@@ -130,3 +130,11 @@ test('无报价时只给只数不给空时刻', async () => {
   assert.match(html, /2 只/, '只数照常显示')
   assert.doesNotMatch(stampOf(html), / · /, '没有时间戳不产生空的时刻槽位')
 })
+
+// 陈旧阈值有 2 分钟地板: 五档的三倍间隔都不到它, 换档不改变判黄时间
+test('悬浮档位不改变陈旧阈值', async () => {
+  const { plugin } = await loadClient()
+  const { staleAfter } = plugin.__testing
+  for (const n of [3, 5, 10, 15, 30]) assert.equal(staleAfter(n), 2 * 60 * 1000, `${n} 秒档`)
+  assert.equal(staleAfter(60), 3 * 60 * 1000, '超过地板时按三倍间隔')
+})

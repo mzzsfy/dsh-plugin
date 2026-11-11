@@ -274,7 +274,7 @@ export function apply(ctx, config) {
       // subagent 会话不在主列表(官方 sessionVisible 以 origin 排除):其输入是
       // 任务提示与注入文本而非人类输入,且会以更近的产物时间挤占扫描窗口,必须排除
       const window = records
-        .filter((recordItem) => recordItem.header.origin !== 'subagent'
+        .filter((recordItem) => !isDerivedSessionHeader(recordItem.header)
           && recordItem.header.cwd !== undefined && samePath(recordItem.header.cwd, cwd))
         .slice(0, HISTORY_SESSION_SCAN_LIMIT)
       // 该 cwd 无主会话(纯 subagent 派生或已清空):无可对齐内容,缓存读写一并跳过
@@ -309,7 +309,7 @@ export function apply(ctx, config) {
       // 既往污染自愈:旧版本窗口未排除 subagent,其条目已混入缓存 entries——
       // 合并前按列表 origin 识别清除;会话已删除的条目无法识别,随时间被挤出
       const subagentIds = new Set(records
-        .filter((recordItem) => recordItem.header.origin === 'subagent')
+        .filter((recordItem) => isDerivedSessionHeader(recordItem.header))
         .map((recordItem) => recordItem.header.id))
       await updateWorkspaceCache(cacheDir, cwd, (latest) => {
         const legacyEntries = (latest?.entries ?? []).filter((entry) => entry.sid === undefined || !subagentIds.has(entry.sid))
@@ -334,7 +334,7 @@ export function apply(ctx, config) {
   function alignSessionFocus(cwd, header) {
     return enqueueFocusAlign(async () => {
       // 与批量窗口同一不变式:缓存只收主会话输入(正常 UI 不可达,防直调路由)
-      if (header.origin === 'subagent') return
+      if (isDerivedSessionHeader(header)) return
       const sessionId = header.id
       const persistence = ctx.get('sessionPersistence')
       const located = persistence ? persistence.locate(header) : undefined
@@ -382,7 +382,7 @@ export function apply(ctx, config) {
         // subagent 会话不参与归纳:纯 subagent 的 cwd 无人类输入,不值得建缓存;
         // 过滤先行再取最近 STARTUP_SCAN 条,subagent 密集派生时不挤占归纳窗口
         for (const recordItem of records
-          .filter((item) => item.header.origin !== 'subagent')
+          .filter((item) => !isDerivedSessionHeader(item.header))
           .slice(0, HISTORY_STARTUP_SCAN_LIMIT)) {
           const recordCwd = recordItem.header.cwd
           if (recordCwd === undefined) continue
@@ -573,6 +573,12 @@ export function apply(ctx, config) {
           const header = needsHeader ? await findHeader(ctx, sessionId, headerCache) : undefined
           if (needsHeader && header === undefined) {
             sendJson(res, 400, { error: MESSAGES.unknownSession })
+            return
+          }
+          // 子 agent 会话的会话范围没有历史聚合语义(对齐入口按 origin 拒绝):
+          // 显式返回空且对齐,避免浮层永久停在未对齐并反复触发路由
+          if (header !== undefined && isDerivedSessionHeader(header)) {
+            sendJson(res, 200, { inputs: [], aligned: true })
             return
           }
           // workspace 范围依赖 cwd 归属;无 cwd 会话在 session 范围无从定位工作区缓存,
@@ -785,6 +791,14 @@ export function apply(ctx, config) {
 // 与 session-manager 各持独立实例,互不共享状态
 const HEADER_CACHE_TTL_MS = 10 * 60 * 1000
 const HEADER_CACHE_MAX = 500
+
+// 子 agent 会话判定:origin 权威;无 origin 的旧记录按 parentSession + delegationDepth
+// (普通 fork 的 depth 为 0,不算)
+function isDerivedSessionHeader(header) {
+  if (!header) return false
+  if (header.origin === 'subagent') return true
+  return header.parentSession !== undefined && (header.delegationDepth ?? 0) >= 1
+}
 
 function rememberHeader(cache, sessionId, header) {
   if (cache.size >= HEADER_CACHE_MAX) cache.delete(cache.keys().next().value)

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseConfiguration, initialControl, marketSchema, klineQuerySchema, capability } from '../src/schemas.mjs'
+import { parseConfiguration, initialControl, marketSchema, klineQuerySchema, capability, preferencesSchema, storedControlSchema, DEFAULT_FLOAT_REFRESH_SECONDS } from '../src/schemas.mjs'
 import { provider, route } from './helpers.mjs'
 test('配置拒绝重复能力路由与不同变量外的密钥字段', () => {
   assert.throws(() => parseConfiguration({ providers: [provider()], routes: [route(), { ...route(), id: 'other' }] }))
@@ -88,4 +88,22 @@ test('存储只声明控制表, 派生数据不进存储', async () => {
   assert.equal(domainSpec.layout, 'single')
   assert.deepEqual(Object.keys(domainSpec.tables), ['control'])
   assert.equal(domainSpec.invalidRecords, undefined, 'single 布局没有坏记录跳过能力, 别写无效声明')
+})
+
+// 悬浮盯盘刷新间隔是独立偏好: 只接受 3~30 秒档位, 旧记录缺字段时补默认
+test('悬浮盯盘刷新间隔只接受 3~30 秒档位', () => {
+  const base = { refreshSeconds: 15, colorMode: 'red-up' }
+  for (const n of [3, 5, 10, 15, 30]) assert.equal(preferencesSchema.safeParse({ ...base, floatRefreshSeconds: n }).success, true, `${n} 秒可用`)
+  for (const n of [0, 1, 7, 60, 120, 3.5]) assert.equal(preferencesSchema.safeParse({ ...base, floatRefreshSeconds: n }).success, false, `${n} 秒应拒绝`)
+  assert.equal(preferencesSchema.parse(base).floatRefreshSeconds, DEFAULT_FLOAT_REFRESH_SECONDS, '旧记录缺字段时补默认')
+  assert.equal(initialControl().preferences.floatRefreshSeconds, DEFAULT_FLOAT_REFRESH_SECONDS, '初始控制带默认值')
+})
+
+// 旧控制记录没有这个字段: 读入即补默认, 不需要迁移版本
+test('旧控制记录缺悬浮档位时读入补默认', () => {
+  const legacy = initialControl()
+  delete legacy.preferences.floatRefreshSeconds
+  assert.equal(storedControlSchema.parse(legacy).preferences.floatRefreshSeconds, DEFAULT_FLOAT_REFRESH_SECONDS)
+  const kept = { ...legacy, preferences: { ...legacy.preferences, floatRefreshSeconds: 5 } }
+  assert.equal(storedControlSchema.parse(kept).preferences.floatRefreshSeconds, 5, '已有值不被默认盖掉')
 })

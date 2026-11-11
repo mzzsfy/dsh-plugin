@@ -1236,6 +1236,9 @@ function ForkDockWithBootstrap({ session, inputActions, useInput, forkSession, c
   // 依赖键 = 会话 id:session 快照身份随每次投影更新漂移,不能作 effect 依赖;
   // loadTurnEnds 闭包身份同样不稳定,经 ref 取用
   const sessionId = session && session.sessionId
+  // 子会话没有可用的 fork 锚点:宿主 follow/page 对 kind:'session' 的子会话地址
+  // 抛 session/agent-busy,注入按钮只会落 console.warn 且永不可点
+  const isSubagentSession = Boolean(session && session.subagent)
   const loadRef = useRef(loadTurnEnds)
   loadRef.current = loadTurnEnds
   // 自动重发通道:宿主 prompt 调用经 apply 闭包注入(与 forkSession 同构),ref 取用
@@ -1267,7 +1270,7 @@ function ForkDockWithBootstrap({ session, inputActions, useInput, forkSession, c
       .catch(() => { refreshPendingRef.current = false })
   }
   useEffect(() => {
-    if (sessionId === undefined) return undefined
+    if (sessionId === undefined || isSubagentSession) return undefined
     let disposed = false
     // 拉取前置空:会话切换后旧会话的映射不得继续服务新会话——轮号跨会话重叠,
     // 旧 seq 会让分叉锚点错位;置空期间 ForkDock 以 null 短路,不注入按钮
@@ -1285,7 +1288,7 @@ function ForkDockWithBootstrap({ session, inputActions, useInput, forkSession, c
         console.warn('[context-manager] fork 轮号映射拉取失败', error)
       })
     return () => { disposed = true }
-  }, [sessionId])
+  }, [sessionId, isSubagentSession])
   // 重试草稿消费:open 切到子会话后本 dock 随之挂载,inputActions 绑定子会话,
   // 暂存文本此刻回填;消费即清除。open 失败时暂存保留,用户手动打开子会话仍兑现。
   // 宿主 open 可能先于点击处登记草稿完成子会话 dock 挂载(实测 ~400ms 切换),
@@ -1332,6 +1335,7 @@ function ForkDockWithBootstrap({ session, inputActions, useInput, forkSession, c
     }
     return undefined
   }, [sessionId, inputActions, draftPollTick])
+  if (isSubagentSession) return null
   return h(ForkDock, { session, forkSession, cancelSession, turnEnds, refreshRef })
 }
 

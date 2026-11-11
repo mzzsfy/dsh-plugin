@@ -124,3 +124,17 @@ test('初始化失败后数据域已关闭, 可以重新打开', async () => {
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+// 偏好按字段合并: 悬浮盯盘间隔与列表间隔互不影响, 非法值不落盘
+test('显示偏好按字段合并, 悬浮盯盘间隔独立于列表', async () => {
+  const app = await createApplication({ storageDomain: memoryStorage(), env: {}, now: () => 1000 })
+  await app.preferences({ ...operation(1, 0), payload: { floatRefreshSeconds: 3 } })
+  assert.equal(app.snapshot().control.preferences.floatRefreshSeconds, 3)
+  assert.equal(app.snapshot().control.preferences.refreshSeconds, 15, '只改悬浮间隔不动列表间隔')
+  await app.preferences({ ...operation(2, 1), payload: { refreshSeconds: 60 } })
+  assert.equal(app.snapshot().control.preferences.refreshSeconds, 60)
+  assert.equal(app.snapshot().control.preferences.floatRefreshSeconds, 3, '只改列表间隔不动悬浮间隔')
+  await assert.rejects(app.preferences({ ...operation(3, 2), payload: { floatRefreshSeconds: 7 } }), e => e.code === 'INVALID_PREFERENCES')
+  assert.equal(app.snapshot().control.preferences.floatRefreshSeconds, 3, '非法值不写入')
+  await app.close()
+})

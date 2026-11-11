@@ -1057,6 +1057,30 @@ window.__ModuleLoader__.load({
     // 不阻断通知与设置页。导航注册表挂在 factory 闭包,与实例代际无关:
     // 已显示通知的迟到闭包点击时现读 Map,由最后激活的存活实例接管。
     const sessionNavigators = new Map()
+
+    // 通知点击的可见目标:子会话在主列表无行,沿 parentId 归结到根会话;
+    // 孤儿/环/缺快照时返回 undefined(只唤醒不跳转),无快照时退回原 id 保持旧行为
+    function rootSessionIdOf(sessionId) {
+      if (typeof activeNotificationOwner === 'undefined') return sessionId
+      const byId = activeNotificationOwner && activeNotificationOwner.sessions
+        ? activeNotificationOwner.sessions.list.getSnapshot().byId
+        : undefined
+      if (!byId) return sessionId
+      let current = String(sessionId)
+      const seen = new Set()
+      while (true) {
+        const row = byId[current]
+        // 快照没收录的 id 仍交给宿主解析(与旧行为一致),只有确认为子会话才归根
+        if (row === undefined) return current
+        if (seen.has(current)) return undefined
+        seen.add(current)
+        if (row.origin !== 'subagent') return current
+        const parent = row.parentId
+        if (parent === undefined || parent === null || !byId[parent]) return undefined
+        current = String(parent)
+      }
+    }
+
     function activateSessionFromUnit(unit) {
       const controller = notificationController
       return () => {
@@ -1071,13 +1095,15 @@ window.__ModuleLoader__.load({
         }
         // 历史投影和无会话测试通知不含 ID,只唤醒,不冒险跳到同名会话。
         if (!hasSessionId(unit)) return
+        const targetSessionId = rootSessionIdOf(unit.sessionId)
+        if (!targetSessionId) return
         const sessionNavigator = [...sessionNavigators.values()].at(-1)
         if (!sessionNavigator) {
           toast('会话导航尚未就绪，请稍后重试', { holdMs: TOAST_MS })
           return
         }
         try {
-          sessionNavigator.openSession(unit.sessionId)
+          sessionNavigator.openSession(targetSessionId)
           // 已读收尾只在登记实例仍存活时执行,过期代际闭包不误清当前代高亮
           if (controller && !controller.signal.aborted && controller === notificationController) markSessionHandled(unit.sessionId)
         } catch {

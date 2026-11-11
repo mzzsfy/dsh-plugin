@@ -16,6 +16,14 @@ const MAX_REJECTS = 3
 const SEGMENT_KIND = 'rsww-segment'
 const SETTLE_OUTPUT_LIMIT = 64 * 1024
 
+// 子 agent 会话判定:origin 权威;无 origin 的旧记录按 parentSession + delegationDepth。
+// 编排页签/恢复器按会话归属,子会话启动只会产出父视图不可见、子销毁后悬空的 run
+function isDerivedHeader(header) {
+  if (!header) return false
+  if (header.origin === 'subagent') return true
+  return header.parentSession !== undefined && (header.delegationDepth ?? 0) >= 1
+}
+
 // 已启用模板表(自有存储 → {entry, parsed};gate/驱动共用此形态)
 export function enabledTemplates() {
   const out = []
@@ -175,6 +183,9 @@ export function registerOrchestrator(ctx, config) {
         },
         async execute(args, exec) {
           const agent = exec.agent
+          if (isDerivedHeader(agent?.session?.header)) {
+            return { ok: false, errors: [{ target: 'session', message: '子 agent 会话不能启动编排' }], hint: '编排归属发起会话;子会话启动的 run 父视图不可见且无法恢复,改由主会话发起' }
+          }
           // 工具参数扁平:gate 入参 = 顶层三字段 + plan(steps/brief)组装(见 feat/orchestrator.md)
           const gatePlan = {
             request: args.request, templateId: args.templateId, inputs: args.inputs,

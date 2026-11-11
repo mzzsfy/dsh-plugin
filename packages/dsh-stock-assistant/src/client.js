@@ -1360,7 +1360,7 @@ window.__ModuleLoader__.load({
     }
     // ---- FloatingTicker: 悬浮盯盘, portal 到 body 常驻, 不随面板切换卸载 ----
     // 悬浮窗自己的数据流: 列表模式批量拉勾选标的的报价, 图形模式只拉当前这只的分时
-    function useFloatingPolling({ open, mode, securityId, picked, items, live, refreshSeconds, quotes, fetched, revision, setFetched, setTrend, setError }) {
+    function useFloatingPolling({ open, mode, securityId, picked, items, live, floatSeconds, quotes, fetched, revision, setFetched, setTrend, setError }) {
       // quotes 的每条是 { quote, health }, 交易时段在 quote 里
       // 时段取最新的一份: 自己拉的和面板的都可能旧, 不能无条件让自己的压过面板的。
       // 时间戳相同取自己那份——自己那份刚由这一拍的刷新拿到, 而面板可能在本次渲染前就已冻结
@@ -1407,9 +1407,9 @@ window.__ModuleLoader__.load({
         }
         pull()
         // 休市时不设交易节奏的定时器, 但仍留一拍低频检查, 复盘后自动恢复
-        const timer = setInterval(pull, floatPollDelay(refreshSeconds, allQuiet))
+        const timer = setInterval(pull, floatPollDelay(floatSeconds, allQuiet))
         return () => { dead = true; clearInterval(timer) }
-      }, [open, mode, securityId, pickedKey, live, refreshSeconds, stateKey])
+      }, [open, mode, securityId, pickedKey, live, floatSeconds, stateKey])
     }
     // 拖动: 按住非控件区域移动, 松手时把落点写回偏好
     function useFloatingDrag(onDrop) {
@@ -1443,9 +1443,13 @@ window.__ModuleLoader__.load({
         },
       }
     }
-    // 轮询节奏: 跟随设置页的刷新间隔, 全部收市后压到一分钟一拍
-    const floatPollDelay = (refreshSeconds, quiet) => {
-      const base = Math.max(15, Number(refreshSeconds) || 15) * 1000
+    // 悬浮窗自己的快慢档位: 只影响这个窗口的请求节奏, 与列表刷新间隔各管各的
+    const FLOAT_INTERVALS = [3, 5, 10, 15, 30], FLOAT_FALLBACK_SECONDS = 10
+    // 档位归一: 定时器、按钮文案与陈旧判定共用同一份取值, 避免非法存量值让三者各说各话
+    const floatIntervalOf = floatSeconds => FLOAT_INTERVALS.includes(Number(floatSeconds)) ? Number(floatSeconds) : FLOAT_FALLBACK_SECONDS
+    // 轮询节奏: 全部收市后压到一分钟一拍
+    const floatPollDelay = (floatSeconds, quiet) => {
+      const base = floatIntervalOf(floatSeconds) * 1000
       return quiet ? Math.max(base, 60 * 1000) : base
     }
     // 主序列是蜡烛还是面积, 决定重涂时该下发哪一组键名: 两组键名互不相通, 用错等于没涂
@@ -1637,7 +1641,9 @@ window.__ModuleLoader__.load({
       const securityId = (floating.securityId && picked.includes(floating.securityId) ? floating.securityId : picked[0]) || null
       const update = next => setFloating(next)
       const drag = useFloatingDrag(update)
-      useFloatingPolling({ open, mode, securityId, picked, items, live: floating.live, refreshSeconds: state.data?.control.preferences?.refreshSeconds, quotes: state.data?.quotes, fetched, revision: state.data?.control.revision, setFetched, setTrend, setError })
+      // 悬浮窗节奏取自独立偏好, 列表间隔不再参与
+      const floatRefresh = floatIntervalOf(state.data?.control.preferences?.floatRefreshSeconds)
+      useFloatingPolling({ open, mode, securityId, picked, items, live: floating.live, floatSeconds: floatRefresh, quotes: state.data?.quotes, fetched, revision: state.data?.control.revision, setFetched, setTrend, setError })
       // 面板已经刷过的报价先拿来渲染, 悬浮窗自己的 refresh 结果回来后再按 receivedAt 择优:
       // 否则首次打开要干等一轮上游请求, 列表是空的
       const entryOf = id => {
@@ -1706,7 +1712,7 @@ window.__ModuleLoader__.load({
       const quoteTimes = stampIds.map(id => priceTimeOf(quoteOf(id))).filter(at => at != null)
       const liveQuoteTimes = picked.filter(id => !QUIET_STATES.has(quoteOf(id)?.sessionState)).map(id => timestampOf(quoteOf(id)?.receivedAt)).filter(at => at != null)
       const trendAt = mode === 'kline' ? (timestampOf(candles?.at(-1)?.at) ?? timestampOf(trendData?.fetchedAt)) : null
-      const { stamp, stale } = floatFreshness({ mode, quoteTimes, liveQuoteTimes, trendAt, quiet: QUIET_STATES.has(quoteOf(securityId)?.sessionState), now: Date.now(), refreshSeconds: state.data?.control.preferences?.refreshSeconds })
+      const { stamp, stale } = floatFreshness({ mode, quoteTimes, liveQuoteTimes, trendAt, quiet: QUIET_STATES.has(quoteOf(securityId)?.sessionState), now: Date.now(), refreshSeconds: floatRefresh })
       // 这里必须先过 finiteOr: Number(null) 是 0, 会把缺失的昨收当成真实的 0 交给下游,
       // 结果是迷你图基准画在 0、价格显示 "0", 与图例里的「昨收 —」自相矛盾
       const last = finiteOr(candles?.at(-1)?.close)
@@ -1732,7 +1738,7 @@ window.__ModuleLoader__.load({
             ? h(FloatList, { picked, items, securityId, entryOf, onPick: id => update({ mode: 'kline', securityId: id }), onTip: showRowTip, onLeave: () => setRowTip(null), onScroll: () => setRowTip(null) })
             : !current ? h('p', { className: 'ssb-muted' }, '未选择标的') : h(FloatChart, { securityId, current, candles, preClose: base, error, last, pct }),
         h(FloatFoot, {
-          mode, securityId, picked, current, stamp, stale, alertOn, error, liveOn: floating.live !== false, refresh: state.data?.control.preferences?.refreshSeconds || 15,
+          mode, securityId, picked, current, stamp, stale, alertOn, error, liveOn: floating.live !== false, refresh: floatRefresh,
           onBell: () => { const next = !alertOn; alertStates.current = {}; setAlert({ on: next }); if (next) requestAlertPermission() },
           onLive: () => {
             if (!picked.length) return
@@ -1964,7 +1970,7 @@ window.__ModuleLoader__.load({
         h('h3', null, '目录缓存'), h('div', { className: 'ssb-toolbar' }, ...Object.keys(BROWSE_MARKETS).filter(market => (state.data.control.routes || []).some(r => r.capability === 'catalog' && r.market === market)).map(market => h(Button, { key: market, disabled: state.busy.sync, onClick: quiet(async () => { const results = await runtime.sync(market); const errors = results.filter(r => !r.ok); if (errors.length) tools.toast?.show(errors.map(r => r.error.message).join('；'), { kind: 'error' }) }) }, `同步${BROWSE_MARKETS[market]}`))),
         ...state.data.catalogs.map(c => h('p', { key: c.source, className: 'ssb-muted' }, `${c.source} · ${timeText(c.fetchedAt)}${c.stale ? ' · 已过期' : ''}${c.complete ? '' : ' · 目录可能不完整'}`)),
         ...Object.entries(state.data.routeSelections).filter(([id, selected]) => selected.providerInstanceId !== saved.routes.find(r => r.id === id)?.primaryInstanceId).map(([id, selected]) => h('div', { className: 'ssb-banner', key: id }, `${id}当前使用备用源 ${selected.providerInstanceId}。`, h(Button, { disabled: state.busy.switch, onClick: quiet(() => runtime.switchPrimary(id)) }, '检查并切回主源')))) :
-        h(React.Fragment, null, h('h3', null, '显示偏好（即改即存）'), h('div', { className: 'ssb-toolbar' }, h('label', { className: 'ssb-field' }, h('span', null, '刷新间隔'), h('select', { value: saved.preferences.refreshSeconds, disabled: state.busy.write || state.busy.configuration, onChange: quiet(e => runtime.preferences({ refreshSeconds: Number(e.target.value) })) }, ...[15, 30, 60].map(n => h('option', { key: n, value: n }, `${n}秒`)))), h('label', { className: 'ssb-field' }, h('span', null, '涨跌颜色'), h('select', { value: saved.preferences.colorMode, disabled: state.busy.write || state.busy.configuration, onChange: quiet(e => runtime.preferences({ colorMode: e.target.value })) }, h('option', { value: 'red-up' }, '红涨绿跌'), h('option', { value: 'green-up' }, '绿涨红跌')))))
+        h(React.Fragment, null, h('h3', null, '显示偏好（即改即存）'), h('div', { className: 'ssb-toolbar' }, h('label', { className: 'ssb-field' }, h('span', null, '刷新间隔'), h('select', { value: saved.preferences.refreshSeconds, disabled: state.busy.write || state.busy.configuration, onChange: quiet(e => runtime.preferences({ refreshSeconds: Number(e.target.value) })) }, ...[15, 30, 60].map(n => h('option', { key: n, value: n }, `${n}秒`)))), h('label', { className: 'ssb-field' }, h('span', null, '悬浮盯盘刷新'), h('select', { value: saved.preferences.floatRefreshSeconds ?? FLOAT_FALLBACK_SECONDS, disabled: state.busy.write || state.busy.configuration, onChange: quiet(e => runtime.preferences({ floatRefreshSeconds: Number(e.target.value) })) }, ...FLOAT_INTERVALS.map(n => h('option', { key: n, value: n }, `${n}秒`)))), h('label', { className: 'ssb-field' }, h('span', null, '涨跌颜色'), h('select', { value: saved.preferences.colorMode, disabled: state.busy.write || state.busy.configuration, onChange: quiet(e => runtime.preferences({ colorMode: e.target.value })) }, h('option', { value: 'red-up' }, '红涨绿跌'), h('option', { value: 'green-up' }, '绿涨红跌')))))
       const controlRoutes = saved.routes || []
       const enabled = (saved.providers || []).filter(p => p.enabled).length
       const markets = new Set(controlRoutes.map(r => r.market)).size
@@ -2228,7 +2234,7 @@ window.__ModuleLoader__.load({
           return () => { for (const stop of disposers.reverse()) stop() }
         }, 'stock-assistant main panel')
       },
-      __testing: { createPageRuntime, StockPage, FloatingTicker, FloatHeader, FloatPicker, FloatList, FloatChart, FloatFoot, Sparkline, dragOrder, quiet, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, toneClass, priceTextOf, tagTabs, resolveTab, costBaseOf, markPct, pollPlan, QUIET_STATES, POLL_EVERY, floatPollDelay, timestampOf, floatFreshness, priceTimeOf, clockText, staleAfter, markAlertOf, markAlertText, deliverMarkAlert, sparkIndexAt, candleTimeText, quoteTipLines, crosshairTipLines, crosshairTimeText, timeKeyOf, crosshairTipStyle, rowTipPositionOf, sparkRangeOf, sparkTicksOf, seriesPaintPlan, sanitizeCandles, themeSignature },
+      __testing: { createPageRuntime, StockPage, FloatingTicker, FloatHeader, FloatPicker, FloatList, FloatChart, FloatFoot, Sparkline, dragOrder, quiet, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, toneClass, priceTextOf, tagTabs, resolveTab, costBaseOf, markPct, pollPlan, QUIET_STATES, POLL_EVERY, floatPollDelay, floatIntervalOf, FLOAT_INTERVALS, FLOAT_FALLBACK_SECONDS, timestampOf, floatFreshness, priceTimeOf, clockText, staleAfter, markAlertOf, markAlertText, deliverMarkAlert, sparkIndexAt, candleTimeText, quoteTipLines, crosshairTipLines, crosshairTimeText, timeKeyOf, crosshairTipStyle, rowTipPositionOf, sparkRangeOf, sparkTicksOf, seriesPaintPlan, sanitizeCandles, themeSignature },
     }
   },
 })

@@ -199,6 +199,21 @@ export const eastmoney = {
 function num_or_null(v) { const n = parseFloat(v); return Number.isFinite(n) ? n : null }
 
 
+// 时区格式化器按来源时区复用:分时逐行换算时,新建 formatter 的成本主导解析
+const ZONE_FORMATTERS = new Map()
+
+function zoneFormatter(timeZone) {
+  let formatter = ZONE_FORMATTERS.get(timeZone)
+  if (formatter === undefined) {
+    formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone, hour12: false,
+      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+    })
+    ZONE_FORMATTERS.set(timeZone, formatter)
+  }
+  return formatter
+}
+
 // 把指定时区的"YYYY-MM-DD HH:MM"换算成 Unix 秒, 时刻属于哪个时区由调用方给定;
 // 无时区元数据或格式不符时返回 null, 调用方回退自造时间轴
 function zonedUnixSeconds(stamp, timeZone) {
@@ -206,10 +221,7 @@ function zonedUnixSeconds(stamp, timeZone) {
   if (!match || !timeZone) return null
   const [, y, mo, d, hh, mm] = match.map(Number)
   const localAsUtc = Date.UTC(y, mo - 1, d, hh, mm)
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone, hour12: false,
-    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
-  }).formatToParts(new Date(localAsUtc))
+  const parts = zoneFormatter(timeZone).formatToParts(new Date(localAsUtc))
   const rendered = Object.fromEntries(parts.map((part) => [part.type, part.value]))
   const asUtc = Date.UTC(Number(rendered.year), Number(rendered.month) - 1, Number(rendered.day),
     Number(rendered.hour) % 24, Number(rendered.minute), Number(rendered.second))

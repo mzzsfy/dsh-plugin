@@ -75,6 +75,8 @@ export function collectActiveWork(ctx) {
   }
 
   let agentList = []
+  // 升级门统计全量存活:子 agent 会话的 agent/job 同样是升级期进程占用,
+  // 按主会话过滤会漏判,故 agents.list 与 jobs.list 不做归属筛选
   try {
     const agents = ctx.get('agents')
     if (!agents || typeof agents.list !== 'function') throw new Error('agents 服务方法面不可用')

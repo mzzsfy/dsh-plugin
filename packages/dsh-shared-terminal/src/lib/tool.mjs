@@ -63,6 +63,14 @@ function requireAgent(exec) {
   return exec.agent
 }
 
+// 终端归属用户侧栏:主 UI 不展示子 agent 会话,子会话创建的终端无法被用户接管;
+// origin 权威,旧记录按 parentSession + delegationDepth(普通 fork 的 depth 为 0,不算)
+function isDerivedHeader(header) {
+  if (!header) return false
+  if (header.origin === 'subagent') return true
+  return header.parentSession !== undefined && (header.delegationDepth ?? 0) >= 1
+}
+
 export function createTerminalTool({ controller, readScreen, defineTool, pumpFactory, waitSkipRegistry = createWaitSkipRegistry() }) {
   return defineTool({
     name: TOOL_NAME,
@@ -91,6 +99,8 @@ export function createTerminalTool({ controller, readScreen, defineTool, pumpFac
     async execute(args, exec) {
       let agent
       try { agent = requireAgent(exec) } catch (error) { return invalid('INVALID_ARGS', error.message) }
+      // 子 agent 会话的终端没有用户侧栏入口,不创建(否则 owner 绑定子会话且无法接管/关闭)
+      if (isDerivedHeader(agent.session?.header)) return invalid('INVALID_ARGS', 'terminal 仅支持主会话')
       const sessionId = agent.session.id
       const action = args?.action
       if (typeof action !== 'string') return invalid('INVALID_ARGS', 'action 必须是字符串')

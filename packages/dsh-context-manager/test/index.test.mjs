@@ -803,6 +803,26 @@ test('历史输入路由:窗口排除 subagent 会话——不解压、条目不
   })
 })
 
+test('历史输入路由:子 agent 会话自身请求返回空且已对齐,不触碰产物', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    for (const derived of [
+      { origin: 'subagent', parentSession: 'root', delegationDepth: 1 },
+      { parentSession: 'root', delegationDepth: 1 },
+    ]) {
+      const { handlers, readCounts } = makeCtx({
+        headers: [{ id: 'sub1', cwd: 'C:\\x', createdAt: 0, ...derived }, { id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+        agents: new Map(),
+        readSessions: { sub1: [userMessageEvent('子代理任务提示', 100)] },
+      })
+      const res = response()
+      await handlers.get('/api/context/inputs')(getRequest('?sessionId=sub1&scope=session'), res)
+      assert.equal(res.status, 200)
+      assert.deepEqual(res.body, { inputs: [], aligned: true })
+      assert.equal(readCounts.get('sub1'), undefined, '子会话产物不被解压')
+    }
+  })
+})
+
 test('历史输入路由:窗口放宽后最近 SCAN 个主会话全部参与对齐(超过旧 20 窗口)', skipMissingDeps, async () => {
   await withHistoryCacheDir(async () => {
     const total = HISTORY_SESSION_SCAN_LIMIT + 10

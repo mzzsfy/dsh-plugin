@@ -495,6 +495,11 @@ test('设置R: 三段Tab布局与分域保存', async () => {
   const prefState = mkState('settings'); prefState.view.settingsDraft.tab = 'display'
   const pHtml = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => prefState, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }), refresh: () => Promise.resolve({}), preferences: () => Promise.resolve({ ok: true }) }, layout: { providerCheck: () => {} } }))
   assert.match(pHtml, /刷新间隔/, '③内容渲染')
+  assert.match(pHtml, /悬浮盯盘刷新/, '③含悬浮盯盘刷新')
+  assert.match(pHtml, /<option value="3">/, '悬浮档位含 3 秒')
+  assert.match(pHtml, /<option value="5">/, '悬浮档位含 5 秒')
+  assert.match(pHtml, /value="10"/, '悬浮档位含 10 秒')
+  assert.match(pHtml, /<option value="30">/, '悬浮档位含 30 秒')
   assert.ok(!pHtml.includes('保存显示偏好'), '③无保存钮(即改即存)')
 })
 // 一键全能力自举: 按适配器 markets×capabilities 补全缺失路由(含K线/目录/搜索)

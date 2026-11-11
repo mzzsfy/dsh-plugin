@@ -92,18 +92,31 @@ async function validateModelSelection(sessionController, raw) {
 export function createSessionDriver({ getSessionController, getWorkspaceRegistry, agents, sessionQuery }) {
   // pinned 会话存在性:持久层 headers 比对(冷会话不在 agents 注册表);
   // 记录形态为官方 SessionRecord(dsh-session-query),id 在 header.id
-  async function pinnedExists(sessionId) {
-    if (!sessionQuery || typeof sessionQuery.listSessions !== 'function') return Boolean(agents.get(sessionId))
+  async function pinnedRecord(sessionId) {
+    if (!sessionQuery || typeof sessionQuery.listSessions !== 'function') {
+      const entry = agents.get(sessionId)
+      return entry ? { header: entry.session?.header } : undefined
+    }
     const records = await sessionQuery.listSessions(ADMISSION_SIGNAL)
-    return records.some((record) => record && record.header && record.header.id === sessionId)
+    return records.find((record) => record && record.header && record.header.id === sessionId)
   }
 
-  // pinned 可用性:已删除(不在持久层)或已归档(从所有分组视图隐藏)均视为丢失,触发重建
+  // 子 agent 会话与主会话共用持久层,但通用会话面不接受子会话投递:
+  // pinned 指向它们时按丢失处理(origin 权威;旧记录按 parentSession + delegationDepth)
+  function isDerivedHeader(header) {
+    if (!header) return false
+    if (header.origin === 'subagent') return true
+    return header.parentSession !== undefined && (header.delegationDepth ?? 0) >= 1
+  }
+
+  // pinned 可用性:已删除(不在持久层)、已归档(从所有分组视图隐藏)或子 agent 会话
+  // 均视为丢失,触发重建
   async function pinnedUsable(sessionId) {
     const registry = getWorkspaceRegistry ? getWorkspaceRegistry() : undefined
     const archivedIds = registry?.archivedSessionIds
     if (Array.isArray(archivedIds) && archivedIds.includes(sessionId)) return false
-    return pinnedExists(sessionId)
+    const record = await pinnedRecord(sessionId)
+    return record !== undefined && !isDerivedHeader(record.header)
   }
 
   // 建会话请求:分组按 workdir 挂载(dsh-im 同构);执行预设非空才带字段,
@@ -144,15 +157,17 @@ export function createSessionDriver({ getSessionController, getWorkspaceRegistry
     let recreated = false
 
     if (isPinned) {
-      // pinned 串行:上轮未完成直接跳过(不排队,agents 实时状态判定)
-      const entry = agents ? agents.get(sessionId) : undefined
-      if (entry && entry.status === 'running') {
-        return { status: 'skipped', message: BUSY_MESSAGE }
-      }
+      // pinned 串行:上轮未完成直接跳过(不排队,agents 实时状态判定);
+      // 丢失/子会话判定先行,避免不可投递的会话被 running 态永久 skipped
       if (!sessionId) {
         recreated = 'unbound'
       } else if (!(await pinnedUsable(sessionId))) {
         recreated = 'lost'
+      } else {
+        const entry = agents ? agents.get(sessionId) : undefined
+        if (entry && entry.status === 'running') {
+          return { status: 'skipped', message: BUSY_MESSAGE }
+        }
       }
     }
 

@@ -45,7 +45,10 @@ export const klineQuerySchema = z.strictObject({
 })
 // 路由上限: 八市场×(quotes/catalog/search/calendar/kline) 全开 40 条封顶
 const configSchema = z.strictObject({ providers: z.array(providerSchema).max(8), routes: z.array(routeSchema).max(40) })
-export const preferencesSchema = z.strictObject({ refreshSeconds: z.union([z.literal(15), z.literal(30), z.literal(60)]), colorMode: z.enum(['red-up', 'green-up']) })
+// 悬浮盯盘刷新间隔独立于列表: 窗口只要快慢, 与列表的 15/30/60 不共享档位
+export const FLOAT_REFRESH_SECONDS = [3, 5, 10, 15, 30]
+export const DEFAULT_FLOAT_REFRESH_SECONDS = 10
+export const preferencesSchema = z.strictObject({ refreshSeconds: z.union([z.literal(15), z.literal(30), z.literal(60)]), colorMode: z.enum(['red-up', 'green-up']), floatRefreshSeconds: z.union(FLOAT_REFRESH_SECONDS.map(n => z.literal(n))).default(DEFAULT_FLOAT_REFRESH_SECONDS) })
 export const securitySchema = z.object({ id: z.string(), exchange: marketSchema, code: z.string(), officialName: z.string().min(1).max(100), instrument: z.literal('equity'), currency: z.string(), timezone: z.string(), priceScale: z.number().int(), listingStatus: z.string() }).superRefine((s, ctx) => {
   const meta = MARKET_META[s.exchange]
   if (!meta || !meta.codePattern.test(s.code) || s.id !== `${s.exchange}:equity:${s.code}`) { ctx.addIssue({ code: 'custom', message: '证券身份不一致' }); return }
@@ -147,4 +150,4 @@ export const defaultConfig = () => {
   ])
   return { providers, routes }
 }
-export const initialControl = () => ({ revision: 0, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: { refreshSeconds: 15, colorMode: 'red-up' }, ...defaultConfig(), operations: [] })
+export const initialControl = () => ({ revision: 0, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: { refreshSeconds: 15, colorMode: 'red-up', floatRefreshSeconds: DEFAULT_FLOAT_REFRESH_SECONDS }, ...defaultConfig(), operations: [] })

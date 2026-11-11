@@ -58,6 +58,23 @@ test('Given 采集时存储写失败 When follower 重连重放 Then 不丢报�
   assert.equal(Object.keys(f.current.reports).length, 1)
 })
 
+test('Given 会话流自然结束且已无活跃 Run When 重连 Then 退到长间隔而非每秒重放整段历史', async () => {
+  const f = setup()
+  const waits = []
+  let attempts = 0
+  const adapter = { async *followSessionEvents() { attempts += 1; yield* f.events } }
+  const followers = createRunFollowers({
+    store: f.store,
+    sessionAdapter: adapter,
+    retryMs: 1000,
+    idleRetryMs: 30000,
+    wait: async (ms) => { waits.push(ms); throw new Error('stop') },
+  })
+  await followers.follow('t1', 's1')
+  assert.equal(f.current.runs.r1.state, 'settled')
+  assert.deepEqual(waits, [30000], 'run 落定后应按空闲间隔等待,不再按每秒重订阅')
+})
+
 test('Given 会话流持续抛错 When 连续失败达到上限 Then 按指数退避有限次重连后停止告警', async () => {
   let attempts = 0
   const waits = []

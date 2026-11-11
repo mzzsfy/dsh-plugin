@@ -501,3 +501,32 @@ test('session-driver:模型安装异常投递前 fail 带可读前缀', async ()
   assert.ok(outcome.message.includes('projection modelSelection is not registered'))
   assert.equal(stubs.prompts.length, 0)
 })
+
+test('session-driver:pinned 指向子 agent 会话时按丢失重建,不向子会话投递', async () => {
+  for (const header of [
+    { id: 'child', origin: 'subagent', parentSession: 'root', delegationDepth: 1 },
+    { id: 'child', parentSession: 'root', delegationDepth: 1 },
+  ]) {
+    const stubs = makeStubs()
+    stubs.sessionQuery.listSessions = async () => [{ header }]
+    const driver = makeDriver(stubs)
+    // When pinned 指向子会话(即便它正在运行,也不得跳过或投递)
+    stubs.sessions.set('child', { id: 'child', status: 'running' })
+    const outcome = await driver.run({ job: { ...BASE_JOB, session: { mode: 'pinned', pinnedSessionId: 'child' } }, env: {} })
+    // Then 新建根会话并投递,pinned 旧 id 不被调用
+    assert.equal(outcome.status, 'success')
+    assert.equal(outcome.pinnedNewId, 'sess-1')
+    assert.equal(stubs.created.length, 1)
+    assert.deepEqual(stubs.prompts.map((prompt) => prompt.sessionId), ['sess-1'])
+  }
+})
+
+test('session-driver:pinned 指向普通 fork(parentSession + depth 0)仍复用', async () => {
+  const stubs = makeStubs()
+  stubs.sessionQuery.listSessions = async () => [{ header: { id: 'fork-1', parentSession: 'root', delegationDepth: 0 } }]
+  const driver = makeDriver(stubs)
+  const outcome = await driver.run({ job: { ...BASE_JOB, session: { mode: 'pinned', pinnedSessionId: 'fork-1' } }, env: {} })
+  assert.equal(outcome.status, 'success')
+  assert.equal(outcome.sessionId, 'fork-1')
+  assert.equal(stubs.created.length, 0)
+})

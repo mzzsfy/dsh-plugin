@@ -664,6 +664,25 @@ test('自动归档评估:subagent 内部会话不参与归档(官方主列表不
   }
 })
 
+test('启动自愈:归档集合中的子会话 id 经官方 unarchiveSession 清理,根会话保留', skipMissingDeps, async () => {
+  const headers = [
+    { id: 'root', cwd: 'C:\\x', createdAt: 0 },
+    { id: 'child', cwd: 'C:\\x', createdAt: 0, origin: 'subagent', parentSession: 'root', delegationDepth: 1 },
+    { id: 'legacy', cwd: 'C:\\x', createdAt: 0, parentSession: 'root', delegationDepth: 1 },
+    { id: 'gone', cwd: 'C:\\x', createdAt: 0 },
+  ]
+  const { activateSettings, registry } = makeCtx({
+    archivedIds: ['root', 'child', 'legacy', 'gone', 'missing-header'],
+    headers,
+    agents: new Map(),
+    settingsValue: { autoArchiveDays: 0, autoArchiveIntervalHours: 0 },
+  })
+  activateSettings()
+  await waitFor(() => registry.unarchiveCalls.length >= 2)
+  assert.deepEqual(registry.unarchiveCalls, ['child', 'legacy'], '只清理可识别为派生的 id,已删除/未知 id 不主动写')
+  assert.deepEqual(registry.archivedSessionIds, ['root', 'gone', 'missing-header'])
+})
+
 test('启动评估:settings 就绪后全量归档超期会话,不限于单工作区', skipMissingDeps, async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'sm-startup-'))
   try {
@@ -1946,4 +1965,218 @@ test('写路由守卫:跨源 POST 403 / 非 JSON 内容类型 415 / 同源 JSON 
   await handlers.get('/api/session-manager/unarchive')(guardedRequest('/api/session-manager/unarchive', sameOrigin), accepted)
   assert.equal(accepted.status, 200)
   assert.deepEqual(accepted.body, { ok: true })
+})
+
+// ── 子 agent 会话:面板不展示,生命周期动作拒绝,创建事件不触发评估 ──
+
+const DERIVED_HEADERS = [
+  { ...HEADER, origin: 'subagent', parentSession: 'root', delegationDepth: 1 },
+  { ...HEADER, parentSession: 'root', delegationDepth: 1 },
+]
+
+test('删除路由:子 agent 会话拒绝,不触碰产物', skipMissingDeps, async () => {
+  for (const header of DERIVED_HEADERS) {
+    const { handlers } = makeCtx({ archivedIds: ['s1'], headers: [header], agents: new Map() })
+    const res = response()
+    await handlers.get('/api/session-manager/delete')(request('s1'), res)
+    assert.equal(res.status, 400)
+    assert.deepEqual(res.body, { error: MESSAGES.derivedSession })
+  }
+})
+
+test('取消归档路由:子 agent 会话拒绝,注册表不变', skipMissingDeps, async () => {
+  for (const header of DERIVED_HEADERS) {
+    const { handlers, registry } = makeCtx({ archivedIds: ['s1'], headers: [header], agents: new Map() })
+    const res = response()
+    await handlers.get('/api/session-manager/unarchive')(request('s1'), res)
+    assert.equal(res.status, 400)
+    assert.deepEqual(res.body, { error: MESSAGES.derivedSession })
+    assert.deepEqual(registry.unarchiveCalls, [])
+  }
+})
+
+test('重挂载路由:子 agent 会话拒绝,不写工作区归属行', skipMissingDeps, async () => {
+  for (const header of DERIVED_HEADERS) {
+    const workspace = makeWorkspace('C:\\x', [])
+    const { handlers, ledger } = makeCtx({
+      archivedIds: [],
+      headers: [header],
+      agents: new Map(),
+      workspaces: [workspace],
+      ledger: makeLedgerDomain([{ sessionId: 's1', path: LEDGER_FIXTURE_PATH, deletedAt: 1 }]),
+    })
+    const res = response()
+    await handlers.get('/api/session-manager/remount')(request('s1'), res)
+    assert.equal(res.status, 400)
+    assert.deepEqual(res.body, { error: MESSAGES.derivedSession })
+    assert.deepEqual(workspace.attachCalls, [])
+    assert.equal(ledger.state.deleted.length, 1, '拒绝后台账保留供人工处置')
+  }
+})
+
+test('会话创建事件:子 agent 会话不触发归档评估(不列会话)', skipMissingDeps, async () => {
+  for (const header of DERIVED_HEADERS) {
+    let scans = 0
+    const { eventHandlers, registry } = makeCtx({
+      archivedIds: [],
+      headers: () => { scans += 1; return [] },
+      agents: new Map(),
+    })
+    eventHandlers['session/created']({ header: { ...header, cwd: 'C:\\x' } })
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(scans, 0, '子会话创建不得触发 listSessions 全量扫描')
+    assert.deepEqual(registry.archiveCalls, [])
+  }
+})
+
+// ── 删除父会话:级联回收派生子会话产物 ──
+
+async function makeCascadeArtifacts(ids) {
+  const root = await mkdtemp(path.join(tmpdir(), 'sm-cascade-'))
+  const paths = {}
+  for (const id of ids) {
+    await mkdir(path.join(root, id), { recursive: true })
+    await writeFile(path.join(root, id, 'session.jsonl.zstd'), 'log-bytes')
+    paths[id] = path.join(root, id)
+  }
+  return { root, paths, cleanup: () => rm(root, { recursive: true, force: true }) }
+}
+
+test('删除父会话:级联回收全部派生子会话并逐条记台账', skipMissingDeps, async () => {
+  const artifacts = await makeCascadeArtifacts(['p', 'c', 'g'])
+  try {
+    const headers = [
+      { id: 'p', cwd: 'C:\\x', createdAt: 0 },
+      { id: 'c', cwd: 'C:\\x', createdAt: 0, origin: 'subagent', parentSession: 'p', delegationDepth: 1 },
+      { id: 'g', cwd: 'C:\\x', createdAt: 0, origin: 'subagent', parentSession: 'c', delegationDepth: 2 },
+    ]
+    const { handlers, ledger } = makeCtx({
+      archivedIds: ['p'],
+      headers,
+      agents: new Map(headers.map((header) => [header.id, { status: 'idle' }])),
+      sessionPersistence: { locate: (header) => ({ path: path.join(artifacts.paths[header.id], 'session.jsonl.zstd') }) },
+    })
+    const trashed = []
+    const res = response()
+    await withTrashStub(async (target) => { trashed.push(target) }, async () => {
+      await handlers.get('/api/session-manager/delete')(request('p'), res)
+    })
+    assert.equal(res.status, 200)
+    assert.deepEqual(res.body.cascade, { deleted: ['c', 'g'], failed: [] })
+    assert.deepEqual(trashed.sort(), [artifacts.paths.p, artifacts.paths.c, artifacts.paths.g].sort())
+    assert.deepEqual(ledger.state.deleted.map((item) => item.sessionId).sort(), ['c', 'g', 'p'])
+  } finally {
+    await artifacts.cleanup()
+  }
+})
+
+test('删除父会话:子会话运行中拒绝整次删除,父产物不动', skipMissingDeps, async () => {
+  const artifacts = await makeCascadeArtifacts(['p', 'c'])
+  try {
+    const headers = [
+      { id: 'p', cwd: 'C:\\x', createdAt: 0 },
+      { id: 'c', cwd: 'C:\\x', createdAt: 0, origin: 'subagent', parentSession: 'p', delegationDepth: 1 },
+    ]
+    const { handlers } = makeCtx({
+      archivedIds: ['p'],
+      headers,
+      agents: new Map([['p', { status: 'idle' }], ['c', { status: 'running' }]]),
+      sessionPersistence: { locate: (header) => ({ path: path.join(artifacts.paths[header.id], 'session.jsonl.zstd') }) },
+    })
+    const trashed = []
+    const res = response()
+    await withTrashStub(async (target) => { trashed.push(target) }, async () => {
+      await handlers.get('/api/session-manager/delete')(request('p'), res)
+    })
+    assert.equal(res.status, 400)
+    assert.deepEqual(res.body, { error: MESSAGES.descendantRunning })
+    assert.deepEqual(trashed, [])
+  } finally {
+    await artifacts.cleanup()
+  }
+})
+
+test('删除父会话:普通 fork 不随父级联(只回收父目录)', skipMissingDeps, async () => {
+  const artifacts = await makeCascadeArtifacts(['p', 'f'])
+  try {
+    const headers = [
+      { id: 'p', cwd: 'C:\\x', createdAt: 0 },
+      { id: 'f', cwd: 'C:\\x', createdAt: 0, parentSession: 'p', delegationDepth: 0 },
+    ]
+    const { handlers, ledger } = makeCtx({
+      archivedIds: ['p'],
+      headers,
+      agents: new Map([['p', { status: 'idle' }], ['f', { status: 'idle' }]]),
+      sessionPersistence: { locate: (header) => ({ path: path.join(artifacts.paths[header.id], 'session.jsonl.zstd') }) },
+    })
+    const trashed = []
+    const res = response()
+    await withTrashStub(async (target) => { trashed.push(target) }, async () => {
+      await handlers.get('/api/session-manager/delete')(request('p'), res)
+    })
+    assert.equal(res.status, 200)
+    assert.equal(res.body.cascade, undefined)
+    assert.deepEqual(trashed, [artifacts.paths.p])
+    assert.deepEqual(ledger.state.deleted.map((item) => item.sessionId), ['p'])
+  } finally {
+    await artifacts.cleanup()
+  }
+})
+
+test('删除父会话:父产物缺失的幽灵清理同样级联子会话', skipMissingDeps, async () => {
+  const artifacts = await makeCascadeArtifacts(['c'])
+  try {
+    const headers = [
+      { id: 'p', cwd: 'C:\\x', createdAt: 0 },
+      { id: 'c', cwd: 'C:\\x', createdAt: 0, origin: 'subagent', parentSession: 'p', delegationDepth: 1 },
+    ]
+    const { handlers, ledger } = makeCtx({
+      archivedIds: ['p'],
+      headers,
+      agents: new Map([['p', { status: 'idle' }], ['c', { status: 'idle' }]]),
+      sessionPersistence: { locate: (header) => ({ path: path.join(artifacts.root, header.id, 'session.jsonl.zstd') }) },
+    })
+    const trashed = []
+    const res = response()
+    await withTrashStub(async (target) => { trashed.push(target) }, async () => {
+      await handlers.get('/api/session-manager/delete')(request('p'), res)
+    })
+    assert.equal(res.status, 200)
+    assert.deepEqual(res.body.cascade, { deleted: ['c'], failed: [] })
+    assert.deepEqual(trashed, [artifacts.paths.c])
+    assert.deepEqual(ledger.state.deleted.map((item) => item.sessionId), ['c'])
+  } finally {
+    await artifacts.cleanup()
+  }
+})
+
+test('删除父会话:子会话回收失败时如实返回 partial 与失败清单', skipMissingDeps, async () => {
+  const artifacts = await makeCascadeArtifacts(['p', 'c'])
+  try {
+    const headers = [
+      { id: 'p', cwd: 'C:\\x', createdAt: 0 },
+      { id: 'c', cwd: 'C:\\x', createdAt: 0, origin: 'subagent', parentSession: 'p', delegationDepth: 1 },
+    ]
+    const { handlers, ledger } = makeCtx({
+      archivedIds: ['p'],
+      headers,
+      agents: new Map([['p', { status: 'idle' }], ['c', { status: 'idle' }]]),
+      sessionPersistence: { locate: (header) => ({ path: path.join(artifacts.paths[header.id], 'session.jsonl.zstd') }) },
+    })
+    const res = response()
+    await withExecutorStub({
+      trashPath: async (target) => { if (path.basename(target) === 'c') throw new Error('gio: not found') },
+      moveToQuarantine: async () => { throw new Error('EXDEV') },
+    }, async () => {
+      await handlers.get('/api/session-manager/delete')(request('p'), res)
+    })
+    assert.equal(res.status, 200)
+    assert.equal(res.body.partial, true)
+    assert.match(res.body.message, /1 个子会话/)
+    assert.deepEqual(res.body.cascade.deleted, [])
+    assert.equal(res.body.cascade.failed.length, 1)
+    assert.deepEqual(ledger.state.deleted.map((item) => item.sessionId), ['p'])
+  } finally {
+    await artifacts.cleanup()
+  }
 })

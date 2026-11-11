@@ -333,7 +333,8 @@ window.__ModuleLoader__.load({
 
     function App({ api, sessions, conversation, uiWorkspace, SessionProvider, renderSlot, bus }) {
       const catalog = React.useSyncExternalStore((notify) => sessions.list.subscribe(notify), () => sessions.list.getSnapshot())
-      const accessibleSessions = new Set(catalog.ids)
+      // 通用会话面只放行主会话:宿主 list 的 ids 含子 agent 行,openSession 会被拒
+      const accessibleSessions = new Set(catalog.ids.filter((id) => catalog.byId?.[id]?.origin !== 'subagent'))
       const [sessionMessage, setSessionMessage] = useState('')
       const [data, setData] = useState(null)
       const [workspaces, setWorkspaces] = useState([])

@@ -6,6 +6,8 @@ import { createRunReportCollector } from './core/report-events.mjs'
 const DEFAULT_RETRY_MS = 1 * 1000
 const MAX_RETRY_MS = 60 * 1000
 const DEFAULT_MAX_FAILURES = 8
+// 会话已无未结 run 时的重订阅间隔:跟随目的已达成,只需等待新 run 出现
+const DEFAULT_IDLE_RETRY_MS = 30 * 1000
 
 // 会话不存在/已删除属终态:重连不会恢复,按错误码与文案识别
 const TERMINAL_CODES = new Set(['SESSION_NOT_FOUND', 'SESSION_DELETED', 'session_not_found', 'session_deleted'])
@@ -23,7 +25,7 @@ function messageOf(error) {
 
 export function createRunFollowers({
   store, sessionAdapter, onError = console.warn,
-  retryMs = DEFAULT_RETRY_MS, maxRetryMs = MAX_RETRY_MS, maxFailures = DEFAULT_MAX_FAILURES,
+  retryMs = DEFAULT_RETRY_MS, idleRetryMs = DEFAULT_IDLE_RETRY_MS, maxRetryMs = MAX_RETRY_MS, maxFailures = DEFAULT_MAX_FAILURES,
   wait = delay,
 }) {
   const followers = new Map()
@@ -43,6 +45,11 @@ export function createRunFollowers({
     if (disposed || followers.has(key)) return
     const controller = new AbortController()
     const collector = createRunReportCollector({ taskId, sessionId, store })
+    // 该会话是否仍有未结 run:与 restore 的准入判据同源
+    async function hasActiveRun() {
+      const aggregate = await store.loadAggregate?.(taskId)
+      return Object.values(aggregate?.runs ?? {}).some((run) => run.sessionId === sessionId && !['settled', 'rejected'].includes(run.state))
+    }
     const done = (async () => {
       let failures = 0
       while (!controller.signal.aborted) {
@@ -62,7 +69,8 @@ export function createRunFollowers({
         }
         if (failure === null) {
           failures = 0
-          if (!(await waitFor(retryMs, controller.signal))) return
+          // 流自然结束且已无未结 run:退到空闲间隔等待新 run,不再每秒重放整段会话历史
+          if (!(await waitFor((await hasActiveRun()) ? retryMs : idleRetryMs, controller.signal))) return
           continue
         }
         failures += 1
