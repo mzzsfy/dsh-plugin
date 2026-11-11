@@ -19,32 +19,56 @@ window.__ModuleLoader__.load({
     // 毫秒字段在面板按秒编辑,避免用户数零
     const MS_PER_SECOND = 1000
 
+    const HEAD_HINT = '开关与数字在点保存后才生效;恢复默认只把默认值填回输入框,仍需保存。'
+
+    // 色彩槽位:根作用域声明包局部 token,直接引用宿主语义别名,不写 fallback
+    // (规范见 DEVELOPMENT/plugin-ui-design.md,字面量在暗色主题与主题切换时漏色)
     const CSS = `
-.kw-panel { display:flex; flex-direction:column; gap:16px; max-width:720px; }
-.kw-group { display:flex; flex-direction:column; gap:10px; padding:14px 16px; border:1px solid var(--dsw-alias-border-l2); border-radius:10px; background:var(--dsw-alias-bg-layer-1); }
-.kw-group__title { font-size:13px; font-weight:600; color:var(--dsw-alias-label-primary); }
-.kw-row { display:flex; align-items:center; justify-content:space-between; gap:12px; }
-.kw-row__label { font-size:13px; color:var(--dsw-alias-label-primary); }
-.kw-row__hint { font-size:12px; color:var(--dsw-alias-label-tertiary); margin-top:2px; }
-.kw-row__control { flex:0 0 auto; display:flex; align-items:center; gap:8px; }
-.kw-number { width:96px; padding:5px 8px; font-size:13px; text-align:right; color:var(--dsw-alias-label-primary); background:var(--dsw-alias-bg-layer-1); border:1px solid var(--dsw-alias-border-l2); border-radius:6px; }
-.kw-textarea { width:100%; min-height:52px; padding:8px 10px; font-size:13px; line-height:1.5; color:var(--dsw-alias-label-primary); background:var(--dsw-alias-bg-layer-1); border:1px solid var(--dsw-alias-border-l2); border-radius:8px; resize:vertical; font-family:inherit; }
-.kw-field { display:flex; flex-direction:column; gap:6px; }
-.kw-field__label { font-size:13px; color:var(--dsw-alias-label-primary); }
-.kw-actions { display:flex; align-items:center; gap:10px; }
-.kw-button { padding:6px 16px; font-size:13px; border-radius:6px; border:1px solid var(--dsw-alias-border-l2); background:var(--dsw-alias-bg-layer-2); color:var(--dsw-alias-label-primary); cursor:pointer; }
-.kw-button--primary { background:var(--dsw-alias-brand-primary); border-color:var(--dsw-alias-brand-primary); color:var(--dsw-alias-label-primary-inverted); }
-.kw-button:disabled { opacity:.55; cursor:not-allowed; }
-.kw-status { font-size:12px; color:var(--dsw-alias-label-tertiary); }
-.kw-status--error { color:var(--dsw-alias-state-error-primary); }
-.kw-switch { position:relative; display:inline-flex; align-items:center; cursor:pointer; }
-.kw-switch input[type="checkbox"] { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }
-.kw-switch__track { display:inline-block; width:34px; height:19px; border-radius:999px; background:var(--dsw-alias-bg-module-platform); transition:background .15s ease; }
-.kw-switch__thumb { display:block; width:13px; height:13px; margin:3px; border-radius:50%; background:var(--dsw-alias-switch-thumb); transition:transform .15s ease; }
-.kw-switch input[type="checkbox"]:checked + .kw-switch__track { background:var(--dsw-alias-brand-primary); }
-.kw-switch input[type="checkbox"]:checked + .kw-switch__track > .kw-switch__thumb { transform:translateX(15px); }
-.kw-switch input[type="checkbox"]:focus-visible + .kw-switch__track { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:2px; }
-.kw-switch input[type="checkbox"]:disabled + .kw-switch__track { background:var(--dsw-alias-bg-module-platform); opacity:.5; }
+.kw-panel { --kw-accent: var(--dsw-alias-brand-primary); --kw-accent-deep: var(--dsw-alias-button-primary-hover); --kw-accent-wash: color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent); --kw-ok: var(--dsw-alias-state-success-primary); --kw-warn: var(--dsw-alias-state-warn-primary); --kw-danger: var(--dsw-alias-state-error-primary); --kw-danger-wash: color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent); --kw-text: var(--dsw-alias-label-primary); --kw-text-sub: var(--dsw-alias-label-secondary); --kw-text-dim: var(--dsw-alias-label-tertiary); --kw-bg: var(--dsw-alias-bg-layer-1); --kw-bg-sub: var(--dsw-alias-bg-layer-2); --kw-bg-muted: var(--dsw-alias-bg-module-platform); --kw-card: var(--dsw-alias-bg-layer-1); --kw-card-border: var(--dsw-alias-border-l2); --kw-border: var(--dsw-alias-border-l2); --kw-border-strong: var(--dsw-alias-border-l3); --kw-hover: var(--dsw-alias-interactive-bg-hover); --kw-hover-danger: var(--dsw-alias-interactive-bg-hover-danger); --kw-skeleton: var(--dsw-alias-bg-skeleton); --kw-radius-sm: var(--dsw-radius-sm); --kw-radius-md: var(--dsw-radius-md); --kw-radius-lg: var(--dsw-radius-lg);
+  display: flex; flex-direction: column; gap: 16px; max-width: 720px; color: var(--kw-text); font-size: 14px; line-height: 22px; }
+.kw-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.kw-head__hint { color: var(--kw-text-sub); font-size: 13px; line-height: 20px; }
+.kw-card { display: flex; flex-direction: column; padding: 20px; background: var(--kw-card); border: .5px solid var(--kw-card-border); border-radius: var(--kw-radius-md); }
+.kw-card__head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; padding-bottom: 8px; }
+.kw-card__title { font-weight: 600; font-size: 14px; line-height: 22px; color: var(--kw-text); }
+.kw-card__meta { margin-left: auto; color: var(--kw-text-dim); font-size: 12px; line-height: 18px; }
+.kw-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 16px; align-items: center; padding: 12px 0; border-top: .5px solid var(--kw-border); }
+.kw-row__text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.kw-row__label { color: var(--kw-text); font-size: 14px; line-height: 22px; }
+.kw-row__hint { color: var(--kw-text-sub); font-size: 13px; line-height: 20px; }
+.kw-row__control { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
+.kw-unit { color: var(--kw-text-dim); font-size: 11px; line-height: 18px; }
+.kw-number { width: 96px; height: 36px; box-sizing: border-box; padding: 0 10px; font: inherit; font-size: 14px; line-height: 22px; text-align: right; color: var(--kw-text); background: var(--kw-bg); border: 1px solid var(--kw-border-strong); border-radius: var(--kw-radius-sm); }
+.kw-number:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary); outline-offset: 2px; }
+.kw-number:disabled { opacity: .5; cursor: not-allowed; }
+.kw-field { display: flex; flex-direction: column; gap: 8px; padding: 12px 0; border-top: .5px solid var(--kw-border); }
+.kw-field__label { color: var(--kw-text); font-size: 14px; line-height: 22px; }
+.kw-textarea { width: 100%; box-sizing: border-box; min-height: 64px; padding: 10px 12px; font: inherit; font-size: 14px; line-height: 22px; color: var(--kw-text); background: var(--kw-bg); border: 1px solid var(--kw-border-strong); border-radius: var(--kw-radius-sm); resize: vertical; }
+.kw-textarea:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary); outline-offset: 2px; }
+.kw-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding-top: 4px; }
+.kw-btn { height: 36px; padding: 0 14px; font: inherit; font-size: 14px; line-height: 22px; border-radius: var(--kw-radius-sm); border: 1px solid var(--kw-border-strong); background: transparent; color: var(--kw-text); cursor: pointer; transition: background .15s, border-color .15s; }
+.kw-btn:hover { background: var(--kw-hover); }
+.kw-btn--primary { background: var(--kw-accent); border-color: var(--kw-accent); color: var(--dsw-alias-bg-base); }
+.kw-btn--primary:hover { background: var(--kw-accent-deep); border-color: var(--kw-accent-deep); }
+.kw-btn:disabled { opacity: .5; cursor: not-allowed; }
+.kw-status { font-size: 12px; line-height: 18px; color: var(--kw-text-dim); }
+.kw-status--error { color: var(--kw-danger); }
+.kw-skeleton { display: flex; flex-direction: column; gap: 8px; padding: 12px 0; }
+.kw-skeleton__row { height: 16px; border-radius: var(--kw-radius-sm); background: var(--kw-skeleton); }
+.kw-switch { position: relative; display: inline-flex; align-items: center; cursor: pointer; }
+.kw-switch input[type="checkbox"] { position: absolute; opacity: 0; width: 0; height: 0; }
+.kw-switch__track { position: relative; flex: none; width: 34px; height: 19px; box-sizing: border-box; border-radius: 999px; background: var(--kw-bg-muted); border: 1px solid var(--kw-border); transition: background .15s, border-color .15s; }
+.kw-switch__thumb { position: absolute; top: 50%; left: 2px; width: 13px; height: 13px; border-radius: 50%; background: var(--kw-text-dim); transform: translateY(-50%); transition: left .15s, background .15s; }
+.kw-switch:hover .kw-switch__track { background: color-mix(in srgb, var(--kw-bg-muted) 88%, var(--kw-text)); }
+.kw-switch input[type="checkbox"]:checked + .kw-switch__track { background: var(--kw-accent); border-color: var(--kw-accent); }
+.kw-switch input[type="checkbox"]:checked + .kw-switch__track .kw-switch__thumb { left: 17px; background: var(--kw-bg); }
+.kw-switch input[type="checkbox"]:focus-visible + .kw-switch__track { outline: 2px solid var(--dsw-alias-state-business-primary); outline-offset: 2px; }
+.kw-switch input[type="checkbox"]:disabled + .kw-switch__track { opacity: .5; cursor: not-allowed; }
+@media (max-width: 640px) {
+  .kw-card { padding: 16px; }
+  .kw-row { grid-template-columns: 1fr; gap: 8px; }
+  .kw-row__control { justify-content: flex-start; }
+}
 `
 
     /** 布尔项:label 包裹视觉隐藏的 checkbox 与胶囊轨道,规约要求的开关形态。 */
@@ -54,48 +78,57 @@ window.__ModuleLoader__.load({
         { className: 'kw-row', key },
         React.createElement(
           'div',
-          null,
+          { className: 'kw-row__text' },
           React.createElement('div', { className: 'kw-row__label' }, label),
           hint === undefined ? null : React.createElement('div', { className: 'kw-row__hint' }, hint),
         ),
         React.createElement(
-          'label',
-          { className: 'kw-switch' },
-          React.createElement('input', {
-            type: 'checkbox',
-            checked: value === true,
-            onChange: (event) => onChange(event.target.checked),
-          }),
+          'div',
+          { className: 'kw-row__control' },
           React.createElement(
-            'span',
-            { className: 'kw-switch__track' },
-            React.createElement('span', { className: 'kw-switch__thumb' }),
+            'label',
+            { className: 'kw-switch' },
+            React.createElement('input', {
+              type: 'checkbox',
+              checked: value === true,
+              onChange: (event) => onChange(event.target.checked),
+            }),
+            React.createElement(
+              'span',
+              { className: 'kw-switch__track' },
+              React.createElement('span', { className: 'kw-switch__thumb' }),
+            ),
           ),
         ),
       )
 
-    /** 数值项:毫秒字段按秒显示,写回时换算。 */
+    /** 数值项:毫秒字段按秒显示,写回时换算;单位随字段类型固定展示。 */
     const numberRow = (key, label, hint, value, unitMs, onChange) =>
       React.createElement(
         'div',
         { className: 'kw-row', key },
         React.createElement(
           'div',
-          null,
+          { className: 'kw-row__text' },
           React.createElement('div', { className: 'kw-row__label' }, label),
           hint === undefined ? null : React.createElement('div', { className: 'kw-row__hint' }, hint),
         ),
-        React.createElement('input', {
-          className: 'kw-number',
-          type: 'number',
-          min: 1,
-          value: unitMs ? Math.round(value / MS_PER_SECOND) : value,
-          onChange: (event) => {
-            const next = Number(event.target.value)
-            if (!Number.isFinite(next) || next <= 0) return
-            onChange(unitMs ? next * MS_PER_SECOND : next)
-          },
-        }),
+        React.createElement(
+          'div',
+          { className: 'kw-row__control' },
+          React.createElement('input', {
+            className: 'kw-number',
+            type: 'number',
+            min: 1,
+            value: unitMs ? Math.round(value / MS_PER_SECOND) : value,
+            onChange: (event) => {
+              const next = Number(event.target.value)
+              if (!Number.isFinite(next) || next <= 0) return
+              onChange(unitMs ? next * MS_PER_SECOND : next)
+            },
+          }),
+          React.createElement('span', { className: 'kw-unit' }, unitMs ? '秒' : '次'),
+        ),
       )
 
     const textField = (key, label, value, onChange) =>
@@ -175,7 +208,24 @@ window.__ModuleLoader__.load({
       }, [defaults])
 
       if (config === null) {
-        return React.createElement('div', { className: 'kw-panel' }, '读取配置中')
+        return React.createElement(
+          'div',
+          { className: 'kw-panel' },
+          React.createElement(
+            'div',
+            { className: 'kw-head' },
+            React.createElement('span', { className: 'kw-head__hint' }, status === '' ? '正在读取配置…' : status),
+          ),
+          React.createElement(
+            'div',
+            { className: 'kw-card' },
+            React.createElement(
+              'div',
+              { className: 'kw-skeleton', 'aria-busy': 'true' },
+              [0, 1, 2].map((index) => React.createElement('div', { className: 'kw-skeleton__row', key: index })),
+            ),
+          ),
+        )
       }
 
       return React.createElement(
@@ -183,8 +233,13 @@ window.__ModuleLoader__.load({
         { className: 'kw-panel' },
         React.createElement(
           'div',
-          { className: 'kw-group' },
-          React.createElement('div', { className: 'kw-group__title' }, '总开关'),
+          { className: 'kw-head' },
+          React.createElement('span', { className: 'kw-head__hint' }, HEAD_HINT),
+        ),
+        React.createElement(
+          'div',
+          { className: 'kw-card' },
+          React.createElement('div', { className: 'kw-card__head' }, React.createElement('span', { className: 'kw-card__title' }, '总开关')),
           switchRow(
             'enabled',
             '启用自动继续',
@@ -195,12 +250,12 @@ window.__ModuleLoader__.load({
         ),
         React.createElement(
           'div',
-          { className: 'kw-group' },
-          React.createElement('div', { className: 'kw-group__title' }, '节奏'),
+          { className: 'kw-card' },
+          React.createElement('div', { className: 'kw-card__head' }, React.createElement('span', { className: 'kw-card__title' }, '节奏')),
           numberRow(
             'graceMs',
             '等待时间',
-            '回合结束后等多久再补发,留出用户插话的间隙(秒)',
+            '回合结束后等多久再补发,留出用户插话的间隙',
             config.graceMs,
             true,
             (next) => patch('graceMs', next),
@@ -208,7 +263,7 @@ window.__ModuleLoader__.load({
           numberRow(
             'cooldownMs',
             '连续补发后的冷却',
-            '同一会话连续补发时,每次都按倍数拉长,这是起始值(秒)',
+            '同一会话连续补发时,每次都按倍数拉长,这是起始值',
             config.cooldownMs,
             true,
             (next) => patch('cooldownMs', next),
@@ -224,8 +279,8 @@ window.__ModuleLoader__.load({
         ),
         React.createElement(
           'div',
-          { className: 'kw-group' },
-          React.createElement('div', { className: 'kw-group__title' }, '恢复项'),
+          { className: 'kw-card' },
+          React.createElement('div', { className: 'kw-card__head' }, React.createElement('span', { className: 'kw-card__title' }, '恢复项')),
           switchRow(
             'scanOnBoot',
             '重启后接着跑',
@@ -257,8 +312,13 @@ window.__ModuleLoader__.load({
         ),
         React.createElement(
           'div',
-          { className: 'kw-group' },
-          React.createElement('div', { className: 'kw-group__title' }, '补发文案'),
+          { className: 'kw-card' },
+          React.createElement(
+            'div',
+            { className: 'kw-card__head' },
+            React.createElement('span', { className: 'kw-card__title' }, '补发文案'),
+            React.createElement('span', { className: 'kw-card__meta' }, '按触发原因分别配置'),
+          ),
           textField('continueText', '出错后', config.continueText, (next) => patch('continueText', next)),
           textField('continueTextInterrupted', '重启后', config.continueTextInterrupted, (next) =>
             patch('continueTextInterrupted', next),
@@ -276,13 +336,13 @@ window.__ModuleLoader__.load({
           { className: 'kw-actions' },
           React.createElement(
             'button',
-            { className: 'kw-button kw-button--primary', onClick: () => void save() },
+            { className: 'kw-btn kw-btn--primary', onClick: () => void save() },
             '保存',
           ),
-          React.createElement('button', { className: 'kw-button', onClick: reset }, '恢复默认'),
+          React.createElement('button', { className: 'kw-btn', onClick: reset }, '恢复默认'),
           React.createElement(
             'span',
-            { className: failed ? 'kw-status kw-status--error' : 'kw-status' },
+            { className: failed ? 'kw-status kw-status--error' : 'kw-status', role: failed ? 'alert' : 'status' },
             status,
           ),
         ),
