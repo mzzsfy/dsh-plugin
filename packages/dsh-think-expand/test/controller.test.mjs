@@ -275,6 +275,7 @@ test('Given 用户收起最新回合过程组 When 再次展开 Then 插件恢�
   f.flush()
   // 宿主隐藏过程组内容时子折叠一并归为收起
   think.open = false
+  think.hiddenProcess = true
   f.notify(); f.flush()
   assert.equal(think.open, false, '过程组收起期间不重开行')
   assert.equal(proc.clicks, 0, '用户收起后不自动展开过程组')
@@ -294,6 +295,7 @@ test('Given 全部消息模式用户收起过程组后再次展开 Then 工具�
   f.manualFold(proc)
   f.flush()
   tool.open = false
+  tool.hiddenProcess = true
   f.notify(); f.flush()
   assert.equal(tool.clicks, clicksAfterExpand, '收起期间不点击工具行')
   f.manualUnfold(proc)
@@ -453,6 +455,26 @@ test('Given 旧回合工具行收起未读 When 最新回合过程组手动收�
   assert.equal(next.open, true)
   assert.equal(oldTool.open, false, '旧工具行不被回退展开')
   assert.equal(latestTool.open, false, '手动回合工具行保持收起')
+})
+
+test('Given 最新回合过程组收起且只剩更旧可见行 When 扫描 Then 不展开旧行', () => {
+  const f = fixture()
+  const old = f.add('think', '旧回合思考')
+  f.mount(); f.flush()
+  old.open = false
+  const proc2 = f.addProcess('2', false)
+  f.manualFold(proc2)
+  f.flush()
+  assert.equal(old.open, false, '更旧的可展开行不越过收起意图')
+})
+
+test('Given 进行中回合的过程组按钮收起 When 同期思考行可见 Then 仍展开该行', () => {
+  const f = fixture()
+  const proc = f.addProcess('1', false)
+  proc.swallow = true
+  const think = f.add('think', '流式思考')
+  f.mount(); f.flush()
+  assert.equal(think.open, true, '可见的同期行不受收起按钮影响')
 })
 
 test('Given 旧回合插件行被隐藏 When 新回合已出现 Then 不恢复旧回合末行', () => {

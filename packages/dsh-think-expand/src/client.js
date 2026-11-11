@@ -603,18 +603,21 @@ window.__ModuleLoader__.load({
     // 回合号数字形态(宿主 data-chat-turn 为递增序号);非数字返回 null 走保守路径
     const toTurnNumber = (value) => /^\d+$/.test(value ?? '') ? Number(value) : null
 
-    // 行决策是否整体不可见:最新已关闭回合的过程组收起,且没有更新的回合行。
-    // 进行中的回合不渲染过程组按钮,按钮只代表已关闭回合;不能用"最后一个按钮
-    // 收起"直接跳过全局,否则上一个回合被收起时新回合的流式行不再展开。
-    // 按回合号判定而不按可见性:工具行常被步骤组折叠隐藏,不能因此漏掉新回合。
+    // 行决策是否整体不可见:最新已关闭回合的过程组收起,且没有可见的同期/更新行。
+    // 进行中的回合也可能渲染收起的按钮(或点击未生效),此时该回合的行仍可见,
+    // 必须继续决策;只有整段内容被隐藏(或仅剩更旧回合的可见行)才跳过。
     function rowDecisionsBlocked(container, described) {
       const buttons = container.querySelectorAll(SELECTOR_PROCESS)
       const last = buttons[buttons.length - 1]
       if (last === undefined || last.getAttribute(ATTR_EXPANDED) !== 'false') return false
+      const visible = described.filter((row) => !hasHiddenAncestor(row.el))
+      if (visible.length === 0) return true
       const lastTurn = toTurnNumber(last.getAttribute(ATTR_PROCESS))
-      if (lastTurn === null) return described.every((row) => hasHiddenAncestor(row.el))
-      const newer = described.some((row) => (toTurnNumber(row.turn) ?? -1) > lastTurn)
-      return !newer
+      if (lastTurn === null) return false
+      return !visible.some((row) => {
+        const turn = toTurnNumber(row.turn)
+        return turn === null || turn >= lastTurn
+      })
     }
 
     // 过程组头部按点击后的最终折叠态登记用户意图:收起=该回合不再自动展开,
