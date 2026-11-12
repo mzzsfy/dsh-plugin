@@ -46,7 +46,7 @@ dsh-plugin/
 
 插件在 DSH 商店(dshmarket 与官方 Discover)的图片分两层:
 
-- **48px 图标**(列表卡片):`assets/icons/*.svg` 与 `assets/icons/png/`(180px)是商店/文档用图标资产(SVG 由 `scripts/generate-icons.mjs` 从 nav-icons glyph 生成,PNG 为同源 180px 光栅版;不保证与各插件运行时导航图标逐像素一致)。上游收录条目以 `icon` 字段指向 PNG 直链,展示于 dshmarket 商店卡片;截至 2026-11-09 官方 catalog 索引生成器仍不透传 `icon`,官方 Discover 列表显示默认占位。
+- **48px 图标**(列表卡片):`assets/icons/*.svg` 与 `assets/icons/png/`(180px)是商店/文档用图标资产(SVG 由 `scripts/generate-icons.mjs` 生成,PNG 为同源 180px 光栅版;来源两类——nav-icons 内置 glyph,或插件无导航入口时脚本内声明的商店专属图形;不保证与各插件运行时导航图标逐像素一致)。上游收录条目以 `icon` 字段指向 PNG 直链,展示于 dshmarket 商店卡片;截至 2026-11-09 官方 catalog 索引生成器仍不透传 `icon`,官方 Discover 列表显示默认占位。
 - **详情页效果截图**:仓库 `assets/screenshots/<包名>/` 收录各插件真实界面截图,展示于 awesome-dsh-plugin.com 与 dshmarket 商店(卡片与详情同源数据);官方 Discover 详情不承载截图字段。上游取图方式是读取作者仓库中**条目目录**旁的 `screenshots.json`(monorepo 即 `packages/<包名>/screenshots.json`;最多 8 条,GitHub https 直链或包目录内的相对路径),探活后随站点构建收录——新增或替换截图只需提交本目录图片与对应 `screenshots.json`,不需要单独的截图 PR。上游收录条目草稿在任务工作区,随条目 PR 一并提交。
 
 ## 安装与更新:缩短 pnpm 宽限期

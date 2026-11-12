@@ -1,18 +1,29 @@
-// 商店图标资产生成:nav-icons glyph 坐标放大为 96 视图资产。
-// glyph 为 16 viewBox 源,坐标缩放系数由目标视图与源视图之比计算。
-// 产物幂等:同输入恒同输出;改动映射或 glyph 后重跑本脚本再提交资产。
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+// 商店图标资产生成:16 viewBox 源图放大为 96 视图资产。
+// 源图两类:nav-icons 内置 glyph(插件同时有导航入口时与导航图标同形),或本文件内
+// 声明、仅服务商店卡片的专属图形(插件没有导航入口、内置表也没有合适寓意时)。
+// 坐标缩放系数由目标视图与源视图之比计算;产物幂等,改动映射或图形后重跑再提交资产。
+import { writeFileSync, mkdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { GLYPHS } from '../packages/dsh-settings-nav-icons/src/logic.mjs'
+import { GLYPHS, pathOf, svgOf } from '../packages/dsh-settings-nav-icons/src/logic.mjs'
 
-// 图标映射:glyph 名与 nav-icons 声明一致;tunnel 商店面取 zap 避免与 llm-pi-gateway 撞形
-const ICON_MAP = {
+// 商店专属图形:与 nav-icons glyph 同一坐标系与描边规格
+export const STORE_GLYPHS = {
+  // 循环续跑:一圈缺口的圆弧加回收箭头
+  loop: svgOf(pathOf('M12.69 9.8a5.4 5.4 0 1 1-1.27-5.62L14.2 6.8') + pathOf('M14.2 3.2v3.6h-3.6')),
+  // 心跳线:性能曲线
+  pulse: svgOf(pathOf('M1.8 8h3l2.1-4.4 2.7 8.8 2-4.4h2.4')),
+}
+
+// 图标映射:glyph 名取自 nav-icons 内置表或上面的商店专属图形;tunnel 商店面取 zap 避免与 llm-pi-gateway 撞形
+export const ICON_MAP = {
   'dsh-auto-trust-all': 'shield',
   'dsh-boss-simulator': 'plan',
+  'dsh-bug-perf': 'pulse',
   'dsh-common-tools': 'cube',
   'dsh-context-manager': 'git',
   'dsh-cron-board': 'plan',
+  'dsh-keep-working': 'loop',
   'dsh-llm-pi-gateway': 'globe',
   'dsh-maintain': 'wrench',
   'dsh-rs-workflow': 'flow',
@@ -74,7 +85,9 @@ const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === resolve(
 if (invokedDirectly) {
   mkdirSync(outDir, { recursive: true })
   for (const [pkg, glyph] of Object.entries(ICON_MAP)) {
-    writeFileSync(join(outDir, `${pkg}.svg`), scaleGlyphToAsset(GLYPHS[glyph]))
+    const source = GLYPHS[glyph] ?? STORE_GLYPHS[glyph]
+    if (!source) throw new Error(`${pkg}: 未知 glyph ${glyph}`)
+    writeFileSync(join(outDir, `${pkg}.svg`), scaleGlyphToAsset(source))
     console.log(`${pkg} <- ${glyph}`)
   }
 }
