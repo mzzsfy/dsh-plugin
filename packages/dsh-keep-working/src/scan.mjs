@@ -5,7 +5,8 @@
  * 判定尾部状态、再按需 resume。
  */
 
-import { hasVisibleOutput, turnSlice } from './closure.mjs'
+import { closureVerdict, hasVisibleOutput, turnSlice } from './closure.mjs'
+import { fillTemplate } from './config.mjs'
 import { isTransientFailure, parseFailureFacts } from './failure.mjs'
 import { isDerivedSessionHeader } from './session-kind.mjs'
 import { appendFileSync, readdirSync, statSync } from 'node:fs'
@@ -13,7 +14,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 /** 扫描结论落盘,重启恢复出问题时这是唯一可观测面。 */
-const logFile = () => join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'keep-working-scan.log')
+const logFile = () => join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'keep-working-scan.log')
 
 export function trace(message) {
   try {
@@ -38,29 +39,49 @@ function tailVerdict(events, nowTime, config) {
   if (!openTurn && lastEnd === undefined) return 'skip:空日志'
   const touchedAt = openTurn ? (events.at(-1)?.time ?? 0) : lastEnd.time
   if (touchedAt < nowTime - config.freshMs) return 'skip:超出时间窗口'
-  if (openTurn) return 'resume'
+  if (openTurn) return 'resume:interrupted'
 
   const reason = lastEnd.data?.reason ?? {}
   switch (reason.kind) {
-    case 'completed':
+    case 'completed': {
+      // 有有效写入却没交付时必须恢复:重启后重做一遍也比永远不交付安全
+      const verdict = closureVerdict(events, lastEnd.data.turn)
+      if (verdict.reason === 'file-write-requires-present') return 'resume:closure'
       // 回合正常结束就当它做完了:重启后重复执行的代价高于漏恢复的概率
-      return hasVisibleOutput(turnSlice(events, lastEnd.data.turn)) ? 'skip:正常结束' : 'resume'
+      if (verdict.closed || hasVisibleOutput(turnSlice(events, lastEnd.data.turn))) return 'skip:正常结束'
+      return config.resumeSilentTurns ? 'resume:silent' : 'skip:无可见输出'
+    }
     case 'error': {
       const failure = parseFailureFacts(reason.error)
       if (failure === undefined) return 'skip:错误无法解析'
       if (config.classify && !isTransientFailure(failure, config.retryableErrorPatterns)) {
         return 'skip:永久错误'
       }
-      return 'resume'
+      return 'resume:error'
     }
     case 'interrupted':
+      return 'resume:interrupted'
     case 'max-tokens':
-      return 'resume'
+      return 'resume:max-tokens'
     case 'aborted':
-      return RESTART_CANCEL_CAUSES.has(reason.reason?.kind) ? 'resume' : 'skip:用户取消'
+      return RESTART_CANCEL_CAUSES.has(reason.reason?.kind) ? 'resume:interrupted' : 'skip:用户取消'
     default:
       return 'skip:无需恢复'
   }
+}
+
+/** 恢复文案:按尾部原因取对应说法,默认用中断文案。 */
+function resumeText(config, verdict) {
+  const reason = verdict.slice('resume:'.length)
+  const template =
+    reason === 'error'
+      ? config.continueText
+      : reason === 'max-tokens'
+        ? config.continueTextMaxTokens
+        : reason === 'silent'
+          ? config.continueTextSilent
+          : config.continueTextInterrupted
+  return fillTemplate(template, {})
 }
 
 /** 把存储会话恢复为 live agent;已 live 时直接返回。 */
@@ -87,22 +108,27 @@ async function materialize(ctx, sessionId, presetId) {
   return ctx.agents.get(sessionId)
 }
 
-/** goal 在进程重启后会被 disarm;active 且 disarmed 时才重新武装。 */
+/** goal 在进程重启后会被 disarm;active 且 disarmed 时才重新武装。返回是否已交回 goal driver 驱动。 */
 function rearmGoal(ctx, agent, config) {
-  if (!config.resumeGoals) return
+  if (!config.resumeGoals) return false
   const goals = ctx.get('goals')
-  if (goals === undefined) return
+  if (goals === undefined) return false
   try {
     const view = goals.get(agent)
-    if (view === undefined || view.revision === undefined) return
+    if (view === undefined || view.revision === undefined) return false
     const ref = { id: view.id, revision: view.revision }
     if (view.phase === 'active' && view.activation === 'disarmed') {
       goals.resume(agent, ref)
-      return
+      return true
     }
-    if (view.phase === 'paused' && config.resumePausedGoals) goals.resume(agent, ref)
+    if (view.phase === 'paused' && config.resumePausedGoals) {
+      goals.resume(agent, ref)
+      return true
+    }
+    return false
   } catch (error) {
     ctx.logger?.warn?.(`[keep-working] goal 恢复失败 ${agent?.id}: ${String(error)}`)
+    return false
   }
 }
 
@@ -115,11 +141,26 @@ const SCAN_YIELD_BATCH = 32
 /** 会话持久层的落盘目录名,与宿主存储布局一致。 */
 const SESSIONS_DIR = 'sessions'
 
-/** 单会话产物文件名。 */
-const SESSION_ARTIFACT = 'session.v4.jsonl.zstd'
+/** 产物规范名:session.v<代际>.jsonl[.zstd],迁移中间产物与临时文件不匹配。 */
+const SESSION_GENERATION = /^session(?:\.v(\d+))?\.jsonl(?:\.[a-z0-9]+)?$/
 
 /** 会话目录前缀,目录名即会话 id。 */
 const SESSION_DIR_PREFIX = 'session-'
+
+/** 会话产物路径:目录内按代际取最高的一份,避免升级后旧代际文件的旧 mtime 掩盖新写入。 */
+function findArtifact(sessionDir) {
+  let names
+  try {
+    names = readdirSync(sessionDir)
+  } catch {
+    return undefined
+  }
+  const candidates = names
+    .map((name) => ({ name, generation: SESSION_GENERATION.exec(name)?.[1] ?? '0' }))
+    .filter((item) => item.generation !== undefined)
+    .sort((left, right) => Number(right.generation) - Number(left.generation))
+  return candidates.length === 0 ? undefined : join(sessionDir, candidates[0].name)
+}
 
 /**
  * 直接扫会话目录取最近改动过的会话。
@@ -130,8 +171,9 @@ const SESSION_DIR_PREFIX = 'session-'
  * 工作区目录不可读会让快照不完整,此时 partial 为真,调用方不得据此认定"没有待恢复会话"。
  * 单个产物缺失不算:非 zstd 后端、旧代际与删除竞态都会表现为缺失,是常态而非读取失败。
  */
-export function listFreshByDirectory(config, nowTime) {
-  const root = join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), SESSIONS_DIR)
+export function listFreshByDirectory(config, nowTime, persistence) {
+  if (persistence !== undefined && typeof persistence.stat !== 'function') return undefined
+  const root = join(process.env.DSH_HOME || join(homedir(), '.dsh'), SESSIONS_DIR)
   let workspaces
   try {
     workspaces = readdirSync(root, { withFileTypes: true })
@@ -155,7 +197,8 @@ export function listFreshByDirectory(config, nowTime) {
     }
     for (const entry of entries) {
       if (!entry.isDirectory() || !entry.name.startsWith(SESSION_DIR_PREFIX)) continue
-      const path = join(root, workspace.name, entry.name, SESSION_ARTIFACT)
+      const path = findArtifact(join(root, workspace.name, entry.name))
+      if (path === undefined) continue
       let stat
       try {
         stat = statSync(path)
@@ -177,7 +220,7 @@ export function listFreshByDirectory(config, nowTime) {
  */
 async function listFreshSessions(ctx, config, nowTime, scanDirectory = listFreshByDirectory) {
   const persistence = ctx.get('sessionPersistence')
-  const byDirectory = scanDirectory(config, nowTime)
+  const byDirectory = scanDirectory(config, nowTime, persistence)
   // 没有持久层服务就拿不到 header,无法区分子会话;此时应走全量回退而不是盲恢复
   if (byDirectory !== undefined && persistence === undefined) return undefined
   if (byDirectory !== undefined) {
@@ -264,6 +307,7 @@ async function listAllSessions(ctx) {
  * 可能只是服务尚未就绪,仍需重试;本轮预算用完时一律重试。
  */
 export function scanSettled(result) {
+  if (result.settled === true) return true
   if (!result.complete) return false
   // 快照不完整时既不能宣称扫完了,也不能据此认定剩余会话无需恢复
   if (result.source === 'partial') return false
@@ -280,14 +324,16 @@ export async function scanStoredSessions({
   seen = new Set(),
   scanDirectory = listFreshByDirectory,
 }) {
-  const result = { listed: 0, scanned: 0, resumed: 0, complete: true, source: undefined }
+  const result = { listed: 0, scanned: 0, resumed: 0, complete: true, source: undefined, settled: false }
   const deadline = Date.now() + budgetMs
   trace('扫描开始')
-  if (!config.scanOnBoot || config.paused) return result
+  // 关掉扫描或全局暂停是终态,不该按秒重试到新鲜窗口耗尽
+  if (!config.scanOnBoot || config.paused) return { ...result, settled: true }
   const query = ctx.get('sessionQuery')
   if (query === undefined) {
+    // 宿主没有会话查询面时重启恢复整体不可用,同样是终态
     trace('sessionQuery 缺失,放弃')
-    return result
+    return { ...result, settled: true }
   }
   // 归档集合决定哪些会话不该被拉起。恢复是写操作,误恢复已归档会话会真的
   // 消耗额度,所以这里的方向与只读场景相反:拿不到权威集合就不恢复。
@@ -344,12 +390,18 @@ export async function scanStoredSessions({
       result.scanned += 1
       const verdict = tailVerdict(events, now(), config)
       trace(`会话 ${sessionId} 事件 ${events.length} 判定 ${verdict}`)
-      if (verdict !== 'resume') continue
+      if (!verdict.startsWith('resume')) continue
       const agent = await materialize(ctx, sessionId, candidate.presetId)
       if (agent === undefined) continue
-      rearmGoal(ctx, agent, config)
+      // goal 已交回 driver 驱动:它自己会排下一轮,再补消息会多出一次重复回合
+      if (rearmGoal(ctx, agent, config)) {
+        result.resumed += 1
+        trace(`已交回 goal 驱动 ${sessionId}`)
+        ctx.logger?.info?.(`[keep-working] 重启恢复(goal) ${sessionId}`)
+        continue
+      }
       const message = createUserMessage({
-        content: [{ type: 'text', text: config.continueTextInterrupted }],
+        content: [{ type: 'text', text: resumeText(config, verdict) }],
         source: { kind: 'user' },
       })
       agent.followup(message)

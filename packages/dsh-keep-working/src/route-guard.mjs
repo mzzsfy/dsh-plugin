@@ -12,7 +12,8 @@ export function rejectCrossOrigin(req, res, sendJson) {
   if (!origin) return false
   let sameOrigin = false
   try {
-    sameOrigin = new URL(origin).host === req.headers.host
+    const host = req.headers.host
+    sameOrigin = typeof host === 'string' && host.length > 0 && new URL(origin).host === host.toLowerCase()
   } catch {
     sameOrigin = false
   }

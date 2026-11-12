@@ -407,3 +407,30 @@ test('离线探测抛错时按在线处理', async () => {
   await new Promise((resolve) => setImmediate(resolve))
   assert.equal(h.sent.length, 1)
 })
+
+test('S18 插件补发的回合里用户插话一条:让路', () => {
+  const h = createHarness({ config: { maxConsecutive: 5 } })
+  h.runTurn(0, 1, '没结案', { human: true })
+  assert.equal(h.sent.length, 1)
+  h.advanceTo(h.now() + 60_000)
+  // 第二回合由 auto-1 发起,真人随后插了一条
+  const autoId = h.sent.at(-1).id
+  h.emit(turnStart(10, 2))
+  h.emit(userMessage(11, 'user', autoId))
+  h.emit(userMessage(12, 'user', 'm-12'))
+  h.emit(assistant(13, 2, '没结案'))
+  h.emit(turnEnd(14, 2, { kind: 'completed' }))
+  h.timers.flush()
+  assert.equal(h.sent.length, 1, '插件回合内的真人插话必须让路')
+})
+
+test('S19 空回合开关关闭但有有效写入:仍要求 present', () => {
+  const h = createHarness({ config: { resumeSilentTurns: false } })
+  h.emit(turnStart(0, TURN))
+  h.emit(userMessage(1))
+  h.emit(toolCall(2, TURN, 'write'))
+  h.emit(turnEnd(4, TURN, { kind: 'completed' }))
+  h.timers.flush()
+  assert.equal(h.sent.length, 1, '文件已改就不能被空回合开关跳过')
+  assert.match(textOf(h.sent[0]), /TASK_DONE/)
+})

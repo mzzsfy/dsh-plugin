@@ -2,8 +2,6 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  isNetworkFailure,
-  isTransientAgentError,
   isTransientFailure,
   parseFailureFacts,
 } from '../src/failure.mjs'
@@ -65,16 +63,19 @@ test('用户自定义片段优先于内置判定', () => {
   assert.equal(isTransientFailure(facts('UPSTREAM', 'bad gateway', 502), 'bad gateway'), true)
 })
 
-test('isTransientAgentError 只放行网络与传输类消息', () => {
-  assert.equal(isTransientAgentError('network unreachable'), true)
-  assert.equal(isTransientAgentError('upstream returned 503'), true)
-  assert.equal(isTransientAgentError('serialization failed'), false)
-  assert.equal(isTransientAgentError('agent disposed'), false)
+test('规范码判永久,不看中性描述', () => {
+  for (const code of ['QUOTA', 'ACCOUNT_QUOTA', 'NO_ADAPTER', 'INVALID_ARGS', 'AUTH', 'CONTEXT_WINDOW_EXCEEDED']) {
+    assert.equal(isTransientFailure({ code, message: 'the request failed' }), false, `${code} 应判永久`)
+  }
 })
 
-test('isNetworkFailure 识别连接层失败', () => {
-  assert.equal(isNetworkFailure(facts('TRANSPORT', 'x')), true)
-  assert.equal(isNetworkFailure(facts('ECONNRESET', 'socket hang up')), true)
-  assert.equal(isNetworkFailure(facts('UPSTREAM', 'fetch failed')), true)
-  assert.equal(isNetworkFailure(facts('UPSTREAM', 'server error', 500)), false)
+test('中性描述的额度原文不被当临时错误', () => {
+  const samples = [
+    'Resource has been exhausted (e.g. check quota).',
+    'Your credit balance is too low to access the Anthropic API',
+  ]
+  for (const message of samples) {
+    assert.equal(isTransientFailure({ code: 'QUOTA', message }), false, message)
+    assert.equal(isTransientFailure({ code: 'UNKNOWN', message }), false, `无规范码时也要按文本拦下: ${message}`)
+  }
 })

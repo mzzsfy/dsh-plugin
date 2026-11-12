@@ -9,12 +9,9 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const { useCallback, useEffect, useState } = React
 
-    const API_PATH = '/api/keep-working/config'
+    const PKG_ID = '@mzzsfy/dsh-keep-working'
 
-    const NAV_ICON = { '持续工作': 'zap', 'dsh-keep-working': 'zap' }
-    if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
-    else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
-    else window.__navicIconQueue = [NAV_ICON]
+    const API_PATH = '/api/keep-working/config'
 
     // 毫秒字段在面板按秒编辑,避免用户数零
     const MS_PER_SECOND = 1000
@@ -24,11 +21,11 @@ window.__ModuleLoader__.load({
     // 色彩槽位:根作用域声明包局部 token,直接引用宿主语义别名,不写 fallback
     // (规范见 DEVELOPMENT/plugin-ui-design.md,字面量在暗色主题与主题切换时漏色)
     const CSS = `
-.kw-panel { --kw-accent: var(--dsw-alias-brand-primary); --kw-accent-deep: var(--dsw-alias-button-primary-hover); --kw-accent-wash: color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent); --kw-ok: var(--dsw-alias-state-success-primary); --kw-warn: var(--dsw-alias-state-warn-primary); --kw-danger: var(--dsw-alias-state-error-primary); --kw-danger-wash: color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent); --kw-text: var(--dsw-alias-label-primary); --kw-text-sub: var(--dsw-alias-label-secondary); --kw-text-dim: var(--dsw-alias-label-tertiary); --kw-bg: var(--dsw-alias-bg-layer-1); --kw-bg-sub: var(--dsw-alias-bg-layer-2); --kw-bg-muted: var(--dsw-alias-bg-module-platform); --kw-card: var(--dsw-alias-bg-layer-1); --kw-card-border: var(--dsw-alias-border-l2); --kw-border: var(--dsw-alias-border-l2); --kw-border-strong: var(--dsw-alias-border-l3); --kw-hover: var(--dsw-alias-interactive-bg-hover); --kw-hover-danger: var(--dsw-alias-interactive-bg-hover-danger); --kw-skeleton: var(--dsw-alias-bg-skeleton); --kw-radius-sm: var(--dsw-radius-sm); --kw-radius-md: var(--dsw-radius-md); --kw-radius-lg: var(--dsw-radius-lg);
-  display: flex; flex-direction: column; gap: 16px; max-width: 720px; color: var(--kw-text); font-size: 14px; line-height: 22px; }
+.kw-panel { --kw-accent: var(--dsw-alias-brand-primary); --kw-accent-deep: var(--dsw-alias-button-primary-hover);    --kw-danger: var(--dsw-alias-state-error-primary);  --kw-text: var(--dsw-alias-label-primary); --kw-text-sub: var(--dsw-alias-label-secondary); --kw-text-dim: var(--dsw-alias-label-tertiary); --kw-bg: var(--dsw-alias-bg-layer-1);  --kw-bg-muted: var(--dsw-alias-bg-module-platform); --kw-card: var(--dsw-alias-bg-layer-1); --kw-card-border: var(--dsw-alias-border-l2); --kw-border: var(--dsw-alias-border-l2); --kw-border-strong: var(--dsw-alias-border-l3); --kw-hover: var(--dsw-alias-interactive-bg-hover);  --kw-skeleton: var(--dsw-alias-bg-skeleton); --kw-radius-sm: var(--dsw-radius-sm); --kw-radius-md: var(--dsw-radius-md); 
+  display: flex; flex-direction: column; gap: 16px; max-width: 560px; color: var(--kw-text); font-size: 14px; line-height: 22px; }
 .kw-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
 .kw-head__hint { color: var(--kw-text-sub); font-size: 13px; line-height: 20px; }
-.kw-card { display: flex; flex-direction: column; padding: 20px; background: var(--kw-card); border: .5px solid var(--kw-card-border); border-radius: var(--kw-radius-md); }
+.kw-card { display: flex; flex-direction: column; padding: 14px 16px; background: var(--kw-card); border: .5px solid var(--kw-card-border); border-radius: var(--kw-radius-md); }
 .kw-card__head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; padding-bottom: 8px; }
 .kw-card__title { font-weight: 600; font-size: 14px; line-height: 22px; color: var(--kw-text); }
 .kw-card__meta { margin-left: auto; color: var(--kw-text-dim); font-size: 12px; line-height: 18px; }
@@ -38,15 +35,15 @@ window.__ModuleLoader__.load({
 .kw-row__hint { color: var(--kw-text-sub); font-size: 13px; line-height: 20px; }
 .kw-row__control { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
 .kw-unit { color: var(--kw-text-dim); font-size: 11px; line-height: 18px; }
-.kw-number { width: 96px; height: 36px; box-sizing: border-box; padding: 0 10px; font: inherit; font-size: 14px; line-height: 22px; text-align: right; color: var(--kw-text); background: var(--kw-bg); border: 1px solid var(--kw-border-strong); border-radius: var(--kw-radius-sm); }
+.kw-number { width: 96px; height: 32px; box-sizing: border-box; padding: 0 10px; font: inherit; font-size: 14px; line-height: 22px; text-align: right; color: var(--kw-text); background: var(--kw-bg); border: 1px solid var(--kw-border-strong); border-radius: var(--kw-radius-sm); }
 .kw-number:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary); outline-offset: 2px; }
 .kw-number:disabled { opacity: .5; cursor: not-allowed; }
 .kw-field { display: flex; flex-direction: column; gap: 8px; padding: 12px 0; border-top: .5px solid var(--kw-border); }
 .kw-field__label { color: var(--kw-text); font-size: 14px; line-height: 22px; }
-.kw-textarea { width: 100%; box-sizing: border-box; min-height: 64px; padding: 10px 12px; font: inherit; font-size: 14px; line-height: 22px; color: var(--kw-text); background: var(--kw-bg); border: 1px solid var(--kw-border-strong); border-radius: var(--kw-radius-sm); resize: vertical; }
+.kw-textarea { width: 100%; box-sizing: border-box; min-height: 64px; padding: 8px 10px; font: inherit; font-size: 14px; line-height: 22px; color: var(--kw-text); background: var(--kw-bg); border: 1px solid var(--kw-border-strong); border-radius: var(--kw-radius-sm); resize: vertical; }
 .kw-textarea:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary); outline-offset: 2px; }
 .kw-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding-top: 4px; }
-.kw-btn { height: 36px; padding: 0 14px; font: inherit; font-size: 14px; line-height: 22px; border-radius: var(--kw-radius-sm); border: 1px solid var(--kw-border-strong); background: transparent; color: var(--kw-text); cursor: pointer; transition: background .15s, border-color .15s; }
+.kw-btn { height: 32px; padding: 0 14px; font: inherit; font-size: 14px; line-height: 22px; border-radius: var(--kw-radius-sm); border: 1px solid var(--kw-border-strong); background: transparent; color: var(--kw-text); cursor: pointer; transition: background .15s, border-color .15s; }
 .kw-btn:hover { background: var(--kw-hover); }
 .kw-btn--primary { background: var(--kw-accent); border-color: var(--kw-accent); color: var(--dsw-alias-bg-base); }
 .kw-btn--primary:hover { background: var(--kw-accent-deep); border-color: var(--kw-accent-deep); }
@@ -90,6 +87,7 @@ window.__ModuleLoader__.load({
             { className: 'kw-switch' },
             React.createElement('input', {
               type: 'checkbox',
+              'aria-label': label,
               checked: value === true,
               onChange: (event) => onChange(event.target.checked),
             }),
@@ -118,6 +116,7 @@ window.__ModuleLoader__.load({
           { className: 'kw-row__control' },
           React.createElement('input', {
             className: 'kw-number',
+            'aria-label': label,
             type: 'number',
             min: 1,
             value: unitMs ? Math.round(value / MS_PER_SECOND) : value,
@@ -138,6 +137,7 @@ window.__ModuleLoader__.load({
         React.createElement('div', { className: 'kw-field__label' }, label),
         React.createElement('textarea', {
           className: 'kw-textarea',
+          'aria-label': label,
           value,
           onChange: (event) => onChange(event.target.value),
         }),
@@ -192,17 +192,8 @@ window.__ModuleLoader__.load({
 
       const reset = useCallback(() => {
         if (defaults === null) return
-        setConfig((current) => ({
-          ...current,
-          graceMs: defaults.graceMs,
-          cooldownMs: defaults.cooldownMs,
-          maxConsecutive: defaults.maxConsecutive,
-          continueText: defaults.continueText,
-          continueTextInterrupted: defaults.continueTextInterrupted,
-          continueTextSilent: defaults.continueTextSilent,
-          continueTextMaxTokens: defaults.continueTextMaxTokens,
-          closureText: defaults.closureText,
-        }))
+        // 面板字段全量回填:只回填一部分会让"恢复默认"留下旧开关,保存后插件仍是关的
+        setConfig((current) => ({ ...current, ...defaults }))
         setStatus('已填入默认值,点保存生效')
         setFailed(false)
       }, [defaults])
@@ -362,9 +353,10 @@ window.__ModuleLoader__.load({
           document.head.appendChild(style)
           return () => style.remove()
         }, 'keep-working styles')
-        ctx.slots.inject('settings.section', () =>
+        // 配置卡片挂在插件管理页的包详情里,与 context 等插件同形态,不占设置导航项
+        ctx.slots.inject('plugins.bundle.config', () =>
           ctx.slots.register(
-            { name: 'settings.section', id: 'keep-working', order: 42, label: '持续工作' },
+            { name: 'plugins.bundle.config', key: PKG_ID },
             () => React.createElement(KeepWorkingPanel),
           ))
       },

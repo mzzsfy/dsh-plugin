@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -8,7 +8,7 @@ import { join } from 'node:path'
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'keep-working-test-'))
 
 import { resolveConfig } from '../src/config.mjs'
-import { scanSettled, scanStoredSessions } from '../src/scan.mjs'
+import { listFreshByDirectory, scanSettled, scanStoredSessions } from '../src/scan.mjs'
 
 const TURN = 3
 const NOW = 10_000_000
@@ -411,7 +411,6 @@ test('旧格式子会话(parentSession + delegationDepth)不恢复', async () =>
       createUserMessage: (options) => ({ id: 'auto-1', ...options }),
       now: () => NOW,
       scanDirectory: () => undefined,
-    scanDirectory: () => undefined,
     })
     assert.equal(result.resumed, 0)
   }
@@ -606,6 +605,79 @@ test('目录扫描按修改时间筛出近期会话', async () => {
     const found = listFreshByDirectory(resolveConfig(), NOW)
     assert.equal(found.partial, false, '全部子项可读时快照完整')
     assert.deepEqual(found.items.map((item) => item.id), ['session-fresh'])
+  } finally {
+    if (previous === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previous
+  }
+})
+
+test('会话查询服务缺失是终态,本轮直接收工', async () => {
+  const result = await scanStoredSessions({
+    ctx: { get: () => undefined, agents: { get: () => undefined } },
+    config: resolveConfig(),
+    createUserMessage: () => ({ id: 'auto-1' }),
+    scanDirectory: () => undefined,
+  })
+  assert.equal(result.settled, true)
+  assert.equal(scanSettled(result), true, '缺服务不能按秒重试到新鲜窗口耗尽')
+})
+
+test('扫描关闭与全局暂停同样是终态', async () => {
+  for (const overrides of [{ scanOnBoot: false }, { paused: true }]) {
+    const result = await scanStoredSessions({
+      ctx: { get: () => undefined, agents: { get: () => undefined } },
+      config: resolveConfig(overrides),
+      createUserMessage: () => ({ id: 'auto-1' }),
+      scanDirectory: () => undefined,
+    })
+    assert.equal(scanSettled(result), true)
+  }
+})
+
+test('空回合恢复开关关闭时重启扫描不补发', async () => {
+  const silentTail = [
+    turnStart(1, TURN),
+    userMessage(2),
+    turnEnd(4, TURN, { kind: 'completed' }),
+  ]
+  for (const [resumeSilentTurns, expected] of [
+    [false, 0],
+    [true, 1],
+  ]) {
+    const h = createHarness({ records: [record('s-silent', silentTail)] })
+    const result = await scanStoredSessions({
+      ctx: h.ctx,
+      config: resolveConfig({ resumeSilentTurns }),
+      createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+      now: () => NOW,
+      scanDirectory: () => undefined,
+    })
+    assert.equal(result.resumed, expected, `resumeSilentTurns=${resumeSilentTurns}`)
+    assert.equal(h.sent.length, expected)
+  }
+})
+
+test('第零代与多代际产物都能被目录扫描识别', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'keep-working-gen-'))
+  const workspace = join(home, 'sessions', 'ws')
+  const nowSeconds = NOW / 1000
+  const make = (sessionId, fileName) => {
+    const dir = join(workspace, sessionId)
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, fileName)
+    writeFileSync(file, 'x')
+    utimesSync(file, nowSeconds, nowSeconds)
+  }
+  make('session-zero', 'session.jsonl.zstd')
+  make('session-v3', 'session.v3.jsonl.zstd')
+  make('session-v5', 'session.v5.jsonl.zstd')
+
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  try {
+    const found = listFreshByDirectory(resolveConfig(), NOW)
+    assert.equal(found.partial, false)
+    assert.deepEqual(found.items.map((item) => item.id).sort(), ['session-v3', 'session-v5', 'session-zero'])
   } finally {
     if (previous === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previous

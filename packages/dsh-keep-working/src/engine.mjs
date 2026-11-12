@@ -9,7 +9,6 @@ import {
   closureVerdict,
   hasVisibleOutput,
   humanInitiatedTurn,
-  isMaintenanceTurnStart,
   turnInitiator,
   turnSlice,
   userTookOver,
@@ -53,7 +52,6 @@ export function createEngine({
         pendingTimer: undefined,
         pending: undefined,
         sentIds: new Set(),
-        maintenanceTurn: undefined,
           }
       states.set(sessionId, state)
     }
@@ -85,11 +83,14 @@ export function createEngine({
 
     switch (reason.kind) {
       case 'completed': {
-        if (closureVerdict(events, turn).closed) return { closed: true }
+        const verdict = closureVerdict(events, turn)
+        if (verdict.closed) return { closed: true }
         // 人已插话就让路,静的回合也不抢方向
         if (userTookOver(events, turn, state.sentIds)) return undefined
-        if (!hasVisibleOutput(turnSlice(events, turn)) && config.resumeSilentTurns) {
-          return { reason: 'silent', text: config.continueTextSilent }
+        // 有有效文件写入时结案规则优先:没 present 就必须提醒,不能被空回合开关跳过
+        const silent = !hasVisibleOutput(turnSlice(events, turn))
+        if (silent && verdict.reason !== 'file-write-requires-present') {
+          return config.resumeSilentTurns ? { reason: 'silent', text: config.continueTextSilent } : undefined
         }
         if (turnInitiator(events, turn) !== 'user') return undefined
         return { reason: 'closure', text: config.closureText }
@@ -191,7 +192,6 @@ export function createEngine({
     const state = stateOf(session.id)
     switch (event.type) {
       case 'turn/start':
-        state.maintenanceTurn = isMaintenanceTurnStart(event) ? event.data?.turn : undefined
         cancelPending(state, '新回合开始')
         return
       case 'turn/end':
@@ -203,13 +203,7 @@ export function createEngine({
 
   function handleTurnEnd(session, state, event) {
     const turn = event.data?.turn
-    const maintenance = state.maintenanceTurn === turn
-    state.maintenanceTurn = undefined
     cancelPending(state, '回合结束')
-    if (maintenance) {
-      log(`${session.id}: 维护回合不恢复`)
-      return
-    }
     // 真人发起的回合说明人已介入:恢复额度,封顶不再永久沉默。
     // 判定按消息 id 排除本插件自投递的消息,不依赖"下一个 turn/start 是我们的"这一猜测。
     if (humanInitiatedTurn(snapshotEvents(session), turn, state.sentIds)) {

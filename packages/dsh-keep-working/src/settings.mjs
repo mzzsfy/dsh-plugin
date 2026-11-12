@@ -24,23 +24,6 @@ export const PANEL_FIELDS = [
   'closureText',
 ]
 
-/** 面板语义说明:字段 -> 一句解释。 */
-export const PANEL_HINTS = {
-  paused: '全局暂停:开启后不再自动补发任何消息',
-  graceMs: '回合结束到补发之间的等待时间',
-  cooldownMs: '连续补发后的基础冷却时间',
-  maxConsecutive: '同一会话最多连续补发几次,到顶后停手',
-  scanOnBoot: '宿主启动时扫描上次没结案的会话并接着跑',
-  resumeSilentTurns: '恢复只输出思考、没有可见回复的回合',
-  pauseWhenOffline: '断网时不重试,联网后自动继续',
-  classify: '区分永久错误(鉴权、余额等)与临时错误,永久错误不重试',
-  continueText: '出错后自动补发的内容',
-  continueTextInterrupted: '宿主重启后自动补发的内容',
-  continueTextSilent: '无可见输出时自动补发的内容',
-  continueTextMaxTokens: '被输出上限截断时自动补发的内容',
-  closureText: '没检测到结案信号时发给模型的要求',
-}
-
 /** 读面板值;服务缺失或读取失败时返回 undefined,由调用方回落 cordis 配置。 */
 export function readSettings(ctx) {
   const settings = ctx.get('settings')

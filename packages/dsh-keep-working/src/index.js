@@ -17,6 +17,9 @@ import { NAMESPACE, PANEL_FIELDS, panelDefaults, readSettings, writeSettings } f
 
 export const name = 'keep-working'
 
+/** cordis FiberState.ACTIVE;卸载后微任务可能才跑到,需按数值判定。 */
+const FIBER_STATE_ACTIVE = 2
+
 /** 缺 agents 或 systemPrompt 时干净禁用:不注册任何服务与提示词。 */
 export const inject = ['agents', 'systemPrompt']
 
@@ -108,7 +111,7 @@ export async function apply(ctx, config) {
     if (runtime === undefined) return
     if (runtime.scanTimer !== undefined) clearTimeout(runtime.scanTimer)
     runtime.engine.dispose()
-    runtime.section()
+    runtime.section?.()
     runtime = undefined
   }
 
@@ -116,7 +119,13 @@ export async function apply(ctx, config) {
     stopRuntime()
     const resolved = resolveConfig(config, readSettings(ctx))
 
-    const section = ctx.systemPrompt.section(buildSection(ctx.systemPrompt))
+    const promptApi = ctx.get('systemPrompt')
+    const canRegisterSection =
+      typeof promptApi?.section === 'function' && typeof promptApi?.getSectionOrder === 'function'
+    const section = canRegisterSection ? promptApi.section(buildSection(promptApi)) : undefined
+    if (!canRegisterSection) {
+      ctx.logger?.warn?.('[keep-working] 宿主缺少 prompt 段落接口,仅恢复不注入结案规则')
+    }
     const engine = createEngine({
       ctx,
       config: resolved,
@@ -159,11 +168,41 @@ export async function apply(ctx, config) {
 
   startRuntime()
 
-  ctx.inject(['settings'], () => {
-    // 设置写入后 cordis Config 的 volatile 字段随之更新,重建运行期以采用新值
-    ctx.on('settings/document-updated', (namespace) => {
-      if (namespace === NAMESPACE) startRuntime()
+  let rebuildQueued = false
+  const scheduleRebuild = () => {
+    if (rebuildQueued) return
+    rebuildQueued = true
+    // 事件由设置服务在 update 内部同步发出,直接重建会在服务栈里重入 describe
+    queueMicrotask(() => {
+      rebuildQueued = false
+      if (ctx.fiber?.state !== FIBER_STATE_ACTIVE) return
+      try {
+        startRuntime()
+      } catch (error) {
+        // 渲染期异常不能冒成未捕获异常拖垮宿主,保留告警并停下自动恢复
+        ctx.logger?.warn?.(`[keep-working] 设置变更后重建失败: ${error instanceof Error ? error.message : String(error)}`)
+      }
     })
+  }
+  ctx.effect(() => {
+    const offVolatile = ctx.on('loader/volatile-update', scheduleRebuild)
+    return () => offVolatile?.()
+  }, 'keep-working volatile reload')
+
+  ctx.inject(['settings'], (settingsCtx) => {
+    // 面板字段由本插件自绘,关掉宿主按 schema 自动生成的表单
+    settingsCtx.effect(
+      () => settingsCtx.settings?.configure?.({ auto: false }, ctx.fiber),
+      'keep-working settings presentation',
+    )
+    // 设置写入后 cordis Config 的 volatile 字段随之更新,重建运行期以采用新值
+    // 部分宿主版本只发 settings 事件而不发 volatile-update,两条路都接,微任务合批
+    settingsCtx.effect(() => {
+      const offSettings = settingsCtx.on('settings/document-updated', (namespace) => {
+        if (namespace === NAMESPACE) scheduleRebuild()
+      })
+      return () => offSettings?.()
+    }, 'keep-working settings reload')
   })
 
   ctx.inject(['webServer'], (serverCtx) => {
@@ -189,15 +228,26 @@ export async function apply(ctx, config) {
               sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) })
               return
             }
+            if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
+              sendJson(res, 400, { ok: false, error: '请求体必须是对象' })
+              return
+            }
             const allowed = new Set(PANEL_FIELDS)
             const clean = Object.fromEntries(
               Object.entries(patch).filter(([key, value]) => allowed.has(key) && value !== undefined),
             )
-            if (!(await writeSettings(ctx, clean))) {
-              sendJson(res, 503, { ok: false, error: '设置服务不可用' })
+            try {
+              if (!(await writeSettings(ctx, clean))) {
+                sendJson(res, 503, { ok: false, error: '设置服务不可用' })
+                return
+              }
+            } catch (error) {
+              // 宿主拒绝写入:修订冲突可重试,条目缺失说明插件没被当成可配置项
+              const message = error instanceof Error ? error.message : String(error)
+              const status = error?.code === 'SETTINGS_CONFLICT' ? 409 : 400
+              sendJson(res, status, { ok: false, error: message })
               return
             }
-            startRuntime()
             sendJson(res, 200, { ok: true, value: resolveConfig(config, readSettings(ctx)) })
           }),
         }),

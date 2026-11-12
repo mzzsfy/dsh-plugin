@@ -8,7 +8,9 @@
 
 一句话:改过文件就 `present` 交付(之后不要再改文件、不再写 `(TASK_DONE)`),没改文件就末行写 `(TASK_DONE)`,做不下去末行写 `(TASK_BLOCKED: 原因)`。
 
-`write` / `edit` / `apply_patch` / `str_replace_editor` 都算改过文件。判定层在 present 有效时即判定结案,不追罚多余标记;二选一由提示词约束。
+`write` / `edit` / `apply_patch` / `str_replace_editor` 都算改过文件;失败的写与 `str_replace_editor` 的 `view` 子命令不算。判定层在 present 有效时即判定结案,不追罚多余标记;二选一由提示词约束。
+
+边界:经 shell 工具改写文件(`sed -i`、重定向)不在识别面内,这类回合不会被要求 present。工具名穷举不可能覆盖所有写路径,这里不追罚也不补判,是显式的口径边界。
 
 规则经 `systemPrompt.section` 常驻注入,不依赖提醒文案。段落在 `DELIVERABLE_FILE_REFERENCES` 之后注册:宿主那段建议里写着“不要只为列出编辑过的源文件就调用 present”,结案规则必须压在其后,并显式声明 present 的时机以本段为准。
 
@@ -27,11 +29,11 @@
 | `aborted` | 用户取消不恢复;`disposed` / `legacy` 按中断恢复 |
 | `forked` 等 | 不处理 |
 
-以下回合一律不发送:子会话(`origin === 'subagent'`,旧记录按 `parentSession` + `delegationDepth >= 1`)、维护轮、用户中途插话的回合、非用户发起的回合的结案提醒、已达连续上限的会话。
+以下回合一律不发送:子会话(`origin === 'subagent'`,旧记录按 `parentSession` + `delegationDepth >= 1`)、用户中途插话的回合、非用户发起的回合的结案提醒、已达连续上限的会话。
 
 ## 节奏
 
-`graceMs` 到点才发送;两次发送之间至少间隔 `cooldownMs`,连续失败按 `backoffFactor` 退避,封顶 `backoffMaxMs`;单会话连续 `maxConsecutive` 次后放弃,等待人工介入;真人发起的回合(首个 `user/message` 不是本插件投递的那条)一到就清零,额度恢复。
+`graceMs` 到点才发送;两次发送之间至少间隔 `cooldownMs`,连续失败按 `backoffFactor` 退避,封顶 `backoffMaxMs`;单会话连续 `maxConsecutive` 次后放弃,等待人工介入;真人发起的回合一到就清零,额度恢复。判定看回合前导段:宿主注入的上下文(指令文件、工作目录、任务事件等,来源不是 `user`)不算发起,本插件补发的消息也不算。
 
 断网时挂起,`offlineCheckMs` 后复查;探测失败按在线处理,不会永久卡住。
 
@@ -56,7 +58,7 @@
 
 ## 设置面板
 
-设置弹窗里新增「持续工作」分区,写的是宿主 `settings` 服务(profile 条目 `config` 的 volatile 字段),保存即时重建恢复引擎,不需要重启。
+配置卡片挂在插件管理页的包详情里(`plugins.bundle.config`,key 为包名),写的是宿主 `settings` 服务(profile 条目 `config` 的 volatile 字段),保存即时重建恢复引擎,不需要重启。
 
 面板字段:总开关、等待时间、冷却、最大连续次数、重启恢复、空回合恢复、断网暂停、错误分类,以及五段补发文案。其余字段(退避倍数、扫描窗口等)仍走 `DEFAULTS` 与 profile 配置。
 

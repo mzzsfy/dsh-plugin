@@ -49,19 +49,27 @@ function unwrap(entry) {
   return out
 }
 
+/** 时长上界:超出即视为误填,按上界截断而不是让恢复实际停摆。 */
+const MAX_GRACE_MS = 5 * 60 * 1000
+const MAX_COOLDOWN_MS = 60 * 60 * 1000
+const MAX_BACKOFF_MS = 24 * 60 * 60 * 1000
+const MAX_FRESH_MS = 7 * 24 * 60 * 60 * 1000
+
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
+
 /** 覆盖解析;未知字段忽略,非法值回落默认。 */
 export function resolveConfig(input = {}, overrides = undefined) {
   const panel = unwrap(overrides ?? {})
   const value = { ...unwrap(input), ...Object.fromEntries(Object.entries(panel).filter(([, v]) => v !== undefined)) }
   return {
-    graceMs: numberOr(value.graceMs, DEFAULTS.graceMs),
-    cooldownMs: numberOr(value.cooldownMs, DEFAULTS.cooldownMs),
+    graceMs: clamp(numberOr(value.graceMs, DEFAULTS.graceMs), 0, MAX_GRACE_MS),
+    cooldownMs: clamp(numberOr(value.cooldownMs, DEFAULTS.cooldownMs), 0, MAX_COOLDOWN_MS),
     maxConsecutive: Math.max(1, numberOr(value.maxConsecutive, DEFAULTS.maxConsecutive)),
     backoffFactor: Math.max(1, numberOr(value.backoffFactor, DEFAULTS.backoffFactor)),
-    backoffMaxMs: numberOr(value.backoffMaxMs, DEFAULTS.backoffMaxMs),
+    backoffMaxMs: clamp(numberOr(value.backoffMaxMs, DEFAULTS.backoffMaxMs), 0, MAX_BACKOFF_MS),
     scanOnBoot: booleanOr(value.scanOnBoot, DEFAULTS.scanOnBoot),
     scanLimit: Math.max(1, numberOr(value.scanLimit, DEFAULTS.scanLimit)),
-    freshMs: numberOr(value.freshMs, DEFAULTS.freshMs),
+    freshMs: clamp(numberOr(value.freshMs, DEFAULTS.freshMs), 0, MAX_FRESH_MS),
     resumeGoals: booleanOr(value.resumeGoals, DEFAULTS.resumeGoals),
     resumePausedGoals: booleanOr(value.resumePausedGoals, DEFAULTS.resumePausedGoals),
     resumeSilentTurns: booleanOr(value.resumeSilentTurns, DEFAULTS.resumeSilentTurns),

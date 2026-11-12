@@ -5,13 +5,30 @@
  * 只会消耗额度;其余(网络、超时、5xx、429)按临时处理。
  */
 
-/** 与错误类型绑定的路由码,即使消息缺失也需识别。 */
-const NETWORK_CODES = /^(TRANSPORT|TIMEOUT|NETWORK|ECONN|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH)/i
+/**
+ * 宿主规范错误码里的永久集合。
+ *
+ * 宿主明确要求按 code 路由而非解析文案,这些码的 message 常常是中性描述
+ * (例如 "the request failed"),只看文本会把额度耗尽、缺少适配器当成
+ * 临时错误反复重试,每次都在真实计费面上再失败一次。
+ */
+const PERMANENT_CODES = new Set([
+  'QUOTA',
+  'ACCOUNT_QUOTA',
+  'AUTH',
+  'INVALID_CREDENTIAL',
+  'MISSING_CREDENTIAL',
+  'CONTEXT_WINDOW_EXCEEDED',
+  'NO_ADAPTER',
+  'INVALID_ARGS',
+])
 
 /** 永久失败的文本特征;命中即不重试。 */
 const PERMANENT_PATTERNS = [
   /unauthor|forbidden|api[\s_-]?key|\bauth\b|authentication|credential|permission denied|invalid token/i,
   /insufficient.*(balance|quota|funds)|billing|payment required|quota exceeded/i,
+  // 各家额度耗尽的原文彼此不通用,补两条最常见的无码形态
+  /credit balance is too low|resource has been exhausted/i,
   /model.*not\s*found|unknown model|does not support model/i,
   /context.*(length|limit|overflow|exceeded)|token limit|max.*context/i,
   /invalid[_-]?request|bad[_-]?request/i,
@@ -20,13 +37,6 @@ const PERMANENT_PATTERNS = [
 
 /** 宿主会把 HTTP 状态并进 message 而非独立字段,文本里的 401/403 同样是永久信号。 */
 const PERMANENT_STATUS = /(?:^|[^\d])(401|403)(?:[^\d]|$)/
-
-/** 连接层失败的文本特征;只有这类值得先做连通性探测。 */
-const NETWORK_PATTERNS =
-  /network|fetch failed|econn|enotfound|eai_again|etimedout|enetunreach|ehostunreach|enetdown|getaddrinfo|socket hang up|offline|could not reach|connection (reset|refused|closed)|timed? ?out/i
-
-/** 宿主 agent/error 消息里的网络与传输特征。 */
-const TRANSIENT_AGENT_PATTERN = /network|timeout|timed ?out|econn|etimedout|socket|5\d\d|\b429\b|upstream|temporar/i
 
 const textOf = (failure) => `${failure?.code ?? ''} ${failure?.status ?? ''} ${failure?.message ?? ''}`
 
@@ -64,19 +74,11 @@ function matchesCustomPattern(text, patterns) {
 export function isTransientFailure(failure, retryableErrorPatterns = '') {
   const text = textOf(failure).toLowerCase()
   if (matchesCustomPattern(text, retryableErrorPatterns)) return true
+  // 规范码优先于文本:中性描述的额度与适配器错误只有 code 认得出来
+  if (typeof failure?.code === 'string' && PERMANENT_CODES.has(failure.code)) return false
   if (failure?.status === 401 || failure?.status === 403) return false
   if (PERMANENT_STATUS.test(text)) return false
   if (failure?.code === 'MALFORMED_RESPONSE') return true
   return !PERMANENT_PATTERNS.some((pattern) => pattern.test(text))
 }
 
-/** agent/error 消息的分类:只放行明确的网络与传输类。 */
-export function isTransientAgentError(message) {
-  return typeof message === 'string' && TRANSIENT_AGENT_PATTERN.test(message)
-}
-
-/** 是否为连接层失败(断网、DNS、连接被拒、传输超时)。 */
-export function isNetworkFailure(failure) {
-  if (typeof failure?.code === 'string' && NETWORK_CODES.test(failure.code)) return true
-  return typeof failure?.message === 'string' && NETWORK_PATTERNS.test(failure.message)
-}

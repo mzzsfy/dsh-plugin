@@ -39,7 +39,16 @@ function makeReq({ method = 'POST', body, headers = {} } = {}) {
 
 async function makeHarness({ settings } = {}) {
   const routes = new Map()
+  const handlers = new Map()
+  const sections = []
   const writes = []
+  const systemPromptStub = {
+    getSectionOrder: () => 0,
+    section: () => {
+      sections.push(1)
+      return () => {}
+    },
+  }
   // undefined 用默认桩;null 表示宿主未提供 settings 服务
   const settingsService = settings === undefined ? {
     async update(namespace, patch) {
@@ -49,11 +58,24 @@ async function makeHarness({ settings } = {}) {
   } : settings
   const ctx = {
     logger: { info() {}, warn() {}, error() {} },
-    systemPrompt: { getSectionOrder: () => 0, section: () => () => {} },
+    systemPrompt: {
+      getSectionOrder: () => 0,
+      section: () => {
+        sections.push(1)
+        return () => {}
+      },
+    },
     agents: { get: () => undefined, list: () => [] },
-    on: () => () => {},
+    on: (name, handler) => {
+      handlers.set(name, handler)
+      return () => handlers.delete(name)
+    },
     effect: (factory) => factory(),
-    get: (name) => (name === 'settings' && settingsService !== null ? settingsService : undefined),
+    fiber: { state: 2 },
+    get: (name) => {
+      if (name === 'systemPrompt') return systemPromptStub
+      return name === 'settings' && settingsService !== null ? settingsService : undefined
+    },
     inject: (deps, fn) => {
       const stub = {
         effect: (factory) => factory(),
@@ -71,7 +93,7 @@ async function makeHarness({ settings } = {}) {
   await apply(ctx, { scanOnBoot: false })
   const handler = routes.get('/api/keep-working/config')
   assert.ok(handler, '配置路由必须注册')
-  return { handler, writes }
+  return { handler, writes, handlers, ctx, sections }
 }
 
 const PATH = '/api/keep-working/config'
@@ -133,4 +155,56 @@ test('接线:设置服务缺失回 503', async () => {
 
 test('路由 path 常量与文档一致', () => {
   assert.equal(PATH, '/api/keep-working/config')
+})
+test('接线:非对象请求体回 400 且不写设置', async () => {
+  const { handler, writes } = await makeHarness()
+  for (const body of ['null', '[1,2]', '"text"', '42']) {
+    const res = makeRes()
+    await handler(
+      makeReq({ body, headers: { origin: 'http://localhost:3080', 'content-type': 'application/json' } }),
+      res,
+    )
+    assert.equal(res.status, 400, body)
+    assert.equal(res.payload.ok, false)
+  }
+  assert.equal(writes.length, 0)
+})
+
+test('接线:设置修订冲突回 409 并带原因', async () => {
+  const conflict = Object.assign(new Error('设置已被其他窗口修改'), { code: 'SETTINGS_CONFLICT' })
+  const { handler } = await makeHarness({
+    settings: {
+      async update() {
+        throw conflict
+      },
+    },
+  })
+  const res = makeRes()
+  await handler(
+    makeReq({ body: { maxConsecutive: 5 }, headers: { origin: 'http://localhost:3080', 'content-type': 'application/json' } }),
+    res,
+  )
+  assert.equal(res.status, 409)
+  assert.equal(res.payload.ok, false)
+  assert.match(res.payload.error, /其他窗口/)
+})
+
+test('接线:loader/volatile-update 触发运行期重建', async () => {
+  const h = await makeHarness()
+  const listener = h.handlers.get('loader/volatile-update')
+  assert.equal(typeof listener, 'function', '必须订阅宿主 volatile 更新')
+  const before = h.sections.length
+  listener()
+  await new Promise((resolve) => queueMicrotask(resolve))
+  assert.equal(h.sections.length, before + 1, '注册新段落即说明运行期完成一次重建')
+})
+
+test('接线:卸载后微任务不再重建', async () => {
+  const h = await makeHarness()
+  const listener = h.handlers.get('loader/volatile-update')
+  h.ctx.fiber.state = 4
+  const before = h.sections.length
+  listener()
+  await new Promise((resolve) => queueMicrotask(resolve))
+  assert.equal(h.sections.length, before, '已卸载的插件不得再重建')
 })

@@ -78,52 +78,96 @@ export function hasVisibleOutput(events) {
   )
 }
 
-/** 维护轮由 message-ops 标记,不参与结案与恢复。 */
-export function isMaintenanceTurnStart(event) {
-  return event?.data?.reason === 'message-ops'
-}
+/** 真人消息:来源是 user,且不是本插件补发的。 */
+const isHumanMessage = (event, excludeIds) =>
+  event?.type === 'user/message' &&
+  event.data?.source?.kind === 'user' &&
+  excludeIds?.has?.(event.data?.id) !== true
 
-/** 本回合首个用户消息的来源类型;缺失表示无用户输入。 */
-export function turnInitiator(events, turn) {
-  const slice = turnSlice(events, turn)
-  for (const event of slice) {
-    if (event?.type === 'user/message') return event.data?.source?.kind
+/**
+ * 回合前导段里的真人发起消息。
+ *
+ * 宿主把各类上下文(指令文件、工作目录、任务事件、定时唤醒等)作为
+ * user/message 注入在真人消息之前,kind 由各生产者自定且持续增加,不能靠白名单。
+ * 这里只看 turn/start 之后的第一段:跳过非 user 来源,遇到本插件自投递或
+ * 模型、工具事件即结束。返回 undefined 表示本回合不是真人发起的。
+ */
+function leadingHumanMessage(events, turn, excludeIds) {
+  for (const event of turnSlice(events, turn)) {
+    if (event?.type === 'user/message') {
+      if (event.data?.source?.kind !== 'user') continue
+      // 本插件补发的消息是回合发起者,但不是真人
+      if (excludeIds?.has?.(event.data?.id) === true) return undefined
+      return event
+    }
+    if (event?.type === 'assistant/message' || event?.type === 'tool/call' || event?.type === 'tool/result') {
+      return undefined
+    }
   }
   return undefined
 }
 
-/** 回合由真人发起:首个 user/message 不是本插件投递的消息(excludeIds 记录自投递 id)。 */
-export function humanInitiatedTurn(events, turn, excludeIds) {
-  const slice = turnSlice(events, turn)
-  for (const event of slice) {
-    if (event?.type !== 'user/message') continue
-    if (event.data?.source?.kind !== 'user') return false
-    return excludeIds?.has?.(event.data?.id) !== true
+/** 回合发起来源;跳过注入上下文后取第一条 user 来源消息(含本插件补发)。 */
+export function turnInitiator(events, turn) {
+  for (const event of turnSlice(events, turn)) {
+    if (event?.type === 'user/message') {
+      if (event.data?.source?.kind !== 'user') continue
+      return 'user'
+    }
+    if (event?.type === 'assistant/message' || event?.type === 'tool/call' || event?.type === 'tool/result') {
+      return undefined
+    }
   }
-  return false
+  return undefined
+}
+
+/** 回合由真人发起:第一条非注入消息是真人且不是本插件自投递。 */
+export function humanInitiatedTurn(events, turn, excludeIds) {
+  return leadingHumanMessage(events, turn, excludeIds) !== undefined
 }
 
 /** 用户在本回合中途插话:结案提醒让路,避免与人的意图抢方向。 */
 export function userTookOver(events, turn, excludeIds) {
-  const slice = turnSlice(events, turn)
-  const first = slice.findIndex((event) => event?.type === 'user/message')
-  if (first === -1) return false
-  return slice
-    .slice(first + 1)
-    .some(
-      (event) =>
-        event?.type === 'user/message' &&
-        event.data?.source?.kind === 'user' &&
-        excludeIds?.has?.(event.data?.id) !== true,
-    )
+  const humans = turnSlice(events, turn).filter((event) => isHumanMessage(event, excludeIds))
+  if (humans.length === 0) return false
+  // 发起者不是真人(插件补发的回合)时,第一条真人消息就是插话
+  return leadingHumanMessage(events, turn, excludeIds) === undefined || humans.length > 1
 }
 
 const isFileWrite = (event) => event?.type === 'tool/call' && FILE_WRITE_TOOLS.has(event.data?.name)
 
+/** 只读子命令:编辑器工具的 view 不改文件,不该逼出交付。 */
+function isReadOnlyCall(call) {
+  if (call?.data?.name !== 'str_replace_editor') return false
+  try {
+    return JSON.parse(call.data?.arguments ?? '{}')?.command === 'view'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 本回合真正改动过文件的调用。
+ *
+ * 失败的写(沙箱拒绝、审批驳回、参数错误)没有产生改动,按结果消息自带的 callId
+ * 精确剔除;没有 callId 的旧日志退化为不剔除,宁可多要求一次 present。
+ */
+function effectiveWrites(slice) {
+  const failed = new Set()
+  for (const event of slice) {
+    if (event?.type !== 'tool/result' || event.data?.message?.isError !== true) continue
+    const callId = event.data?.message?.toolCallId ?? event.data?.message?.source?.callId
+    if (callId !== undefined) failed.add(callId)
+  }
+  return slice
+    .filter(isFileWrite)
+    .filter((call) => !failed.has(call.data?.callId) && !isReadOnlyCall(call))
+}
+
 /** 结案判定;reason 供日志与提醒文案选择。 */
 export function closureVerdict(events, turn) {
   const slice = turnSlice(events, turn)
-  const writes = slice.filter(isFileWrite)
+  const writes = effectiveWrites(slice)
   const presents = slice.filter(
     (event) => event?.type === 'deliverables/presented' && event.data?.turn === turn,
   )
