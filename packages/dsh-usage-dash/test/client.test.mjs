@@ -1063,6 +1063,8 @@ test('defaultPricingRule 承接给定货币,缺省回落首档', () => {
 test('validatePricingRules 就地校验 model 必填两段式与价格非空非负', () => {
   const valid = [{ model: 'p/m', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] }]
   assert.equal(validatePricingRules(valid).size, 0)
+  // 模型段允许下级斜杠,提交校验不能把 oc/xx/xx 判成单段旧形态
+  assert.equal(validatePricingRules([{ ...valid[0], model: 'oc/xx/xx' }]).size, 0)
   const broken = [
     { model: '  ', currency: '¥', price: { input: '', output: -1, cacheRead: 0, cacheWrite: 0 }, conditions: [] },
     { model: 'solo', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] },

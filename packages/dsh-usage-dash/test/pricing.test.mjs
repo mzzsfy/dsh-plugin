@@ -139,6 +139,9 @@ test('模型名段允许含斜杠按首个斜杠分段', () => {
   const named = makeRule({ model: '*/deepseek/deepseek-chat', price: { input: 9 } })
   assert.deepEqual(matchPrice([named], 'openrouter/deepseek/deepseek-chat', SUNDAY), { input: 9 })
   assert.equal(matchPrice([named], 'openrouter/deepseek/chat', SUNDAY), null)
+  const exact = makeRule({ model: 'oc/xx/xx', price: { input: 10 } })
+  assert.deepEqual(matchPrice([exact], 'oc/xx/xx', SUNDAY), { input: 10 })
+  assert.equal(matchPrice([exact], 'oc/xx/yy', SUNDAY), null)
 })
 
 test('单段规则属旧形态失效不命中', () => {

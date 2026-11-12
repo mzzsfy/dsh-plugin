@@ -311,6 +311,8 @@ test(`costOf 双侧一致(${COST_VECTORS.length} 向量)`, () => {
 // (refOf→undefined,turnModelOf→全通配键),该场景单独断言各自约定值
 const REF_VECTORS = [
   { name: '双全拼两段', route: { provider: 'deepseek', model: 'deepseek-chat' }, expected: 'deepseek/deepseek-chat' },
+  { name: '模型段含下级斜杠', route: { provider: 'oc', model: 'xx/xx' }, expected: 'oc/xx/xx' },
+  { name: '供应商与模型都含下级斜杠', route: { provider: 'oc/xx', model: 'yy/zz' }, expected: 'oc/xx/yy/zz' },
   { name: '仅 model 用裸名', route: { model: 'm' }, expected: 'm' },
   { name: 'provider 空串按裸名', route: { provider: '', model: 'm' }, expected: 'm' },
   { name: 'provider 非空 model 空串不成立', route: { provider: 'p', model: '' }, expected: undefined },

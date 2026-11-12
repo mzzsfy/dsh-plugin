@@ -46,6 +46,23 @@ test('Given routes 只有裸模型名 When buildCostItem Then 用两段键命中
   assert.equal(buildCostItem(usage({ routes: [{ model: 'newapi/auto-free' }] }), rules, prefs, t), '费用 ≈ ¥0.77')
 })
 
+test('Given 多级模型名 oc/xx/xx When buildSessionCostItem Then 精确规则按整键命中', () => {
+  // Given 投影模型键为三段,规则表同时有高价的 */* 与精确三段规则
+  // When 底栏计价
+  // Then 命中精确规则,租金由整键决定而不是被 */* 抢走
+  const exact = rule('oc/xx/xx', price(1_000_000, 1_000_000, 1_000_000, 1_000_000))
+  const wildcard = rule('*/*', price(1, 1, 1, 1))
+  const value = buildSessionCostItem(usage(), modelUsage([{
+    time: at(9),
+    model: 'oc/xx/xx',
+    uncachedInputTokens: 2,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+  }]), [wildcard, exact], prefs, t)
+  assert.deepEqual(value, { text: '费用 ≈ ¥2.00', unpriced: 0 })
+})
+
 test('Given 投影小时/模型桶 When buildSessionCostItem Then 按模型与桶时刻计价', () => {
   const rules = [rule('*/auto-free', price(0.03, 0.03, 0.03, 0))]
   const value = buildSessionCostItem(usage(), modelUsage([{

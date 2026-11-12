@@ -56,6 +56,20 @@ test('Given request/context 路由与 message usage When 折叠 Then 按小时/�
   })
 })
 
+test('Given 供应商+多级模型名 When 折叠 Then 保留完整三段键供底层匹配', () => {
+  // Given provider=oc、model=xx/xx(模型段自身含斜杠)
+  // When 折叠路由与 message
+  // Then wire 键为 oc/xx/xx,不被截成 oc/xx 或丢掉末段
+  let state = initial()
+  const time = at(9)
+  state = apply(state, requestContext('oc', 'xx/xx', time))
+  state = apply(state, message(1, 1, time, {
+    usage: usage(),
+    message: { source: { provider: 'oc', model: 'xx/xx' } },
+  }))
+  assert.deepEqual(wire(state).hours.map((entry) => [entry.model, entry.uncachedInputTokens]), [['oc/xx/xx', 100]])
+})
+
 test('Given message.source 与 request/context 不同 When 折叠 Then message.source 权威并刷新后续路由', () => {
   // Given request/context 指向 old/model
   // When message 自带 new/model source,随后 attempt 无 source 复用 message 路由
@@ -71,6 +85,23 @@ test('Given message.source 与 request/context 不同 When 折叠 Then message.s
     wire(state).hours.map((entry) => [entry.model, entry.uncachedInputTokens]),
     [['new/model', 10], ['new/model', 30]],
   )
+})
+
+test('Given 同 turn/step 换路由与小时 When 折叠 Then 旧小时/模型桶减掉,新桶只留新值', () => {
+  // Given 旧路由 old/model 在 9 点已记 10 input
+  // When 同 turn/step 的 message 改为 new/model、10 点、30 input
+  // Then 替换槽从旧小时/模型回退,新小时/模型只留 30,不残留旧样本
+  let state = initial()
+  state = apply(state, requestContext('old', 'model', at(9)))
+  state = apply(state, message(1, 1, at(9), { usage: usage({ inputTokens: 10 }) }))
+  state = apply(state, requestContext('new', 'model', at(10)))
+  state = apply(state, message(1, 1, at(10), {
+    usage: usage({ inputTokens: 30 }),
+    message: { source: { provider: 'new', model: 'model' } },
+  }))
+  assert.deepEqual(wire(state).hours.map((entry) => [entry.time, entry.model, entry.uncachedInputTokens]), [
+    [hourStart(at(10)), 'new/model', 30],
+  ])
 })
 
 test('Given 同 turn/step 的 usage 被替换 When 折叠 Then 减旧值加新值且只留最新小时桶', () => {
