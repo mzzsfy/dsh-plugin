@@ -27,7 +27,7 @@ window.__ModuleLoader__.load({
     const SELECTOR_HEAD = '[data-disclosure-row]'
     const SELECTOR_BODY = '[class*="thinkBody"]'
     const SELECTOR_TOOL_BODY = '[class*="bodyWrap"]'
-    // 回合过程组按钮:折叠完成回合后过程组内容不渲染,工具行随之从 DOM 卸下
+    // 回合过程组按钮:折叠完成回合后过程组内容置 hidden,工具行随内容不可见
     const SELECTOR_PROCESS = '[data-turn-process]'
     const ATTR_STATE = 'data-state'
     const ATTR_EXPANDED = 'aria-expanded'
@@ -43,7 +43,7 @@ window.__ModuleLoader__.load({
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: [ATTR_EXPANDED, ATTR_STATE],
+      attributeFilter: [ATTR_EXPANDED, ATTR_STATE, ATTR_EXPANDABLE],
     }
     // 哨兵只关心容器出现/替换(childList 通道已覆盖),attributes 通道只会带来
     // 全页 aria 扩散回波(含本插件自身点击引发的),独立最小配置
@@ -52,6 +52,8 @@ window.__ModuleLoader__.load({
     // 首扫延迟:首屏水合完成前行头点击会被宿主忽略,过早扫描会白点一次并留下
     // 假闩锁;等首屏交互就绪后再执行
     const INITIAL_SCAN_DELAY_MS = 800
+    // 过程组点击意图定格延迟:官方 disclosure 同步翻 aria,留一拍让宿主提交后再读最终态
+    const TURN_INTENT_SETTLE_MS = 50
     // 行头点击未提交(宿主重渲染/挂载瞬态)时的重试间隔与次数:覆盖首屏会话渲染窗口
     const CLICK_RETRY_DELAY_MS = 150
     const CLICK_RETRY_LIMIT = 20
@@ -523,7 +525,7 @@ window.__ModuleLoader__.load({
       return {
         el,
         uid: rowUid(el),
-        turn: el.getAttribute(ATTR_TURN),
+        turn: el.closest('[' + ATTR_TURN + ']')?.getAttribute(ATTR_TURN) ?? el.getAttribute(ATTR_TURN),
         expandable: head !== null && head.getAttribute(ATTR_EXPANDABLE) !== null,
         bodyText: body !== null ? body.textContent || '' : '',
         expanded: head !== null && head.getAttribute(ATTR_EXPANDED) === 'true',
@@ -559,16 +561,18 @@ window.__ModuleLoader__.load({
       return last === undefined ? null : last.getAttribute(ATTR_PROCESS)
     }
 
-    // 宿主折叠完成回合时过程组内容整批不渲染(工具行从 DOM 卸下),最新回合的行
-    // 因此不可见也不可决策;展开最新回合过程组让行重新挂载。用户手动折叠过的
+    // 宿主折叠完成回合时过程组内容置 hidden(工具行随内容不可见),最新回合的行
+    // 因此不可见也不可决策;展开最新回合过程组让行重新可见。用户手动折叠过的
     // 回合不展开,已展开过的回合不重复点击。
     function ensureLatestTurnOpen(container) {
       const buttons = container.querySelectorAll(SELECTOR_PROCESS)
       const last = buttons[buttons.length - 1]
       if (last === undefined) return false
       const turn = last.getAttribute(ATTR_PROCESS)
+      // 宿主把过程组收起/展开多次时,点击成功后清掉记录,回合完成折叠后仍可再展开;
+      // 记录只用于抑制"点了没生效"的重复点击
+      if (last.getAttribute(ATTR_EXPANDED) !== 'false') { if (turn !== null) openedTurns.delete(turn); return false }
       if (turn === null || manualTurns.has(turn) || openedTurns.has(turn)) return false
-      if (last.getAttribute(ATTR_EXPANDED) !== 'false') return false
       openedTurns.add(turn)
       applyingAction = true
       try { last.click() } finally { applyingAction = false }
@@ -576,10 +580,11 @@ window.__ModuleLoader__.load({
     }
 
     // 宿主隐藏或重置已完成过程的折叠后,只恢复仍由插件负责的最新回合末行;
-    // 用户手动收起已在捕获阶段清掉闩锁,不会走到这里
+    // 用户手动收起(行头或过程组)已在捕获阶段登记 manual,不恢复
     function restoreHiddenCurrent(container, state, rows, latestTurn) {
       const row = rows.find(row => row.uid === state.current?.uid)
       if (!row?.plugged || row.turn !== latestTurn || row.expanded) return
+      if (manualTurns.has(String(row.turn))) return
       if (rows.filter(row => row.headable || row.expandable).at(-1) !== row) return
       revealAncestors(row.el)
       applyAction(container, [row], { index: 0, kind: 'expand' })
@@ -587,23 +592,91 @@ window.__ModuleLoader__.load({
       return true
     }
 
+    // 行是否被宿主隐藏(过程组收起时整段内容置 hidden="until-found")
+    function hasHiddenAncestor(el) {
+      for (let node = el; node !== null; node = node.parentElement) {
+        if (node.hasAttribute?.('hidden')) return true
+      }
+      return false
+    }
+
+    // 回合号数字形态(宿主 data-chat-turn 为递增序号);非数字返回 null 走保守路径
+    const toTurnNumber = (value) => /^\d+$/.test(value ?? '') ? Number(value) : null
+
+    // 行决策是否整体不可见:最新已关闭回合的过程组收起,且没有可见的同期/更新行。
+    // 进行中的回合也可能渲染收起的按钮(或点击未生效),此时该回合的行仍可见,
+    // 必须继续决策;只有整段内容被隐藏(或仅剩更旧回合的可见行)才跳过。
+    function rowDecisionsBlocked(container, described) {
+      const buttons = container.querySelectorAll(SELECTOR_PROCESS)
+      const last = buttons[buttons.length - 1]
+      if (last === undefined || last.getAttribute(ATTR_EXPANDED) !== 'false') return false
+      const visible = described.filter((row) => !hasHiddenAncestor(row.el))
+      if (visible.length === 0) return true
+      const lastTurn = toTurnNumber(last.getAttribute(ATTR_PROCESS))
+      if (lastTurn === null) return false
+      return !visible.some((row) => {
+        const turn = toTurnNumber(row.turn)
+        return turn === null || turn >= lastTurn
+      })
+    }
+
+    // 过程组头部按点击后的最终折叠态登记用户意图:收起=该回合不再自动展开,
+    // 展开=撤回收起意图(用户重新想看该回合内容)。内部行闩锁不动——过程组折叠
+    // 会隐藏行,但不改变行归属;清闩锁会让插件把宿主折叠误判成用户收起行。
+    function trackTurnIntent(head) {
+      const turn = head.getAttribute(ATTR_PROCESS)
+      if (turn === null) return
+      const owner = slot
+      const container = observedContainer
+      const wasOpen = head.getAttribute(ATTR_EXPANDED) === 'true'
+      const wasManual = manualTurns.has(turn)
+      // 点击即按预期方向落地,不依赖 50ms 后宿主是否提交;settle 只做校正
+      if (wasOpen) manualTurns.add(turn)
+      else manualTurns.delete(turn)
+      setTimeout(() => {
+        // 代际与容器校验:切换会话(attach 重置 manualTurns)后旧回合号不得写入新会话
+        if (!isActive(owner) || container !== observedContainer) return
+        const open = head.isConnected ? head.getAttribute(ATTR_EXPANDED) === 'true' : wasOpen
+        if (open === wasOpen) {
+          // 点击未生效或按钮被替换:回滚到点击前意图
+          if (wasManual) manualTurns.add(turn)
+          else manualTurns.delete(turn)
+          return
+        }
+        if (open) {
+          manualTurns.delete(turn)
+          scheduleScan()
+        } else {
+          manualTurns.add(turn)
+        }
+      }, TURN_INTENT_SETTLE_MS)
+    }
+
     function onDisclosureClick(event) {
       if (applyingAction) return
       // 用户手动操作优先:终止未完成点击的重试链,避免把收起误判成点击未提交
       if (pendingClick !== null) { clearTimeout(pendingClick.timer); pendingClick = null }
-      const head = event.target.closest?.('[aria-expanded="true"]')
-      if (!head) return
-      const rows = [...collectRows(observedContainer), ...collectToolRows(observedContainer)]
-      const row = rows.find((row) => row.el.querySelector(SELECTOR_HEAD) === head)
-      if (row !== undefined) { pluginExpandedEls.delete(row.el); return }
-      const turn = head.getAttribute(ATTR_PROCESS)
-      if (turn !== null) {
-        manualTurns.add(turn)
-        for (const item of rows) if (item.el.closest(SELECTOR_ANY_ROW)?.getAttribute(ATTR_TURN) === turn) pluginExpandedEls.delete(item.el)
-        return
+      // 最近折叠头优先:行头命中即只按行处理,不再向上找过程组头(过程组内容若包在
+      // 按钮内,点击行头不得被记成收起过程组)。行头只在收到收起动作时让渡所有权
+      const rowHead = event.target.closest?.(SELECTOR_HEAD)
+      if (rowHead) {
+        const rows = [...collectRows(observedContainer), ...collectToolRows(observedContainer)]
+        const row = rows.find((item) => item.el.querySelector(SELECTOR_HEAD) === rowHead)
+        if (row !== undefined) {
+          if (rowHead.getAttribute(ATTR_EXPANDED) === 'true') pluginExpandedEls.delete(row.el)
+          return
+        }
       }
-      const group = head.closest('[data-step-process]')
-      if (group !== null) for (const item of rows) if (item.el.closest('[data-step-process]') === group) pluginExpandedEls.delete(item.el)
+      const processHead = event.target.closest?.('[' + ATTR_PROCESS + ']')
+      if (processHead) { trackTurnIntent(processHead); return }
+      // 步骤组头是用户对组内行的收起:让渡该组行所有权(与回合过程组折叠区分)
+      const groupHead = event.target.closest?.('[data-step-process] [aria-expanded="true"]')
+      if (groupHead) {
+        const group = groupHead.closest('[data-step-process]')
+        for (const item of [...collectRows(observedContainer), ...collectToolRows(observedContainer)]) {
+          if (item.el.closest('[data-step-process]') === group) pluginExpandedEls.delete(item.el)
+        }
+      }
     }
 
     // 执行动作并返回被点击的行元素(未触发点击返回 null)。
@@ -707,47 +780,68 @@ window.__ModuleLoader__.load({
       if (container === null || container !== observedContainer) return 0
       // 待提交点击期间宿主状态不稳定(展开态未落定),暂停行决策,由重试链路收尾
       if (pendingClick !== null) return 0
-      // 最新回合过程组折叠时行整批缺失(宿主不渲染过程组内容):先展开过程组,
+      // 最新回合过程组折叠时行整批不可见(宿主把过程组内容置 hidden):先展开过程组,
       // 本拍不作行决策,重挂后下一拍按新行集扫描
       if (ensureLatestTurnOpen(container)) {
         scheduleScan()
         return 0
       }
-      const latestTurn = latestTurnId(container)
+      // 最新已关闭回合过程组收起且没有更新的可见行:宿主隐藏整段内容,行集不可见。
+      // 此时的收起不表达用户对行的意图,做行决策会把插件展开的末行误判成用户已读
+      // 并永久压制(实测:过程组收起后行 aria 归 false,再展开过程组也不恢复)。
       const described = collectRows(container)
+      const gateRows = expandAll ? [...described, ...collectToolRows(container)] : described
+      if (rowDecisionsBlocked(container, gateRows)) return 0
+      const latestTurn = latestTurnId(container)
+      // 用户手动收起过程组的回合:该回合行不参与决策(与工具机同规则)。
+      // 最新行属于 manual 时整机跳过:过滤后 target 会回退到更旧行并把它展开。
+      const latestThink = described.at(-1)
+      const thinkRows = latestThink !== undefined && manualTurns.has(String(latestThink.turn ?? ''))
+        ? []
+        : described.filter((row) => !manualTurns.has(String(row.turn ?? '')))
 
       if (!restoreHiddenCurrent(container, registry, described, latestTurn)) {
         releaseLatchIfCollapsed(described)
-        for (const action of plan(registry, toLogicRows(described)).actions) applyAction(container, described, action)
+        if (thinkRows.length > 0) {
+          for (const action of plan(registry, toLogicRows(thinkRows)).actions) applyAction(container, thinkRows, action)
+        }
       }
       // 行决策已覆盖当前行集:消费首扫兜底,避免同一拍对同一行二次点击(切换抵消)
       if (described.some((row) => row.headable)) finalState.pending = false
       // 工具机与思考机并行(独立 registry/独立目标行),仅全部消息模式运行
       if (expandAll) {
         const tools = collectToolRows(container)
+        // 用户手动收起过程组的回合:工具行不参与决策;最新工具行属于 manual 时整机跳过,
+        // 避免 target 回退到更旧的非手动工具行
+        const latestTool = tools.at(-1)
+        const usableTools = latestTool !== undefined && manualTurns.has(String(latestTool.turn ?? ''))
+          ? []
+          : tools.filter((row) => !manualTurns.has(String(row.turn ?? '')))
         if (!restoreHiddenCurrent(container, toolsRegistry, tools, latestTurn)) {
           releaseToolLatchIfCollapsed(tools)
-          for (const action of planTools(toolsRegistry, toToolLogicRows(tools)).actions) applyAction(container, tools, action)
+          if (usableTools.length > 0) {
+            for (const action of planTools(toolsRegistry, toToolLogicRows(usableTools)).actions) applyAction(container, usableTools, action)
+          }
         }
-        if (tools.some((row) => row.expandable)) toolsFinalState.pending = false
+        if (usableTools.some((row) => row.expandable)) toolsFinalState.pending = false
       }
       return described.length
     }
 
     // 用户手动收起不经 applyAction(闩锁解除只发生在插件 collapse 分支):
     // current 行转为收起时在此解除闩锁,使"收起后再手动展开同一条"能被
-    // 识别为手动意图,不被新行出现时的接管收起强收
+    // 识别为手动意图,不被新行出现时的接管收起强收。被宿主隐藏的行不是用户收起。
     function releaseLatchIfCollapsed(described) {
       if (registry.current === null) return
       const row = described.find((item) => item.uid === registry.current.uid)
-      if (row !== undefined && !row.expanded) pluginExpandedEls.delete(row.el)
+      if (row !== undefined && !row.expanded && !hasHiddenAncestor(row.el)) pluginExpandedEls.delete(row.el)
     }
 
     // 工具机同款:工具 current 行被用户收起时解除闩锁
     function releaseToolLatchIfCollapsed(described) {
       if (toolsRegistry.current === null) return
       const row = described.find((item) => item.uid === toolsRegistry.current.uid)
-      if (row !== undefined && !row.expanded) pluginExpandedEls.delete(row.el)
+      if (row !== undefined && !row.expanded && !hasHiddenAncestor(row.el)) pluginExpandedEls.delete(row.el)
     }
 
     // 展开动作落定后登记当前行,使 plan()/planTools() 识别为插件展开而非手动意图;
@@ -782,10 +876,14 @@ window.__ModuleLoader__.load({
     function tryPlanFinal() {
       const container = document.querySelector(SELECTOR_SCROLL)
       if (container === null) return
-      // 过程组折叠时最新回合的行缺失:先展开过程组,行渲染后的下一拍再决策
+      // 过程组折叠时最新回合的行不可见:先展开过程组,行可见后的下一拍再决策
       if (ensureLatestTurnOpen(container)) return
       const described = collectRows(container)
-      if (finalState.pending && described.some((row) => row.headable)) {
+      const gateRows = expandAll ? [...described, ...collectToolRows(container)] : described
+      if (rowDecisionsBlocked(container, gateRows)) return
+      const latestThink = described.at(-1)
+      const thinkManual = latestThink !== undefined && manualTurns.has(String(latestThink.turn ?? ''))
+      if (finalState.pending && !thinkManual && described.some((row) => row.headable)) {
         finalState.pending = false
         for (const action of planFinal(toLogicRows(described)).actions) {
           const clicked = applyAction(container, described, action)
@@ -798,10 +896,14 @@ window.__ModuleLoader__.load({
       // 工具机 final:仅全部消息模式参与,目标为最后一个可展开工具行
       if (expandAll && toolsFinalState.pending) {
         const tools = collectToolRows(container)
-        if (tools.some((row) => row.expandable)) {
+        const latestTool = tools.at(-1)
+        const usableTools = latestTool !== undefined && manualTurns.has(String(latestTool.turn ?? ''))
+          ? []
+          : tools.filter((row) => !manualTurns.has(String(row.turn ?? '')))
+        if (usableTools.some((row) => row.expandable)) {
           toolsFinalState.pending = false
-          for (const action of planTools(toolsRegistry, toToolLogicRows(tools)).actions) {
-            const clicked = applyAction(container, tools, action)
+          for (const action of planTools(toolsRegistry, toToolLogicRows(usableTools)).actions) {
+            const clicked = applyAction(container, usableTools, action)
             if (clicked !== null) {
               toolsFinalState.el = clicked
               toolsFinalState.awaitRegister = true
@@ -868,15 +970,24 @@ window.__ModuleLoader__.load({
       const container = observedContainer
       if (container === null) return 0
       const described = collectRows(container)
-      const actions = plan(registry, toLogicRows(described), { suppressManual: true }).actions
+      const gateRows = expandAll ? [...described, ...collectToolRows(container)] : described
+      if (rowDecisionsBlocked(container, gateRows)) return 0
+      // 首扫窗口内用户已收起最新回合过程组:该回合行不参与首扫决策
+      const latestThink = described.at(-1)
+      const thinkManual = latestThink !== undefined && manualTurns.has(String(latestThink.turn ?? ''))
+      const actions = thinkManual ? [] : plan(registry, toLogicRows(described), { suppressManual: true }).actions
       for (const action of actions) applyAction(container, described, action)
       if (described.some((row) => row.headable)) finalState.pending = false
       // 工具机首扫同抑制(仅全部消息模式)
       if (expandAll) {
         const tools = collectToolRows(container)
-        const toolActions = planTools(toolsRegistry, toToolLogicRows(tools), { suppressManual: true }).actions
-        for (const action of toolActions) applyAction(container, tools, action)
-        if (tools.some((row) => row.expandable)) toolsFinalState.pending = false
+        const latestTool = tools.at(-1)
+        const usableTools = latestTool !== undefined && manualTurns.has(String(latestTool.turn ?? ''))
+          ? []
+          : tools.filter((row) => !manualTurns.has(String(row.turn ?? '')))
+        const toolActions = planTools(toolsRegistry, toToolLogicRows(usableTools), { suppressManual: true }).actions
+        for (const action of toolActions) applyAction(container, usableTools, action)
+        if (usableTools.some((row) => row.expandable)) toolsFinalState.pending = false
       }
       return described.length
     }
@@ -965,38 +1076,56 @@ window.__ModuleLoader__.load({
 
     // ---- 设置卡片:「插件」设置页折叠卡 + 全部消息开关(实时生效,持久 localStorage) ----
 
-    // 包局部视觉 token(plugin-ui-design 契约):引用宿主语义别名,fallback 必填
+    // 包局部视觉 token(plugin-ui-design L1):值只引用宿主语义别名,不写字面 fallback
     const CARD_CSS = [
-      ':root { --te-accent: var(--dsw-alias-brand-primary, #1677ff);',
-      '  --te-text: var(--dsw-alias-label-primary, #1f2329);',
-      '  --te-text-dim: var(--dsw-alias-label-tertiary, #8f959e);',
-      '  --te-border: var(--dsw-alias-border-l2, #e5e6eb);',
-      '  --te-bg-muted: var(--dsw-alias-bg-module-platform, #f2f3f5); }',
-      '.te-card { border:0.5px solid var(--te-border); background:transparent; border-radius:8px;',
-      '  width:100%; transition:border-color 0.16s; }',
-      '.te-card:hover { border-color:var(--te-text-dim); }',
-      '.te-card__header { appearance:none; width:100%; font:inherit; color:inherit; text-align:left; cursor:pointer;',
-      '  background:none; border:0; border-radius:8px; align-items:center; gap:12px; padding:14px 16px; display:flex; }',
-      '.te-card__header:focus-visible { outline:2px solid var(--te-accent); outline-offset:-2px; }',
-      '.te-card__head-text { display:flex; flex-direction:column; flex:1 1 0%; gap:4px; min-width:0; }',
-      '.te-card__name { color:var(--te-text); font-size:15px; font-weight:600; line-height:1.4; }',
-      '.te-card__description { color:var(--te-text-dim); font-size:13px; line-height:1.5; }',
-      '.te-card__chevron { color:var(--te-text-dim); flex:0 0 auto; transition:transform 0.16s; display:inline-flex; }',
+      '.te-card {',
+      '  --te-accent:var(--dsw-alias-brand-primary); --te-accent-deep:var(--dsw-alias-button-primary-hover);',
+      '  --te-accent-wash:color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent);',
+      '  --te-ok:var(--dsw-alias-state-success-primary); --te-warn:var(--dsw-alias-state-warn-primary);',
+      '  --te-danger:var(--dsw-alias-state-error-primary);',
+      '  --te-danger-wash:color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent);',
+      '  --te-bg:var(--dsw-alias-bg-layer-1); --te-bg-sub:var(--dsw-alias-bg-layer-2);',
+      '  --te-bg-muted:var(--dsw-alias-bg-module-platform);',
+      '  --te-card:var(--dsw-alias-bg-layer-1); --te-card-border:var(--dsw-alias-border-l2);',
+      '  --te-border:var(--dsw-alias-border-l2); --te-border-strong:var(--dsw-alias-border-l3);',
+      '  --te-text:var(--dsw-alias-label-primary); --te-text-sub:var(--dsw-alias-label-secondary);',
+      '  --te-text-dim:var(--dsw-alias-label-tertiary);',
+      '  --te-hover:var(--dsw-alias-interactive-bg-hover); --te-hover-danger:var(--dsw-alias-interactive-bg-hover-danger);',
+      '  --te-skeleton:var(--dsw-alias-bg-skeleton); --te-switch-thumb:var(--dsw-alias-switch-thumb);',
+      '  --te-radius-sm:var(--dsw-radius-sm); --te-radius-md:var(--dsw-radius-md); --te-radius-lg:var(--dsw-radius-lg);',
+      '  width:100%; box-sizing:border-box; padding:14px 16px; border:.5px solid var(--te-card-border);',
+      '  border-radius:var(--te-radius-md); background:var(--te-card); color:var(--te-text);',
+      '  font-size:14px; line-height:22px; transition:border-color .16s; }',
+      '.te-card:hover { border-color:var(--te-border-strong); }',
+      '.te-card__header { appearance:none; display:flex; align-items:flex-start; gap:12px; width:100%;',
+      '  padding:0; border:0; border-radius:var(--te-radius-sm); background:none; font:inherit; color:inherit;',
+      '  text-align:left; cursor:pointer; }',
+      '.te-card__header:focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:2px; }',
+      '.te-card__head-text { display:flex; flex-direction:column; flex:1 1 auto; gap:2px; min-width:0; }',
+      '.te-card__name { color:var(--te-text); font-size:16px; font-weight:500; line-height:24px; }',
+      '.te-card__description { color:var(--te-text-sub); font-size:13px; line-height:20px; }',
+      '.te-card__chevron { color:var(--te-text-dim); flex:none; margin-top:4px; display:inline-flex; transition:transform .16s; }',
       '.te-card--open .te-card__chevron { transform:rotate(180deg); }',
-      '.te-card__body { border-top:0.5px solid var(--te-border); margin:0 16px; padding:8px 0 12px;',
-      '  display:flex; flex-direction:column; align-items:flex-start; gap:4px; }',
-      // 开关行(规约 switch 形态):track 胶囊 + thumb 圆点,状态选择器锚定 checkbox
-      '.te-switch { display:inline-flex; align-items:center; gap:8px; margin-top:6px; cursor:pointer;',
-      '  font:inherit; font-size:13px; color:var(--te-text-dim); }',
-      '.te-switch:hover { color:var(--te-text); }',
+      '.te-card__body { display:flex; flex-direction:column; gap:8px; margin-top:12px; padding-top:12px;',
+      '  border-top:.5px solid var(--te-border); align-items:self-start; }',
+      '.te-card__row { display:flex; align-items:center; justify-content:space-between; gap:12px;',
+      '  width:100%; min-height:36px; }',
+      '.te-card__row-label { color:var(--te-text-sub); font-size:13px; line-height:20px; }',
+      '.te-card__hint { margin:0; color:var(--te-text-dim); font-size:12px; line-height:18px; }',
+      // 开关行(plugin-client-conventions 规约形态):track 胶囊 + thumb 圆点,状态选择器锚定 checkbox
+      '.te-switch { display:inline-flex; align-items:center; gap:8px; min-height:28px; cursor:pointer;',
+      '  flex:none; color:var(--te-text); font-size:14px; line-height:22px; }',
+      '.te-switch:hover .te-switch__track { border-color:var(--te-accent); }',
       '.te-switch input[type="checkbox"] { position:absolute; width:1px; height:1px; margin:-1px; opacity:0; }',
-      '.te-switch__track { position:relative; flex:none; width:36px; height:20px; border-radius:999px;',
-      '  background:var(--te-bg-muted); transition:background 0.15s ease; }',
-      '.te-switch__thumb { position:absolute; left:2px; top:2px; width:16px; height:16px; border-radius:999px;',
-      '  background:#fff; box-shadow:0 1px 2px rgba(0,0,0,0.25); transition:transform 0.15s ease; }',
-      '.te-switch input[type="checkbox"]:checked + .te-switch__track { background:var(--te-accent); }',
-      '.te-switch input[type="checkbox"]:checked + .te-switch__track .te-switch__thumb { transform:translateX(16px); }',
-      '.te-switch input[type="checkbox"]:focus-visible + .te-switch__track { outline:2px solid var(--te-accent); outline-offset:1px; }',
+      '.te-switch__track { position:relative; flex:none; box-sizing:border-box; width:34px; height:19px;',
+      '  border:1px solid var(--te-border); border-radius:999px;',
+      '  background:var(--te-bg-muted); transition:background .15s ease, border-color .15s ease; }',
+      '.te-switch__thumb { position:absolute; left:2px; top:2px; width:13px; height:13px; border-radius:50%;',
+      '  background:var(--te-switch-thumb); transition:left .15s ease; }',
+      '.te-switch input[type="checkbox"]:checked + .te-switch__track { background:var(--te-accent); border-color:var(--te-accent); }',
+      '.te-switch input[type="checkbox"]:checked + .te-switch__track .te-switch__thumb { left:17px; }',
+      '.te-switch input[type="checkbox"]:focus-visible + .te-switch__track { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:2px; }',
+      '.te-card :is(button, input):disabled { opacity:.5; cursor:not-allowed; }',
       '@media (prefers-reduced-motion: reduce) { .te-switch__track, .te-switch__thumb, .te-card__chevron { transition:none; } }',
     ].join('\n')
 
@@ -1024,11 +1153,14 @@ window.__ModuleLoader__.load({
               strokeLinecap: 'round', strokeLinejoin: 'round',
             })))),
         open && React.createElement('div', { className: 'te-card__body' },
-          React.createElement('label', { className: 'te-switch' },
-            React.createElement('input', { type: 'checkbox', checked, onChange: onToggle }),
-            React.createElement('span', { className: 'te-switch__track' },
-              React.createElement('span', { className: 'te-switch__thumb' })),
-            React.createElement('span', { className: 'te-switch__label' }, '展开全部消息')),
+          React.createElement('div', { className: 'te-card__row' },
+            React.createElement('span', { className: 'te-card__row-label' }, '展开全部消息'),
+            React.createElement('label', { className: 'te-switch' },
+              React.createElement('input', { type: 'checkbox', checked, onChange: onToggle }),
+              React.createElement('span', { className: 'te-switch__track' },
+                React.createElement('span', { className: 'te-switch__thumb' })),
+              React.createElement('span', { className: 'te-switch__label' }, '启用'))),
+          React.createElement('p', { className: 'te-card__hint' }, '关闭时只自动展开思考块;开关值保存在本机浏览器,刷新后保持。'),
         ))
     }
 

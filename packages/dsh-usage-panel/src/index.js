@@ -16,6 +16,7 @@ import {
   extractCustom,
 } from './parsers.mjs'
 import { readingToSnapshots, appendPoint, buildMonthSequence, newSequenceStore } from './history.mjs'
+import { withHostGate } from './route-gate.mjs'
 import { createHistoryStore } from './historyStore.mjs'
 import { createBackoff, lastQuerySecOf, isDue, runLimited, POLL_INTERVAL_SEC } from './poller.mjs'
 import {
@@ -310,10 +311,113 @@ function normalizeAccounts(input) {
   })
 }
 
-// 响应剥离明文 Key:客户端只需知道是否已配置,Key 永不出主机。
-function redactAccount(account) {
-  return { ...account, apiKey: '', hasKey: account.apiKey.length > 0 }
+// 响应剥离明文凭据:apiKey 用 hasKey 表达;自定义头/体按字段名脱敏,
+// 客户端回存时把占位替换回旧值,因此占位必须稳定且不可能与真实值撞车。
+const REDACTED = '[已隐藏]'
+const SECRET_FIELD = /(api[-_]?key|token|secret|password|authorization|cookie)/i
+
+function redactJson(value) {
+  if (Array.isArray(value)) return value.map(redactJson)
+  if (value === null || typeof value !== 'object') return value
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+    key,
+    typeof item === 'string' && SECRET_FIELD.test(key) ? REDACTED : redactJson(item),
+  ]))
 }
+
+function redactBody(body) {
+  if (typeof body !== 'string' || body.length === 0) return body
+  try {
+    const parsed = JSON.parse(body)
+    if (parsed !== null && typeof parsed === 'object') return JSON.stringify(redactJson(parsed), null, 2)
+  } catch {
+    // 非 JSON 体无法判定字段,整体隐藏
+  }
+  return REDACTED
+}
+
+function redactAccount(account) {
+  const custom = account.custom || {}
+  return {
+    ...account,
+    apiKey: '',
+    hasKey: account.apiKey.length > 0,
+    custom: {
+      ...custom,
+      headers: Object.fromEntries(Object.entries(custom.headers || {}).map(([name, value]) => [name, value === '' ? '' : REDACTED])),
+      body: redactBody(custom.body),
+    },
+  }
+}
+
+function restoreJson(submitted, existing) {
+  if (Array.isArray(submitted)) {
+    const old = Array.isArray(existing) ? existing : []
+    return submitted.map((item, index) => restoreJson(item, old[index]))
+  }
+  if (submitted === null || typeof submitted !== 'object') {
+    return submitted === REDACTED && typeof existing === 'string' ? existing : submitted
+  }
+  const old = existing !== null && typeof existing === 'object' ? existing : {}
+  return Object.fromEntries(Object.entries(submitted).map(([key, value]) => [key, restoreJson(value, old[key])]))
+}
+
+function restoreHeaders(submitted, existing) {
+  const old = existing || {}
+  return Object.fromEntries(Object.entries(submitted || {}).map(([name, value]) => [
+    name,
+    value === REDACTED && typeof old[name] === 'string' ? old[name] : value,
+  ]))
+}
+
+function restoreBody(submitted, existing) {
+  if (submitted === REDACTED) return typeof existing === 'string' ? existing : submitted
+  if (typeof submitted !== 'string' || typeof existing !== 'string') return submitted
+  try {
+    return JSON.stringify(restoreJson(JSON.parse(submitted), JSON.parse(existing)), null, 2)
+  } catch {
+    return submitted
+  }
+}
+
+// 占位符按「字段路径」还原:改键名、重排数组、把 JSON 改坏都配不上旧值,
+// 残留占位符绝不能当凭据落盘(否则上游拿到 [已隐藏] 静默 401),这里直接拒绝保存
+function findRedacted(value, path = '') {
+  if (value === REDACTED) return path || '(根)'
+  if (Array.isArray(value)) {
+    for (const [index, item] of value.entries()) {
+      const hit = findRedacted(item, path + '[' + index + ']')
+      if (hit !== undefined) return hit
+    }
+    return undefined
+  }
+  if (value !== null && typeof value === 'object') {
+    for (const [key, item] of Object.entries(value)) {
+      const hit = findRedacted(item, path ? path + '.' + key : key)
+      if (hit !== undefined) return hit
+    }
+  }
+  return undefined
+}
+
+function assertRestored(custom) {
+  const headerHit = findRedacted(custom.headers, 'headers')
+  if (headerHit !== undefined) throw new Error('自定义请求头的隐藏项无法还原(' + headerHit + '),请重新填写该字段')
+  if (typeof custom.body === 'string' && custom.body.length > 0) {
+    let parsed
+    try {
+      parsed = JSON.parse(custom.body)
+    } catch {
+      if (custom.body.includes(REDACTED)) throw new Error('自定义请求体的隐藏项无法还原(JSON 已改动),请重新填写该字段')
+      return
+    }
+    const bodyHit = findRedacted(parsed, 'body')
+    if (bodyHit !== undefined) throw new Error('自定义请求体的隐藏项无法还原(' + bodyHit + '),请重新填写该字段')
+  }
+}
+
+// 脱敏回存的纯函数面:路由层只负责拒绝落盘,判定逻辑在此单测
+export const __test = { redactAccount, restoreHeaders, restoreBody, findRedacted, assertRestored, REDACTED }
 
 async function queryAccount(account) {
   const queriedAt = Date.now()
@@ -343,6 +447,10 @@ async function queryAccount(account) {
 export const inject = ['webServer']
 
 export function apply(ctx, configRef) {
+  // 宿主闸门:插件 exact 路由先于宿主 /api prefix 命中,统一在注册处包一层,
+  // 否则无 cookie 的调用绕过 connection.admit 直接进业务面
+  const register = ctx.webServer.register.bind(ctx.webServer)
+  const gatedRegister = (route) => register({ ...route, handler: withHostGate(ctx, route.handler) })
   const tools = setupCommonTools(ctx)
   const changes = createChangeNotifier(() => tools.publish())
   ctx.effect(() => () => changes.dispose(), '通知变更合并')
@@ -405,6 +513,17 @@ export function apply(ctx, configRef) {
   // 数据修订号(F31):账号/历史任一持久化成功即自增;面板经 revision 路由
   // 对账,读数落后即重拉——后台轮询写入不再让面板陈旧
   let dataRevision = 0
+  // 账号表独立修订号:查询只更新 last 也会 persistConfig,不能拿 dataRevision
+  // 做账号保存的乐观锁,否则正常查询会把用户的保存误判成并发冲突。
+  let accountsRevision = 0
+  // 修订号比较与落盘必须在同一临界区:仅比较 revision 仍有 TOCTOU,两个
+  // 携带同修订号的请求可以同时通过检查,后写者覆盖先写者。
+  let accountsWriteChain = Promise.resolve()
+  function withAccountsLock(job) {
+    const run = accountsWriteChain.then(job, job)
+    accountsWriteChain = run.catch(() => {})
+    return run
+  }
   function bumpDataRevision() {
     dataRevision += 1
     notifyChange()
@@ -547,45 +666,63 @@ export function apply(ctx, configRef) {
 
   ctx.effect(
     () =>
-      ctx.webServer.register({
+      gatedRegister({
         kind: 'exact',
         path: '/api/usage-panel/accounts',
         handler: guardedRoute(async (req, res) => {
           if (req.method === 'GET') {
             const current = await ensureConfig()
-            sendJson(res, 200, { accounts: current.accounts.map(redactAccount) })
+            sendJson(res, 200, { accounts: current.accounts.map(redactAccount), revision: accountsRevision })
             return
           }
           const body = JSON.parse(await readBody(req))
-          await ensureConfig()
-          await ensureHistory()
-          const previous = Array.isArray(config.accounts) ? config.accounts : []
-          const saved = normalizeAccounts(body && body.accounts).map((account) => {
-            const old = previous.find((item) => item.id === account.id)
-            if (old === undefined) return account
-            // 客户端拿不到旧 Key,空 Key 视为「保持不变」;last 与 notifyState 不经表单,
-            // 同 id 旧值回填,防编辑账号丢失读数与沿触发防抖基线
-            const merged = account.apiKey.length > 0 ? account : { ...account, apiKey: old.apiKey }
-            return { ...merged, last: old.last, notifyState: old.notifyState }
+          return withAccountsLock(async () => {
+            await ensureConfig()
+            // 账号表乐观锁:客户端带读取时的修订号;不一致说明他窗已改,拒绝整体覆盖。
+            if (Number.isInteger(body && body.revision) && body.revision !== accountsRevision) {
+              sendJson(res, 409, { error: '配置已被其他窗口修改,请刷新后重试', revision: accountsRevision })
+              return
+            }
+            await ensureHistory()
+            const previous = Array.isArray(config.accounts) ? config.accounts : []
+            const saved = normalizeAccounts(body && body.accounts).map((account) => {
+              const old = previous.find((item) => item.id === account.id)
+              if (old === undefined) return account
+              // 客户端拿不到旧 Key,空 Key 视为「保持不变」;last 与 notifyState 不经表单,
+              // 同 id 旧值回填,防编辑账号丢失读数与沿触发防抖基线。自定义头/体的
+              // 脱敏占位同样按旧账号还原,否则编辑名称就会把凭据写成占位。
+              const merged = account.apiKey.length > 0 ? account : { ...account, apiKey: old.apiKey }
+              const oldCustom = old.custom || {}
+              const custom = {
+                ...account.custom,
+                headers: restoreHeaders(account.custom.headers, oldCustom.headers),
+                body: restoreBody(account.custom.body, oldCustom.body),
+              }
+              assertRestored(custom)
+              return { ...merged, custom, last: old.last, notifyState: old.notifyState }
+            })
+            config = { version: 1, accounts: saved }
+            accountsRevision += 1
+            const savedRevision = accountsRevision
+            // 已删除账号的轮询状态同步清理,不留悬挂退避
+            for (const id of [...pollState.keys()]) {
+              if (!saved.some((account) => account.id === id)) pollState.delete(id)
+            }
+            // 已删除账号的历史序列同步清理(id 无冒号前置校验保证账号段切分可靠),
+            // 防 history.json 无主数据无限累积
+            for (const key of Object.keys(history)) {
+              const accountId = key.slice(0, key.indexOf(':'))
+              if (!saved.some((account) => account.id === accountId)) delete history[key]
+            }
+            await persistConfig().catch((error) => {
+              // 写失败(如 broken 拒写)回滚内存态,防 tick/GET 与磁盘不一致
+              config = { version: 1, accounts: previous }
+              accountsRevision = savedRevision - 1
+              throw error
+            })
+            await persistHistory().catch(() => {})
+            sendJson(res, 200, { ok: true, accounts: saved.map(redactAccount), revision: savedRevision })
           })
-          config = { version: 1, accounts: saved }
-          // 已删除账号的轮询状态同步清理,不留悬挂退避
-          for (const id of [...pollState.keys()]) {
-            if (!saved.some((account) => account.id === id)) pollState.delete(id)
-          }
-          // 已删除账号的历史序列同步清理(id 无冒号前置校验保证账号段切分可靠),
-          // 防 history.json 无主数据无限累积
-          for (const key of Object.keys(history)) {
-            const accountId = key.slice(0, key.indexOf(':'))
-            if (!saved.some((account) => account.id === accountId)) delete history[key]
-          }
-          await persistConfig().catch((error) => {
-            // 写失败(如 broken 拒写)回滚内存态,防 tick/GET 与磁盘不一致
-            config = { version: 1, accounts: previous }
-            throw error
-          })
-          await persistHistory().catch(() => {})
-          sendJson(res, 200, { ok: true, accounts: saved.map(redactAccount) })
         }),
       }),
     'usage-panel accounts route',
@@ -593,7 +730,7 @@ export function apply(ctx, configRef) {
 
   ctx.effect(
     () =>
-      ctx.webServer.register({
+      gatedRegister({
         kind: 'exact',
         path: '/api/usage-panel/query',
         handler: guardedRoute.post(async (req, res) => {
@@ -620,7 +757,7 @@ export function apply(ctx, configRef) {
 
   ctx.effect(
     () =>
-      ctx.webServer.register({
+      gatedRegister({
         kind: 'exact',
         path: '/api/usage-panel/history',
         handler: async (req, res) => {
@@ -637,7 +774,7 @@ export function apply(ctx, configRef) {
 
   ctx.effect(
     () =>
-      ctx.webServer.register({
+      gatedRegister({
         kind: 'exact',
         path: '/api/usage-panel/settings',
         handler: async (req, res) => {
@@ -668,7 +805,7 @@ export function apply(ctx, configRef) {
   const IM_ERROR_STATUS = { 'bad-request': 400, 'unknown-bot': 404, 'bot-not-connected': 503 }
 
   ctx.effect(() => {
-    const disposeRoute = ctx.webServer.register({
+    const disposeRoute = gatedRegister({
       kind: 'exact',
       path: '/api/usage-panel/notifications',
       handler: async (req, res) => {
@@ -689,7 +826,7 @@ export function apply(ctx, configRef) {
   // 数据修订号对账口(F31):面板轮询比对本值,落后即重拉账号与历史
   ctx.effect(
     () =>
-      ctx.webServer.register({
+      gatedRegister({
         kind: 'exact',
         path: '/api/usage-panel/revision',
         handler: async (req, res) => {
@@ -705,7 +842,7 @@ export function apply(ctx, configRef) {
 
   ctx.effect(
     () =>
-      ctx.webServer.register({
+      gatedRegister({
         kind: 'exact',
         path: '/api/usage-panel/notify-config',
         handler: guardedRoute(async (req, res) => {
@@ -729,7 +866,7 @@ export function apply(ctx, configRef) {
 
   ctx.effect(
     () =>
-      ctx.webServer.register({
+      gatedRegister({
         kind: 'exact',
         path: '/api/usage-panel/test-webhook',
         handler: guardedRoute.post(async (req, res) => {
@@ -742,7 +879,7 @@ export function apply(ctx, configRef) {
 
   ctx.effect(
     () =>
-      ctx.webServer.register({
+      gatedRegister({
         kind: 'exact',
         path: '/api/usage-panel/im-targets',
         handler: async (req, res) => {
@@ -775,7 +912,7 @@ export function apply(ctx, configRef) {
 
   ctx.effect(
     () =>
-      ctx.webServer.register({
+      gatedRegister({
         kind: 'exact',
         path: '/api/usage-panel/test-im',
         handler: guardedRoute.post(async (req, res) => {

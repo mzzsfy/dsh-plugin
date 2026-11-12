@@ -157,6 +157,11 @@ test('readPrompts 归一化:非法形状回退空数组,非字符串 text 与缺
     { text: '保留', at: 7 },
     { text: '缺时间', at: 0 },
   ])
+  // 同一文本重复出现:保留先出现的一条(文本即身份,重复项会让列表 key 冲突)
+  await writeFile(join(dir, 'prompts.json'), JSON.stringify({
+    items: [{ text: '重复', at: 1 }, { text: '重复', at: 2 }, { text: '其它', at: 3 }],
+  }), 'utf8')
+  assert.deepEqual(await readPrompts(dir), [{ text: '重复', at: 1 }, { text: '其它', at: 3 }])
   // writePrompts 落盘后回读同值
   await writePrompts(dir, [{ text: '落盘', at: 3 }])
   assert.deepEqual(await readPrompts(dir), [{ text: '落盘', at: 3 }])

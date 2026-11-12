@@ -4,7 +4,7 @@
 // 写方法成功受理即经 notifyChange 发布总线变更(通知面/数据面分离,客户端 refetch 快照)。
 
 import { assertValidSchedule, nextRunAtOf, nextRunsOf, summarizeCron } from './cron.mjs'
-import { DEFAULT_MAX_EXPANSION, DEFAULT_TIMEOUT_MS } from './config.mjs'
+import { DEFAULT_MAX_EXPANSION, DEFAULT_TIMEOUT_MS, SESSION_UNAVAILABLE_REASON } from './config.mjs'
 import { maskValue } from './env-text.mjs'
 
 const ROUTE_PREFIX = '/api/cron-board'
@@ -24,13 +24,40 @@ export const MESSAGES = {
   badSessionModel: '模型指定不合法:provider 与 model 必须为非空文本,reasoningEffort 可省略',
   jobNotFound: '任务不存在',
   runNotFound: '运行记录不存在',
-  sessionDisabled: '宿主会话服务不可用,会话任务通道已禁用',
+  sessionUnavailable: SESSION_UNAVAILABLE_REASON,
+  crossOrigin: '跨源请求被拒绝',
+  nonJsonBody: '仅接受 application/json 请求体',
   systemError: '操作失败(系统级错误,详见服务端日志)',
 }
 
 function sendJson(res, status, payload) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
   res.end(JSON.stringify(payload))
+}
+
+// 写路由守卫(全仓同构):浏览器跨站表单可发 text/plain 且载荷为合法 JSON,
+// 仅方法守卫不足以阻断 drive-by 写,补同源比对与 JSON 内容类型双校验。
+// 无 Origin 的非浏览器调用(本地 CLI/脚本)放行。
+function rejectCrossOrigin(req, res) {
+  const origin = req.headers ? req.headers.origin : undefined
+  if (!origin) return false
+  let sameOrigin = false
+  try {
+    sameOrigin = new URL(origin).host === req.headers.host
+  } catch {
+    sameOrigin = false
+  }
+  if (sameOrigin) return false
+  sendJson(res, 403, { error: MESSAGES.crossOrigin })
+  return true
+}
+
+function rejectNonJson(req, res) {
+  const type = req.headers ? req.headers['content-type'] : undefined
+  if (typeof type !== 'string' || type.trim() === '') return false
+  if (type.split(';')[0].trim().toLowerCase() === 'application/json') return false
+  sendJson(res, 415, { error: MESSAGES.nonJsonBody })
+  return true
 }
 
 function respondError(res, error, logSystem) {
@@ -182,8 +209,14 @@ function normalizeJob(body) {
   return normalized
 }
 
-export function createApi({ store, logger, executor, scheduler, periodic, sessionState, readSidebarTab, updateUiSettings, getAgentPresets, getSessionController, logSystem, notifyChange }) {
+export function createApi({ store, logger, executor, scheduler, periodic, reportSessionMissing, readSidebarTab, updateUiSettings, getAgentPresets, getSessionController, logSystem, notifyChange }) {
 
+  // 会话通道就绪按请求时刻判定:服务由宿主异步挂载,晚到即恢复,不做一次性定格
+  const sessionAvailable = () => Boolean(typeof getSessionController === 'function' && getSessionController())
+  const rejectSessionUnavailable = (res) => {
+    if (typeof reportSessionMissing === 'function') reportSessionMissing()
+    sendJson(res, 400, { error: MESSAGES.sessionUnavailable })
+  }
   const routes = [
     {
       method: 'GET',
@@ -296,9 +329,7 @@ export function createApi({ store, logger, executor, scheduler, periodic, sessio
           timerReason: periodic && periodic.reason ? periodic.reason : null,
           scheduler: scheduler ? scheduler.status() : { active: 0, queued: 0 },
           nextAt: scheduler && scheduler.nextRunAt ? scheduler.nextRunAt() : null,
-          session: sessionState
-            ? { ready: Boolean(sessionState.ready), disabled: Boolean(sessionState.disabled) }
-            : { ready: false, disabled: false },
+          session: { ready: sessionAvailable() },
           // 宿主进程时区偏移小时数:无后缀任务的展示时区(调度与展示同源,与浏览器无关)
           serverTzOffset: -new Date().getTimezoneOffset() / 60,
           ui: { sidebarTab: readSidebarTab ? readSidebarTab() === true : false },
@@ -413,9 +444,7 @@ export function createApi({ store, logger, executor, scheduler, periodic, sessio
       handler: async ({ req, res }) => {
         const body = await readJsonBody(req)
         const fields = normalizeJob(body)
-        if (fields.kind === 'session' && sessionState && sessionState.disabled) {
-          return sendJson(res, 400, { error: MESSAGES.sessionDisabled })
-        }
+        if (fields.kind === 'session' && !sessionAvailable()) return rejectSessionUnavailable(res)
         const row = await store.jobs.create(fields)
         sendJson(res, 200, row)
       },
@@ -428,6 +457,9 @@ export function createApi({ store, logger, executor, scheduler, periodic, sessio
         const existing = store.jobs.get(params.id)
         if (!existing) throw new Error(MESSAGES.jobNotFound)
         const fields = normalizeJob({ ...existing, ...body })
+        // 只拦「脚本任务改成会话任务」这一引入动作:停用/改名/改期等既有会话任务维护
+        // 在服务缺失期照旧可用(否则会把停用开关一起打断)
+        if (fields.kind === 'session' && existing.kind !== 'session' && !sessionAvailable()) return rejectSessionUnavailable(res)
         // 编辑保存:请求未显式携带 nextRunAt 即按当前 schedule 重算。
         // 合并旧任务行会把既有 nextRunAt 当作显式值透传,改期后残留旧触发点导致误执行
         if (body.nextRunAt === undefined) fields.nextRunAt = nextRunAtOf(fields.schedule)
@@ -547,6 +579,9 @@ export function createApi({ store, logger, executor, scheduler, periodic, sessio
           sendJson(res, 404, { error: MESSAGES.notFound })
           return
         }
+        // 写路由先过同源与内容类型双守卫,再读体与落库
+        if (WRITE_METHODS.has(matched.route.method)
+          && (rejectCrossOrigin(req, res) || rejectNonJson(req, res))) return
         await dispatchRoute(matched, { req, res, url, params: matched.params })
       } catch (error) {
         respondError(res, error, logSystem)

@@ -25,7 +25,13 @@ async function makeApi(t, overrides = {}) {
   })
   const logger = createLogger({ rootDir: join(dir, 'logs') })
   const executor = createExecutor({ store, logger, readMaxConcurrent: () => 2 })
-  const api = createApi({ store, logger, executor, getAgentPresets: () => null, ...overrides })
+  // 会话服务默认给镜像宿主的最小方法面(create/prompt/modelCatalog),需要缺失态时逐用例覆盖
+  const sessionController = {
+    create: async () => ({ sessionId: 's-api' }),
+    prompt: async () => ({ accepted: true }),
+    modelCatalog: async () => ({ groups: [], failures: [] }),
+  }
+  const api = createApi({ store, logger, executor, getAgentPresets: () => null, getSessionController: () => sessionController, ...overrides })
   return { store, api }
 }
 function makeReq(method, body) {
@@ -53,6 +59,53 @@ async function call(api, method, pathAndQuery, body) {
   await api.handle(req, res)
   return res
 }
+
+async function callRaw(api, { method, path, headers = {}, body }) {
+  const res = { status: null, payload: null }
+  res.writeHead = (status) => { res.status = status }
+  res.end = (text) => {
+    res.raw = text
+    try { res.payload = JSON.parse(text) } catch { res.payload = null }
+  }
+  const req = new EventEmitter()
+  req.method = method
+  req.headers = { host: 'localhost:3000', ...headers }
+  req.url = 'http://localhost' + path
+  if (body !== undefined) {
+    process.nextTick(() => {
+      req.emit('data', Buffer.from(body))
+      req.emit('end')
+    })
+  }
+  await api.handle(req, res)
+  return res
+}
+
+test('写路由守卫:跨源 Origin 403,非 JSON 415,同源 JSON 放行', async (t) => {
+  const { store, api } = await makeApi(t)
+  // Given 一条合法建任务请求
+  const body = JSON.stringify({ name: 'n', command: 'echo 1', kind: 'shell', schedule: '* * * * *' })
+  // When 跨源 Origin
+  const cross = await callRaw(api, { method: 'POST', path: '/api/cron-board/jobs', headers: { origin: 'http://evil.example', 'content-type': 'application/json' }, body })
+  // Then 403 且不落库
+  assert.equal(cross.status, 403)
+  assert.equal(store.jobs.list().length, 0)
+  // When 同源但 text/plain(drive-by 表单载荷)
+  const plain = await callRaw(api, { method: 'POST', path: '/api/cron-board/jobs', headers: { origin: 'http://localhost:3000', 'content-type': 'text/plain' }, body })
+  // Then 415 且不落库
+  assert.equal(plain.status, 415)
+  assert.equal(store.jobs.list().length, 0)
+  // When 同源 application/json
+  const ok = await callRaw(api, { method: 'POST', path: '/api/cron-board/jobs', headers: { origin: 'http://localhost:3000', 'content-type': 'application/json; charset=utf-8' }, body })
+  // Then 正常受理
+  assert.equal(ok.status, 200)
+  assert.equal(store.jobs.list().length, 1)
+  // When 无 Origin 的本地 CLI 调用(无 content-type)
+  const cli = await callRaw(api, { method: 'POST', path: '/api/cron-board/jobs', body })
+  // Then 放行(与全仓口径一致)
+  assert.equal(cli.status, 200)
+})
+
 
 test('envs 路由:新建后列表打码,长度不足四字符全打码', async (t) => {
   // Given 新建变量 value=abcdef123456
@@ -512,7 +565,7 @@ test('model-catalog 路由:宿主目录归一,缺失与异常降级空目录', a
     failures: [{ id: 'broken', name: 'Broken', message: '凭据未配置' }],
   })
   // When 服务缺失
-  const bare = await makeApi(t)
+  const bare = await makeApi(t, { getSessionController: () => undefined })
   const empty = await call(bare.api, 'GET', '/api/cron-board/model-catalog')
   // Then 空目录 200
   assert.equal(empty.status, 200)
@@ -524,26 +577,66 @@ test('model-catalog 路由:宿主目录归一,缺失与异常降级空目录', a
   assert.deepEqual(failed.payload, { default: null, items: [], failures: [] })
 })
 
-test('jobs 路由:会话通道禁用时建会话任务 400,脚本任务不受限', async (t) => {
-  // Given sessionState.disabled(等价 0.1.1-rc.2 超时禁用态)
-  const sessionState = { ready: false, disabled: true }
-  const { api } = await makeApi(t, { sessionState })
+test('jobs 路由:会话服务缺失时建/改会话任务 400,脚本任务不受限', async (t) => {
+  // Given 宿主无 sessionController(等价 0.1.1-rc.2)且告警回调被记录
+  const reported = []
+  const { api } = await makeApi(t, { getSessionController: () => undefined, reportSessionMissing: () => reported.push(1) })
+  // When 建会话任务
   const sess = await call(api, 'POST', '/api/cron-board/jobs', {
     name: 'sv', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true,
   })
+  // Then 400 中文文案,缺失告警上报
   assert.equal(sess.status, 400)
-  assert.match(sess.payload.error, /会话任务通道已禁用/)
+  assert.match(sess.payload.error, /会话任务通道不可用/)
+  assert.deepEqual(reported, [1])
+  // When 建脚本任务
   const shell = await call(api, 'POST', '/api/cron-board/jobs', {
     name: 'sh', kind: 'shell', command: 'echo x', schedule: '* * * * *', enabled: true,
   })
+  // Then 不受会话通道影响
   assert.equal(shell.status, 200)
+  // When 把已有脚本任务改成会话任务
+  const patched = await call(api, 'PATCH', '/api/cron-board/jobs/' + shell.payload.id, {
+    kind: 'session', prompt: 'x',
+  })
+  // Then 同一闸门拦截
+  assert.equal(patched.status, 400)
+  assert.match(patched.payload.error, /会话任务通道不可用/)
 })
 
-test('status 路由:透出会话通道就绪状态', async (t) => {
-  const sessionState = { ready: true, disabled: false }
-  const { api } = await makeApi(t, { sessionState })
-  const res = await call(api, 'GET', '/api/cron-board/status')
-  assert.deepEqual(res.payload.session, { ready: true, disabled: false })
+test('jobs 路由:服务缺失期既有会话任务的停用/改名照旧可用', async (t) => {
+  // Given 服务在场时建好的会话任务,随后服务下线(宿主卸载 / HMR 窗口 / 旧宿主切换)
+  let controller = { create: async () => ({ sessionId: 's-1' }), prompt: async () => ({ accepted: true }) }
+  const { api } = await makeApi(t, { getSessionController: () => controller })
+  const created = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: 'sv', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true,
+  })
+  assert.equal(created.status, 200)
+  controller = undefined
+  // When 停用开关(客户端开关走同一条 PATCH 写路由)
+  const toggled = await call(api, 'PATCH', '/api/cron-board/jobs/' + created.payload.id, { enabled: false })
+  // Then 不受会话通道影响
+  assert.equal(toggled.status, 200)
+  assert.equal(toggled.payload.enabled, false)
+  // When 改名
+  const renamed = await call(api, 'PATCH', '/api/cron-board/jobs/' + created.payload.id, { name: '改名' })
+  // Then 同样放行
+  assert.equal(renamed.status, 200)
+  assert.equal(renamed.payload.name, '改名')
+})
+
+test('status 路由:会话通道就绪按请求时刻现算', async (t) => {
+  // Given 服务缺失的宿主
+  let controller
+  const { api } = await makeApi(t, { getSessionController: () => controller })
+  // Then 未就绪
+  const before = await call(api, 'GET', '/api/cron-board/status')
+  assert.deepEqual(before.payload.session, { ready: false })
+  // When 宿主晚到挂载服务(慢启动不再永久误判)
+  controller = {}
+  const after = await call(api, 'GET', '/api/cron-board/status')
+  // Then 同一实例即就绪
+  assert.deepEqual(after.payload.session, { ready: true })
 })
 
 test('cron preview 路由:人话摘要与下三次触发', async (t) => {

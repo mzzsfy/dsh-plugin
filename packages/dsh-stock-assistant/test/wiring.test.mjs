@@ -151,3 +151,12 @@ test('悬浮盯盘入口在主导航', () => {
   must(/floating\.open \? '收起盯盘' : '悬浮盯盘'/, '主操作行必须有盯盘开关')
   must(/const \[floating, setFloating\] = usePref\(FLOAT_KEY, FLOAT_DEFAULT\)/, '入口要跟着真实偏好走')
 })
+
+test('全屏浮层层级高于宿主侧栏拖拽手柄', () => {
+  // 宿主 0.2.2-rc.1 的侧栏手柄(.pI_x6G_handle, 类名哈希随宿主构建变) z-index 11 且横贯整屏;
+  // 浮层更低时设置弹窗与详情抽屉横穿一条不可点带, 落在带内的下拉点了没反应
+  // (2026-11-12 实测: 悬浮盯盘刷新下拉中心命中手柄). 文本断言只能防插件侧回退, 宿主改层级要靠兼容性测试兜底.
+  const overlay = /\.ssb-overlay\s*\{[^}]*z-index:\s*(\d+)/.exec(client)
+  assert.ok(overlay, '浮层必须显式声明层级')
+  assert.ok(Number(overlay[1]) > 11, `浮层层级 ${overlay[1]} 必须高于宿主手柄 11`)
+})

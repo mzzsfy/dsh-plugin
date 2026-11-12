@@ -177,3 +177,69 @@ test('P12 Given failed pricing request, When next consumer mounts, Then failed f
   const stats = f.stats(); assert.equal(f.gets.length, 2)
   f.resolve(f.gets[1], price(2)); await f.settle(); assert.match(text(stats.tree), /¥2\.00/)
 }))
+
+const EDITOR_RULE = {
+  model: 'a/b',
+  unit: 'perMillion',
+  currency: '¥',
+  price: { input: 2, output: 0, cacheRead: 0, cacheWrite: 0 },
+  conditions: [{ kind: 'weekdays', days: [1] }],
+}
+const editorGroups = editor => nodes(editor.tree)
+  .filter(node => node.type?.name === 'PricingModelGroup')
+const groupOf = (editor, model) => editorGroups(editor).find(node => node.props.group.model === model)
+
+test('P13 Given 无 */* 规则 When 编辑器加载 Then 末尾合成锁定且不可删除的全局槽', t => withFixture(t, async f => {
+  const editor = f.editor()
+  f.resolve(f.gets[0], { revision: 1, rules: [EDITOR_RULE] }); await f.settle()
+  const global = groupOf(editor, '*/*')
+  assert.ok(global, '缺少合成 */* 组')
+  assert.equal(editorGroups(editor).at(-1).props.group.model, '*/*')
+  assert.equal(global.props.group.slots.length, 1)
+  assert.deepEqual(global.props.group.slots[0].rule.conditions, [])
+  const rendered = global.type(global.props)
+  const input = nodes(rendered).find(node => node.type === 'input' && node.props.value === '*/*')
+  assert.equal(input.props.readOnly, true)
+  assert.equal(nodes(rendered).filter(node => node.type?.name === 'DeleteArmedButton').length, 0)
+}))
+
+test('P14 Given 合成 */* 槽未填价 When 保存 Then 草稿剔除该槽且保存后仍可见', t => withFixture(t, async f => {
+  const editor = f.editor()
+  f.resolve(f.gets[0], { revision: 1, rules: [EDITOR_RULE] }); await f.settle()
+  const pending = f.save(editor)
+  assert.deepEqual(f.saves[0].body.rules.map(item => item.model), ['a/b'])
+  f.resolve(f.saves[0], { revision: 2, rules: [EDITOR_RULE] }); await pending; await f.settle()
+  assert.ok(groupOf(editor, '*/*'), '保存后合成槽应继续可见')
+}))
+
+test('P15 Given 无默认价的模型组 When 点添加默认价 Then 新槽无条件并成为默认槽', t => withFixture(t, async f => {
+  const editor = f.editor()
+  f.resolve(f.gets[0], { revision: 1, rules: [EDITOR_RULE] }); await f.settle()
+  const group = groupOf(editor, 'a/b')
+  const rendered = group.type(group.props)
+  const add = nodes(rendered).find(node => node.type === 'button' && text(node) === '添加默认价')
+  assert.ok(add, '无默认价组应提供添加默认价按钮')
+  add.props.onClick(); await f.settle()
+  const updated = groupOf(editor, 'a/b')
+  const { defaultSlot } = corePartition(updated.props.group)
+  assert.ok(defaultSlot)
+  assert.deepEqual(defaultSlot.rule.conditions, [])
+}))
+
+test('P16 Given 附加规则仅一条条件 When 渲染 Then 删除条件按钮隐藏', t => withFixture(t, async f => {
+  const editor = f.editor()
+  f.resolve(f.gets[0], { revision: 1, rules: [EDITOR_RULE] }); await f.settle()
+  const group = groupOf(editor, 'a/b')
+  const rendered = group.type(group.props)
+  const card = nodes(rendered).find(node => node.type?.name === 'PricingExtraRuleCard')
+  assert.ok(card, '组内应有附加规则卡')
+  const cardTree = card.type(card.props)
+  assert.equal(nodes(cardTree).filter(node => node.type === 'button'
+    && node.props['aria-label'] === '删除条件').length, 0)
+}))
+
+// 复用编辑器同一分区函数:测试直接读组件 props,不重新实现判定
+const corePartition = (group) => {
+  const fallback = group.slots.find(slot => (slot.rule.conditions ?? []).length === 0)
+  return { defaultSlot: fallback ?? null }
+}

@@ -3,7 +3,7 @@
 // 缓存只服务 owner/本地调用,非 owner 主体不得命中共享缓存。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { installListSlim, slimItem } from '../src/list-slim.mjs'
+import { installListSlim, KEEP_PROJECTIONS, slimItem } from '../src/list-slim.mjs'
 
 /** 一条带完整投影的列表项。 */
 const item = (id, values) => ({ sessionId: id, updatedAt: 1, projections: { kind: 'cached', asOfSeq: 1, values } })
@@ -49,6 +49,18 @@ test('裁剪只保留白名单里的投影', () => {
   assert.deepEqual(Object.keys(slim.projections.values), ['title'])
   assert.equal(slim.projections.kind, 'cached')
   assert.equal(slim.sessionId, 'a')
+})
+
+test('子会话与分支血缘投影保留在列表 block 中', () => {
+  const values = {
+    title: '根',
+    subagentCatalog: { head: [{ childSessionId: 'child' }] },
+    subagentTiming: { child: { startedAt: 1 } },
+    subagent: { mode: 'continuable' },
+    forkLineage: { parentSessionId: 'p' },
+  }
+  const slim = slimItem(item('root', values), KEEP_PROJECTIONS)
+  assert.deepEqual(Object.keys(slim.projections.values).sort(), Object.keys(values).sort())
 })
 
 test('形状不符的条目原样返回', () => {

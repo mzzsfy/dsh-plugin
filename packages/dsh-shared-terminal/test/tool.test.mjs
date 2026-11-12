@@ -308,3 +308,20 @@ test('Given a different Agent, When invoking read, Then its actual Agent identit
     .execute({ action: 'read', terminal_id: 'term-a' }, { agent: otherAgent })
   assert.equal(seen[0][1], otherAgent)
 })
+
+test('Given a subagent session, When invoking any terminal action, Then rejected before owner binding', async () => {
+  for (const header of [
+    { origin: 'subagent', parentSession: 'root', delegationDepth: 1 },
+    { parentSession: 'root', delegationDepth: 1 },
+  ]) {
+    const controller = makeController()
+    const agent = { id: 'child', session: { id: 'child', header } }
+    for (const args of [{ action: 'open' }, { action: 'list' }, { action: 'read', terminal_id: 'term-a' }]) {
+      const result = await makeTool(controller).execute(args, { agent, signal: new AbortController().signal })
+      assert.equal(result.ok, false)
+      assert.equal(result.error.code, 'INVALID_ARGS')
+      assert.match(result.error.message, /仅支持主会话/)
+    }
+    assert.equal(controller.calls.length, 0)
+  }
+})

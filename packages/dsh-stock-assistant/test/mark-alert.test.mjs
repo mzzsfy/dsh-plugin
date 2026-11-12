@@ -115,7 +115,7 @@ test('刷新开关是图标按钮, 形状表示点下去会发生什么', async 
   const running = liveButton(html)
   assert.match(running, /aria-label="暂停自动刷新"/, '正在刷新时给暂停动作')
   assert.match(running, /<rect /, '暂停图标是两条竖条')
-  assert.match(running, /title="行情每 15 秒自动刷新，点击暂停"/, '悬停说明含义与间隔')
+  assert.match(running, /title="行情每 10 秒自动刷新，点击暂停"/, '悬停说明含义与默认间隔')
 
   const { plugin, store } = await loadClient()
   store.set('ssb-floating', JSON.stringify({ ids: [stock.id], open: true, mode: 'list', live: false }))

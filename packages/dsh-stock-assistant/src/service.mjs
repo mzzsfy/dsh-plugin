@@ -49,8 +49,12 @@ export function createWatchlistService(state, resolveSecurity, now = Date.now) {
           if (w.order.length >= 100) fail('LIMIT_REACHED', '最多添加100只自选', 422)
           const security = resolveSecurity(p.securityId)
           if (!security || !securitySchema.safeParse(security).success) fail('CANDIDATE_EXPIRED', '候选已过期，请重新搜索', 409)
-          // 默认按市场分组: 标签由市场元数据生成, 用户可再改可删
-          w.items[p.securityId] = { ...security, alias: '', pinned: false, marks: [], tags: [MARKET_META[security.exchange].tag] }; w.order.push(p.securityId)
+          // 市场分组默认开: 该市场还没有自选时按市场归组; 该市场已无票持市场标签(解散/改名/逐票移除),
+          // 不再把新票塞回去; 手动加回市场标签即恢复
+          const marketTag = MARKET_META[security.exchange].tag
+          const marketPeers = w.order.filter(id => w.items[id].exchange === security.exchange)
+          const keepMarketTag = !marketPeers.length || marketPeers.some(id => w.items[id].tags.includes(marketTag))
+          w.items[p.securityId] = { ...security, alias: '', pinned: false, marks: [], tags: keepMarketTag ? [marketTag] : [] }; w.order.push(p.securityId)
         } else if (operation.action === 'restore') {
           const deleted = control.operations.find(o => o.id === p.removeOperationId && o.action === 'remove')
           const restore = deleted?.result.restore

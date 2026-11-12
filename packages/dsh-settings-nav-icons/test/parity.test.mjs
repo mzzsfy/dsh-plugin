@@ -90,17 +90,24 @@ function defineScenarios(prefix, L) {
   })
 
   test(prefix + '未收录但现役是官方齿轮:从备用池取图标', () => {
-    const cell = makeCell('某新装插件分区', { gear: true })
+    const cell = makeCell('某新装分区', { gear: true })
     const d = decide(cell)
     assert.ok(d, '齿轮兜底应有决策')
-    assert.equal(d.inner, svgInner(FALLBACK[poolIndexOf('某新装插件分区')]))
+    assert.equal(d.inner, svgInner(FALLBACK[poolIndexOf('某新装分区')]))
   })
 
   test(prefix + '非齿轮官方一律不动:映射或声明命中也不例外', () => {
     // 只对官方齿轮做强补;官方原生图标(模型/使用统计)与第三方供给形态不干预
     assert.equal(decide(makeCell('模型', { gear: false })), null, '模型分区自带原生图标')
+    assert.equal(decide(makeCell('Agent 扩展', { gear: false })), null, '分类兜底不得覆盖非齿轮官方图标')
     assert.equal(decide(makeCell('插件市场', { gear: false })), null, '映射命中非齿轮同样不动')
     assert.equal(decide(makeCell('未知官方分区', { gear: false })), null)
+  })
+
+  test(prefix + '第三方 dshmarket 供给优先于分类兜底', () => {
+    const cell = makeCell('Agent 扩展', { gear: 'rc1' })
+    cell.dataset.dshMarketNavIcon = ''
+    assert.equal(decide(cell), null, '外部供给标记存在时不接管,交给 dshmarket 的 mask 图标')
   })
 
   test(prefix + '兜底哈希:固定 label 手算期望值锁定 31 进制累加', () => {
@@ -115,15 +122,15 @@ function defineScenarios(prefix, L) {
   })
 
   test(prefix + 'rc.1 primitives 齿轮 fallback 同样强补(新代齿轮识别)', () => {
-    const cell = makeCell('某新装插件分区', { gear: 'rc1' })
+    const cell = makeCell('某新装分区', { gear: 'rc1' })
     const d = decide(cell)
     assert.ok(d, '新代齿轮兜底应有决策')
-    assert.equal(d.inner, svgInner(FALLBACK[poolIndexOf('某新装插件分区')]))
+    assert.equal(d.inner, svgInner(FALLBACK[poolIndexOf('某新装分区')]))
   })
 
   test(prefix + '已改写形态(svg 记账等于 label)返回 null', () => {
     assert.equal(decide(makeCell('认证', { marked: true })), null)
-    assert.equal(decide(makeCell('某新装插件分区', { marked: true })), null, '兜底分区同样幂等')
+    assert.equal(decide(makeCell('某新装分区', { marked: true })), null, '兜底分区同样幂等')
   })
 
   test(prefix + 'svg 记账变化时按新 label 重写(语言切换)', () => {
@@ -295,6 +302,11 @@ function defineScenarios(prefix, L) {
     // 顺序即优先级,具体语义在前:双规则同打名取靠前者
     assert.equal(themedIcon('search-bot'), themedIcon('search'), 'search 先于 bot')
     assert.equal(themedIcon('git-notify'), themedIcon('git'), 'git 先于 notify')
+    // 大分类兜底:扩展类优先于 Agent 类,IM 类保持机器人;不再落随机网格
+    assert.equal(themedIcon('Agent 扩展'), GLYPHS.cube, '扩展大类优先取魔方')
+    assert.equal(themedIcon('Agent 管理'), GLYPHS.spark, 'Agent 大类取星芒')
+    assert.equal(themedIcon('IM 机器人'), GLYPHS.bot, 'IM 大类取机器人')
+    assert.equal(themedIcon('扩展工具'), GLYPHS.cube, '中文扩展关键词命中')
     // 余额语义:wallet 系关键词命中钱包图,plan 系关键词仍命中时钟
     assert.equal(themedIcon('account-balance'), GLYPHS.wallet, 'balance 命中钱包')
     assert.equal(themedIcon('my-wallet-tool'), GLYPHS.wallet, 'wallet 命中钱包')
@@ -411,7 +423,7 @@ test('两份实现 ICONS/GLYPHS/FALLBACK 全量同源', () => {
   assert.deepEqual(logic.ICONS, client.ICONS)
   assert.deepEqual(logic.GLYPHS, client.GLYPHS)
   assert.deepEqual(logic.FALLBACK, client.FALLBACK)
-  assert.equal(logic.poolIndexOf('某新装插件分区'), client.poolIndexOf('某新装插件分区'))
+  assert.equal(logic.poolIndexOf('某新装分区'), client.poolIndexOf('某新装分区'))
 })
 
 test('两份实现 NAME_RULES 全量同源(含标志位)', () => {
@@ -426,7 +438,7 @@ test('两份实现 NAME_RULES 全量同源(含标志位)', () => {
 test('README 契约数量锁定', () => {
   // README 声明的内置表规模,扩表须同步改 README
   assert.equal(Object.keys(logic.GLYPHS).length, 30)
-  assert.equal(logic.NAME_RULES.length, 21)
+  assert.equal(logic.NAME_RULES.length, 23)
 })
 
 test('LOGIC 段与 logic.mjs 决策函数逐函数源码一致(归一化注释与空白)', () => {

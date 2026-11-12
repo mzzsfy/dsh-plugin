@@ -11,11 +11,23 @@ export const MARKET_META = {
   XKRX: { currency: 'KRW', timezone: 'Asia/Seoul', priceScale: 0, codePattern: /^\d{6}$/, verifiedByDefault: true, sessions: [['09:00', '15:30']], tag: '韩国' },
   XLON: { currency: 'GBP', timezone: 'Europe/London', priceScale: 2, codePattern: /^[A-Z0-9.]{1,10}$/, verifiedByDefault: true, sessions: [['08:00', '16:30']], tag: '英国' },
 }
+// 交易时段判定按市场时区复用格式化器:逐笔报价判定时新建 formatter 主导成本
+const SESSION_FORMATTERS = new Map()
+
+function sessionFormatter(timeZone) {
+  let formatter = SESSION_FORMATTERS.get(timeZone)
+  if (formatter === undefined) {
+    formatter = new Intl.DateTimeFormat('en-US', { timeZone, hour12: false, weekday: 'short', hour: '2-digit', minute: '2-digit' })
+    SESSION_FORMATTERS.set(timeZone, formatter)
+  }
+  return formatter
+}
+
 // 报价此刻落在市场交易日的哪个阶段; 周末恒为休市, 节假日不做推断(没有日历能力时会误判)
 export function sessionStateOf(exchange, nowMs) {
   const meta = MARKET_META[exchange]
   if (!meta?.sessions?.length) return 'unknown'
-  const parts = new Intl.DateTimeFormat('en-US', { timeZone: meta.timezone, hour12: false, weekday: 'short', hour: '2-digit', minute: '2-digit' }).formatToParts(new Date(nowMs))
+  const parts = sessionFormatter(meta.timezone).formatToParts(new Date(nowMs))
   const pick = type => parts.find(part => part.type === type)?.value
   if (pick('weekday') === 'Sat' || pick('weekday') === 'Sun') return 'closed'
   const minutes = (Number(pick('hour')) % 24) * 60 + Number(pick('minute'))

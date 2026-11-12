@@ -21,8 +21,10 @@ const MODEL_UNSUPPORTED_MESSAGE = '宿主会话服务不支持指定模型,任�
 // 宿主仅在入口读一次不保留,共享单例安全,宿主将来收紧为非可选链亦无需再改
 const ADMISSION_SIGNAL = new AbortController().signal
 
-// 同一宿主控制器的热重载实例共用短准入闸门,不延伸到会话运行生命周期。
-const admissions = globalThis[Symbol.for('@mzzsfy/dsh-cron-board/session-admissions')] ??= new WeakMap()
+// 短准入闸门(投递期互斥,不延伸到会话运行生命周期):键是任务/固定会话标识字符串,
+// 存进程级集合,故跨热重载实例共享;不按控制器对象身份记——ctx.get 每次返回新的
+// traceable 代理,按对象做键会让两个实例各自成键、互斥形同虚设。
+const admissions = globalThis[Symbol.for('@mzzsfy/dsh-cron-board/session-admission-keys')] ??= new Set()
 
 // pinned 自愈三态:未绑定过(首跑)/已绑定但会话丢失;两者都回写新绑定,仅文案不同
 function recreatedMessage(recreated) {
@@ -71,11 +73,11 @@ function catalogSelection(raw, modelCatalog) {
 
 // 任务显式指定模型时的能力与目录校验(建会话前,失败不留残缺会话);
 // 目录是运行时事实,未列出即不可用(不猜宿主解析行为),failures 携带宿主原始原因。
-// 能力面稳定性:sessionController.agents 在宿主类型为 private(0.2.x 实现细节非服务契约),
-// modelCatalog 为公开面;私有面重构时此处在 typeof 门控下干净退化为「不支持指定模型」,
-// 不崩溃不误投递——依赖等级即「探测可用则用,不可用即拒」,不随宿主内部形态漂移产生部分生效
+// 能力面稳定性:modelCatalog 与 selectModel 都是宿主公开服务面(dsh-api-session-controller
+// 的 SessionController 方法);缺任一项即在 typeof 门控下干净退化为「不支持指定模型」,
+// 不崩溃不误投递
 async function validateModelSelection(sessionController, raw) {
-  if (typeof sessionController.modelCatalog !== 'function' || !sessionController.agents || typeof sessionController.agents.selectForNextRequest !== 'function' || typeof sessionController.agents.resolveAgent !== 'function') {
+  if (typeof sessionController.modelCatalog !== 'function' || typeof sessionController.selectModel !== 'function') {
     return { fail: MODEL_UNSUPPORTED_MESSAGE }
   }
   let modelCatalog
@@ -89,21 +91,34 @@ async function validateModelSelection(sessionController, raw) {
   return { selection: checked.selection }
 }
 
-export function createSessionDriver({ getSessionController, getWorkspaceRegistry, agents, sessionQuery }) {
+export function createSessionDriver({ getSessionController, getWorkspaceRegistry, agents, sessionQuery, reportSessionMissing }) {
   // pinned 会话存在性:持久层 headers 比对(冷会话不在 agents 注册表);
   // 记录形态为官方 SessionRecord(dsh-session-query),id 在 header.id
-  async function pinnedExists(sessionId) {
-    if (!sessionQuery || typeof sessionQuery.listSessions !== 'function') return Boolean(agents.get(sessionId))
+  async function pinnedRecord(sessionId) {
+    if (!sessionQuery || typeof sessionQuery.listSessions !== 'function') {
+      const entry = agents.get(sessionId)
+      return entry ? { header: entry.session?.header } : undefined
+    }
     const records = await sessionQuery.listSessions(ADMISSION_SIGNAL)
-    return records.some((record) => record && record.header && record.header.id === sessionId)
+    return records.find((record) => record && record.header && record.header.id === sessionId)
   }
 
-  // pinned 可用性:已删除(不在持久层)或已归档(从所有分组视图隐藏)均视为丢失,触发重建
+  // 子 agent 会话与主会话共用持久层,但通用会话面不接受子会话投递:
+  // pinned 指向它们时按丢失处理(origin 权威;旧记录按 parentSession + delegationDepth)
+  function isDerivedHeader(header) {
+    if (!header) return false
+    if (header.origin === 'subagent') return true
+    return header.parentSession !== undefined && (header.delegationDepth ?? 0) >= 1
+  }
+
+  // pinned 可用性:已删除(不在持久层)、已归档(从所有分组视图隐藏)或子 agent 会话
+  // 均视为丢失,触发重建
   async function pinnedUsable(sessionId) {
     const registry = getWorkspaceRegistry ? getWorkspaceRegistry() : undefined
     const archivedIds = registry?.archivedSessionIds
     if (Array.isArray(archivedIds) && archivedIds.includes(sessionId)) return false
-    return pinnedExists(sessionId)
+    const record = await pinnedRecord(sessionId)
+    return record !== undefined && !isDerivedHeader(record.header)
   }
 
   // 建会话请求:分组按 workdir 挂载(dsh-im 同构);执行预设非空才带字段,
@@ -125,16 +140,18 @@ export function createSessionDriver({ getSessionController, getWorkspaceRegistry
   async function run(input) {
     // 控制器运行时动态解析,同任务及同 pinned 会话均先占位再进行异步准入。
     const sessionController = getSessionController ? getSessionController() : undefined
-    if (!sessionController) return { status: 'fail', message: '会话服务不可用' }
+    if (!sessionController) {
+      // 定时触发落到无服务宿主时补一次系统告警(手动运行同源,不重复实现)
+      if (typeof reportSessionMissing === 'function') reportSessionMissing()
+      return { status: 'fail', message: '会话服务不可用' }
+    }
     const { job } = input
     if (job.session?.mode !== 'pinned') return runAdmitted(input, sessionController)
-    const locks = admissions.get(sessionController) ?? new Set()
-    admissions.set(sessionController, locks)
     const keys = ['job:' + job.id, ...(job.session.pinnedSessionId ? ['session:' + job.session.pinnedSessionId] : [])]
-    if (keys.some((key) => locks.has(key))) return { status: 'skipped', message: BUSY_MESSAGE }
-    for (const key of keys) locks.add(key)
+    if (keys.some((key) => admissions.has(key))) return { status: 'skipped', message: BUSY_MESSAGE }
+    for (const key of keys) admissions.add(key)
     try { return await runAdmitted(input, sessionController) }
-    finally { for (const key of keys) locks.delete(key) }
+    finally { for (const key of keys) admissions.delete(key) }
   }
 
   async function runAdmitted({ job, env, mask, updateRecord, updateBinding }, sessionController) {
@@ -144,15 +161,17 @@ export function createSessionDriver({ getSessionController, getWorkspaceRegistry
     let recreated = false
 
     if (isPinned) {
-      // pinned 串行:上轮未完成直接跳过(不排队,agents 实时状态判定)
-      const entry = agents ? agents.get(sessionId) : undefined
-      if (entry && entry.status === 'running') {
-        return { status: 'skipped', message: BUSY_MESSAGE }
-      }
+      // pinned 串行:上轮未完成直接跳过(不排队,agents 实时状态判定);
+      // 丢失/子会话判定先行,避免不可投递的会话被 running 态永久 skipped
       if (!sessionId) {
         recreated = 'unbound'
       } else if (!(await pinnedUsable(sessionId))) {
         recreated = 'lost'
+      } else {
+        const entry = agents ? agents.get(sessionId) : undefined
+        if (entry && entry.status === 'running') {
+          return { status: 'skipped', message: BUSY_MESSAGE }
+        }
       }
     }
 
@@ -170,19 +189,13 @@ export function createSessionDriver({ getSessionController, getWorkspaceRegistry
       sessionId = created.sessionId
     }
 
-    // 会话内安装(纯会话面,无宿主全局副作用):宿主 resolveAgent 返回 {agent}/{error} 包装
-    // (ApiSessionAgentController 契约),fresh 复用与 pinned 冷会话都经它解包;
-    // 解析失败(会话被写句柄占用等)在投递前 fail 并透传宿主原因
+    // 会话内安装(纯会话面,无宿主全局副作用):宿主 selectModel 自行 resume 并装会话级
+    // selection,fresh 复用与 pinned 冷会话同一条路径;安装失败在投递前 fail 并透传宿主原因
     if (model) {
-      const found = await sessionController.agents.resolveAgent(sessionId)
-      if (!found || found.error || !found.agent) {
-        const detail = found && found.error && found.error.message ? found.error.message : 'agent 未就绪'
-        return { status: 'fail', message: MODEL_UNAVAILABLE_PREFIX + ':会话不可用(' + detail + ')', sessionId }
-      }
       try {
-        sessionController.agents.selectForNextRequest(found.agent, session.model)
+        await sessionController.selectModel({ sessionId, ...session.model })
       } catch (error) {
-        // 宿主安装面异常(modelSelection 投影未注册等)在投递前收敛为可读 fail,不落原始异常串
+        // 宿主安装面异常(会话被写句柄占用、投影未注册等)在投递前收敛为可读 fail
         return { status: 'fail', message: MODEL_UNAVAILABLE_PREFIX + ':模型安装失败(' + String(error && error.message || error) + ')', sessionId }
       }
     }

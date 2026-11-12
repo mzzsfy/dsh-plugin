@@ -2,6 +2,8 @@
 // 方法/跨源守卫 + 业务异常归一 400)。webServer 缺席(headless)时跳过,不影响
 // shell 能力本体。faces 由执行器注入,路由层无自有状态。
 
+import { withHostGate } from './route-gate.mjs'
+
 // 路由前缀
 const API_ROOT = '/api/shell-select'
 
@@ -110,6 +112,6 @@ export function mountRoutes(ctx, faces) {
     },
   ]
   for (const item of routes) {
-    ctx.effect(() => webServer.register({ kind: 'exact', path: item.path, handler: item.handler }), `shell-select ${item.path}`)
+    ctx.effect(() => webServer.register({ kind: 'exact', path: item.path, handler: withHostGate(ctx, item.handler) }), `shell-select ${item.path}`)
   }
 }

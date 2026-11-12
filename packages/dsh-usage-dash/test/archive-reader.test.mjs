@@ -1,6 +1,6 @@
 // archive-reader 行为测试:宿主 sessionPersistence API 多版本适配层的
 // 工厂分派与各代映射。宿主 API 形状以各代真实签名为蓝本,collector 只见
-// 内部统一契约(list → [{id}],readLog → {inheritedEventCount, events})。
+// 内部统一契约(list → [{id, derived?}],readLog → {inheritedEventCount, events, derived})。
 // 分页读、close 吞错、畸形行丢弃对齐竞品 0.1.12 双路径语义;
 // V3 日志兼容由 collector 测试的专有事件忽略用例钉住。
 
@@ -38,7 +38,7 @@ test('工厂:两代形状都不匹配分派到 unknown 恒抛适配器', async (
   await assert.rejects(reader.readLog('s1'), /sessionPersistence/)
 })
 
-test('handle 代:list 归一 snapshot 为 {id},signal 包裹透传,畸形行丢弃', () => {
+test('handle 代:list 归一 snapshot 为 {id,derived},signal 包裹透传,畸形行丢弃', () => {
   return withDirectRoot(async () => {
     const seen = []
     const persistence = {
@@ -46,7 +46,7 @@ test('handle 代:list 归一 snapshot 为 {id},signal 包裹透传,畸形行丢�
         seen.push(options)
         return [
           { header: { id: 'a' }, revision: 'r1', sizeBytes: 10 },
-          { header: { id: 'b' }, revision: 'r2' },
+          { header: { id: 'child', origin: 'subagent', delegationDepth: 1 }, revision: 'r2' },
           { revision: 'no-header' },
           null,
           { header: { id: '' } },
@@ -58,9 +58,30 @@ test('handle 代:list 归一 snapshot 为 {id},signal 包裹透传,畸形行丢�
     }
     const signal = new AbortController().signal
     const reader = createArchiveReader(persistence)
-    assert.deepEqual(await reader.list(signal), [{ id: 'a' }, { id: 'b' }])
+    assert.deepEqual(await reader.list(signal), [
+      { id: 'a', derived: false },
+      { id: 'child', derived: true },
+    ])
     assert.deepEqual(seen, [{ signal }])
   })
+})
+
+test('handle 代:readLog 透出 header 派生标记', async () => {
+  const persistence = {
+    async open(id) {
+      return {
+        header: { id, origin: 'subagent', delegationDepth: 1 },
+        inheritedEventCount: 0,
+        async read() {
+          return { eventState: 'detached', events: [] }
+        },
+        async close() {},
+      }
+    },
+  }
+  const reader = createArchiveReader(persistence)
+  const result = await reader.readLog('s1')
+  assert.equal(result.derived, true)
 })
 
 test('handle 代:readLog 分页循环直到空页,handle 元数据透出', async () => {
@@ -177,7 +198,7 @@ test('handle 代:read 成功后 close 失败被吞掉,读取结果照常返回',
   const reader = createArchiveReader(persistence)
   const result = await reader.readLog('s1')
   assert.equal(closed, 1)
-  assert.deepEqual(result, { inheritedEventCount: 0, events })
+  assert.deepEqual(result, { inheritedEventCount: 0, events, derived: false })
 })
 
 test('handle 代:abort 中断分页循环,当前页已读数据保留', async () => {
@@ -212,13 +233,19 @@ test('handle 代:open 抛错直接传播,不触发 close', async () => {
   await assert.rejects(reader.readLog('s1'), (error) => error === failure)
 })
 
-test('inspect 代:list 归一 header 数组为 {id},signal 直传,畸形行丢弃', () => {
+test('inspect 代:list 归一 header 数组为 {id,derived},signal 直传,畸形行丢弃', () => {
   return withDirectRoot(async () => {
     const seen = []
     const persistence = {
       async list(arg) {
         seen.push(arg)
-        return [{ id: 'a', createdAt: 1 }, { id: 'b', createdAt: 2 }, null, {}]
+        return [
+          { id: 'a', createdAt: 1 },
+          { id: 'child', parentSession: 'a', delegationDepth: 0 },
+          { id: 'grandchild', parentSession: 'child', delegationDepth: 1 },
+          null,
+          {},
+        ]
       },
       async inspect() {
         throw new Error('not reached')
@@ -226,25 +253,29 @@ test('inspect 代:list 归一 header 数组为 {id},signal 直传,畸形行丢�
     }
     const signal = new AbortController().signal
     const reader = createArchiveReader(persistence)
-    assert.deepEqual(await reader.list(signal), [{ id: 'a' }, { id: 'b' }])
+    assert.deepEqual(await reader.list(signal), [
+      { id: 'a', derived: false },
+      { id: 'child', derived: false },
+      { id: 'grandchild', derived: true },
+    ])
     assert.deepEqual(seen, [signal])
   })
 })
 
-test('inspect 代:readLog 经 inspect 整读,signal 直传', async () => {
+test('inspect 代:readLog 经 inspect 整读,signal 直传,meta 透出派生标记', async () => {
   const seen = []
   const events = [ev(0)]
   const signal = new AbortController().signal
   const persistence = {
     async inspect(id, arg) {
       seen.push([id, arg])
-      return { meta: { id }, inheritedEventCount: 2, events }
+      return { meta: { id, origin: 'subagent' }, inheritedEventCount: 2, events }
     },
   }
   const reader = createArchiveReader(persistence)
   assert.deepEqual(
     await reader.readLog('s1', signal),
-    { inheritedEventCount: 2, events },
+    { inheritedEventCount: 2, events, derived: true },
   )
   assert.deepEqual(seen, [['s1', signal]])
 })
@@ -259,9 +290,9 @@ function withDirectRoot(run) {
   })
 }
 
-function seedArtifact(root, id, events) {
+function seedArtifact(root, id, events, header = {}) {
   const text = [
-    JSON.stringify({ type: 'session/header', id }),
+    JSON.stringify({ type: 'session/header', id, ...header }),
     ...events.map((event) => JSON.stringify(event)),
   ].join('\n')
   const dir = join(root, 'sessions', 'bucket-x', id)
@@ -287,6 +318,21 @@ test('handle 代:宿主拒读(descriptor)降级文件直读', () => {
     const result = await reader.readLog('refused')
     assert.equal(result.inheritedEventCount, 0)
     assert.equal(result.events.length, 2)
+    assert.equal(result.derived, false)
+  })
+})
+
+test('handle 代:降级直读时 header 的 origin 参与派生判定', () => {
+  return withDirectRoot(async (root) => {
+    seedArtifact(root, 'child-refused', [ev(0)], { origin: 'subagent', delegationDepth: 1 })
+    const persistence = {
+      async open() {
+        throw new Error('session "child-refused" header uses unsupported descriptor version 2')
+      },
+    }
+    const reader = createArchiveReader(persistence)
+    const result = await reader.readLog('child-refused')
+    assert.equal(result.derived, true)
   })
 })
 

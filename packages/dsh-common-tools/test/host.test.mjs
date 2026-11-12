@@ -2,12 +2,13 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { setupCommonTools, __test } from '../src/host.js'
 
-function context(name = '@mzzsfy/a') {
+function context(name = '@mzzsfy/a', connection = undefined) {
   const cleanups = [], upgrades = new Map()
   return {
     fiber: { entry: { options: { name } } },
     webServer: { registerUpgrade(route) { assert.equal(upgrades.has(route.path), false); upgrades.set(route.path, route); return () => upgrades.delete(route.path) } },
     upgrades,
+    get(service) { return service === 'connection' ? connection : undefined },
     effect(fn) { cleanups.push(fn()) },
     dispose() { while (cleanups.length) cleanups.pop()() },
   }
@@ -16,7 +17,7 @@ function isolate(t) {
   delete globalThis.__dshCommonTools
   const contexts = []
   t.after(() => { for (const ctx of contexts) ctx.dispose(); delete globalThis.__dshCommonTools })
-  return name => { const ctx = context(name); contexts.push(ctx); return ctx }
+  return (name, connection) => { const ctx = context(name, connection); contexts.push(ctx); return ctx }
 }
 
 test('Given 同插件多实例 When 一个卸载 Then 另一实例仍可发布且最后卸载清路由', t => {
@@ -85,4 +86,43 @@ test('Given 缺失身份或非法listener When setup或订阅 Then 明确拒绝'
   assert.throws(() => setupCommonTools({}), /entry.options.name/)
   assert.throws(() => tools.subscribe(null), /listener/)
   assert.throws(() => tools.onPresence(null), /listener/)
+})
+
+function fakeSocket() {
+  const socket = { written: '', destroyed: false, write(text) { socket.written += text }, destroy() { socket.destroyed = true } }
+  return socket
+}
+
+test('Given 宿主拒绝升级 When 连总线 Then 直接断开不建连', t => {
+  const ctx = isolate(t)
+  const host = ctx('@mzzsfy/a', { requestRejection: () => 401 })
+  setupCommonTools(host)
+  const route = [...host.upgrades.values()].find((item) => item.path === '/api/bus/ws')
+  const socket = fakeSocket()
+  route.handler({ headers: {} }, socket, {})
+  assert.equal(socket.destroyed, true)
+  assert.match(socket.written, /^HTTP\/1\.1 401/)
+})
+
+test('Given 闸门抛错 When 连总线 Then 按拒绝处理', t => {
+  const ctx = isolate(t)
+  const host = ctx('@mzzsfy/a', { requestRejection: () => { throw new Error('boom') } })
+  setupCommonTools(host)
+  const route = [...host.upgrades.values()].find((item) => item.path === '/api/bus/ws')
+  const socket = fakeSocket()
+  route.handler({ headers: {} }, socket, {})
+  assert.equal(socket.destroyed, true)
+  assert.match(socket.written, /^HTTP\/1\.1 403/)
+})
+
+test('Given 宿主放行 When 连总线 Then 交给 websocket 升级而不断开', t => {
+  const ctx = isolate(t)
+  const host = ctx('@mzzsfy/a', { requestRejection: () => undefined })
+  setupCommonTools(host)
+  const route = [...host.upgrades.values()].find((item) => item.path === '/api/bus/ws')
+  const socket = fakeSocket()
+  // 非真实 socket:ws 在升级握手处抛错,只要没被闸门提前 destroy 即算放行
+  try { route.handler({ headers: {} }, socket, {}) } catch { /* 交给 ws 后必然失败 */ }
+  assert.equal(socket.destroyed, false)
+  assert.equal(socket.written, '')
 })

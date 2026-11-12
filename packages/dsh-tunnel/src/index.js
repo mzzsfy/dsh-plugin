@@ -17,6 +17,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import { setupCommonTools, createChangeNotifier } from '@mzzsfy/dsh-common-tools/host'
 import { createApi, MESSAGES, ROUTE_PREFIX as API_PREFIX } from './api.mjs'
+import { withHostGate } from './route-gate.mjs'
 
 export const name = 'dsh-tunnel'
 
@@ -651,7 +652,8 @@ export function apply(ctx, config) {
     const disposeApiRoute = webServer.register({
       kind: 'prefix',
       path: API_PREFIX,
-      handler: async (req, res) => {
+      // 管理面回问宿主闸门;转发面(/p/*)服务别的应用,不能拦
+      handler: withHostGate(ctx, async (req, res) => {
         try {
           await restApi.handle(req, res)
         } catch (error) {
@@ -659,7 +661,7 @@ export function apply(ctx, config) {
           res.end(JSON.stringify({ error: MESSAGES.systemError }))
           console.warn(`${WARN_TAG}${String(error && error.stack || error)}`)
         }
-      },
+      }),
     })
     return disposeApiRoute
   }, 'dsh-tunnel api')

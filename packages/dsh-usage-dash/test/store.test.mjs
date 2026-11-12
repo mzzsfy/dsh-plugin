@@ -40,37 +40,41 @@ function rowOf(bucket, provider, model) {
 // 内存假域:表与 global 方法面同构;failUpdate 返回错误时 update 抛出该错误
 function fakeDomain({ failUpdate = () => null } = {}) {
   const rows = new Map()
-  const stats = { puts: 0, globalSets: 0 }
+  const sessionRows = new Map()
+  const stats = { puts: 0, sessionPuts: 0, globalSets: 0 }
   let globalValue = { backfilledSessions: [], liveFirstSeq: {} }
-  const table = {
-    get: (key) => rows.get(key),
-    keys: () => rows.keys(),
-    entries: () => rows.entries(),
+  const makeTable = (store, name, countPut) => ({
+    get: (key) => store.get(key),
+    keys: () => store.keys(),
+    entries: () => store.entries(),
     get size() {
-      return rows.size
+      return store.size
     },
     async put(key, value) {
-      stats.puts += 1
-      rows.set(key, value)
+      countPut()
+      store.set(key, value)
     },
     async delete(key) {
-      return rows.delete(key)
+      return store.delete(key)
     },
     async update(key, fn) {
       const failure = failUpdate(key)
       if (failure) throw failure
-      const current = rows.get(key)
+      const current = store.get(key)
       if (current === undefined) {
         // 与宿主 storage-domain 缺键报错同形,匹配 /no record .* to update/
-        throw new Error(`domain 'usage_stats' table 'buckets' has no record '${key}' to update`)
+        throw new Error(`domain 'usage_stats' table '${name}' has no record '${key}' to update`)
       }
-      rows.set(key, fn(current))
+      store.set(key, fn(current))
     },
-  }
+  })
+  const bucketsTable = makeTable(rows, 'buckets', () => { stats.puts += 1 })
+  const sessionsTable = makeTable(sessionRows, 'sessions', () => { stats.sessionPuts += 1 })
   return {
     rows,
+    sessionRows,
     stats,
-    table: () => table,
+    table: (name) => (name === 'sessions' ? sessionsTable : bucketsTable),
     global: {
       get: () => globalValue,
       set: async (value) => {
@@ -759,4 +763,136 @@ test('F14: 超出档留存期的样本不入 pending 不落盘,回扫同通道�
   const offStore = new UsageStore(facilityOf(fakeDomain()), { now: () => local(2026, 8, 2, 14, 38), retentionDays: () => 0 })
   await offStore.record(tokenSample(local(2026, 8, 2, 14, 37)))
   assert.equal(offStore.pending.size, 2, '关闭分钟档后仅日/小时两行入队')
+})
+
+// ── 会话索引:真实会话按天/小时去重落表,供汇总卡「会话数量」聚合 ─────────────
+test('recordSession:同一会话落天/小时两行,重复记录幂等', async () => {
+  const domain = fakeDomain()
+  const store = makeStore(domain)
+  const time = local(2026, 8, 2, 14, 37)
+  await store.recordSession('sid-a', time)
+  await store.recordSession('sid-a', time + 60_000)
+  await store.flushNow()
+  assert.deepEqual(domain.sessionRows.get('D|2026-08-02'), { bucket: '2026-08-02', sessions: ['sid-a'] })
+  assert.deepEqual(domain.sessionRows.get('H|2026-08-02T14'), { bucket: '2026-08-02T14', sessions: ['sid-a'] })
+})
+
+test('recordSession:同一 (会话,桶) 只入队一次,不重复写', async () => {
+  const domain = fakeDomain()
+  const store = makeStore(domain)
+  const time = local(2026, 8, 2, 14, 37)
+  await store.recordSession('sid-a', time)
+  await store.recordSession('sid-a', time + 1)
+  assert.equal(store.sessionPending.size, 2, '天/小时各一行 pending')
+  await store.flushNow()
+  assert.equal(domain.stats.sessionPuts, 2, '两行各一次 put')
+  await store.recordSession('sid-a', time + 2)
+  assert.equal(store.sessionPending.size, 0, '同桶重复记录被去重')
+})
+
+test('recordSession:多小时活动累加到对应小时行,天行合并同会话', async () => {
+  const domain = fakeDomain()
+  const store = makeStore(domain)
+  await store.recordSession('sid-a', local(2026, 8, 2, 14, 1))
+  await store.recordSession('sid-a', local(2026, 8, 2, 15, 1))
+  await store.recordSession('sid-b', local(2026, 8, 2, 15, 2))
+  await store.flushNow()
+  assert.deepEqual(domain.sessionRows.get('D|2026-08-02').sessions, ['sid-a', 'sid-b'])
+  assert.deepEqual(domain.sessionRows.get('H|2026-08-02T14').sessions, ['sid-a'])
+  assert.deepEqual(domain.sessionRows.get('H|2026-08-02T15').sessions, ['sid-a', 'sid-b'])
+})
+
+test('recordSession:小时桶超保留期只落天行', async () => {
+  const domain = fakeDomain()
+  const store = makeStore(domain)
+  await store.recordSession('sid-old', local(2026, 7, 1, 10, 0))
+  await store.flushNow()
+  assert.deepEqual([...domain.sessionRows.keys()], ['D|2026-07-01'])
+})
+
+test('recordSession:空 id 或非法时间不入队', async () => {
+  const domain = fakeDomain()
+  const store = makeStore(domain)
+  await store.recordSession('', local(2026, 8, 2, 14, 0))
+  await store.recordSession('sid-a', Number.NaN)
+  assert.equal(store.sessionPending.size, 0)
+})
+
+test('sessionRangeRows:按粒度前缀与闭区间过滤窗口', async () => {
+  const domain = fakeDomain()
+  const store = makeStore(domain)
+  await store.recordSession('sid-a', local(2026, 8, 2, 14, 0))
+  await store.recordSession('sid-b', local(2026, 8, 3, 9, 0))
+  await store.flushNow()
+  const days = await store.sessionRangeRows('D', '2026-08-02', '2026-08-02')
+  assert.deepEqual(days.map((row) => row.bucket), ['2026-08-02'])
+  const hours = await store.sessionRangeRows('H', '2026-08-02T00', '2026-08-02T23')
+  assert.deepEqual(hours.map((row) => row.bucket), ['2026-08-02T14'])
+})
+
+test('会话索引 flush 失败行重排,下轮写入成功', async () => {
+  let fail = true
+  const domain = fakeDomain({ failUpdate: (key) => (fail && key === 'D|2026-08-02' ? new Error('boom') : null) })
+  const store = makeStore(domain)
+  const failures = []
+  store.onFlushError = (error) => failures.push(error)
+  await store.recordSession('sid-a', local(2026, 8, 2, 14, 0))
+  await store.flushNow()
+  assert.equal(failures.length, 1)
+  assert.equal(domain.sessionRows.has('D|2026-08-02'), false)
+  fail = false
+  await store.flushNow()
+  assert.deepEqual(domain.sessionRows.get('D|2026-08-02'), { bucket: '2026-08-02', sessions: ['sid-a'] })
+})
+
+test('pruneHours 清理过期小时会话行,天行保留', async () => {
+  const domain = fakeDomain()
+  let now = local(2026, 8, 10, 0, 0)
+  const store = new UsageStore(facilityOf(domain), { now: () => now })
+  await store.recordSession('sid-a', local(2026, 8, 2, 14, 0))
+  await store.flushNow()
+  assert.ok(domain.sessionRows.has('H|2026-08-02T14'))
+  now = local(2026, 8, 20, 0, 0)
+  await store.pruneHours()
+  assert.equal(domain.sessionRows.has('H|2026-08-02T14'), false)
+  assert.ok(domain.sessionRows.has('D|2026-08-02'))
+})
+
+test('reset 清空会话索引与去重内存', async () => {
+  const domain = fakeDomain()
+  const store = makeStore(domain)
+  await store.recordSession('sid-a', local(2026, 8, 2, 14, 0))
+  await store.flushNow()
+  await store.reset(new Map())
+  assert.equal(domain.sessionRows.size, 0)
+  await store.recordSession('sid-a', local(2026, 8, 2, 14, 5))
+  await store.flushNow()
+  assert.deepEqual(domain.sessionRows.get('D|2026-08-02').sessions, ['sid-a'])
+})
+
+test('reset 前快照包含会话索引,restore 一并回退', async () => {
+  const domain = fakeDomain()
+  const backup = fakeDomain()
+  const store = new UsageStore(facilityOf(domain, backup), { now: () => FIXED_NOW })
+  await store.recordSession('sid-a', local(2026, 8, 2, 14, 0))
+  await store.flushNow()
+  await store.reset()
+  assert.equal(domain.sessionRows.size, 0)
+  await store.restoreFromBackup()
+  assert.deepEqual(domain.sessionRows.get('D|2026-08-02').sessions, ['sid-a'])
+})
+
+test('hasSessionRows/hasBucketRows 反映两表现状', async () => {
+  const domain = fakeDomain()
+  const store = makeStore(domain)
+  await store.readyPromise()
+  assert.equal(store.hasSessionRows(), false)
+  assert.equal(store.hasBucketRows(), false)
+  await store.record(tokenSample(local(2026, 8, 2, 14, 0)))
+  await store.flushNow()
+  assert.equal(store.hasBucketRows(), true)
+  assert.equal(store.hasSessionRows(), false)
+  await store.recordSession('sid-a', local(2026, 8, 2, 14, 0))
+  await store.flushNow()
+  assert.equal(store.hasSessionRows(), true)
 })

@@ -595,6 +595,77 @@ window.__ModuleLoader__.load({
     function Toggle({ label, checked, onChange, disabled = false }) {
       return h('label', { className: 'ssb-switch' }, h('input', { type: 'checkbox', checked, disabled, onChange: e => onChange(e.target.checked) }), h('span', { className: 'ssb-switch__track' }, h('span', { className: 'ssb-switch__thumb' })), h('span', null, label))
     }
+    // 自绘下拉: 原生 select 的菜单不进 DOM, 自动化点不到也断言不了; 换成 listbox 后「打开→选择」全链路可测
+    const DROPDOWN = { itemHeight: 28, padding: 8, gap: 4, maxHeight: 240, edge: 8 }
+    // 菜单定位: 下方空间不够且上方更宽裕时向上弹, 左右夹在视口内; 高度取可用方向的空间
+    function dropdownPlacement(rect, viewport, count) {
+      const height = Math.min(count * DROPDOWN.itemHeight + DROPDOWN.padding, DROPDOWN.maxHeight)
+      const below = viewport.height - rect.bottom - DROPDOWN.gap - DROPDOWN.edge
+      const above = rect.top - DROPDOWN.gap - DROPDOWN.edge
+      const up = below < height && above > below
+      const maxHeight = Math.max(DROPDOWN.itemHeight, Math.min(height, Math.floor(up ? above : below)))
+      const left = Math.max(DROPDOWN.edge, Math.min(rect.left, viewport.width - rect.width - DROPDOWN.edge))
+      return { left, top: up ? Math.max(DROPDOWN.edge, rect.top - DROPDOWN.gap - maxHeight) : rect.bottom + DROPDOWN.gap, minWidth: rect.width, maxHeight }
+    }
+    function Select({ value, options, onChange, disabled = false, label }) {
+      const [open, setOpen] = React.useState(false), [active, setActive] = React.useState(0), [place, setPlace] = React.useState(null)
+      const rootRef = React.useRef(null), triggerRef = React.useRef(null), menuId = React.useId()
+      const selectedAt = Math.max(0, options.findIndex(option => option.value === value))
+      const current = options[selectedAt]
+      const close = React.useCallback(() => setOpen(false), [])
+      // 打开时才量坐标: 设置页有折叠区, 渲染期算出的位置会过期
+      const openMenu = React.useCallback(() => {
+        if (disabled || !triggerRef.current) return
+        setPlace(dropdownPlacement(triggerRef.current.getBoundingClientRect(), { width: innerWidth, height: innerHeight }, options.length))
+        setActive(selectedAt); setOpen(true)
+      }, [disabled, options.length, selectedAt])
+      React.useEffect(() => {
+        if (!open) return
+        const onPointer = event => { if (!rootRef.current?.contains(event.target)) close() }
+        const onMove = () => close()
+        document.addEventListener('pointerdown', onPointer, true)
+        window.addEventListener('scroll', onMove, true)
+        window.addEventListener('resize', onMove)
+        return () => { document.removeEventListener('pointerdown', onPointer, true); window.removeEventListener('scroll', onMove, true); window.removeEventListener('resize', onMove) }
+      }, [open, close])
+      React.useEffect(() => { if (disabled) close() }, [disabled, close])
+      const choose = index => {
+        const option = options[index]
+        if (!option) return
+        setOpen(false); triggerRef.current?.focus()
+        if (option.value !== value) onChange(option.value)
+      }
+      const onKeyDown = event => {
+        if (disabled) return
+        if (!open) {
+          if (event.key === 'Enter' || event.key === ' ' || event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); openMenu() }
+          return
+        }
+        if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); return }
+        if (event.key === 'Tab') { close(); return }
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setActive(at => Math.max(0, Math.min(options.length - 1, at + (event.key === 'ArrowDown' ? 1 : -1)))); return }
+        if (event.key === 'Home') { event.preventDefault(); setActive(0); return }
+        if (event.key === 'End') { event.preventDefault(); setActive(options.length - 1); return }
+        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); choose(active) }
+      }
+      const optionId = index => `${menuId}-opt-${index}`
+      return h('div', { className: 'ssb-select', ref: rootRef },
+        h('button', {
+          type: 'button', ref: triggerRef, className: 'ssb-select-trigger', role: 'combobox', disabled, 'aria-label': label,
+          'aria-haspopup': 'listbox', 'aria-expanded': open, 'aria-controls': menuId, 'aria-activedescendant': open ? optionId(active) : undefined,
+          onClick: () => (open ? close() : openMenu()), onKeyDown,
+        }, h('span', { className: 'ssb-select-value' }, current?.label ?? ''), h('span', { className: 'ssb-select-caret', 'aria-hidden': 'true' })),
+        h('div', {
+          role: 'listbox', id: menuId, hidden: !open, className: 'ssb-select-menu', 'aria-label': label,
+          style: place ? { left: place.left, top: place.top, minWidth: place.minWidth, maxHeight: place.maxHeight } : undefined,
+        }, ...options.map((option, index) => h('div', {
+          key: option.value, id: optionId(index), role: 'option', 'aria-selected': option.value === value,
+          className: `ssb-select-option${index === active ? ' ssb-select-option-active' : ''}`,
+          onPointerDown: event => event.preventDefault(),
+          onClick: () => choose(index),
+          onPointerEnter: () => setActive(index),
+        }, option.label))))
+    }
     function QuoteStatus({ entry, short = false }) {
       const quote = entry?.quote
       const detail = (quote ? `${quote.providerInstanceId} · ${quote.delayKind === 'unknown' ? '延迟未知' : delayText(quote)}` : '等待报价') + (entry?.lastError?.message ? ` · ${entry.lastError.message}` : '')
@@ -671,7 +742,7 @@ window.__ModuleLoader__.load({
         renameDraft.error ? h('small', { className: 'ssb-form-error', role: 'alert' }, renameDraft.error) : null) : null
       return h('section', { className: 'ssb-list-pane' },
         sourcesBanner,
-        h('div', { className: 'ssb-section-head' }, h('h2', null, `自选 · ${w.order.length}`), w.order.length ? h('span', { className: 'ssb-muted' }, statsText) : null, tagTools, h('label', null, h('span', { className: 'ssb-sr' }, '自选排序'), h('select', { value: view.sort, onChange: e => runtime.updateView({ sort: e.target.value }) }, h('option', { value: 'manual' }, '手动顺序'), h('option', { value: 'desc' }, '涨幅优先'), h('option', { value: 'asc' }, '跌幅优先')))),
+        h('div', { className: 'ssb-section-head' }, h('h2', null, `自选 · ${w.order.length}`), w.order.length ? h('span', { className: 'ssb-muted' }, statsText) : null, tagTools, h(Select, { value: view.sort, label: '自选排序', options: [{ value: 'manual', label: '手动顺序' }, { value: 'desc', label: '涨幅优先' }, { value: 'asc', label: '跌幅优先' }], onChange: value => runtime.updateView({ sort: value }) })),
         renameForm,
         tabBar,
         !w.order.length ? h('div', { className: 'ssb-empty' }, h('p', null, '添加第一只自选，集中查看价格和来源。'), h(Button, { primary: true, onClick: () => runtime.updateView({ view: 'search' }) }, '添加自选')) :
@@ -1360,7 +1431,7 @@ window.__ModuleLoader__.load({
     }
     // ---- FloatingTicker: 悬浮盯盘, portal 到 body 常驻, 不随面板切换卸载 ----
     // 悬浮窗自己的数据流: 列表模式批量拉勾选标的的报价, 图形模式只拉当前这只的分时
-    function useFloatingPolling({ open, mode, securityId, picked, items, live, refreshSeconds, quotes, fetched, revision, setFetched, setTrend, setError }) {
+    function useFloatingPolling({ open, mode, securityId, picked, items, live, floatSeconds, quotes, fetched, revision, setFetched, setTrend, setError }) {
       // quotes 的每条是 { quote, health }, 交易时段在 quote 里
       // 时段取最新的一份: 自己拉的和面板的都可能旧, 不能无条件让自己的压过面板的。
       // 时间戳相同取自己那份——自己那份刚由这一拍的刷新拿到, 而面板可能在本次渲染前就已冻结
@@ -1407,9 +1478,9 @@ window.__ModuleLoader__.load({
         }
         pull()
         // 休市时不设交易节奏的定时器, 但仍留一拍低频检查, 复盘后自动恢复
-        const timer = setInterval(pull, floatPollDelay(refreshSeconds, allQuiet))
+        const timer = setInterval(pull, floatPollDelay(floatSeconds, allQuiet))
         return () => { dead = true; clearInterval(timer) }
-      }, [open, mode, securityId, pickedKey, live, refreshSeconds, stateKey])
+      }, [open, mode, securityId, pickedKey, live, floatSeconds, stateKey])
     }
     // 拖动: 按住非控件区域移动, 松手时把落点写回偏好
     function useFloatingDrag(onDrop) {
@@ -1443,9 +1514,13 @@ window.__ModuleLoader__.load({
         },
       }
     }
-    // 轮询节奏: 跟随设置页的刷新间隔, 全部收市后压到一分钟一拍
-    const floatPollDelay = (refreshSeconds, quiet) => {
-      const base = Math.max(15, Number(refreshSeconds) || 15) * 1000
+    // 悬浮窗自己的快慢档位: 只影响这个窗口的请求节奏, 与列表刷新间隔各管各的
+    const FLOAT_INTERVALS = [3, 5, 10, 15, 30], FLOAT_FALLBACK_SECONDS = 10
+    // 档位归一: 定时器、按钮文案与陈旧判定共用同一份取值, 避免非法存量值让三者各说各话
+    const floatIntervalOf = floatSeconds => FLOAT_INTERVALS.includes(Number(floatSeconds)) ? Number(floatSeconds) : FLOAT_FALLBACK_SECONDS
+    // 轮询节奏: 全部收市后压到一分钟一拍
+    const floatPollDelay = (floatSeconds, quiet) => {
+      const base = floatIntervalOf(floatSeconds) * 1000
       return quiet ? Math.max(base, 60 * 1000) : base
     }
     // 主序列是蜡烛还是面积, 决定重涂时该下发哪一组键名: 两组键名互不相通, 用错等于没涂
@@ -1637,7 +1712,9 @@ window.__ModuleLoader__.load({
       const securityId = (floating.securityId && picked.includes(floating.securityId) ? floating.securityId : picked[0]) || null
       const update = next => setFloating(next)
       const drag = useFloatingDrag(update)
-      useFloatingPolling({ open, mode, securityId, picked, items, live: floating.live, refreshSeconds: state.data?.control.preferences?.refreshSeconds, quotes: state.data?.quotes, fetched, revision: state.data?.control.revision, setFetched, setTrend, setError })
+      // 悬浮窗节奏取自独立偏好, 列表间隔不再参与
+      const floatRefresh = floatIntervalOf(state.data?.control.preferences?.floatRefreshSeconds)
+      useFloatingPolling({ open, mode, securityId, picked, items, live: floating.live, floatSeconds: floatRefresh, quotes: state.data?.quotes, fetched, revision: state.data?.control.revision, setFetched, setTrend, setError })
       // 面板已经刷过的报价先拿来渲染, 悬浮窗自己的 refresh 结果回来后再按 receivedAt 择优:
       // 否则首次打开要干等一轮上游请求, 列表是空的
       const entryOf = id => {
@@ -1706,19 +1783,17 @@ window.__ModuleLoader__.load({
       const quoteTimes = stampIds.map(id => priceTimeOf(quoteOf(id))).filter(at => at != null)
       const liveQuoteTimes = picked.filter(id => !QUIET_STATES.has(quoteOf(id)?.sessionState)).map(id => timestampOf(quoteOf(id)?.receivedAt)).filter(at => at != null)
       const trendAt = mode === 'kline' ? (timestampOf(candles?.at(-1)?.at) ?? timestampOf(trendData?.fetchedAt)) : null
-      const { stamp, stale } = floatFreshness({ mode, quoteTimes, liveQuoteTimes, trendAt, quiet: QUIET_STATES.has(quoteOf(securityId)?.sessionState), now: Date.now(), refreshSeconds: state.data?.control.preferences?.refreshSeconds })
+      const { stamp, stale } = floatFreshness({ mode, quoteTimes, liveQuoteTimes, trendAt, quiet: QUIET_STATES.has(quoteOf(securityId)?.sessionState), now: Date.now(), refreshSeconds: floatRefresh })
       // 这里必须先过 finiteOr: Number(null) 是 0, 会把缺失的昨收当成真实的 0 交给下游,
       // 结果是迷你图基准画在 0、价格显示 "0", 与图例里的「昨收 —」自相矛盾
       const last = finiteOr(candles?.at(-1)?.close)
       const base = finiteOr(trendData?.preClose)
       const pct = Number.isFinite(last) && Number.isFinite(base) && base ? (last - base) / base * 100 : null
       const showRowTip = (id, event) => {
-        // 浮层用 fixed 定位挂到视口: 列表容器是 overflow:auto, 放行内会被裁掉;
-        // 位置按条目数预估高度, 下方放不下就翻到行上方, 否则最后一行会撞出窗口
-        const rect = event.currentTarget.getBoundingClientRect(), width = 184, item = items[id]
-        const left = Math.max(8, rect.left - width - 8 >= 8 ? rect.left - width - 8 : Math.min(window.innerWidth - width - 8, rect.right + 8))
-        const lines = quoteTipLines({ quote: quoteOf(id), marks: item.marks, scale: item.priceScale }).length
-        setRowTip({ id, left, top: rowTipPositionOf({ top: rect.top, bottom: rect.bottom, lines, viewportHeight: window.innerHeight }).top })
+        // 行提示走公共悬浮组件(common-tools Tooltip):portal 到 body, 不受列表 overflow 裁剪;
+        // 组件自己按视口夹取与换侧, 不再预估高度
+        const rect = event.currentTarget.getBoundingClientRect()
+        setRowTip({ id, anchor: { kind: 'rect', left: rect.left, top: rect.top, width: rect.width, height: rect.height } })
       }
       const greenUp = state.data?.control.preferences.colorMode === 'green-up' ? ' ssb-green-up' : ''
       // 勾选写入一律按自选顺序重排, 否则反复勾选会把 ids 变成点击次序, 列表顺序会跳
@@ -1732,7 +1807,7 @@ window.__ModuleLoader__.load({
             ? h(FloatList, { picked, items, securityId, entryOf, onPick: id => update({ mode: 'kline', securityId: id }), onTip: showRowTip, onLeave: () => setRowTip(null), onScroll: () => setRowTip(null) })
             : !current ? h('p', { className: 'ssb-muted' }, '未选择标的') : h(FloatChart, { securityId, current, candles, preClose: base, error, last, pct }),
         h(FloatFoot, {
-          mode, securityId, picked, current, stamp, stale, alertOn, error, liveOn: floating.live !== false, refresh: state.data?.control.preferences?.refreshSeconds || 15,
+          mode, securityId, picked, current, stamp, stale, alertOn, error, liveOn: floating.live !== false, refresh: floatRefresh,
           onBell: () => { const next = !alertOn; alertStates.current = {}; setAlert({ on: next }); if (next) requestAlertPermission() },
           onLive: () => {
             if (!picked.length) return
@@ -1742,8 +1817,8 @@ window.__ModuleLoader__.load({
           },
           onDetail: () => { if (securityId) runtime.openDetail(securityId) },
         }),
-        rowTip && items[rowTip.id] ? h('div', { className: 'ssb-float-rowtip', style: { left: rowTip.left, top: rowTip.top } },
-          ...quoteTipLines({ quote: quoteOf(rowTip.id), marks: items[rowTip.id].marks, scale: items[rowTip.id].priceScale }).map((text, index) => h('span', { key: index }, text))) : null)
+        rowTip && items[rowTip.id] ? h(tools.Tooltip, { anchor: rowTip.anchor },
+          ...quoteTipLines({ quote: quoteOf(rowTip.id), marks: items[rowTip.id].marks, scale: items[rowTip.id].priceScale }).map((text, index) => h('div', { key: index }, text))) : null)
     }
     function BrowseView({ runtime, state }) {
       const { view, busy, data } = state
@@ -1774,7 +1849,7 @@ window.__ModuleLoader__.load({
         h('div', { className: 'ssb-panel-head' }, h('h2', null, '添加自选'), h('div', { className: 'ssb-toolbar' }, h(Button, { onClick: () => runtime.updateView({ view: 'list' }) }, '返回自选'))),
         h('div', { className: 'ssb-panel-body' },
           h('div', { className: 'ssb-form-row' },
-            h('label', { className: 'ssb-field' }, h('span', null, '市场'), h('select', { value: view.searchMarket || 'all', onChange: e => runtime.updateView({ searchMarket: e.target.value }) }, ...[['all', '全部'], ['XSHG', '沪A股'], ['XSHE', '深A股'], ['XHKG', '港股'], ['XNAS', '美股(NASDAQ)'], ['XNYS', '美股(NYSE)'], ['XJPX', '日经'], ['XKRX', '韩证'], ['XLON', '伦敦']].map(([value, label]) => h('option', { value, key: value }, label)))),
+            h('div', { className: 'ssb-field' }, h('span', null, '市场'), h(Select, { value: view.searchMarket || 'all', label: '市场', options: [['all', '全部'], ['XSHG', '沪A股'], ['XSHE', '深A股'], ['XHKG', '港股'], ['XNAS', '美股(NASDAQ)'], ['XNYS', '美股(NYSE)'], ['XJPX', '日经'], ['XKRX', '韩证'], ['XLON', '伦敦']].map(([value, label]) => ({ value, label })), onChange: value => runtime.updateView({ searchMarket: value }) })),
             h('label', { className: 'ssb-search-label' }, '搜索名称、代码或拼音首字母', h('input', { type: 'search', autoFocus: true, value: view.query, placeholder: '例如 600519、茅台、腾讯、AAPL', onChange: e => runtime.search(e.target.value), onCompositionStart: () => runtime.composition(true), onCompositionEnd: () => runtime.composition(false), onKeyDown: e => {
           if (e.nativeEvent?.isComposing || state.composing) return
           const at = visible.findIndex(c => c.id === view.selectedId)
@@ -1847,7 +1922,7 @@ window.__ModuleLoader__.load({
           adapter?.description ? h('p', { className: 'ssb-provider-desc ssb-muted' }, adapter.description) : null,
           expanded ? h('div', { className: 'ssb-provider-body', disabled: state.busy.configuration },
             h('div', { className: 'ssb-provider-head' },
-              h('label', { className: 'ssb-field ssb-provider-adapter' }, h('span', null, '适配器'), h('select', { value: p.adapterId, onChange: e => { const adapterId = e.target.value, descriptor = state.data.adapters.find(a => a.adapterId === adapterId); providerChange(p.id, { adapterId, credentialRef: descriptor?.credential === 'none' ? null : descriptor?.credential || null, quotaGroup: adapterId + '-account', budget: descriptor?.credential === 'none' && p.budget.requestsPerMinute === null ? { ...p.budget, requestsPerMinute: 60 } : p.budget }) } }, ...state.data.adapters.map(a => h('option', { value: a.adapterId, key: a.adapterId }, a.adapterId + (a.credential === 'none' ? '（免凭据）' : ''))))),
+              h('div', { className: 'ssb-field ssb-provider-adapter' }, h('span', null, '适配器'), h(Select, { value: p.adapterId, label: '适配器', options: state.data.adapters.map(a => ({ value: a.adapterId, label: a.adapterId + (a.credential === 'none' ? '（免凭据）' : '') })), onChange: adapterId => { const descriptor = state.data.adapters.find(a => a.adapterId === adapterId); providerChange(p.id, { adapterId, credentialRef: descriptor?.credential === 'none' ? null : descriptor?.credential || null, quotaGroup: adapterId + '-account', budget: descriptor?.credential === 'none' && p.budget.requestsPerMinute === null ? { ...p.budget, requestsPerMinute: 60 } : p.budget }) } })),
               h('div', { className: 'ssb-provider-switches' },
                 h(Toggle, { label: '启用', checked: p.enabled, onChange: value => providerChange(p.id, { enabled: value }) }),
                 h(Button, { danger: true, onClick: () => change({ providers: draft.providers.filter(other => other.id !== p.id), routes: draft.routes.filter(r => r.primaryInstanceId !== p.id).map(r => ({ ...r, fallbackInstanceIds: r.fallbackInstanceIds.filter(id => id !== p.id), failoverMode: r.fallbackInstanceIds.includes(p.id) ? 'off' : r.failoverMode })) }) }, '移除'))),
@@ -1858,7 +1933,7 @@ window.__ModuleLoader__.load({
                 openSource || !p.credentialRef ? null : h(CredentialField, { key: 'cred-' + p.id, runtime, refName: p.credentialRef, present: status?.credentialPresent }),
                 field('每分钟请求上限（留空仅允许探针）', p.budget.requestsPerMinute, value => providerChange(p.id, { budget: { ...p.budget, requestsPerMinute: value ? Number(value) : null } }), { type: 'number', min: 1 }),
                 field('每日请求上限（留空无限制）', p.budget.dailyRequestLimit, value => providerChange(p.id, { budget: { ...p.budget, dailyRequestLimit: value ? Number(value) : null } }), { type: 'number', min: 1 }),
-                h('label', { className: 'ssb-field' }, h('span', null, '计费单位'), h('select', { value: p.budget.billingUnit, onChange: e => providerChange(p.id, { budget: { ...p.budget, billingUnit: e.target.value } }) }, h('option', { value: 'request' }, '请求'), h('option', { value: 'symbol' }, '证券'))),
+                h('div', { className: 'ssb-field' }, h('span', null, '计费单位'), h(Select, { value: p.budget.billingUnit, label: '计费单位', options: [{ value: 'request', label: '请求' }, { value: 'symbol', label: '证券' }], onChange: value => providerChange(p.id, { budget: { ...p.budget, billingUnit: value } }) })),
                 p.budget.billingUnit === 'symbol' ? field('每分钟证券额度', p.budget.symbolCreditsPerMinute, value => providerChange(p.id, { budget: { ...p.budget, symbolCreditsPerMinute: value ? Number(value) : null } }), { type: 'number', min: 1 }) : null,
                 ...['quotes', 'catalog', 'search', 'calendar'].map(cap => field(`${({ quotes: '报价', catalog: '目录', search: '搜索', calendar: '日历' })[cap]}每分钟上限`, p.budget.capabilityLimits[cap] ?? '', value => providerChange(p.id, { budget: { ...p.budget, capabilityLimits: Object.fromEntries(Object.entries({ ...p.budget.capabilityLimits, [cap]: value ? Number(value) : null }).filter(([, limit]) => limit !== null)) } }), { type: 'number', min: 1, key: cap })),
                 adapter?.endpointKeys?.length ? h('details', { key: 'ep-' + p.id, style: { gridColumn: '1 / -1' } },
@@ -1879,13 +1954,13 @@ window.__ModuleLoader__.load({
         const allocation = marketRoutes.map(r => `${CAP_LABEL[r.capability]}: ${r.primaryInstanceId}${r.fallbackInstanceIds.length ? `（备 ${r.fallbackInstanceIds[0]}）` : ''}`).join('\n')
         const cells = caps.map(cap => {
           const route = draft.routes.find(r => r.market === market && r.capability === cap)
-          const options = [h('option', { value: '', key: '' }, '未配置'), ...draft.providers.filter(p => p.enabled && state.data.adapters.find(a => a.adapterId === p.adapterId)?.capabilities.includes(cap)).map(p => h('option', { value: p.id, key: p.id }, p.id))]
+          const options = [{ value: '', label: '未配置' }, ...draft.providers.filter(p => p.enabled && state.data.adapters.find(a => a.adapterId === p.adapterId)?.capabilities.includes(cap)).map(p => ({ value: p.id, label: p.id }))]
           // 每个能力可单独探一次: 结果只做诊断展示, 不影响能否保存
           const probeKey = route ? `${route.primaryInstanceId}:${cap}:${market}` : null
           const probe = probeKey ? (draft.probes || {})[probeKey] : null
           const probing = probeKey ? (draft.probing || {})[probeKey] : false
           return h('div', { className: 'ssb-route-cell ssb-route-cell-probe', key: cap },
-            h('label', { className: 'ssb-route-cell-main' }, h('span', { className: 'ssb-route-cell-label' }, CAP_LABEL[cap]), h('select', { value: route?.primaryInstanceId || '', onChange: e => change({ routes: [...draft.routes.filter(r => r !== route), ...(e.target.value ? [routeFor(market, cap, e.target.value)] : [])] }) }, ...options)),
+            h('div', { className: 'ssb-route-cell-main' }, h('span', { className: 'ssb-route-cell-label' }, CAP_LABEL[cap]), h(Select, { value: route?.primaryInstanceId || '', label: CAP_LABEL[cap], options, onChange: value => change({ routes: [...draft.routes.filter(r => r !== route), ...(value ? [routeFor(market, cap, value)] : [])] }) })),
             route ? h('button', {
               className: 'ssb-probe', disabled: probing, title: '单独测这一条能力：拉一次真实数据，报告成败与耗时',
               onClick: quiet(async () => {
@@ -1912,10 +1987,10 @@ window.__ModuleLoader__.load({
         const advanced = tuned.map(route => {
           const cap = route.capability
           const updateRoute = patch => change({ routes: draft.routes.map(r => r === route ? { ...r, ...patch } : r) })
-          const options = [h('option', { value: '', key: '' }, '无'), ...draft.providers.filter(p => p.enabled && state.data.adapters.find(a => a.adapterId === p.adapterId)?.capabilities.includes(cap) && p.id !== route.primaryInstanceId).map(p => h('option', { value: p.id, key: p.id }, p.id))]
+          const options = [{ value: '', label: '无' }, ...draft.providers.filter(p => p.enabled && state.data.adapters.find(a => a.adapterId === p.adapterId)?.capabilities.includes(cap) && p.id !== route.primaryInstanceId).map(p => ({ value: p.id, label: p.id }))]
           return h('div', { className: 'ssb-route-tune', key: cap },
             h('span', { className: 'ssb-route-tune-label' }, CAP_LABEL[cap]),
-            h('label', { className: 'ssb-field' }, h('span', null, '备用源'), h('select', { value: route.fallbackInstanceIds[0] || '', onChange: e => updateRoute({ fallbackInstanceIds: e.target.value ? [e.target.value] : [], failoverMode: 'off' }) }, ...options)),
+            h('div', { className: 'ssb-field' }, h('span', null, '备用源'), h(Select, { value: route.fallbackInstanceIds[0] || '', label: '备用源', options, onChange: value => updateRoute({ fallbackInstanceIds: value ? [value] : [], failoverMode: 'off' }) })),
             h(Toggle, { label: '自动切换', disabled: !route.fallbackInstanceIds.length, checked: route.failoverMode === 'network', onChange: on => updateRoute({ failoverMode: on ? 'network' : 'off' }) }),
             cap === 'quotes' ? h(Toggle, { label: '接受延迟未知', checked: route.acceptUnknownDelay, onChange: on => updateRoute({ acceptUnknownDelay: on }) }) : null,
             cap === 'quotes' ? h('label', { className: 'ssb-field ssb-route-delay' }, h('span', null, '最大延迟秒'), h('input', { type: 'number', min: 0, value: route.maxDelaySeconds ?? '', placeholder: '不限', onChange: e => updateRoute({ maxDelaySeconds: e.target.value ? Number(e.target.value) : null }) })) : null)
@@ -1964,7 +2039,10 @@ window.__ModuleLoader__.load({
         h('h3', null, '目录缓存'), h('div', { className: 'ssb-toolbar' }, ...Object.keys(BROWSE_MARKETS).filter(market => (state.data.control.routes || []).some(r => r.capability === 'catalog' && r.market === market)).map(market => h(Button, { key: market, disabled: state.busy.sync, onClick: quiet(async () => { const results = await runtime.sync(market); const errors = results.filter(r => !r.ok); if (errors.length) tools.toast?.show(errors.map(r => r.error.message).join('；'), { kind: 'error' }) }) }, `同步${BROWSE_MARKETS[market]}`))),
         ...state.data.catalogs.map(c => h('p', { key: c.source, className: 'ssb-muted' }, `${c.source} · ${timeText(c.fetchedAt)}${c.stale ? ' · 已过期' : ''}${c.complete ? '' : ' · 目录可能不完整'}`)),
         ...Object.entries(state.data.routeSelections).filter(([id, selected]) => selected.providerInstanceId !== saved.routes.find(r => r.id === id)?.primaryInstanceId).map(([id, selected]) => h('div', { className: 'ssb-banner', key: id }, `${id}当前使用备用源 ${selected.providerInstanceId}。`, h(Button, { disabled: state.busy.switch, onClick: quiet(() => runtime.switchPrimary(id)) }, '检查并切回主源')))) :
-        h(React.Fragment, null, h('h3', null, '显示偏好（即改即存）'), h('div', { className: 'ssb-toolbar' }, h('label', { className: 'ssb-field' }, h('span', null, '刷新间隔'), h('select', { value: saved.preferences.refreshSeconds, disabled: state.busy.write || state.busy.configuration, onChange: quiet(e => runtime.preferences({ refreshSeconds: Number(e.target.value) })) }, ...[15, 30, 60].map(n => h('option', { key: n, value: n }, `${n}秒`)))), h('label', { className: 'ssb-field' }, h('span', null, '涨跌颜色'), h('select', { value: saved.preferences.colorMode, disabled: state.busy.write || state.busy.configuration, onChange: quiet(e => runtime.preferences({ colorMode: e.target.value })) }, h('option', { value: 'red-up' }, '红涨绿跌'), h('option', { value: 'green-up' }, '绿涨红跌')))))
+        h(React.Fragment, null, h('h3', null, '显示偏好（即改即存）'), h('div', { className: 'ssb-toolbar' },
+          h('div', { className: 'ssb-field' }, h('span', null, '刷新间隔'), h(Select, { value: saved.preferences.refreshSeconds, label: '刷新间隔', disabled: state.busy.write || state.busy.configuration, options: [15, 30, 60].map(n => ({ value: n, label: `${n}秒` })), onChange: value => quiet(() => runtime.preferences({ refreshSeconds: value }))() })),
+          h('div', { className: 'ssb-field' }, h('span', null, '悬浮盯盘刷新'), h(Select, { value: saved.preferences.floatRefreshSeconds ?? FLOAT_FALLBACK_SECONDS, label: '悬浮盯盘刷新', disabled: state.busy.write || state.busy.configuration, options: FLOAT_INTERVALS.map(n => ({ value: n, label: `${n}秒` })), onChange: value => quiet(() => runtime.preferences({ floatRefreshSeconds: value }))() })),
+          h('div', { className: 'ssb-field' }, h('span', null, '涨跌颜色'), h(Select, { value: saved.preferences.colorMode, label: '涨跌颜色', disabled: state.busy.write || state.busy.configuration, options: [{ value: 'red-up', label: '红涨绿跌' }, { value: 'green-up', label: '绿涨红跌' }], onChange: value => quiet(() => runtime.preferences({ colorMode: value }))() }))))
       const controlRoutes = saved.routes || []
       const enabled = (saved.providers || []).filter(p => p.enabled).length
       const markets = new Set(controlRoutes.map(r => r.market)).size
@@ -1977,29 +2055,43 @@ window.__ModuleLoader__.load({
         pane)
     }
     const CSS = `
-.ssb-root,.ssb-float-root { --ssb-accent:var(--dsw-alias-brand-primary); --ssb-accent-deep:var(--dsw-alias-button-primary-hover); --ssb-on-accent:var(--dsw-alias-label-primary-inverted); --ssb-accent-wash:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent); --ssb-ok:var(--dsw-alias-state-success-primary); --ssb-warn:var(--dsw-alias-state-warn-primary); --ssb-danger:var(--dsw-alias-state-error-primary); --ssb-bg:var(--dsw-alias-bg-layer-1); --ssb-bg-sub:var(--dsw-alias-bg-layer-2); --ssb-bg-muted:var(--dsw-alias-bg-module-platform); --ssb-border:var(--dsw-alias-border-l2); --ssb-text:var(--dsw-alias-label-primary); --ssb-text-sub:var(--dsw-alias-label-secondary); --ssb-text-dim:var(--dsw-alias-label-tertiary); --ssb-radius-sm:6px; --ssb-radius-md:8px; --ssb-radius-lg:12px; }
+.ssb-root,.ssb-float-root { --ssb-accent:var(--dsw-alias-brand-primary); --ssb-accent-deep:var(--dsw-alias-button-primary-hover); --ssb-on-accent:var(--dsw-alias-label-primary-inverted); --ssb-accent-wash:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent); --ssb-ok:var(--dsw-alias-state-success-primary); --ssb-warn:var(--dsw-alias-state-warn-primary); --ssb-danger:var(--dsw-alias-state-error-primary); --ssb-bg:var(--dsw-alias-bg-layer-1); --ssb-bg-sub:var(--dsw-alias-bg-layer-2); --ssb-bg-muted:var(--dsw-alias-bg-module-platform); --ssb-border:var(--dsw-alias-border-l2); --ssb-text:var(--dsw-alias-label-primary); --ssb-text-sub:var(--dsw-alias-label-secondary); --ssb-text-dim:var(--dsw-alias-label-tertiary); --ssb-hover:var(--dsw-alias-interactive-bg-hover); --ssb-radius-sm:var(--dsw-radius-sm); --ssb-radius-md:var(--dsw-radius-md); --ssb-radius-lg:var(--dsw-radius-lg); }
 /* 图表区分色: 亮色取中低明度保证白底上不糊, 取值由 test/chart-colors.test.mjs 卡对比度与线间色差 */
 .ssb-root,.ssb-float-root { --ssb-chart-ma-fast: hsl(45 96% 40%); --ssb-chart-ma-mid: hsl(280 88% 52%); --ssb-chart-ma-slow: hsl(189 94% 38%); --ssb-chart-ma-long: hsl(239 84% 56%); --ssb-chart-ema: hsl(330 81% 50%); --ssb-chart-boll-mid: hsl(217 91% 50%); --ssb-chart-boll-rail: hsl(213 90% 62%); --ssb-chart-bbi: hsl(160 84% 34%); --ssb-chart-cost: hsl(20 92% 45%); --ssb-chart-target: hsl(305 80% 45%); }
 /* 暗色整体提亮一档, 否则深色线条直接溶进背景; 明暗标记由宿主写在 body 上 */
 [data-ds-dark-theme] .ssb-root,[data-ds-dark-theme] .ssb-float-root { --ssb-chart-ma-fast: hsl(45 96% 58%); --ssb-chart-ma-mid: hsl(280 90% 72%); --ssb-chart-ma-slow: hsl(189 90% 58%); --ssb-chart-ma-long: hsl(239 88% 76%); --ssb-chart-ema: hsl(330 85% 68%); --ssb-chart-boll-mid: hsl(217 92% 68%); --ssb-chart-boll-rail: hsl(213 94% 80%); --ssb-chart-bbi: hsl(160 80% 56%); --ssb-chart-cost: hsl(20 95% 58%); --ssb-chart-target: hsl(305 85% 70%); }
 /* 悬浮盯盘挂在 body 上, 与面板同源取色但不需要面板的整屏布局 */
-.ssb-root { height:100%; min-width:0; overflow:auto; color:var(--ssb-text); background:var(--ssb-bg); font:inherit; font-size:12px; line-height:1.5; }
-.ssb-float-root { color:var(--ssb-text); font:inherit; font-size:12px; line-height:1.5; }
+.ssb-root { height:100%; min-width:0; overflow:auto; color:var(--ssb-text); background:var(--ssb-bg); font:inherit; font-size:13px; line-height:20px; }
+.ssb-float-root { color:var(--ssb-text); font:inherit; font-size:13px; line-height:20px; }
 .ssb-root *,.ssb-float-root * { box-sizing:border-box; }
-.ssb-page { max-width:1200px; margin:0 auto; padding:20px; }
-.ssb-root h1 { margin:0; font-size:20px; line-height:1.3; }.ssb-root h2 { margin:0; font-size:16px; line-height:1.3; }.ssb-root h3 { margin:24px 0 12px; font-size:14px; }
-.ssb-tablist { display:flex; gap:4px; border-bottom:1px solid var(--ssb-border); margin:12px 0 16px; }
+.ssb-page { max-width:1200px; margin:0 auto; padding:24px; }
+.ssb-root h1 { margin:0; font-size:20px; font-weight:500; line-height:28px; }.ssb-root h2 { margin:0; font-size:16px; font-weight:600; line-height:24px; }.ssb-root h3 { margin:24px 0 12px; font-size:14px; }
+.ssb-tablist { display:flex; gap:24px; border-bottom:.5px solid var(--ssb-border); margin:0 0 16px; }
 /* 自选分组 tab: 横向可滚动, 与设置页 tab 同一形态, 只在容器边距上去掉页面级间距 */
-.ssb-tabs { display:flex; gap:4px; border-bottom:1px solid var(--ssb-border); padding:0 16px; overflow-x:auto; }.ssb-tabs .ssb-tab { flex:0 0 auto; }
+.ssb-tabs { display:flex; gap:4px; border-bottom:.5px solid var(--ssb-border); padding:0 16px; overflow-x:auto; }.ssb-tabs .ssb-tab { flex:0 0 auto; padding:10px 8px; }
 /* 分组标签编辑: 已选 tags 用 chips, 可加入的已有标签用虚线 pill, 都是可点按钮而不是纯装饰 */
 .ssb-tag-editor { display:grid; gap:8px; }.ssb-tag-chips,.ssb-tag-pills { display:flex; flex-wrap:wrap; gap:6px; }
 .ssb-tag-chip { display:inline-flex; align-items:center; height:24px; padding:0 4px 0 8px; border-radius:999px; background:var(--ssb-accent-wash); color:var(--ssb-accent); font-size:11px; }
 .ssb-tag-x { display:inline-flex; align-items:center; justify-content:center; min-width:24px; height:24px; border:0; background:transparent; color:inherit; font:inherit; line-height:1; padding:0; cursor:pointer; }.ssb-tag-x:hover { color:var(--ssb-danger); }
 .ssb-tag-pill { border:1px dashed var(--ssb-border); background:transparent; color:var(--ssb-text-sub); border-radius:999px; height:24px; padding:0 10px; font:inherit; font-size:11px; cursor:pointer; }.ssb-tag-pill:hover { border-color:var(--ssb-accent); color:var(--ssb-accent); }
-.ssb-tag-rename { padding:0 16px 8px; }.ssb-section-head .ssb-toolbar { margin:0; }.ssb-tab { font:inherit; color:var(--ssb-text-sub); background:transparent; border:0; border-bottom:2px solid transparent; padding:8px 14px; cursor:pointer; }.ssb-tab-on { color:var(--ssb-text); border-bottom-color:var(--ssb-accent); }.ssb-header,.ssb-toolbar,.ssb-section-head,.ssb-row-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }.ssb-header { justify-content:space-between; margin-bottom:24px; }.ssb-header p { margin:6px 0 0; }.ssb-section-head { justify-content:space-between; padding:12px 16px; }.ssb-toolbar { margin:12px 0; }
-.ssb-button { color:var(--ssb-text); background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); min-height:28px; padding:4px 12px; font:inherit; cursor:pointer; transition:background .15s; }.ssb-button:hover { background:var(--dsw-alias-interactive-bg-hover); }.ssb-button.ssb-primary { background:var(--ssb-accent); color:var(--ssb-on-accent); border-color:var(--ssb-accent); }.ssb-button.ssb-primary:hover { background:var(--ssb-accent-deep); }.ssb-button.ssb-danger { color:var(--ssb-danger); }.ssb-root button:disabled { opacity:.5; cursor:not-allowed; }.ssb-root :focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:2px; }
-.ssb-root input:not([type=checkbox]),.ssb-root select { background:var(--ssb-bg); color:var(--ssb-text); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); min-height:32px; padding:6px 8px; font:inherit; max-width:100%; }.ssb-field { display:flex; flex-direction:column; gap:6px; min-width:0; }.ssb-muted { color:var(--ssb-text-sub); }.ssb-code,.ssb-source { display:block; font-size:11px; }.ssb-code,.ssb-number { font-family:var(--ds-font-family-code); font-variant-numeric:tabular-nums; }.ssb-code { color:var(--ssb-text-sub); margin-top:4px; }.ssb-small { font-size:13px; margin-left:12px; }
-.ssb-content { display:grid; grid-template-columns:minmax(0,1fr); gap:16px; }.ssb-overlay { position:fixed; inset:0; background:color-mix(in srgb, var(--dsw-alias-label-primary) 45%, transparent); display:flex; z-index:10; animation:ssb-fade .15s ease-out; }.ssb-drawer { animation:ssb-slide .2s ease-out; }.ssb-modal-card { animation:ssb-pop .18s ease-out; }@keyframes ssb-fade { from { opacity:0; } }@keyframes ssb-slide { from { transform:translateX(40px); opacity:0; } }@keyframes ssb-pop { from { transform:scale(.96); opacity:0; } }.ssb-overlay-drawer { justify-content:flex-end; }.ssb-overlay-modal { align-items:center; justify-content:center; padding:24px; }.ssb-drawer { width:min(80vw,94vw); height:100%; overflow:auto; background:var(--ssb-bg); border-left:1px solid var(--ssb-border); box-shadow:var(--dsw-shadow-lv3); padding:16px; }.ssb-modal-card { width:min(880px,94vw); max-height:88vh; overflow:auto; background:var(--ssb-bg); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-lg); box-shadow:var(--dsw-shadow-lv3); padding:16px; }.ssb-drawer-head { display:flex; justify-content:flex-end; }.ssb-drawer .ssb-detail, .ssb-drawer .ssb-settings { border:0; padding:0; background:transparent; }.ssb-list-pane,.ssb-detail { border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); min-width:0; }.ssb-detail { padding:16px; background:var(--ssb-bg-sub); }.ssb-detail .ssb-section-head { padding:0; }.ssb-detail-price { font-size:28px; margin:20px 0 4px; }.ssb-table-scroll { max-height:65vh; overflow:auto; border-radius:0 0 var(--ssb-radius-md) var(--ssb-radius-md); }.ssb-foot { margin:12px 0 4px; }.ssb-table { width:100%; border-collapse:collapse; table-layout:auto; }.ssb-table th { color:var(--ssb-text-sub); font-weight:400; font-size:11px; background:var(--ssb-bg-sub); position:sticky; top:0; z-index:1; }.ssb-table td,.ssb-table th { padding:10px 12px; text-align:left; border-top:1px solid var(--ssb-border); }.ssb-table td.ssb-number { text-align:right; white-space:nowrap; }.ssb-table tr:hover { background:var(--dsw-alias-interactive-bg-hover); }.ssb-selected { background:var(--ssb-accent-wash); }.ssb-stock-name { font:inherit; color:inherit; background:transparent; border:0; padding:0; text-align:left; cursor:pointer; }.ssb-stale td.ssb-number { opacity:.65; }.ssb-up { color:var(--ssb-danger); }.ssb-down { color:var(--ssb-ok); }.ssb-green-up .ssb-up { color:var(--ssb-ok); }.ssb-green-up .ssb-down { color:var(--ssb-danger); }
+.ssb-tag-rename { padding:0 16px 8px; }.ssb-section-head .ssb-toolbar { margin:0; }.ssb-tab { font:inherit; font-size:13px; color:var(--ssb-text-sub); background:transparent; border:0; border-bottom:2px solid transparent; padding:10px 2px; cursor:pointer; }.ssb-tab-on { color:var(--ssb-text); border-bottom-color:var(--ssb-accent); font-weight:600; }.ssb-header,.ssb-toolbar,.ssb-section-head,.ssb-row-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }.ssb-header { justify-content:space-between; align-items:flex-start; margin-bottom:16px; gap:16px; }.ssb-header-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }.ssb-header p { margin:6px 0 0; }.ssb-section-head { justify-content:space-between; padding:16px; }.ssb-section-head h2[tabindex="-1"]:focus { outline:none; }.ssb-toolbar { margin:12px 0; }
+.ssb-button { color:var(--ssb-text); background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); min-height:32px; padding:0 12px; font:inherit; font-size:13px; cursor:pointer; transition:background .15s; white-space:nowrap; }.ssb-button:hover { background:var(--dsw-alias-interactive-bg-hover); }.ssb-button.ssb-primary { background:var(--ssb-accent); color:var(--ssb-on-accent); border-color:var(--ssb-accent); }.ssb-button.ssb-primary:hover { background:var(--ssb-accent-deep); }.ssb-button.ssb-danger { color:var(--ssb-danger); }.ssb-root button:disabled { opacity:.5; cursor:not-allowed; }.ssb-root :focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:2px; }
+.ssb-root input:not([type=checkbox]) { background:var(--ssb-bg); color:var(--ssb-text); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); min-height:32px; padding:6px 8px; font:inherit; max-width:100%; }
+.ssb-select { position:relative; display:inline-flex; min-width:0; max-width:100%; }
+.ssb-select-trigger { display:inline-flex; align-items:center; justify-content:space-between; gap:8px; min-height:32px; padding:6px 8px; background:var(--ssb-bg); color:var(--ssb-text); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); font:inherit; font-size:13px; line-height:1.4; text-align:left; cursor:pointer; max-width:100%; }
+.ssb-select-trigger:hover:not(:disabled) { border-color:var(--ssb-text-dim); }
+.ssb-select-trigger:disabled { opacity:.5; cursor:not-allowed; }
+.ssb-select-value { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ssb-select-caret { flex:none; width:6px; height:6px; border-right:1.5px solid var(--ssb-text-sub); border-bottom:1.5px solid var(--ssb-text-sub); transform:translateY(-2px) rotate(45deg); }
+.ssb-select-menu { position:fixed; z-index:2; display:flex; flex-direction:column; gap:1px; padding:4px; overflow:auto; background:var(--ssb-bg-sub); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); box-shadow:var(--dsw-shadow-lv3); }
+.ssb-select-menu[hidden] { display:none; }
+.ssb-select-option { display:flex; align-items:center; min-height:28px; padding:4px 8px; border-radius:var(--ssb-radius-sm); font-size:13px; color:var(--ssb-text); white-space:nowrap; cursor:pointer; }
+.ssb-select-option-active { background:var(--ssb-hover); }
+.ssb-select-option[aria-selected="true"] { color:var(--ssb-accent); }
+.ssb-select-option[aria-selected="true"].ssb-select-option-active { background:var(--ssb-accent-wash); }.ssb-field { display:flex; flex-direction:column; gap:6px; min-width:0; }.ssb-muted { color:var(--ssb-text-sub); }.ssb-code,.ssb-source { display:block; font-size:11px; }.ssb-code,.ssb-number { font-family:var(--ds-font-family-code); font-variant-numeric:tabular-nums; }.ssb-code { color:var(--ssb-text-sub); margin-top:4px; }.ssb-small { font-size:13px; margin-left:12px; }
+.ssb-content { display:grid; grid-template-columns:minmax(0,1fr); gap:16px; }
+/* 浮层须压过宿主侧栏拖拽手柄; 取 60 与其它插件弹窗同档, 仍在宿主抽屉遮罩之下 */
+.ssb-overlay { position:fixed; inset:0; background:color-mix(in srgb, var(--dsw-alias-label-primary) 45%, transparent); display:flex; z-index:60; animation:ssb-fade .15s ease-out; }.ssb-drawer { animation:ssb-slide .2s ease-out; }.ssb-modal-card { animation:ssb-pop .18s ease-out; }@keyframes ssb-fade { from { opacity:0; } }@keyframes ssb-slide { from { transform:translateX(40px); opacity:0; } }@keyframes ssb-pop { from { transform:scale(.96); opacity:0; } }.ssb-overlay-drawer { justify-content:flex-end; }.ssb-overlay-modal { align-items:center; justify-content:center; padding:24px; }.ssb-drawer { width:min(80vw,94vw); height:100%; overflow:auto; background:var(--ssb-bg); border-left:1px solid var(--ssb-border); box-shadow:var(--dsw-shadow-lv3); padding:16px; }.ssb-modal-card { width:min(880px,94vw); max-height:88vh; overflow:auto; background:var(--ssb-bg); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-lg); box-shadow:var(--dsw-shadow-lv3); padding:16px; }.ssb-drawer-head { display:flex; justify-content:flex-end; }.ssb-drawer .ssb-detail, .ssb-drawer .ssb-settings { border:0; padding:0; background:transparent; }.ssb-list-pane,.ssb-detail { border:.5px solid var(--ssb-border); border-radius:var(--ssb-radius-md); min-width:0; }.ssb-detail { padding:16px; background:var(--ssb-bg-sub); }.ssb-detail .ssb-section-head { padding:0; }.ssb-detail-price { font-size:28px; margin:20px 0 4px; }.ssb-table-scroll { max-height:65vh; overflow:auto; border-radius:0 0 var(--ssb-radius-md) var(--ssb-radius-md); }.ssb-foot { margin:12px 0 4px; }.ssb-table { width:100%; border-collapse:collapse; table-layout:auto; }.ssb-table th { color:var(--ssb-text-sub); font-weight:400; font-size:12px; background:var(--ssb-bg-sub); position:sticky; top:0; z-index:1; }.ssb-table td,.ssb-table th { padding:8px 12px; text-align:left; border-top:.5px solid var(--ssb-border); }.ssb-table td.ssb-number { text-align:right; white-space:nowrap; }.ssb-table tr:hover { background:var(--dsw-alias-interactive-bg-hover); }.ssb-selected { background:var(--ssb-accent-wash); }.ssb-stock-name { font:inherit; color:inherit; background:transparent; border:0; padding:0; text-align:left; cursor:pointer; }.ssb-stale td.ssb-number { opacity:.65; }.ssb-up { color:var(--ssb-danger); }.ssb-down { color:var(--ssb-ok); }.ssb-green-up .ssb-up { color:var(--ssb-ok); }.ssb-green-up .ssb-down { color:var(--ssb-danger); }
 .ssb-table th.ssb-number { text-align:right; }.ssb-table th.ssb-col-status { text-align:right; }
 .ssb-table td { vertical-align:middle; padding-top:8px; padding-bottom:8px; }.ssb-table td:first-child { max-width:240px; }
 .ssb-stock-name { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
@@ -2031,10 +2123,10 @@ window.__ModuleLoader__.load({
 .ssb-row .ssb-code { margin-top:0; flex:0 0 auto; font-size:11px; color:var(--ssb-text-dim); }
 .ssb-cell-price,.ssb-cell-pct,.ssb-cell-change,.ssb-cell-open,.ssb-cell-amount,.ssb-cell-amplitude,.ssb-cell-pl { text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); }
 .ssb-cell-range { white-space:nowrap; color:var(--ssb-text-dim); font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); }
-.ssb-cell-price { font-size:15px; font-weight:600; }
+.ssb-cell-price { font-size:14px; font-weight:600; }
 .ssb-cell-amount,.ssb-cell-amplitude,.ssb-cell-open { color:var(--ssb-text-dim); }
 .ssb-col-status { justify-self:end; }
-.ssb-pill { display:inline-block; padding:0 5px; border-radius:var(--ssb-radius-sm); background:color-mix(in srgb, currentColor 12%, transparent); }
+.ssb-pill { display:inline-block; padding:0 6px; border-radius:var(--ssb-radius-sm); background:color-mix(in srgb, currentColor 12%, transparent); }
 
 
 
@@ -2047,7 +2139,7 @@ window.__ModuleLoader__.load({
   .ssb-cell-open,.ssb-cell-range,.ssb-cell-amount,.ssb-cell-amplitude,.ssb-cell-pl { display:none; }
   .ssb-row-sub { display:flex; gap:10px; margin-top:2px; padding-left:20px; font-size:12px; color:var(--ssb-text-dim); font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); }
 }
-.ssb-kv { display:inline-flex; gap:3px; white-space:nowrap; }
+.ssb-kv { display:inline-flex; gap:4px; white-space:nowrap; }
 /* 悬浮盯盘: 固定右下角, 尺寸以 4px 刻度, 只做轻边框分层不挂阴影 */
 .ssb-float { position:fixed; right:24px; bottom:24px; z-index:60; width:288px; max-height:calc(100vh - 48px); display:flex; flex-direction:column; gap:8px; padding:12px; background:var(--ssb-bg); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-lg); box-shadow:var(--dsw-shadow-lv3); font-size:12px; }
 /* 拖动只从标题条发起: touch-action 取的是路径交集, 父级给 none 会把列表的 pan-y 一起废掉 */
@@ -2073,12 +2165,11 @@ window.__ModuleLoader__.load({
 .ssb-float-hover strong { font-size:12px; font-weight:600; }
 /* 右侧价格刻度: 每个价位配一个实心小点, 只给数字看不出对应位置 */
 .ssb-float-axis { position:absolute; top:0; right:0; bottom:0; width:40px; pointer-events:none; font-size:11px; color:var(--ssb-text-dim); font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); }
-.ssb-float-tick { position:absolute; right:36px; width:6px; height:2px; border-radius:1px; background:var(--ssb-text-sub); transform:translateY(-50%); }
+.ssb-float-tick { position:absolute; right:36px; width:6px; height:2px; border-radius:999px; background:var(--ssb-text-sub); transform:translateY(-50%); }
 .ssb-float-tick-value { position:absolute; right:1px; transform:translateY(-50%); white-space:nowrap; }
 /* 标记价常驻行: 图外再给一份完整清单, 范围外的标记也能看到 */
 .ssb-float-marks { display:flex; flex-wrap:wrap; gap:2px 8px; font-size:11px; font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); }
 /* 列表悬停浮层用 fixed 定位, 列表容器的 overflow:auto 裁不到它 */
-.ssb-float-rowtip { position:fixed; z-index:70; width:184px; padding:6px 8px; display:flex; flex-direction:column; gap:2px; pointer-events:none; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); background:var(--ssb-bg); box-shadow:var(--dsw-shadow-lv3); font-size:11px; line-height:1.4; color:var(--ssb-text-sub); font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); }
 /* 曲线用 currentColor 取色: 有涨跌时由 .ssb-up/.ssb-down 决定, 只在两者都没有时退回次要文字色 */
 .ssb-float-chart:not(.ssb-up):not(.ssb-down) { color:var(--ssb-text-sub); }
 .ssb-float-line { fill:none; stroke:currentColor; stroke-width:1.5; vector-effect:non-scaling-stroke; }
@@ -2162,11 +2253,11 @@ window.__ModuleLoader__.load({
 .ssb-menu-title { padding:8px 8px 2px; font-size:11px; color:var(--ssb-text-dim); }.ssb-kline-holder { height:340px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); }
 .ssb-kline-chart { position:relative; }
 /* 十字线读数: 贴光标右上, 指针穿透, 不挡拖动时间轴 */
-.ssb-kline-tip { position:absolute; z-index:3; width:200px; padding:4px 8px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); background:var(--ssb-bg); box-shadow:var(--dsw-shadow-lv3); font-size:11px; line-height:1.5; color:var(--ssb-text-sub); font-family:var(--ds-font-family-code); font-variant-numeric:tabular-nums; pointer-events:none; }
+.ssb-kline-tip { position:absolute; z-index:3; width:200px; padding:8px 10px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); background:var(--ssb-bg-sub); box-shadow:var(--dsw-shadow-lv3); font-size:12px; line-height:1.5; color:var(--ssb-text-sub); font-family:var(--ds-font-family-code); font-variant-numeric:tabular-nums; pointer-events:none; }
 .ssb-kline-tip-time { color:var(--ssb-text); }.ssb-kline-skeleton { height:340px; border:1px dashed var(--ssb-border); border-radius:var(--ssb-radius-sm); display:flex; align-items:center; justify-content:center; color:var(--ssb-text-sub); margin-bottom:8px; }
 .ssb-detail-grid { display:grid; grid-template-columns:minmax(0,1fr) 240px; gap:16px; align-items:start; }.ssb-detail-side { min-width:0; }.ssb-detail-side .ssb-facts { grid-template-columns:auto minmax(0,1fr); gap:6px 12px; }.ssb-detail-side .ssb-facts dt { white-space:nowrap; }
-.ssb-empty { padding:32px 16px; color:var(--ssb-text-sub); text-align:center; }.ssb-banner { border:1px solid var(--ssb-border); border-left:3px solid var(--ssb-warn); border-radius:var(--ssb-radius-sm); padding:12px; margin:12px 0; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }.ssb-banner-ok { border-left-color:var(--ssb-ok); }.ssb-error { border-left-color:var(--ssb-danger); }.ssb-banner p { margin:0; }.ssb-search-view { max-width:760px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); background:var(--ssb-bg); padding-bottom:4px; }.ssb-panel-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; border-bottom:1px solid var(--ssb-border); flex-wrap:wrap; }.ssb-panel-head h2 { font-size:16px; margin:0; }.ssb-panel-body { padding:16px; display:flex; flex-direction:column; gap:12px; }.ssb-form-row { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; }.ssb-form-row > .ssb-field { flex:0 0 176px; }.ssb-search-label { display:grid; gap:8px; margin-top:20px; }.ssb-form-row > .ssb-search-label { flex:1 1 300px; margin-top:0; }.ssb-results { display:grid; gap:8px; margin:16px; }.ssb-candidate { padding:10px 12px; display:flex; justify-content:space-between; align-items:center; gap:12px; background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); color:var(--ssb-text); font:inherit; cursor:pointer; }.ssb-candidate:hover { border-color:var(--ssb-accent); }.ssb-candidate.ssb-selected { background:var(--ssb-accent-wash); border-color:var(--ssb-accent); }.ssb-peek { display:flex; flex:1; flex-direction:column; gap:2px; text-align:left; cursor:pointer; min-width:0; }.ssb-peek:hover strong { text-decoration:underline; }.ssb-provider { border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); padding:16px; margin:12px 0; min-width:0; }.ssb-provider legend { padding:0 6px; color:var(--ssb-text-sub); }.ssb-provider details { grid-column:1 / -1; }.ssb-provider summary { cursor:pointer; }.ssb-reqlog { margin:8px 0 0; padding:0 0 0 18px; color:var(--ssb-text-sub); }.ssb-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }.ssb-route-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(132px,1fr)); gap:12px; }.ssb-route-cell { display:grid; gap:6px; min-width:0; }.ssb-route-cell-label { color:var(--ssb-text-sub); font-size:11px; }.ssb-route-cell select { width:100%; min-width:0; }.ssb-route-advanced { margin-top:12px; }.ssb-route-advanced > summary { cursor:pointer; }.ssb-route-tune { display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap; padding:8px 0; border-top:1px solid var(--ssb-border); }.ssb-route-tune-label { min-width:32px; color:var(--ssb-text-sub); }.ssb-route-delay { flex:0 0 120px; }
-.ssb-switch { display:inline-flex; align-items:center; gap:8px; cursor:pointer; position:relative; }.ssb-switch input[type="checkbox"] { position:absolute; opacity:0; width:1px; height:1px; }.ssb-switch__track { display:inline-flex; flex-shrink:0; align-items:center; width:34px; height:19px; padding:3px; border-radius:999px; background:var(--ssb-bg-muted); border:1px solid var(--ssb-border); transition:background .15s ease; }.ssb-switch__thumb { width:13px; height:13px; border-radius:50%; background:var(--ssb-text-sub); transition:transform .15s ease; }.ssb-switch input[type="checkbox"]:checked + .ssb-switch__track { background:var(--ssb-accent); }.ssb-switch input[type="checkbox"]:checked + .ssb-switch__track .ssb-switch__thumb { transform:translateX(13px); background:var(--ssb-bg); }.ssb-switch input[type="checkbox"]:focus-visible + .ssb-switch__track { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:2px; }.ssb-switch input[type="checkbox"]:disabled + .ssb-switch__track { opacity:.5; cursor:not-allowed; }.ssb-switch:hover .ssb-switch__track { border-color:var(--ssb-accent); }.ssb-sr { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
+.ssb-empty { padding:48px 16px; color:var(--ssb-text-sub); text-align:center; font-size:14px; }.ssb-banner { border:1px solid var(--ssb-border); border-left:3px solid var(--ssb-warn); border-radius:var(--ssb-radius-sm); padding:12px; margin:12px 0; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }.ssb-banner-ok { border-left-color:var(--ssb-ok); }.ssb-error { border-left-color:var(--ssb-danger); }.ssb-banner p { margin:0; }.ssb-search-view { max-width:760px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); background:var(--ssb-bg); padding-bottom:4px; }.ssb-panel-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px; border-bottom:.5px solid var(--ssb-border); flex-wrap:wrap; }.ssb-panel-head h2 { font-size:16px; margin:0; }.ssb-panel-body { padding:16px; display:flex; flex-direction:column; gap:12px; }.ssb-form-row { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; }.ssb-form-row > .ssb-field { flex:0 0 176px; }.ssb-search-label { display:grid; gap:8px; margin-top:20px; }.ssb-form-row > .ssb-search-label { flex:1 1 300px; margin-top:0; }.ssb-results { display:grid; gap:8px; margin:16px; }.ssb-candidate { padding:10px 12px; display:flex; justify-content:space-between; align-items:center; gap:12px; background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); color:var(--ssb-text); font:inherit; cursor:pointer; }.ssb-candidate:hover { border-color:var(--ssb-accent); }.ssb-candidate.ssb-selected { background:var(--ssb-accent-wash); border-color:var(--ssb-accent); }.ssb-peek { display:flex; flex:1; flex-direction:column; gap:2px; text-align:left; cursor:pointer; min-width:0; }.ssb-peek:hover strong { text-decoration:underline; }.ssb-provider { border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); padding:16px; margin:12px 0; min-width:0; }.ssb-provider legend { padding:0 6px; color:var(--ssb-text-sub); }.ssb-provider details { grid-column:1 / -1; }.ssb-provider summary { cursor:pointer; }.ssb-reqlog { margin:8px 0 0; padding:0 0 0 18px; color:var(--ssb-text-sub); }.ssb-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }.ssb-route-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(132px,1fr)); gap:12px; }.ssb-route-cell { display:grid; gap:6px; min-width:0; }.ssb-route-cell-label { color:var(--ssb-text-sub); font-size:11px; }.ssb-route-cell select { width:100%; min-width:0; }.ssb-route-advanced { margin-top:12px; }.ssb-route-advanced > summary { cursor:pointer; }.ssb-route-tune { display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap; padding:8px 0; border-top:1px solid var(--ssb-border); }.ssb-route-tune-label { min-width:32px; color:var(--ssb-text-sub); }.ssb-route-delay { flex:0 0 120px; }
+.ssb-switch { display:inline-flex; align-items:center; gap:8px; cursor:pointer; position:relative; }.ssb-switch input[type="checkbox"] { position:absolute; opacity:0; width:1px; height:1px; }.ssb-switch__track { display:inline-flex; flex-shrink:0; align-items:center; width:34px; height:19px; padding:3px; border-radius:999px; background:var(--ssb-bg-muted); border:1px solid var(--ssb-border); transition:background .15s ease; }.ssb-switch__thumb { width:13px; height:13px; border-radius:50%; background:var(--ssb-text-sub); transition:transform .15s ease; }.ssb-switch input[type="checkbox"]:checked + .ssb-switch__track { background:var(--ssb-accent); }.ssb-switch input[type="checkbox"]:checked + .ssb-switch__track .ssb-switch__thumb { transform:translateX(13px); background:var(--ssb-bg); }.ssb-switch input[type="checkbox"]:focus-visible + .ssb-switch__track { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:2px; }.ssb-switch input[type="checkbox"]:disabled + .ssb-switch__track { opacity:.5; cursor:not-allowed; }.ssb-switch:hover .ssb-switch__track { border-color:var(--ssb-accent); }
 @media(max-width:720px) { .ssb-detail-grid { grid-template-columns:minmax(0,1fr); } }
 @media(max-width:959px) { .ssb-content { grid-template-columns:minmax(0,1fr); }.ssb-page { padding:16px; } }
 @media(max-width:479px) { .ssb-page { padding:12px; }.ssb-header { align-items:flex-start; gap:12px; }.ssb-aux { display:none; }.ssb-table td,.ssb-table th { padding:8px; }.ssb-form-grid { grid-template-columns:minmax(0,1fr); }.ssb-detail-price { font-size:24px; }.ssb-button { min-height:36px; }.ssb-section-head { padding:12px; } }
@@ -2183,14 +2274,20 @@ window.__ModuleLoader__.load({
       }, [view.view])
       return h('div', { className: `ssb-root${data?.control.preferences.colorMode === 'green-up' ? ' ssb-green-up' : ''}`, ref: root },
         React.createElement('style', { 'data-plugin': '@mzzsfy/dsh-stock-assistant', dangerouslySetInnerHTML: { __html: CSS } }),
-        h('div', { className: 'ssb-page' }, h('header', { className: 'ssb-header' }, h('div', null, h('h1', null, '股票'), h('p', { className: 'ssb-muted' }, scopeText(data?.control.watchlist.order || []))), h('nav', { className: 'ssb-toolbar', 'aria-label': '股票工具操作' },
-          h(Button, { primary: view.view === 'list', onClick: () => runtime.updateView({ view: 'list' }) }, '自选'), h(Button, { primary: view.view === 'browse', onClick: () => { runtime.updateView({ view: 'browse' }); if (!runtime.getSnapshot().view.browseRows) quiet(() => runtime.loadBrowse('XSHG', 0))() } }, '市场'), h(Button, { primary: view.view === 'search', onClick: () => runtime.updateView({ view: 'search' }) }, '搜索'), h(Button, { disabled: !data || state.busy.refresh, onClick: quiet(() => runtime.refresh()) }, state.busy.refresh ? '刷新中…' : '刷新'),
-          h(Button, { primary: floating.open, 'aria-pressed': floating.open, onClick: () => setFloating({ open: !floating.open }) }, floating.open ? '收起盯盘' : '悬浮盯盘'),
-          h('div', { className: 'ssb-more', style: { position: 'relative' } }, h(Button, { 'aria-label': '更多操作', 'aria-expanded': !!view.menuOpen, onClick: () => runtime.updateView({ menuOpen: !view.menuOpen }) }, '更多'), view.menuOpen ? h('div', { className: 'ssb-menu', style: { position: 'absolute', right: 0, top: 'calc(100% + 4px)', background: 'var(--ssb-bg)', border: '1px solid var(--ssb-border)', borderRadius: 'var(--ssb-radius-md)', padding: '8px', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10, minWidth: '140px' }, role: 'menu' },
-            h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '4px 8px' } }, h(Toggle, { label: '暂停采集', checked: state.paused, onChange: runtime.setPaused })),
-            h('div', { className: 'ssb-muted', style: { padding: '0 8px', fontSize: '11px' } }, `${(data?.control.providers || []).filter(p => p.enabled).length}/${(data?.control.providers || []).length} 源启用${state.data?.klineReady ? ` · K线 ${Object.keys(state.data.klineReady).length} 市场` : ''}`),
-            h(Button, { onClick: () => { runtime.updateView({ view: 'list', overlay: 'settings', menuOpen: false }) } }, '设置'),
-            h(Button, { onClick: () => { runtime.updateView({ menuOpen: false }); layout.selectPanel(null) } }, '返回对话')) : null))),
+        h('div', { className: 'ssb-page' }, h('header', { className: 'ssb-header' },
+          h('div', null, h('h1', null, '股票'), h('p', { className: 'ssb-muted' }, scopeText(data?.control.watchlist.order || []))),
+          h('div', { className: 'ssb-header-actions' },
+            h(Button, { disabled: !data || state.busy.refresh, onClick: quiet(() => runtime.refresh()) }, state.busy.refresh ? '刷新中…' : '刷新'),
+            h(Button, { primary: floating.open, 'aria-pressed': floating.open, onClick: () => setFloating({ open: !floating.open }) }, floating.open ? '收起盯盘' : '悬浮盯盘'),
+            h('div', { className: 'ssb-more', style: { position: 'relative' } }, h(Button, { 'aria-label': '更多操作', 'aria-expanded': !!view.menuOpen, onClick: () => runtime.updateView({ menuOpen: !view.menuOpen }) }, '更多'), view.menuOpen ? h('div', { className: 'ssb-menu', style: { position: 'absolute', right: 0, top: 'calc(100% + 4px)', background: 'var(--ssb-bg)', border: '1px solid var(--ssb-border)', borderRadius: 'var(--ssb-radius-md)', padding: '8px', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10, minWidth: '140px' }, role: 'menu' },
+              h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '4px 8px' } }, h(Toggle, { label: '暂停采集', checked: state.paused, onChange: runtime.setPaused })),
+              h('div', { className: 'ssb-muted', style: { padding: '0 8px', fontSize: '11px' } }, `${(data?.control.providers || []).filter(p => p.enabled).length}/${(data?.control.providers || []).length} 源启用${state.data?.klineReady ? ` · K线 ${Object.keys(state.data.klineReady).length} 市场` : ''}`),
+              h(Button, { onClick: () => { runtime.updateView({ view: 'list', overlay: 'settings', menuOpen: false }) } }, '设置'),
+              h(Button, { onClick: () => { runtime.updateView({ menuOpen: false }); layout.selectPanel(null) } }, '返回对话')) : null))),
+        h('nav', { className: 'ssb-tablist', 'aria-label': '股票视图' },
+          h('button', { type: 'button', className: 'ssb-tab' + (view.view === 'list' ? ' ssb-tab-on' : ''), 'aria-current': view.view === 'list' ? 'page' : undefined, onClick: () => runtime.updateView({ view: 'list' }) }, '自选'),
+          h('button', { type: 'button', className: 'ssb-tab' + (view.view === 'browse' ? ' ssb-tab-on' : ''), 'aria-current': view.view === 'browse' ? 'page' : undefined, onClick: () => { runtime.updateView({ view: 'browse' }); if (!runtime.getSnapshot().view.browseRows) quiet(() => runtime.loadBrowse('XSHG', 0))() } }, '市场'),
+          h('button', { type: 'button', className: 'ssb-tab' + (view.view === 'search' ? ' ssb-tab-on' : ''), 'aria-current': view.view === 'search' ? 'page' : undefined, onClick: () => runtime.updateView({ view: 'search' }) }, '搜索')),
           state.error ? h('div', { className: 'ssb-banner ssb-error', role: 'alert' }, state.error, h(Button, { onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) }, '检查设置')) : null,
           state.view.notice ? h('div', { className: 'ssb-banner', role: 'status' }, state.view.notice, h(Button, { onClick: () => runtime.updateView({ notice: '' }) }, '知道了')) : null,
           data?.ensureError ? h('div', { className: 'ssb-banner', role: 'status' }, `后台目录同步失败：${data.ensureError.message}。可在设置中手动同步。`, h(Button, { onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) }, '前往设置')) : null,
@@ -2228,7 +2325,7 @@ window.__ModuleLoader__.load({
           return () => { for (const stop of disposers.reverse()) stop() }
         }, 'stock-assistant main panel')
       },
-      __testing: { createPageRuntime, StockPage, FloatingTicker, FloatHeader, FloatPicker, FloatList, FloatChart, FloatFoot, Sparkline, dragOrder, quiet, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, toneClass, priceTextOf, tagTabs, resolveTab, costBaseOf, markPct, pollPlan, QUIET_STATES, POLL_EVERY, floatPollDelay, timestampOf, floatFreshness, priceTimeOf, clockText, staleAfter, markAlertOf, markAlertText, deliverMarkAlert, sparkIndexAt, candleTimeText, quoteTipLines, crosshairTipLines, crosshairTimeText, timeKeyOf, crosshairTipStyle, rowTipPositionOf, sparkRangeOf, sparkTicksOf, seriesPaintPlan, sanitizeCandles, themeSignature },
+      __testing: { createPageRuntime, StockPage, FloatingTicker, FloatHeader, FloatPicker, FloatList, FloatChart, FloatFoot, Sparkline, Select, dropdownPlacement, dragOrder, quiet, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, toneClass, priceTextOf, tagTabs, resolveTab, costBaseOf, markPct, pollPlan, QUIET_STATES, POLL_EVERY, floatPollDelay, floatIntervalOf, FLOAT_INTERVALS, FLOAT_FALLBACK_SECONDS, timestampOf, floatFreshness, priceTimeOf, clockText, staleAfter, markAlertOf, markAlertText, deliverMarkAlert, sparkIndexAt, candleTimeText, quoteTipLines, crosshairTipLines, crosshairTimeText, timeKeyOf, crosshairTipStyle, rowTipPositionOf, sparkRangeOf, sparkTicksOf, seriesPaintPlan, sanitizeCandles, themeSignature },
     }
   },
 })

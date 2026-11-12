@@ -1,7 +1,7 @@
 // config 形态与自有文件存储 BDD(场景名即 Given/When/Then;契约源 docs/rsww-v5/data-design.md 存储布局节、board.md config-save)
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SLOT_KEYS as TEMPLATE_SLOT_KEYS } from '../lib/template.mjs'
@@ -86,6 +86,27 @@ test('Given 临时数据目录 When saveJson+loadJson Then 往返一致;缺失�
     saveJson('templates.json', [{ id: 'x', json: '{}' }])
     assert.deepEqual(loadJson('templates.json', []), [{ id: 'x', json: '{}' }])
     assert.deepEqual(loadJson('config.json', { fallback: true }), { fallback: true })
+  } finally {
+    if (prevDataDir === undefined) delete process.env.DSH_RS_WORKFLOW_DATA_DIR
+    else process.env.DSH_RS_WORKFLOW_DATA_DIR = prevDataDir
+  }
+})
+
+test('Given 损坏 JSON When loadJson Then 返回 fallback、备份原件并拒写覆盖', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rsww-corrupt-'))
+  const prevDataDir = process.env.DSH_RS_WORKFLOW_DATA_DIR
+  process.env.DSH_RS_WORKFLOW_DATA_DIR = dir
+  const name = 'templates-corrupt-a.json'
+  const target = join(dir, 'v5', name)
+  try {
+    mkdirSync(join(dir, 'v5'), { recursive: true })
+    writeFileSync(target, '{broken', 'utf8')
+    assert.deepEqual(loadJson(name, []), [])
+    const backup = target + '.bak'
+    assert.equal(existsSync(backup), true, '损坏原件必须备份')
+    assert.equal(readFileSync(backup, 'utf8'), '{broken')
+    assert.throws(() => saveJson(name, []), /已损坏/)
+    assert.equal(readFileSync(target, 'utf8'), '{broken', '拒写后原文件保持不变')
   } finally {
     if (prevDataDir === undefined) delete process.env.DSH_RS_WORKFLOW_DATA_DIR
     else process.env.DSH_RS_WORKFLOW_DATA_DIR = prevDataDir

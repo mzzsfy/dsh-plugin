@@ -2,6 +2,7 @@
 // 并接收浏览器定期上报的性能采样(只落本地临时文件,用于定位“越用越卡”)。
 // 会话列表瘦身在宿主执行(包装 sessionController.list),其余补丁在客户端执行;
 // 这里不做认证,缺 webServer 或路由注册失败都不影响宿主。
+import { withHostGate } from './route-gate.mjs'
 import { appendFileSync, existsSync, renameSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -48,7 +49,7 @@ const SETTINGS_SCHEMA = z.object({
   }).description('会话加载停滞兜底'),
   jobStreamLimit: z.object({
     enabled: z.boolean().default(DEFAULT_CONFIG.jobStreamLimit.enabled).description('任务状态流上限:每个会话行各订阅一条常驻 job/list 流,会话多时会把主线程压满,这里按默认窗口加点击放行'),
-    base: z.number().default(DEFAULT_CONFIG.jobStreamLimit.base).description('默认窗口:只给主会话放行的条数,子 agent 会话不占这个窗口'),
+    base: z.number().default(DEFAULT_CONFIG.jobStreamLimit.base).description('默认窗口:只给未归档会话放行的条数,归档会话、当前视图与点击过的会话不占这个窗口'),
     max: z.number().default(DEFAULT_CONFIG.jobStreamLimit.max).description('硬上限;点击某个会话可越过默认窗口加入,总数到上限后淘汰最先加入的一条'),
   }).description('任务状态流上限'),
   sessionWindow: z.object({
@@ -246,7 +247,7 @@ export function apply(ctx, config) {
   ]
   try {
     ctx.effect(() => {
-      const disposers = routes.map((route) => server.register(route))
+      const disposers = routes.map((route) => server.register({ ...route, handler: withHostGate(ctx, route.handler) }))
       return () => { for (const dispose of disposers) if (typeof dispose === 'function') dispose() }
     }, 'bug-perf routes')
   } catch (error) {

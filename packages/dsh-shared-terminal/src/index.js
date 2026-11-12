@@ -5,11 +5,12 @@ import { createTerminalTool } from './lib/tool.mjs'
 import { readControllerViewport } from './lib/private-screen.mjs'
 import { createPumpFactory } from './lib/attach-pump.mjs'
 import { createWaitSkipRegistry } from './lib/wait-skip.mjs'
+import { withHostGate } from './route-gate.mjs'
 
 export const name = 'dsh-shared-terminal'
 export const inject = ['terminalController', 'tools', 'webServer']
 // 仅实测过私有结构的精确版本;其余版本 clean-disable。
-export const SUPPORTED_VERSIONS = Object.freeze(['0.2.0-rc.1', '0.2.0-rc.2', '0.2.1-alpha.2', '0.2.1-rc.2', '0.2.1-rc.3', '0.2.1-rc.4', '0.2.1-rc.5', '0.2.2-rc.1'])
+export const SUPPORTED_VERSIONS = Object.freeze(['0.2.0-rc.1', '0.2.0-rc.2', '0.2.1-alpha.2', '0.2.1-rc.2', '0.2.1-rc.3', '0.2.1-rc.4', '0.2.1-rc.5', '0.2.2-alpha.3', '0.2.2-rc.1'])
 // 两代写模型:0.2.0 系(自 rc.1 起)与 0.2.1-alpha.2 蹭 UI 附着直调 write;0.2.1-rc.2 起 write 移除,改自持 attach 泵
 const METHODS_LEGACY = ['shells', 'list', 'create', 'write', 'close', 'terminal']
 const METHODS_SHARED = ['shells', 'list', 'create', 'attach', 'close', 'terminal']
@@ -125,8 +126,8 @@ function registerSharedTerminalRoutes(ctx, { waitSkipRegistry, tools, controller
   ctx.effect(() => {
     const stopTool = tools.register(createTerminalTool({ controller, readScreen: readControllerViewport, defineTool, pumpFactory, waitSkipRegistry }))
     // 形状漂移(有服务无 register)直接抛错暴露宿主 API 变更,不做静默降级
-    const unregisterRoute = webServer.register({ kind: 'exact', path: WAIT_SKIP_PATH, handler: waitSkipHandler })
-    const unregisterPumpRoute = webServer.register({ kind: 'exact', path: PUMP_STATE_PATH, handler: pumpStateHandler })
+    const unregisterRoute = webServer.register({ kind: 'exact', path: WAIT_SKIP_PATH, handler: withHostGate(ctx, waitSkipHandler) })
+    const unregisterPumpRoute = webServer.register({ kind: 'exact', path: PUMP_STATE_PATH, handler: withHostGate(ctx, pumpStateHandler) })
     return () => {
       stopTool?.()
       unregisterRoute?.()

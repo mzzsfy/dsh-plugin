@@ -3,7 +3,11 @@ import assert from 'node:assert/strict'
 import { fixture, until } from './_ws-fixture.mjs'
 import { once } from 'node:events'
 import { setupCommonTools, __test } from '../src/host.js'
+import { readFileSync } from 'node:fs'
 import NodeWebSocket from 'ws'
+
+// 版本面从 manifest 取:测试不重复声明发版号,发布改版本不会瓦解断言
+const { version: PKG_VERSION } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 
 test('Given 新 client 连接首帧 When 发送 hello Then host 回协议集与版本', async t => {
   const f = await fixture(t)
@@ -13,9 +17,9 @@ test('Given 新 client 连接首帧 When 发送 hello Then host 回协议集与�
   const frames = []
   socket.on('message', data => frames.push(JSON.parse(data.toString())))
   await once(socket, 'open')
-  socket.send(JSON.stringify({ type: 'hello', protocol: 1, version: '0.4.0' }))
+  socket.send(JSON.stringify({ type: 'hello', protocol: 1, version: PKG_VERSION }))
   await until(() => frames.length === 1)
-  assert.deepEqual(frames[0], { type: 'hello', protocol: 1, protocols: [1], version: '0.4.0' })
+  assert.deepEqual(frames[0], { type: 'hello', protocol: 1, protocols: [1], version: PKG_VERSION })
 })
 
 test('Given 两插件通道 When 双向推送 Then 自动身份隔离且共享一条真实WS', async t => {

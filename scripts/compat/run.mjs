@@ -19,6 +19,7 @@ import { buildProfile, installPackageExternals, enumeratePackages } from './prof
 import { isSemver } from './window.mjs'
 import { dismissOnboardingEval, verifyTypedEval, newSessionEval, ONBOARDING_CLEARED_VALUES } from './probe-evals.mjs'
 import { judgeUpstreamSeen, judgeRoundtrip, judgeLlm, judgeImportFailures, judgeFinal } from './compat-judges.mjs'
+import { probeHostGate } from './gate-probe.mjs'
 import { PLATFORM_GATED_BUNDLES, COMPAT_CHAT_MESSAGE, COMPAT_ANTHROPIC_MESSAGE } from './compat-criteria.mjs'
 
 const BOOT_TIMEOUT_MS = 150 * 1000
@@ -580,6 +581,14 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
   }
 }
 
+// token URL 铸会话 cookie:fetch 不持 cookie,取 set-cookie 首段自行携带
+async function mintSessionCookie(base, token) {
+  const res = await fetchWithTimeout(`${base}/?token=${token}`, { redirect: 'manual' })
+  const raw = res.headers.get('set-cookie') ?? ''
+  const first = raw.split(';')[0].trim()
+  return first.includes('=') ? first : ''
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   const workDir = join(args.workRoot, args.version)
@@ -589,7 +598,7 @@ async function main() {
   const bootLogPath = join(workDir, 'boot.log')
   const hostDir = args.hostDir ?? join(workDir, 'dsh-host')
   const base = `http://127.0.0.1:${args.port}`
-  const checks = { page: false, activation: null, browser: null, llm: null }
+  const checks = { page: false, activation: null, browser: null, gate: null, llm: null }
 
   // 宿主安装(幂等):已装则复用,支持 --host-dir 指向既有 .dsh-versions 目录;
   // 复用前校验闭包版本与目标一致(B12:binGuess 在场即复用会让 0.2.0 请求跑到
@@ -721,6 +730,15 @@ async function main() {
     )
     log(`[${args.version}] browser ok=${checks.browser.ok}`)
 
+    // 插件路由闸门:无 cookie 必须 401/403,带 cookie 必须放行。宿主闸门只挂在它自己的
+    // /api prefix 上,插件 exact/更长 prefix 先命中,漏接线在这里必然变红。
+    if (!args.crashOnly) {
+      const cookie = await mintSessionCookie(base, token)
+      checks.gate = await probeHostGate({ base, cookie, packages: args.only })
+      log(`[${args.version}] gate ${checks.gate.ok ? 'ok' : 'FAIL'} (${checks.gate.rows.length} 条路由)`)
+      for (const row of checks.gate.rows) log(`[${args.version}]   ${row.ok ? 'OK ' : 'BAD'} ${row.name} ${row.path} 无cookie=${row.anon} 带cookie=${row.auth}`)
+    }
+
     // LLM 链路验证(链路级边界:provider 注册 → 宿主经 gateway 打到模拟器 → 留档证据;
     // 模型行为驱动面如 shell 工具调用不在此列——模拟器不发 tool_use,该面归 L1 stub + 真实模型人工轮)
     if (!args.crashOnly) {
@@ -770,7 +788,8 @@ async function main() {
 
   // 基线槽只判不崩溃:页面可达 + 渲染无加载失败 + 无行级加载失败
   const crashOnly = args.crashOnly === true
-  const ok = judgeFinal({ crashOnly, page: checks.page, browserOk: checks.browser.ok, activation: checks.activation, llm: checks.llm, importFailures })
+  const gateOk = checks.gate === null || checks.gate.ok === true
+  const ok = judgeFinal({ crashOnly, page: checks.page, browserOk: checks.browser.ok, activation: checks.activation, llm: checks.llm, importFailures }) && gateOk
   writeFileSync(join(workDir, 'result.json'), JSON.stringify({ version: args.version, mode: crashOnly ? 'crash-only' : 'full', checks, importFailures, ok }, null, 2), 'utf8')
   log(`[${args.version}] 判定(${crashOnly ? '不崩溃口径' : '完全适配口径'}) ${ok ? 'PASS' : 'FAIL'}(明细 ${join(workDir, 'result.json')})${importFailures.length > 0 ? ` 行加载失败: ${importFailures.join(' | ')}` : ''}`)
   process.exitCode = ok ? 0 : 1

@@ -41,6 +41,7 @@ function byIdOf(rows) {
   for (const row of rows) {
     byId[row.id] = { displayTitle: row.title, updatedAt: row.updatedAt }
     if (row.cwd !== undefined) byId[row.id].cwd = row.cwd
+    if (row.origin !== undefined) byId[row.id].origin = row.origin
   }
   return byId
 }
@@ -77,6 +78,13 @@ test('parity 归档投影:空输入与空集合', () => {
 test('parity 归档投影:workspaceState 缺省守卫(双侧均回退全 null)', () => {
   assertArchiveProjectionParity([{ id: 'a', title: 'A', updatedAt: 1, cwd: 'C:\\work\\alpha' }], ['a'], undefined)
   assertArchiveProjectionParity([{ id: 'a', title: 'A', updatedAt: 1 }], ['a'], [])
+})
+
+test('parity 归档投影:子 agent 行两侧一致排除', () => {
+  assertArchiveProjectionParity([
+    { id: 'root', title: '根', updatedAt: 2 },
+    { id: 'child', title: '子', updatedAt: 1, origin: 'subagent' },
+  ], ['root', 'child'])
 })
 
 test('parity 归档投影:标题缺失回退会话 id', () => {

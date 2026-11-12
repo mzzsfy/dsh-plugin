@@ -24,7 +24,7 @@ export async function apply(ctx) {
     bus = setupCommonTools(ctx)
     notifier = createChangeNotifier(() => bus.publish({ type: 'invalidate', serverEpoch: application.snapshot().serverEpoch, snapshotSeq: application.snapshot().snapshotSeq }))
     unsubscribe = bus.subscribe(message => { if (message?.type === 'watch-demand') application.demand(message) })
-    stopRoutes = registerRoutes(ctx.webServer, application)
+    stopRoutes = registerRoutes(ctx.webServer, application, ctx)
     // 注册异常仅告警: client ensureLwc 失败同样走降级路径
     try { ctx.webServer.register({ kind: 'prefix', path: VENDOR_PREFIX, handler: serveVendor }) } catch (e) { ctx.logger?.warn?.('图表组件路由注册失败,详情将降级为数字详情') }
   } catch (e) {

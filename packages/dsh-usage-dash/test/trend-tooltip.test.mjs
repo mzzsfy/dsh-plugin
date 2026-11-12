@@ -28,9 +28,9 @@ function fixture({ money = false, costDisplay = true, currency = '¥', lang = 'z
     useEffect() {}, useLayoutEffect() {}, useMemo: fn => fn(), useCallback: fn => fn,
   }
   const window = { __ModuleLoader__: { load: entry => { factory = entry.factory } } }
-  const source = CLIENT_SOURCE.replace("inject: ['slots', 'locale'],", "__test: { TrendChart }, inject: ['slots', 'locale'],")
+  const source = CLIENT_SOURCE.replace("inject: ['slots', 'locale'],", "__test: { TrendChart, TipBody }, inject: ['slots', 'locale'],")
   new Function('window', 'localStorage', source)(window, { getItem: () => JSON.stringify({ costDisplay }), setItem() {} })
-  const { TrendChart } = factory(name => name === 'react' ? React : {}).__test
+  const { TrendChart, TipBody } = factory(name => name === 'react' ? React : {}).__test
   let tree
   const props = {
     title: 'trend', notes: [], slots: data, tipSlots: data, modelOrder: ['p/a', 'p/b', OTHER],
@@ -43,10 +43,20 @@ function fixture({ money = false, costDisplay = true, currency = '¥', lang = 'z
     tree = TrendChart(props)
     return tree
   }
-  const tip = () => nodes(tree).find(n => n.type?.name === 'ChartTip')
-  const rows = () => nodes(tip()).filter(n => n.props.className?.includes('ud-tip-row')).map(text)
+  const tipNode = () => nodes(tree).find(n => n.type?.name === 'TipBody')
+  const tipBody = () => { const node = tipNode(); return node ? TipBody(node.props) : null }
+  const tip = () => tipBody()
+  const rows = () => nodes(tipBody())
+    .filter(n => typeof n.props?.className === 'string' && n.props.className.split(' ').includes('ud-tip-item'))
+    .map((item) => {
+      const label = nodes(item).find(n => n.props?.className === 'ud-tip-label')
+      const value = nodes(item).find(n => n.props?.className === 'ud-tip-value')
+      return `${text(label)}: ${text(value)}`
+    })
   const hover = (index = 0) => {
-    nodes(tree).filter(n => n.props.className === 'ud-bar-hit')[index].props.onMouseEnter({ clientX: 20, clientY: 20 })
+    const rect = { left: 10, top: 10, width: 20, height: 20 }
+    nodes(tree).filter(n => n.props.className === 'ud-bar-hit')[index]
+      .props.onMouseEnter({ currentTarget: { getBoundingClientRect: () => rect } })
     render()
   }
   const select = (key, ctrl = false) => {
@@ -54,7 +64,7 @@ function fixture({ money = false, costDisplay = true, currency = '¥', lang = 'z
     render()
   }
   render()
-  return { hover, select, rows, tip: () => text(tip()), update: changes => { Object.assign(props, changes); render() } }
+  return { hover, select, rows, tree: () => tree, tip: () => text(tipBody()), update: changes => { Object.assign(props, changes); render() } }
 }
 
 test('Given 金额视图 When 悬浮 Then 总计和各模型展示估算费用，其他明细按费用排序', () => {
@@ -66,7 +76,7 @@ test('Given 金额视图 When 悬浮 Then 总计和各模型展示估算费用�
 
 test('Given Token 视图 When 单选模型 Then 总计、费用、均价仅包含可见模型', () => {
   const f = fixture(); f.hover(); f.select('p/a')
-  assert.deepEqual(f.rows(), ['所选用量: 1,000 tok', 'p/a: 1,000 tok', '≈ ¥2.00', '均价: ¥2,000.000/M'])
+  assert.deepEqual(f.rows(), ['所选用量: 1,000 tok', 'p/a: 1,000 tok', '费用: ≈ ¥2.00', '均价: ¥2,000.000/M'])
 })
 
 test('Given 金额视图 When Ctrl 多选包含其他 Then 合计不重复计其他子项', () => {

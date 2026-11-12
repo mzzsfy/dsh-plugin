@@ -5,7 +5,19 @@
 // 缓存只服务 owner/本地调用:非 owner Remote 主体直接透传原方法,避免跨主体命中共享缓存。
 
 // 列表行消费的投影;其余键不下发。被裁掉的投影仍由会话详情接口完整返回。
-export const KEEP_PROJECTIONS = ['title', 'sessionListMetadata', 'inbox', 'modelSelection', 'tokenUsage']
+// subagent* / forkLineage 是跨插件数据面:宿主 client 用列表 block 播种 projection
+// store(applyListBlock),未打开的会话无详情刷新,裁掉会让子会话行/徽标/血缘消失。
+export const KEEP_PROJECTIONS = [
+  'title',
+  'sessionListMetadata',
+  'inbox',
+  'modelSelection',
+  'tokenUsage',
+  'subagentCatalog',
+  'subagentTiming',
+  'subagent',
+  'forkLineage',
+]
 
 // 缓存有效期:会话增删立即失效,TTL 只兜底标题与运行时状态的漂移。
 export const TTL_MS = 15 * 1000
