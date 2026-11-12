@@ -55,6 +55,7 @@ before(async () => {
   page = context.pages()[0]
   errors = []
   page.on('pageerror', error => errors.push(error.message))
+  trackPreferenceResponses()
   await page.goto(url)
   await page.waitForSelector('.ssb-root')
 })
@@ -70,8 +71,23 @@ async function openPreferences() {
   await page.getByRole('tab', { name: '显示偏好' }).click()
 }
 
-function preferenceResponse() {
-  return page.waitForResponse(response => response.url().includes('/api/stock-assistant/preferences') && response.request().method() === 'POST')
+// preferences 写盘响应缓冲: 挤兑/CPU 饥饿下"注册等待窗口"与"click 完成"会互相吃掉
+// 30s 时窗, page 级监听从用例开始就缓存全部响应, 断言侧按谓词取事件, 事件永不丢
+const preferenceResponses = []
+function trackPreferenceResponses() {
+  page.on('response', response => {
+    if (response.url().includes('/api/stock-assistant/preferences') && response.request().method() === 'POST') preferenceResponses.push(response)
+  })
+}
+async function takePreferenceResponse() {
+  // 预算上限: 挤兑下等待可长, 但超 120s 判真失败, 防断言侧无限挂死
+  const deadline = Date.now() + 120 * 1000
+  for (;;) {
+    const hit = preferenceResponses.shift()
+    if (hit) return hit
+    if (Date.now() > deadline) throw new Error('120s 内未等到 preferences 写盘响应')
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
 }
 
 test('鼠标点开下拉并选择: 菜单进 DOM, 选择后写盘且菜单关闭', async () => {
@@ -80,7 +96,7 @@ test('鼠标点开下拉并选择: 菜单进 DOM, 选择后写盘且菜单关闭
   await trigger.click()
   const listbox = page.getByRole('listbox', { name: '悬浮盯盘刷新' })
   await listbox.waitFor({ state: 'visible' })
-  const pending = preferenceResponse()
+  const pending = takePreferenceResponse()
   await listbox.getByRole('option', { name: '30秒' }).click()
   const response = await pending
   assert.equal(response.status(), 200)
@@ -99,7 +115,14 @@ test('键盘打开与选择, Escape 只关菜单不关设置弹窗', async () =>
   await page.keyboard.press('Enter')
   const listbox = page.getByRole('listbox', { name: '刷新间隔' })
   await listbox.waitFor({ state: 'visible' })
-  const pending = preferenceResponse()
+  // 菜单打开时 active 初始化为当前值, 等 aria-activedescendant 就绪再导航:
+  // open 与 active 是两次 setState, 快机器上 ArrowDown 可能落在 React 提交前
+  await page.waitForFunction(([triggerSel, optionLabel]) => {
+    const trigger = document.querySelector(triggerSel)
+    const active = trigger?.getAttribute('aria-activedescendant')
+    return active !== null && document.getElementById(active)?.textContent?.trim() === optionLabel
+  }, ['[aria-label="刷新间隔"]', '15秒'])
+  const pending = takePreferenceResponse()
   await page.keyboard.press('ArrowDown')
   await page.keyboard.press('Enter')
   const response = await pending
@@ -114,6 +137,8 @@ test('键盘打开与选择, Escape 只关菜单不关设置弹窗', async () =>
   await trigger.click()
   await page.getByRole('option', { name: '15秒' }).click()
   await page.getByRole('button', { name: '关闭' }).click()
+  // 显式等弹窗退场: 遮罩退场动画中点「更多操作」会命中持续不稳定态
+  await page.getByRole('dialog', { name: '设置' }).waitFor({ state: 'hidden' })
   assert.equal(errors.length, 0)
 })
 
