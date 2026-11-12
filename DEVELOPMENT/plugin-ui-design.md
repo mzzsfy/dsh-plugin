@@ -120,7 +120,7 @@ L2 全屏页面:
 控件结构契约(开关、pill、图标、样式注入)以 plugin-client-conventions.md 为准,本节只定视觉参数:
 
 - **开关**:track 胶囊 34×19px、thumb 圆点 13px(参考 `.tn-switch` 存量值,防仿制漂移),关闭态底色 `<pfx>-bg-muted`,选中底色 `<pfx>-accent`,过渡 0.15s ease;禁用态统一见文末"禁用"。禁止 40×24 等放大变体。
-- **按钮**:主按钮实底 `<pfx>-accent` + `--dsw-alias-bg-base` 文字、hover `<pfx>-accent-deep`;次按钮透明底 + `<pfx>-border-strong` 边框 + text 色,hover `<pfx>-hover`;ghost 按钮无边框、text-sub,hover `<pfx>-hover`;危险按钮默认 ghost + `<pfx>-danger` 文字,hover `<pfx>-hover-danger`,实底危险仅用于确认弹窗主操作。高度 L1 36 / L2 32 / L3 28,圆角 radius-sm,内边距水平 12/14。图标按钮 28×28,`aria-label` 必填。
+- **按钮**:主按钮实底 `<pfx>-accent` + `--dsw-alias-bg-base` 文字、hover `<pfx>-accent-deep`;次按钮透明底 + `<pfx>-border-strong` 边框 + text 色,hover `<pfx>-hover`;ghost 按钮无边框、text-sub,hover `<pfx>-hover`;危险按钮默认 ghost + `<pfx>-danger` 文字,hover `<pfx>-hover-danger`,实底危险仅用于确认弹窗主操作。危险按钮进入确认态后必须保持实心底 + 反白文字,`:hover` 也不得回退成 wash 底;否则反白文字落在浅色底上不可读。高度 L1 36 / L2 32 / L3 28,圆角 radius-sm,内边距水平 12/14。图标按钮 28×28,`aria-label` 必填。
 - **输入框**:白底(`<pfx>-bg`)+ `<pfx>-border-strong` 边框,radius-sm,焦点环 `outline: 2px solid var(--dsw-alias-state-business-primary)`。L1 高 36,L2/L3 高 32/28。数字输入右侧单位用 `<pfx>-text-dim` 11px。
 - **卡片 / 面板**:L1 `<pfx>-card` 底 + `<pfx>-card-border` 0.5px 描边 + radius-md + padding 10-16;L2 `<pfx>-bg` 底 + `<pfx>-border` 描边 + radius-md;嵌套分层用 bg-sub,不再加边框。与官方 PluginCard 同槽位并列的卡片,二选一并全页一致:镜像官方像素(注释豁免),或统一为 L1 卡并在注释说明不镜像。
 - **表格 / 列表**:表头 12px text-dim,行高 40px(L2)/36px(L3),hover `<pfx>-hover`,选中行 accent-wash 底 + accent 文字或左侧 accent 竖线(二选一,包内一致);操作列在最右,默认 opacity .75,hover 行时 1。
