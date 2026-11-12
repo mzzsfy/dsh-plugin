@@ -257,6 +257,10 @@ const MESSAGES_ZH = {
   'turnCostChip': '{cost}',
   cachePrecision: '精确缓存命中率',
   cachePrecisionDesc: '将官方用量胶囊及弹窗中的命中率显示为两位小数。',
+  recentSpeed: '最近输出速度',
+  recentSpeedDesc: '在官方「用时与速度」弹窗的输出速度下方追加最近 {n} 个可读数步骤的平均输出速度:输出 token 合计 ÷ 耗时合计,耗时优先取首 token 到完成,未记录首 token 的步骤取启动到完成(含首字等待)。',
+  replaceSpeed: '替换默认速度',
+  replaceSpeedDesc: '开启后用最近输出速度替换官方用时胶囊上的平均输出速度,关闭则保留官方读数。',
   tokenDetail: '会话 Token 明细',
   tokenDetailDesc: '在官方 Token 用量弹窗末尾追加含缓存输入合计；存在缓存写入时追加未命中合计。',
   costDisplay: '费用显示',
@@ -406,6 +410,10 @@ const MESSAGES_EN = {
   'turnCostChip': '{cost}',
   cachePrecision: 'Precise cache-hit rate',
   cachePrecisionDesc: 'Show two decimals in the official usage pill and Token usage dialog.',
+  recentSpeed: 'Recent output speed',
+  recentSpeedDesc: 'Append the average output speed of the latest {n} steps below the speed row of the official time-and-speed dialog: total output tokens ÷ total elapsed time; elapsed prefers first token to completion, falling back to step start (including first-token wait) when no first token was recorded.',
+  replaceSpeed: 'Replace default speed',
+  replaceSpeedDesc: 'Replace the average output speed on the official time pill with the recent output speed; off keeps the official reading.',
   tokenDetail: 'Session token detail',
   tokenDetailDesc: 'Append total input including cache to the official Token usage dialog; add total cache misses when cache writes exist.',
   costDisplay: 'Cost display',
@@ -1095,6 +1103,14 @@ const NUMBER_COMPACT_INT_THRESHOLD = 100
 const PERCENT_PRECISE_CAP = 99.99
 const DURATION_MINUTE_SECONDS = 60
 const TPS_INTEGER_THRESHOLD = 10
+// 最近输出速度取样的助手步骤上限:窗口分页只保留近期事件,口径落在"当下能读到的最新几步"
+const RECENT_SPEED_STEPS = 20
+// 读数行的宿主挂载点:官方「用时与速度」胶囊与其弹窗明细;输出速度是该明细的最后一行
+const SPEED_DIALOG_STAT = 'activity'
+const SPEED_DIALOG_SELECTOR = '[data-session-stats-details]'
+// 读数行自述标记:portal 落在宿主明细里,靠属性把自家 dt/dd 与官方行区分并归位
+const SPEED_ROW_ATTRIBUTE = 'data-ud-speed-detail="recentSpeed"'
+const TEXT_NODE = 3
 
 // 官方 billing 分母:三个互斥的 prompt 侧计费桶
 function billedInputTokens(usage) {
@@ -1137,6 +1153,145 @@ function formatTokensPerSecond(tps) {
   const clamped = Math.max(0, tps)
   if (clamped >= TPS_INTEGER_THRESHOLD) return String(Math.round(clamped))
   return String(Math.round(clamped * NUMBER_ONE_DECIMAL) / NUMBER_ONE_DECIMAL)
+}
+
+// ===== 最近输出速度:当前窗口最近若干助手步骤的生成吞吐 =====
+// 单步耗时:优先 decode 口径(完成 - 首 token);流未记录首 token 时回退到端到端
+// (完成 - 步骤启动,含首 token 等待);非有限数字与两者都缺一样不出读数
+function stepSpanMs(timing) {
+  const completed = timing?.completedTime
+  if (!Number.isFinite(completed)) return null
+  const anchor = Number.isFinite(timing.firstTokenTime)
+    ? timing.firstTokenTime
+    : Number.isFinite(timing.stepStartTime) ? timing.stepStartTime : null
+  if (anchor === null) return null
+  const span = completed - anchor
+  return Number.isFinite(span) && span > 0 ? span : null
+}
+
+// 单步读数:分子为该步输出 token;零输出、timing 或 usage 缺失的步骤不出读数(零 token 只添分母)
+function stepSpeedReading(node) {
+  const outputTokens = node?.usage?.outputTokens
+  if (typeof outputTokens !== 'number' || !Number.isFinite(outputTokens) || outputTokens <= 0) return null
+  const ms = stepSpanMs(node?.timing)
+  return ms === null ? null : { tokens: outputTokens, ms }
+}
+
+// 最近 limit 个可读数步骤的加权平均速度 = 总输出 token / 总 decode 秒;
+// 窗口节点按序排列,自尾向前取样;无读数(或时长合计为零)返回 null 供渲染层省略该行
+function recentSpeedOf(nodes, limit = RECENT_SPEED_STEPS) {
+  if (nodes === null || typeof nodes !== 'object' || !(limit > 0)) return null
+  const list = typeof nodes.values === 'function' ? [...nodes.values()] : typeof nodes[Symbol.iterator] === 'function' ? [...nodes] : null
+  if (list === null) return null
+  let tokens = 0
+  let decodeMs = 0
+  let taken = 0
+  for (let index = list.length - 1; index >= 0 && taken < limit; index -= 1) {
+    const reading = stepSpeedReading(list[index])
+    if (reading === null) continue
+    tokens += reading.tokens
+    decodeMs += reading.ms
+    taken += 1
+  }
+  return decodeMs > 0 ? tokens / (decodeMs / MS_PER_SECOND) : null
+}
+
+// 官方统计弹窗定位:胶囊展开且同名弹窗恰好一个时交付该弹窗,其余情况交 null;
+// 关闭/重开/换会话都会重建弹窗节点,观察器按引用变化重新交付;onUpdate 每次 DOM 变更后
+// 收到当前目标,用于校正官方后续追加行造成的行序漂移
+function observeStatDialog(anchor, document, Observer, onTarget, stat, dialogSelector, onUpdate) {
+  let current = null
+  const update = () => {
+    const pill = anchor?.closest('[data-slot="conversation.composer.dock"]')?.querySelector(`[data-composer-stat="${stat}"]`)
+    const button = pill?.querySelector('button')
+    const dialogs = document.querySelectorAll(dialogSelector)
+    const next = button?.getAttribute('aria-expanded') === 'true' && dialogs.length === 1 ? dialogs[0] : null
+    if (next !== current) {
+      current = next
+      onTarget(next)
+    }
+    if (onUpdate) onUpdate(next)
+    observer.takeRecords()
+  }
+  const observer = new Observer(update)
+  observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-expanded'] })
+  update()
+  return () => observer.disconnect()
+}
+
+// 读数行归位:官方弹窗后续追加行会排在 portal 节点之后,这里把读数行搬回明细末尾
+function keepSpeedRowLast(list) {
+  if (!list || typeof list.querySelector !== 'function') return false
+  const dt = list.querySelector(`dt[${SPEED_ROW_ATTRIBUTE}]`)
+  const dd = list.querySelector(`dd[${SPEED_ROW_ATTRIBUTE}]`)
+  if (!dt || !dd || dt.nextElementSibling !== dd) return false
+  if (list.lastElementChild === dd) return false
+  list.append(dt, dd)
+  return true
+}
+
+// 胶囊速度文本改写:只替换「数值 + 每秒单位」片段,保留轮/步前缀与分隔;单位随宿主语言
+// (tok/s、jetons/s、ток/с),text 为 null 时原样返回,便于调用方以同一入口表达"不启用"
+const SPEED_READING_PATTERN = /[\d.]+ \S*?\/(?:s|с)/
+function rewriteSpeedText(text, value) {
+  if (typeof text !== 'string' || value === null) return text
+  return SPEED_READING_PATTERN.test(text) ? text.replace(SPEED_READING_PATTERN, value) : text
+}
+
+// 宿主胶囊的文本节点可能挂在 span 任意层(紧凑模式没有 button),按子树收集统一处理
+function textNodesOf(element) {
+  const found = []
+  const walk = (node) => {
+    for (const child of node?.childNodes ?? []) {
+      if (child.nodeType === TEXT_NODE) found.push(child)
+      else walk(child)
+    }
+  }
+  walk(element)
+  return found
+}
+
+// 官方用时胶囊的速度读数原位改写:只替换读数片段,轮/步前缀与官方节点保留;
+// text 为 null 时停止改写,卸载时只还原仍由本次改写持有的值
+function observeSpeedCapsule(anchor, document, Observer, text) {
+  const changes = new Map()
+  const patch = (node, key, read, write) => {
+    const before = read()
+    if (typeof before !== 'string') return
+    const after = rewriteSpeedText(before, text)
+    if (after === before) return
+    let fields = changes.get(node)
+    if (!fields) changes.set(node, fields = new Map())
+    fields.set(key, { before, after, read, write })
+    write(after)
+  }
+  const releaseChanged = (records) => {
+    for (const record of records) {
+      const fields = changes.get(record.target)
+      if (record.type === 'characterData') fields?.delete('text')
+      if (record.type === 'attributes' && record.attributeName === 'aria-label') fields?.delete('aria')
+    }
+    for (const [node, fields] of changes) if (fields.size === 0 || !document.contains(node)) changes.delete(node)
+  }
+  const update = (records = []) => {
+    releaseChanged(records)
+    const pill = anchor?.closest('[data-slot="conversation.composer.dock"]')?.querySelector('[data-composer-stat="activity"]')
+    // 紧凑模式只有不可展开的 span 胶囊,没有 aria-label 可同步
+    const button = pill?.querySelector('button')
+    for (const node of textNodesOf(pill)) patch(node, 'text', () => node.nodeValue, (value) => { node.nodeValue = value })
+    if (button) patch(button, 'aria', () => button.getAttribute('aria-label'), (value) => button.setAttribute('aria-label', value))
+    observer.takeRecords()
+  }
+  const observer = new Observer(update)
+  observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['aria-label'] })
+  update()
+  return () => {
+    releaseChanged(observer.takeRecords())
+    observer.disconnect()
+    for (const fields of changes.values()) for (const change of fields.values()) {
+      if (change.read() === change.after) change.write(change.before)
+    }
+  }
 }
 
 function buildUsageDialogRows(usage, prefs, t) {
@@ -1204,9 +1359,10 @@ function observeUsageDialog(anchor, document, Observer, onTarget, percent) {
 }
 
 // usp stats-line 偏好状态工厂:storage 注入便于 Node 测试,读写全防御,内存值始终生效
-// 默认三开:存储缺键/非法值一律按开,仅显式 false 视为用户关闭
+// 四项展示增强默认开(存储缺键/非法值一律按开,仅显式 false 视为用户关闭);
+// 替换官方读数是侵入性改写,缺键按关
 function createStatsLineState(storage) {
-  const DEFAULT_PREFS = { cachePrecision: true, tokenDetail: true, costDisplay: true }
+  const DEFAULT_PREFS = { cachePrecision: true, tokenDetail: true, costDisplay: true, recentSpeed: true, replaceSpeed: false }
   const listeners = new Set()
   const read = () => {
     if (!storage) return { ...DEFAULT_PREFS }
@@ -1217,6 +1373,8 @@ function createStatsLineState(storage) {
         cachePrecision: parsed.cachePrecision !== false,
         tokenDetail: parsed.tokenDetail !== false,
         costDisplay: parsed.costDisplay !== false,
+        recentSpeed: parsed.recentSpeed !== false,
+        replaceSpeed: parsed.replaceSpeed === true,
       }
     } catch {
       return { ...DEFAULT_PREFS }
@@ -2957,40 +3115,78 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       return target
     }
 
-    // 官方明细末尾仅追加补充项，底栏保留费用。
-    const StatsLineAppended = React.memo(function StatsLineAppended({ useProjection, t = defaultT }) {
+    // 最近输出速度的挂载点:官方「用时与速度」弹窗,读数行落在输出速度之后;
+    // 统计开关关闭时不装观察器,避免为未启用的功能付全文档监听
+    function useSpeedDialogTarget(anchorRef, enabled) {
+      const [target, setTarget] = useState(null)
+      useEffect(() => {
+        if (!enabled) {
+          setTarget(null)
+          return undefined
+        }
+        return observeStatDialog(anchorRef.current, document, MutationObserver, setTarget, SPEED_DIALOG_STAT, SPEED_DIALOG_SELECTOR, keepSpeedRowLast)
+      }, [enabled])
+      return enabled ? target : null
+    }
+
+    // 胶囊读数替换:仅当开关开启且有读数时接管,关闭或读数消失即还原官方文本
+    function useSpeedCapsulePatch(anchorRef, text) {
+      useEffect(() => {
+        if (text === null) return undefined
+        return observeSpeedCapsule(anchorRef.current, document, MutationObserver, text)
+      }, [text])
+    }
+
+    // 官方明细追加补充项，底栏保留费用。最近输出速度只吃当前窗口节点，全局口径归统计面板。
+    const StatsLineAppended = React.memo(function StatsLineAppended({ useProjection, useChat, t = defaultT }) {
       if (typeof useProjection !== 'function') return null
       const usage = useProjection('tokenUsage')
       const modelUsage = useProjection(MODEL_USAGE_PROJECTION)
+      // 窗口节点订阅:宿主 dock 标准 props 恒提供 useChat,缺失时最近输出速度按无数据降级
+      const windowNodes = typeof useChat === 'function' ? useChat((state) => state?.legacy?.nodes) : null
       const [prefs, setPrefs] = useState(() => statsLineState.get())
       useEffect(() => statsLineState.subscribe(() => setPrefs(statsLineState.get())), [])
       const { rules: pricingRules } = usePricing()
       const anchorRef = useRef(null)
       const costRef = useRef(null)
+      const speedAnchorRef = useRef(null)
+      const percent = prefs.cachePrecision && usage ? cacheHitPercentPrecise(usage) : null
+      const target = useUsageDialogTarget(anchorRef, percent)
+      const speedTarget = useSpeedDialogTarget(speedAnchorRef, prefs.recentSpeed)
+      // 弹窗关闭且不替换胶囊时无需取样,避免每渲染复制整个窗口节点数组
+      const speedWanted = prefs.recentSpeed && (speedTarget !== null || prefs.replaceSpeed)
+      const recentSpeed = speedWanted ? recentSpeedOf(windowNodes) : null
+      const recentSpeedText = recentSpeed === null ? null : `${formatTokensPerSecond(recentSpeed)} tok/s`
+      useSpeedCapsulePatch(speedAnchorRef, prefs.replaceSpeed ? recentSpeedText : null)
       useLayoutEffect(() => {
         const element = costRef.current
         const dock = anchorRef.current?.closest('[data-slot="conversation.composer.dock"]')?.parentElement
         if (element && dock) element.style.setProperty('--ud-dock-gap', getComputedStyle(dock).columnGap)
       })
-      const percent = prefs.cachePrecision && usage ? cacheHitPercentPrecise(usage) : null
-      const target = useUsageDialogTarget(anchorRef, percent)
       const rows = buildUsageDialogRows(usage, prefs, t)
       const costItem = usage && (billedInputTokens(usage) > 0 || usage.outputTokens > 0)
         ? buildSessionCostItem(usage, modelUsage, pricingRules, prefs, t)
         : null
-      const details = target && createPortal && rows.length > 0
-        ? createPortal(rows.map((row) => h(React.Fragment, { key: row.key },
-          h('dt', { 'data-ud-usage-detail': row.key }, row.label),
-          h('dd', { 'data-ud-usage-detail': row.key }, row.value))), target)
+      const detailRows = rows.map((row) => h(React.Fragment, { key: row.key },
+        h('dt', { 'data-ud-usage-detail': row.key }, row.label),
+        h('dd', { 'data-ud-usage-detail': row.key }, row.value)))
+      const details = target && createPortal && detailRows.length > 0 ? createPortal(detailRows, target) : null
+      const speedDetails = speedTarget && createPortal && recentSpeedText !== null
+        ? createPortal([
+            h('dt', { key: 'speedLabel', 'data-ud-speed-detail': 'recentSpeed' }, t('recentSpeed')),
+            h('dd', { key: 'speedValue', 'data-ud-speed-detail': 'recentSpeed' }, recentSpeedText),
+          ], speedTarget)
         : null
       return h(React.Fragment, null,
         h('span', { ref: anchorRef, hidden: true }),
+        h('span', { ref: speedAnchorRef, hidden: true }),
         costItem !== null && h(HintText, {
           innerRef: costRef,
           className: 'ud-statsline-root',
           text: sessionCostTitleText(t, costItem.unpriced),
         }, costItem.text),
-        details)
+        details,
+        speedDetails)
     })
 
     // 注入点B 组件:回合费用芯片,官方动作行内渲染(复制与分支图标之间,赞踩/上下文跳转同排);
@@ -3039,12 +3235,12 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     }
 
     // 偏好卡行:说明文案承担 aria-describedby 目标
-    function StatsLineOptionRow({ labelKey, descKey, checked, onToggle, t = defaultT }) {
+    function StatsLineOptionRow({ labelKey, descKey, descParams, checked, onToggle, t = defaultT }) {
       const describeId = React.useId()
       return h('div', { className: 'ud-pref-row' },
         h('div', { className: 'ud-pref-text' },
           h('span', { className: 'ud-pref-title' }, t(labelKey)),
-          h('span', { className: 'ud-pref-desc', id: describeId }, t(descKey))),
+          h('span', { className: 'ud-pref-desc', id: describeId }, t(descKey, descParams))),
         h(Switch, { checked, onChange: onToggle, describedbyId: describeId }))
     }
 
@@ -3058,6 +3254,23 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           descKey: 'cachePrecisionDesc',
           checked: prefs.cachePrecision,
           onToggle: (value) => statsLineState.set({ cachePrecision: value }),
+          t,
+        }),
+        h(StatsLineOptionRow, {
+          labelKey: 'recentSpeed',
+          descKey: 'recentSpeedDesc',
+          descParams: { n: RECENT_SPEED_STEPS },
+          checked: prefs.recentSpeed,
+          // 关统计时连带复位替换项:否则子开关隐藏后仍武装着,重开父开关会突然接管官方读数
+          onToggle: (value) => statsLineState.set(value ? { recentSpeed: true } : { recentSpeed: false, replaceSpeed: false }),
+          t,
+        }),
+        // 子开关只在最近输出速度开启时可见:关闭统计后其替换读数已无意义
+        prefs.recentSpeed && h(StatsLineOptionRow, {
+          labelKey: 'replaceSpeed',
+          descKey: 'replaceSpeedDesc',
+          checked: prefs.replaceSpeed,
+          onToggle: (value) => statsLineState.set({ replaceSpeed: value }),
           t,
         }),
         h(StatsLineOptionRow, {

@@ -22,6 +22,8 @@ const {
 } = core
 
 const USAGE = { uncachedInputTokens: 1000, cacheReadTokens: 4000, cacheWriteTokens: 0, outputTokens: 500 }
+// 展示项默认全开;替换官方读数属侵入性改写,缺键按关
+const DEFAULT_EXPECT = { cachePrecision: true, tokenDetail: true, costDisplay: true, recentSpeed: true, replaceSpeed: false }
 const PREFS_OFF = { cachePrecision: false, tokenDetail: false, costDisplay: false }
 const PREFS_COST_ON = { cachePrecision: false, tokenDetail: false, costDisplay: true }
 const zhT = createTranslator(MESSAGES_ZH)
@@ -51,6 +53,14 @@ test('stats 词典关键值逐字节,en 族逐字节', () => {
   assert.equal(MESSAGES_ZH['stats.tokens'], '输入 {input} tok · 输出 {output} tok')
   assert.equal(MESSAGES_ZH.cachePrecision, '精确缓存命中率')
   assert.equal(MESSAGES_ZH.cachePrecisionDesc, '将官方用量胶囊及弹窗中的命中率显示为两位小数。')
+  assert.equal(MESSAGES_ZH.recentSpeed, '最近输出速度')
+  assert.equal(MESSAGES_ZH.recentSpeedDesc, '在官方「用时与速度」弹窗的输出速度下方追加最近 {n} 个可读数步骤的平均输出速度:输出 token 合计 ÷ 耗时合计,耗时优先取首 token 到完成,未记录首 token 的步骤取启动到完成(含首字等待)。')
+  assert.equal(MESSAGES_ZH.replaceSpeed, '替换默认速度')
+  assert.equal(MESSAGES_ZH.replaceSpeedDesc, '开启后用最近输出速度替换官方用时胶囊上的平均输出速度,关闭则保留官方读数。')
+  assert.equal(MESSAGES_EN.recentSpeed, 'Recent output speed')
+  assert.equal(MESSAGES_EN.recentSpeedDesc, 'Append the average output speed of the latest {n} steps below the speed row of the official time-and-speed dialog: total output tokens ÷ total elapsed time; elapsed prefers first token to completion, falling back to step start (including first-token wait) when no first token was recorded.')
+  assert.equal(MESSAGES_EN.replaceSpeed, 'Replace default speed')
+  assert.equal(MESSAGES_EN.replaceSpeedDesc, 'Replace the average output speed on the official time pill with the recent output speed; off keeps the official reading.')
   assert.equal(MESSAGES_ZH.tokenDetail, '会话 Token 明细')
   assert.equal(MESSAGES_ZH.tokenDetailDesc, '在官方 Token 用量弹窗末尾追加含缓存输入合计；存在缓存写入时追加未命中合计。')
   assert.equal(MESSAGES_ZH['stats.cost'], '费用 ≈ {cost}')
@@ -100,15 +110,21 @@ test('formatTokensPerSecond 钳负值且阈值上下分别取整', () => {
   assert.equal(formatTokensPerSecond(3.24), '3.2')
 })
 
-test('createStatsLineState 默认三开,非法 JSON 回落三开,显式 false 才视为关', () => {
-  assert.deepEqual(createStatsLineState(fakeStorage()).get(), { cachePrecision: true, tokenDetail: true, costDisplay: true })
-  assert.deepEqual(createStatsLineState(null).get(), { cachePrecision: true, tokenDetail: true, costDisplay: true })
+test('createStatsLineState 展示项默认四开、替换项默认关,非法 JSON 回落默认,显式值才生效', () => {
+  assert.deepEqual(createStatsLineState(fakeStorage()).get(), DEFAULT_EXPECT)
+  assert.deepEqual(createStatsLineState(null).get(), DEFAULT_EXPECT)
   const broken = fakeStorage({ [STATS_LINE_STORAGE_KEY]: '{broken json' })
-  assert.deepEqual(createStatsLineState(broken).get(), { cachePrecision: true, tokenDetail: true, costDisplay: true })
+  assert.deepEqual(createStatsLineState(broken).get(), DEFAULT_EXPECT)
   const junk = fakeStorage({ [STATS_LINE_STORAGE_KEY]: JSON.stringify({ cachePrecision: 'yes', tokenDetail: 1 }) })
-  assert.deepEqual(createStatsLineState(junk).get(), { cachePrecision: true, tokenDetail: true, costDisplay: true })
+  assert.deepEqual(createStatsLineState(junk).get(), DEFAULT_EXPECT)
   const partialOff = fakeStorage({ [STATS_LINE_STORAGE_KEY]: JSON.stringify({ cachePrecision: false, tokenDetail: true }) })
-  assert.deepEqual(createStatsLineState(partialOff).get(), { cachePrecision: false, tokenDetail: true, costDisplay: true })
+  assert.deepEqual(createStatsLineState(partialOff).get(), { ...DEFAULT_EXPECT, cachePrecision: false })
+  const speedOff = fakeStorage({ [STATS_LINE_STORAGE_KEY]: JSON.stringify({ recentSpeed: false }) })
+  assert.deepEqual(createStatsLineState(speedOff).get(), { ...DEFAULT_EXPECT, recentSpeed: false })
+  const replaceOn = fakeStorage({ [STATS_LINE_STORAGE_KEY]: JSON.stringify({ replaceSpeed: true }) })
+  assert.deepEqual(createStatsLineState(replaceOn).get(), { ...DEFAULT_EXPECT, replaceSpeed: true })
+  const replaceJunk = fakeStorage({ [STATS_LINE_STORAGE_KEY]: JSON.stringify({ replaceSpeed: 'yes' }) })
+  assert.deepEqual(createStatsLineState(replaceJunk).get(), DEFAULT_EXPECT)
 })
 
 test('createStatsLineState set 合并生效并持久化且通知订阅者', () => {
@@ -117,8 +133,8 @@ test('createStatsLineState set 合并生效并持久化且通知订阅者', () =
   const seen = []
   state.subscribe(() => seen.push(state.get()))
   state.set({ cachePrecision: false })
-  assert.deepEqual(state.get(), { cachePrecision: false, tokenDetail: true, costDisplay: true })
-  assert.deepEqual(JSON.parse(storage.getItem(STATS_LINE_STORAGE_KEY)), { cachePrecision: false, tokenDetail: true, costDisplay: true })
+  assert.deepEqual(state.get(), { ...DEFAULT_EXPECT, cachePrecision: false })
+  assert.deepEqual(JSON.parse(storage.getItem(STATS_LINE_STORAGE_KEY)), { ...DEFAULT_EXPECT, cachePrecision: false })
   assert.equal(seen.length, 1)
 })
 
@@ -139,7 +155,7 @@ test('createStatsLineState reload 吸收外部写入', () => {
   state.subscribe(() => { notified += 1 })
   storage.setItem(STATS_LINE_STORAGE_KEY, JSON.stringify({ cachePrecision: true, tokenDetail: true }))
   state.reload()
-  assert.deepEqual(state.get(), { cachePrecision: true, tokenDetail: true, costDisplay: true })
+  assert.deepEqual(state.get(), DEFAULT_EXPECT)
   assert.equal(notified, 1)
 })
 
@@ -149,7 +165,7 @@ test('createStatsLineState 写入失败仅丢持久化,内存仍生效', () => {
     setItem: () => { throw new Error('quota') },
   })
   state.set({ tokenDetail: false })
-  assert.deepEqual(state.get(), { cachePrecision: true, tokenDetail: false, costDisplay: true })
+  assert.deepEqual(state.get(), { ...DEFAULT_EXPECT, tokenDetail: false })
 })
 
 // —— S14 费用组(buildCostItem) ——
@@ -189,9 +205,9 @@ test('buildCostItem usage 缺席为 null', () => {
   assert.equal(buildCostItem(undefined, COST_RULES, PREFS_COST_ON, zhT, COST_NOW), null)
 })
 
-test('dock 注册 append 契约:order 排官方 pill(activity 0/usage 1)之后,条目只消费 useProjection', () => {
+test('dock 注册 append 契约:order 排官方 pill(activity 0/usage 1)之后,条目只消费投影与窗口节点', () => {
   assert.ok(CLIENT_BODY.includes("id: 'stats', order: 2, priority: STATS_SLOT_PRIORITY"))
-  assert.ok(CLIENT_BODY.includes('StatsLineAppended({ useProjection, t = defaultT })'))
+  assert.ok(CLIENT_BODY.includes('StatsLineAppended({ useProjection, useChat, t = defaultT })'))
   assert.ok(!CLIENT_BODY.includes("useProjection('sessionStats')"))
   assert.ok(!CLIENT_BODY.includes('deriveStats'))
 })
