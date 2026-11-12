@@ -232,10 +232,12 @@ function runUnit(unit, logPath, sandboxHome) {
       }
     })
     // 单元一律在一次性 home 下运行:插件数据目录从 DSH_HOME(或 homedir)派生,
-    // 继承会话环境会把测试写入落进宿主真实目录(实例化的写路由用例尤甚)
+    // 继承会话环境会把测试写入落进宿主真实目录(实例化的写路由用例尤甚)。
+    // 原值经 DSH_REAL_HOME 透传: branded Chrome 在 HOME 被重定向时把显式
+    // user-data-dir 误判为默认目录, 拒绝 DevTools 调试; 浏览器测试用它恢复
     const child = spawn(unit.command[0], unit.command.slice(1), {
       cwd: unit.cwd,
-      env: {...process.env, DSH_HOME: sandboxHome, USERPROFILE: sandboxHome, HOME: sandboxHome},
+      env: {...process.env, DSH_HOME: sandboxHome, USERPROFILE: sandboxHome, HOME: sandboxHome, DSH_REAL_HOME: process.env.USERPROFILE || process.env.HOME},
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     })

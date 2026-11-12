@@ -2,11 +2,14 @@ import test, { before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { chromium } from 'playwright'
 
 // 自绘下拉的验收: 原生 select 的菜单进不了 DOM, 自动化点不到; 这里用真实浏览器点开菜单并选值,
 // 把「打开→选择→写盘」整条链路跑通。夹具是内存 app + 真 React 客户端, 不碰生产宿主。
-let fixture, browser, page, errors, fixtureExit
+let fixture, context, page, errors, fixtureExit
 
 before(async () => {
   fixture = spawn(process.execPath, [fileURLToPath(new URL('./browser-fixture.mjs', import.meta.url))], { stdio: ['ignore', 'pipe', 'pipe'] })
@@ -24,9 +27,21 @@ before(async () => {
   })
   // 浏览器渠道按环境选择: CI 用 playwright 内置 chromium(workflow 装配, Google
   // 不发 Linux arm64 系统版, amd64 预装的系统 Chrome 是环境差异不是契约);
-  // 本地与 amd64 缺省走系统 Chrome, DSH_BROWSER_CHANNEL 置空走内置 chromium
-  browser = await chromium.launch({ headless: true, channel: process.env.DSH_BROWSER_CHANNEL === 'chromium' ? undefined : 'chrome' })
-  page = await browser.newPage({ viewport: { width: 1280, height: 900 }, locale: 'zh-CN' })
+  // 本地与 amd64 缺省走系统 Chrome, DSH_BROWSER_CHANNEL=chromium 置空渠道。
+  // 走 persistent context 显式提供 user-data-dir: 聚合器把 HOME/USERPROFILE 重定向
+  // 到一次性 home 后, branded Chrome 判定数据目录形态失败并拒绝 DevTools 调试
+  const profile = mkdtempSync(join(tmpdir(), 'select-browser-profile-'))
+  context = await chromium.launchPersistentContext(profile, {
+    headless: true,
+    channel: process.env.DSH_BROWSER_CHANNEL === 'chromium' ? undefined : 'chrome',
+    viewport: { width: 1280, height: 900 },
+    locale: 'zh-CN',
+    // branded Chrome 按 HOME/USERPROFILE 判定数据目录形态, 聚合器重定向后
+    // 显式 user-data-dir 也会被误判为默认目录而拒绝 DevTools; 还原真实值,
+    // 插件数据隔离由 DSH_HOME 承担, 不依赖这两个变量
+    env: { ...process.env, ...(process.env.DSH_REAL_HOME ? { HOME: process.env.DSH_REAL_HOME, USERPROFILE: process.env.DSH_REAL_HOME } : {}) },
+  })
+  page = context.pages()[0]
   errors = []
   page.on('pageerror', error => errors.push(error.message))
   await page.goto(url)
@@ -34,7 +49,7 @@ before(async () => {
 })
 
 after(async () => {
-  await browser?.close()
+  await context?.close()
   fixture?.kill('SIGTERM')
 })
 
