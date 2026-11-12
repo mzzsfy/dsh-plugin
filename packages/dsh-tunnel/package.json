@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-tunnel",
   "description": "穿透隧道:在 dsh 宿主进程内把本地端口反向代理到 /p/<name> 或 <name>.*(监听层按 Host/路径分发,HTTP 与任意 WebSocket 路径均可透传,路径模式改写 3xx Location);GUI 看板手动管理隧道,设置页独立配置节与侧边栏注入开关;向 ai 注册 tunnel_open/tunnel_list/tunnel_close 工具且「允许 ai 使用」可开关(关闭即注销);代理逻辑全在插件进程内,不引入 nginx/caddy 等外部反代",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "type": "module",
   "main": "src/index.js",
   "exports": {
