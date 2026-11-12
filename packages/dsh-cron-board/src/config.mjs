@@ -8,3 +8,5 @@ export const DEFAULT_MAX_CONCURRENT = 2
 // 调度 tick 周期与下限(设计 §4.1)
 export const DEFAULT_TICK_MS = 30 * 1000
 export const MIN_TICK_MS = 5 * 1000
+// 会话任务通道不可用的唯一文案来源(stderr 告警与 400 响应同源)
+export const SESSION_UNAVAILABLE_REASON = '宿主会话服务 sessionController 不可用,会话任务通道不可用,脚本任务不受影响'

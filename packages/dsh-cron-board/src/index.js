@@ -12,7 +12,7 @@ import schemastery from '@deepseek-ai/schemastery'
 import { withHostGate } from './route-gate.mjs'
 
 import { createApi } from './api.mjs'
-import { DEFAULT_MAX_CONCURRENT, DEFAULT_TICK_MS, MIN_TICK_MS } from './config.mjs'
+import { DEFAULT_MAX_CONCURRENT, DEFAULT_TICK_MS, MIN_TICK_MS, SESSION_UNAVAILABLE_REASON } from './config.mjs'
 import { createExecutor } from './executor.mjs'
 import { createLogger } from './logger.mjs'
 import { createScheduler } from './scheduler.mjs'
@@ -22,9 +22,8 @@ import { createStore } from './store.mjs'
 export const name = 'dsh-cron-board'
 
 // 会话任务依赖的 sessionController 由 dsh-web-app 的 session-controller 条目挂载,
-// 注册晚于同批条目的 apply(异步装配),且 0.1.1-rc.2 无此服务:inject 声明会在旧版
-// 永久 pending 拖死 boot,apply 内同步探测又会抢在挂载前误判缺失(0.1.2-rc.1 实测
-// 404)。唯一两头正确的形态:启动后异步轮询等待服务出现再装配,超时仍缺失即干净禁用。
+// 注册晚于本插件 apply;0.1.1-rc.2 及更早宿主无此服务,inject 声明会在旧版永久 pending
+// 拖死 boot。因此不进 inject,改使用点实时探测:就绪与否按请求时刻判定,服务晚到即恢复。
 // 推送总线:数据刷新统一走公共依赖 common-tools,客户端轮询已废除(不留双路径)
 export const inject = ['webServer']
 
@@ -34,9 +33,6 @@ const API_PREFIX = '/api/cron-board'
 
 const SETTINGS_NS = 'cron-board'
 const TIMER_UNAVAILABLE_REASON = '宿主定时服务不可用,自动调度已停用'
-const SESSION_UNAVAILABLE_REASON = '宿主会话服务 sessionController 不可用(需 dsh-web-app 挂载 session-controller,0.1.1-rc.2 及更早版本缺失),会话任务通道禁用,脚本任务不受影响'
-const SESSION_WAIT_MS = 15 * 1000
-const SESSION_POLL_MS = 250
 const DEFAULT_LOG_KEEP_PER_JOB = 200
 
 // 设置 schema(schemastery 声明式):tick 周期 / 全局并发 / 日志与运行元数据保留份数 / 会话投递变量掩码 / 侧边栏移入偏好
@@ -76,10 +72,26 @@ export function apply(ctx, config) {
   const changes = createChangeNotifier(() => tools.publish())
   ctx.effect(() => () => changes.dispose(), '通知变更合并')
   const notifyChange = changes.refresh
+  // 会话服务实时解析:ctx.get 不受 inject 门控(cordis 明文契约:缺失返回 undefined),
+  // 也不在 apply 期定格就绪态——宿主激活链可能晚于任何固定窗口,服务晚到/替换后即恢复。
+  // 服务引用不做缓存:ctx.get 每次返回新的 traceable 代理,缓存反而会在提供方重载后失效;
+  // 需要跨实例共享的状态一律按标识字符串记(见 session-driver 准入闸门),不按对象身份。
+  let sessionMissingLogged = false
+  const getSessionController = () => {
+    const controller = ctx.get('sessionController')
+    if (controller) sessionMissingLogged = false
+    return controller ?? undefined
+  }
+  // 会话通道缺失是一次性系统级事实:只在真正要用会话任务时告警,同一轮缺失不刷屏
+  const reportSessionMissing = () => {
+    if (sessionMissingLogged) return
+    sessionMissingLogged = true
+    // 旧宿主 cordis logger 默认 exporter 仅入内存缓冲无输出通道,告警必须直写 stderr 才可见
+    process.stderr.write('[cron-board] ' + SESSION_UNAVAILABLE_REASON + '\n')
+    if (ctx.logger && ctx.logger.warn) ctx.logger.warn('[cron-board] ' + SESSION_UNAVAILABLE_REASON)
+  }
   // 装配惰性单例:首个请求 / timer 激活触发初始化,各组件只建一次
   let runtimePromise = null
-  // 会话通道就绪状态:等待期 API 已可服务脚本任务,就绪/禁用后状态定格
-  const sessionState = { ready: false, disabled: false }
   // 生命周期解绑引用:惰性装配完成前给安全空实现,装配后指向真实 scheduler
   const schedulerRef = { current: { dispose() {} } }
   const getRuntime = () => {
@@ -88,7 +100,7 @@ export function apply(ctx, config) {
         const store = await createStore({ dir: dataDir })
         const logger = createLogger({ rootDir: join(dataDir, 'logs') })
         const sessionDriver = createSessionDriver({
-          getSessionController: () => sessionControllerRef.current,
+          getSessionController,
           // 分组解析为可选增强:registry 缺失(旧宿主)时 driver 干净降级为 cwd-only
           getWorkspaceRegistry: () => ctx.get('workspaceRegistry'),
           // 执行预设目录为可选增强:服务缺失时任务不带 preset,由宿主解析默认
@@ -115,11 +127,11 @@ export function apply(ctx, config) {
           executor,
           scheduler,
           periodic,
-          sessionState,
+          reportSessionMissing,
           readSidebarTab: () => readBoolean('sidebarTab', false),
           updateUiSettings,
           getAgentPresets: () => ctx.get('agentPresets'),
-          getSessionController: () => sessionControllerRef.current,
+          getSessionController,
           logSystem: (line) => (ctx.logger && ctx.logger.warn ? ctx.logger.warn(line) : undefined),
           notifyChange,
         })
@@ -129,31 +141,6 @@ export function apply(ctx, config) {
     }
     return runtimePromise
   }
-
-  // 会话通道异步就绪:轮询等待 dsh-web-app 挂载 sessionController(时序不可赌,
-  // 实测 0.1.2-rc.1 冷启动挂载晚于本插件 apply),超时仍缺失即按旧宿主对待
-  ctx.effect(() => {
-    const startedAt = Date.now()
-    const poll = setInterval(() => {
-      // ctx.get 不受 inject 门控(cordis 明文契约:缺失返回 undefined)
-      const sessionController = ctx.get('sessionController')
-      if (sessionController) {
-        sessionState.ready = true
-        sessionControllerRef.current = sessionController
-        clearInterval(poll)
-        return
-      }
-      if (Date.now() - startedAt >= SESSION_WAIT_MS) {
-        sessionState.disabled = true
-        // rc.2 的 cordis logger 默认 exporter 仅入内存缓冲无输出通道,告警必须直写 stderr 才可见
-        process.stderr.write('[cron-board] ' + SESSION_UNAVAILABLE_REASON + '\n')
-        if (ctx.logger && ctx.logger.warn) ctx.logger.warn('[cron-board] ' + SESSION_UNAVAILABLE_REASON)
-        clearInterval(poll)
-      }
-    }, SESSION_POLL_MS)
-    return () => clearInterval(poll)
-  }, 'cron-board session wait')
-  const sessionControllerRef = { current: null }
 
   const periodic = { running: false, reason: null }
   let armTick = null

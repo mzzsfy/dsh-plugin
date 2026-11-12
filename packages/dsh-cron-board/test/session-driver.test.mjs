@@ -125,6 +125,44 @@ for (const bound of [false, true]) {
   })
 }
 
+test('session-driver:宿主无控制器时记 fail 并上报缺失告警', async () => {
+  // Given 宿主未挂载 sessionController(旧宿主 / web-app 卸载期)
+  const reported = []
+  const driver = createSessionDriver({
+    getSessionController: () => undefined,
+    reportSessionMissing: () => reported.push(1),
+  })
+  // When 定时触发落到该宿主
+  const outcome = await driver.run({ job: BASE_JOB, env: {} })
+  // Then 记 fail 留痕,并补一次系统告警
+  assert.equal(outcome.status, 'fail')
+  assert.match(outcome.message, /会话服务不可用/)
+  assert.deepEqual(reported, [1])
+})
+
+test('C6 Given host hands each read a distinct service proxy, When two instances overlap, Then admission still excludes', async () => {
+  // 宿主 ctx.get 每次返回新的 traceable 代理:闸门若按控制器对象身份做键,
+  // 两个插件实例会各持一键、互斥失效(热重载实例共享也依赖同一口径)
+  const stubs = makeStubs({ autoIdle: false, persisted: ['s-1'] })
+  const entered = Promise.withResolvers(), release = Promise.withResolvers()
+  const prompt = stubs.sessionController.prompt
+  stubs.sessionController.prompt = async (...args) => { entered.resolve(); await release.promise; return prompt(...args) }
+  const makeProxyDriver = () => createSessionDriver({
+    getSessionController: () => ({ ...stubs.sessionController }),
+    getWorkspaceRegistry: stubs.getWorkspaceRegistry,
+    agents: stubs.agents,
+    sessionQuery: stubs.sessionQuery,
+  })
+  const a = makeProxyDriver(), b = makeProxyDriver()
+  const first = a.run({ job: PINNED_S1, env: {} })
+  await entered.promise
+  const second = b.run({ job: { ...PINNED_S1, id: 'other-job' }, env: {} })
+  release.resolve()
+  const results = await Promise.all([first, second])
+  assert.deepEqual(results.map((result) => result.status), ['success', 'skipped'])
+  assert.equal(stubs.prompts.length, 1)
+})
+
 test('C4 Given pinned admission throws, When same job retries, Then the gate is released', async () => {
   const stubs = makeStubs()
   const driver = makeDriver(stubs)

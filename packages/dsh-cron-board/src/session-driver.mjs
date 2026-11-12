@@ -21,8 +21,10 @@ const MODEL_UNSUPPORTED_MESSAGE = '宿主会话服务不支持指定模型,任�
 // 宿主仅在入口读一次不保留,共享单例安全,宿主将来收紧为非可选链亦无需再改
 const ADMISSION_SIGNAL = new AbortController().signal
 
-// 同一宿主控制器的热重载实例共用短准入闸门,不延伸到会话运行生命周期。
-const admissions = globalThis[Symbol.for('@mzzsfy/dsh-cron-board/session-admissions')] ??= new WeakMap()
+// 短准入闸门(投递期互斥,不延伸到会话运行生命周期):键是任务/固定会话标识字符串,
+// 存进程级集合,故跨热重载实例共享;不按控制器对象身份记——ctx.get 每次返回新的
+// traceable 代理,按对象做键会让两个实例各自成键、互斥形同虚设。
+const admissions = globalThis[Symbol.for('@mzzsfy/dsh-cron-board/session-admission-keys')] ??= new Set()
 
 // pinned 自愈三态:未绑定过(首跑)/已绑定但会话丢失;两者都回写新绑定,仅文案不同
 function recreatedMessage(recreated) {
@@ -89,7 +91,7 @@ async function validateModelSelection(sessionController, raw) {
   return { selection: checked.selection }
 }
 
-export function createSessionDriver({ getSessionController, getWorkspaceRegistry, agents, sessionQuery }) {
+export function createSessionDriver({ getSessionController, getWorkspaceRegistry, agents, sessionQuery, reportSessionMissing }) {
   // pinned 会话存在性:持久层 headers 比对(冷会话不在 agents 注册表);
   // 记录形态为官方 SessionRecord(dsh-session-query),id 在 header.id
   async function pinnedRecord(sessionId) {
@@ -138,16 +140,18 @@ export function createSessionDriver({ getSessionController, getWorkspaceRegistry
   async function run(input) {
     // 控制器运行时动态解析,同任务及同 pinned 会话均先占位再进行异步准入。
     const sessionController = getSessionController ? getSessionController() : undefined
-    if (!sessionController) return { status: 'fail', message: '会话服务不可用' }
+    if (!sessionController) {
+      // 定时触发落到无服务宿主时补一次系统告警(手动运行同源,不重复实现)
+      if (typeof reportSessionMissing === 'function') reportSessionMissing()
+      return { status: 'fail', message: '会话服务不可用' }
+    }
     const { job } = input
     if (job.session?.mode !== 'pinned') return runAdmitted(input, sessionController)
-    const locks = admissions.get(sessionController) ?? new Set()
-    admissions.set(sessionController, locks)
     const keys = ['job:' + job.id, ...(job.session.pinnedSessionId ? ['session:' + job.session.pinnedSessionId] : [])]
-    if (keys.some((key) => locks.has(key))) return { status: 'skipped', message: BUSY_MESSAGE }
-    for (const key of keys) locks.add(key)
+    if (keys.some((key) => admissions.has(key))) return { status: 'skipped', message: BUSY_MESSAGE }
+    for (const key of keys) admissions.add(key)
     try { return await runAdmitted(input, sessionController) }
-    finally { for (const key of keys) locks.delete(key) }
+    finally { for (const key of keys) admissions.delete(key) }
   }
 
   async function runAdmitted({ job, env, mask, updateRecord, updateBinding }, sessionController) {
