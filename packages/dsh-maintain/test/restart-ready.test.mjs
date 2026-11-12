@@ -219,6 +219,12 @@ test('restartConfirmLabel: armed 且活跃计数>0 才显示仍要重启文案',
   assert.equal(clientRestartConfirmLabel(true, 3), '仍要重启(3 项活跃工作)')
 })
 
+test('重启确认态按钮: armed 实底必须覆盖 danger hover,避免白字落在浅色 wash 上', () => {
+  const armedRules = [...clientSource().matchAll(/\.dm-btn--danger-armed[^{]*\{[^}]*\}/g)].map((match) => match[0])
+  assert.ok(armedRules.length > 0, '缺少 dm-btn--danger-armed 样式')
+  assert.ok(armedRules.some((rule) => rule.includes(':hover') && /background:\s*var\(--dm-danger\)/.test(rule)), 'armed 必须同时声明 hover 背景,否则悬停时被 .dm-btn--danger:hover 覆盖成 wash')
+})
+
 test('client 切换退出接管:单一守卫函数,订阅回调与初始加载两路同走', () => {
   const source = clientSource()
   const guardFn = source.match(/function takeOverSwitchExit\(snapshot\)\s*\{([\s\S]*?)\n  \}/)

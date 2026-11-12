@@ -68,7 +68,7 @@ const CSS = [
   '.dm-btn--ghost:hover { color:var(--dm-text); background:var(--dm-hover); }',
   '.dm-btn--danger { border-color:var(--dm-danger); color:var(--dm-danger); background:var(--dm-danger-wash); }',
   '.dm-btn--danger:hover { background:var(--dsw-alias-interactive-bg-hover-danger); }',
-  '.dm-btn--danger-armed { background:var(--dm-danger); border-color:var(--dm-danger); color:var(--dsw-alias-bg-base); }',
+  '.dm-btn--danger-armed, .dm-btn--danger-armed:hover { background:var(--dm-danger); border-color:var(--dm-danger); color:var(--dsw-alias-bg-base); }',
   '.dm-btn:disabled { opacity:.5; cursor:not-allowed; }',
   '.dm-link { color:var(--dm-accent); font-size:13px; line-height:20px; text-decoration:underline; }',
   '.dm-link:hover { text-decoration:none; }',
