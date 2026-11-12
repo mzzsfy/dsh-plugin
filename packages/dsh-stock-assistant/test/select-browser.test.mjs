@@ -7,6 +7,17 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { chromium } from 'playwright'
 
+// 聚合器把单元 HOME 重定向到一次性目录, playwright 按 HOME 解析浏览器注册表
+// (linux: ~/.cache/ms-playwright, win: ~/AppData/Local/ms-playwright)会指到空目录;
+// 装配步/本地下载装在 runner 或开发者真实 HOME 下, 经 DSH_REAL_HOME 透传,
+// launch 前把注册表根指回去(launch 时才读, 顶层赋值有效)
+if (process.env.DSH_REAL_HOME) {
+  const browsersRoot = process.platform === 'win32'
+    ? join(process.env.DSH_REAL_HOME, 'AppData', 'Local', 'ms-playwright')
+    : join(process.env.DSH_REAL_HOME, '.cache', 'ms-playwright')
+  process.env.PLAYWRIGHT_BROWSERS_PATH = browsersRoot
+}
+
 // 自绘下拉的验收: 原生 select 的菜单进不了 DOM, 自动化点不到; 这里用真实浏览器点开菜单并选值,
 // 把「打开→选择→写盘」整条链路跑通。夹具是内存 app + 真 React 客户端, 不碰生产宿主。
 let fixture, context, page, errors, fixtureExit
