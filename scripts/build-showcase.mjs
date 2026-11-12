@@ -3,29 +3,7 @@
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-
-// 图标映射:glyph 名与 nav-icons 声明一致;tunnel 商店面取 zap 避免与 llm-pi-gateway 撞形
-const ICON_MAP = {
-  'dsh-auto-trust-all': 'shield',
-  'dsh-boss-simulator': 'plan',
-  'dsh-common-tools': 'cube',
-  'dsh-context-manager': 'git',
-  'dsh-cron-board': 'plan',
-  'dsh-llm-pi-gateway': 'globe',
-  'dsh-maintain': 'wrench',
-  'dsh-rs-workflow': 'flow',
-  'dsh-session-manager': 'archive',
-  'dsh-settings-nav-icons': 'tune',
-  'dsh-shared-terminal': 'cards',
-  'dsh-shell-select': 'term',
-  'dsh-stock-assistant': 'chart',
-  'dsh-think-expand': 'spark',
-  'dsh-tool-gate': 'layers',
-  'dsh-tunnel': 'zap',
-  'dsh-turn-notify': 'bell',
-  'dsh-usage-dash': 'gauge',
-  'dsh-usage-panel': 'wallet',
-}
+import { ICON_MAP } from './generate-icons.mjs'
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), '..')
 const shotsRoot = join(repo, 'assets/screenshots')
@@ -52,12 +30,16 @@ const DESC = {
   'dsh-shell-select': 'Windows Shell 接管:多客户端可配置,deny 黑名单',
   'dsh-tool-gate': '全局工具白名单延迟加载',
   'dsh-tunnel': '路径穿透隧道:/p/ 子路径与子域名反代,AI 三工具自管',
+  'dsh-keep-working': '持续工作:未结案的回合静默结束就补发消息拉回,含重启恢复与 goal 重建',
+  'dsh-bug-perf': '宿主缺陷兜底与性能补丁:流重建合并、终端看门狗、保活、列表与历史窗口收敛',
 }
 
 const SHOT_LABEL = {
   board: '主面板',
   settings: '设置分区',
   'settings-card': '设置折叠卡',
+  'settings-2': '设置分区(续)',
+  'settings-3': '设置分区(续)',
   session: '会话终端',
   'plugin-list': '插件列表头像槽',
   'plugins-page': '插件页',
@@ -73,6 +55,7 @@ const SHOT_LABEL = {
 }
 
 let iconCards = ''
+const iconCount = Object.keys(ICON_MAP).length
 for (const [pkg, glyph] of Object.entries(ICON_MAP)) {
   const svg = readFileSync(join(repo, 'assets/icons', `${pkg}.svg`), 'utf8').replace('<svg ', '<svg width="48" height="48" ')
   iconCards += `<div class=icon-card><div class=icon-box>${svg}</div><div class=icon-name>${pkg.replace('dsh-', '')}</div><div class=icon-glyph>${glyph}</div></div>`
@@ -113,10 +96,10 @@ const style = [
 
 const html = `<!doctype html><html lang="zh"><meta charset="utf-8"><title>dsh-plugin 商店展示效果</title><style>${style}</style>` +
   '<h1>dsh-plugin 商店展示效果</h1>' +
-  '<div class=note>图标随上游收录 PR 提交至 awesome-dsh-plugin(icon 走 assets/icons/png 180px 光栅),展示于 dshmarket 与官方 Discover;截图展示于 awesome-dsh-plugin.com 与 dshmarket 详情页。全部 19 包图标与各界面截图均来自隔离环境实测。</div>' +
-  '<h2 style="margin-top:32px">商店图标(19 包)</h2><p class=desc>glyph 名与插件设置页图标声明一致;tunnel 取 zap 避免与 llm-pi-gateway 撞形</p>' +
+  `<div class=note>图标随上游收录 PR 提交至 awesome-dsh-plugin(icon 走 assets/icons/png 180px 光栅),展示于 dshmarket 与官方 Discover;截图展示于 awesome-dsh-plugin.com 与 dshmarket 详情页。全部 ${iconCount} 包图标与各界面截图均来自隔离环境实测。</div>` +
+  `<h2 style="margin-top:32px">商店图标(${iconCount} 包)</h2><p class=desc>glyph 名取自插件设置页图标声明;插件无导航入口、内置表也没有合适寓意时用本仓库专属图形(loop / pulse)</p>` +
   `<div class=grid>${iconCards}</div>${shotSections}` +
-  '<p style="margin-top:48px;color:#999;font-size:12px">生成于 2026-11-04 · 截图 assets/screenshots/ · 重新生成:node scripts/build-showcase.mjs</p></html>'
+  `<p style="margin-top:48px;color:#999;font-size:12px">生成于 ${new Date().toISOString().slice(0, 10)} · 截图 assets/screenshots/ · 重新生成:node scripts/build-showcase.mjs</p></html>`
 
 mkdirSync(dirname(outPath), { recursive: true })
 writeFileSync(outPath, html)
