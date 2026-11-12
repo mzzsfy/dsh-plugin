@@ -609,7 +609,7 @@ window.__ModuleLoader__.load({
     }
     function Select({ value, options, onChange, disabled = false, label }) {
       const [open, setOpen] = React.useState(false), [active, setActive] = React.useState(0), [place, setPlace] = React.useState(null)
-      const rootRef = React.useRef(null), triggerRef = React.useRef(null), menuId = React.useId()
+      const rootRef = React.useRef(null), triggerRef = React.useRef(null), menuRef = React.useRef(null), menuId = React.useId()
       const selectedAt = Math.max(0, options.findIndex(option => option.value === value))
       const current = options[selectedAt]
       const close = React.useCallback(() => setOpen(false), [])
@@ -621,8 +621,10 @@ window.__ModuleLoader__.load({
       }, [disabled, options.length, selectedAt])
       React.useEffect(() => {
         if (!open) return
-        const onPointer = event => { if (!rootRef.current?.contains(event.target)) close() }
-        const onMove = () => close()
+        const onPointer = event => { if (!rootRef.current?.contains(event.target) && !menuRef.current?.contains(event.target)) close() }
+        // 收菜单只针对页面级滚动: 菜单自身 maxHeight 裁剪后的内部滚动(option
+        // scrollIntoView/滚轮)会以 capture 冒到这里, 关掉自己会让点击落空
+        const onMove = event => { if (!menuRef.current || event.target !== menuRef.current) close() }
         document.addEventListener('pointerdown', onPointer, true)
         window.addEventListener('scroll', onMove, true)
         window.addEventListener('resize', onMove)
@@ -649,22 +651,27 @@ window.__ModuleLoader__.load({
         if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); choose(active) }
       }
       const optionId = index => `${menuId}-opt-${index}`
+      // 菜单常驻 DOM, 打开时 fixed 定位浮出。不 portal: react-dom 本体不在宿主
+      // client 种子表(只有 react-dom/client); 弹窗卡 scale 动画会把动画期 fixed
+      // 菜单的包含块劫持为卡片——已把 pop 动画从卡片移除, 从根上消除该窗口期
+      const menu = h('div', {
+        role: 'listbox', id: menuId, hidden: !open, className: 'ssb-select-menu', 'aria-label': label,
+        ref: menuRef,
+        style: place ? { left: place.left, top: place.top, minWidth: place.minWidth, maxHeight: place.maxHeight } : undefined,
+      }, ...options.map((option, index) => h('div', {
+        key: option.value, id: optionId(index), role: 'option', 'aria-selected': option.value === value,
+        className: `ssb-select-option${index === active ? ' ssb-select-option-active' : ''}`,
+        onPointerDown: event => event.preventDefault(),
+        onClick: () => choose(index),
+        onPointerEnter: () => setActive(index),
+      }, option.label)))
       return h('div', { className: 'ssb-select', ref: rootRef },
         h('button', {
           type: 'button', ref: triggerRef, className: 'ssb-select-trigger', role: 'combobox', disabled, 'aria-label': label,
           'aria-haspopup': 'listbox', 'aria-expanded': open, 'aria-controls': menuId, 'aria-activedescendant': open ? optionId(active) : undefined,
           onClick: () => (open ? close() : openMenu()), onKeyDown,
         }, h('span', { className: 'ssb-select-value' }, current?.label ?? ''), h('span', { className: 'ssb-select-caret', 'aria-hidden': 'true' })),
-        h('div', {
-          role: 'listbox', id: menuId, hidden: !open, className: 'ssb-select-menu', 'aria-label': label,
-          style: place ? { left: place.left, top: place.top, minWidth: place.minWidth, maxHeight: place.maxHeight } : undefined,
-        }, ...options.map((option, index) => h('div', {
-          key: option.value, id: optionId(index), role: 'option', 'aria-selected': option.value === value,
-          className: `ssb-select-option${index === active ? ' ssb-select-option-active' : ''}`,
-          onPointerDown: event => event.preventDefault(),
-          onClick: () => choose(index),
-          onPointerEnter: () => setActive(index),
-        }, option.label))))
+        menu)
     }
     function QuoteStatus({ entry, short = false }) {
       const quote = entry?.quote
@@ -2083,7 +2090,7 @@ window.__ModuleLoader__.load({
 .ssb-select-trigger:disabled { opacity:.5; cursor:not-allowed; }
 .ssb-select-value { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .ssb-select-caret { flex:none; width:6px; height:6px; border-right:1.5px solid var(--ssb-text-sub); border-bottom:1.5px solid var(--ssb-text-sub); transform:translateY(-2px) rotate(45deg); }
-.ssb-select-menu { position:fixed; z-index:2; display:flex; flex-direction:column; gap:1px; padding:4px; overflow:auto; background:var(--ssb-bg-sub); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); box-shadow:var(--dsw-shadow-lv3); }
+.ssb-select-menu { position:fixed; z-index:70; display:flex; flex-direction:column; gap:1px; padding:4px; overflow:auto; background:var(--ssb-bg-sub); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); box-shadow:var(--dsw-shadow-lv3); }
 .ssb-select-menu[hidden] { display:none; }
 .ssb-select-option { display:flex; align-items:center; min-height:28px; padding:4px 8px; border-radius:var(--ssb-radius-sm); font-size:13px; color:var(--ssb-text); white-space:nowrap; cursor:pointer; }
 .ssb-select-option-active { background:var(--ssb-hover); }
@@ -2091,7 +2098,7 @@ window.__ModuleLoader__.load({
 .ssb-select-option[aria-selected="true"].ssb-select-option-active { background:var(--ssb-accent-wash); }.ssb-field { display:flex; flex-direction:column; gap:6px; min-width:0; }.ssb-muted { color:var(--ssb-text-sub); }.ssb-code,.ssb-source { display:block; font-size:11px; }.ssb-code,.ssb-number { font-family:var(--ds-font-family-code); font-variant-numeric:tabular-nums; }.ssb-code { color:var(--ssb-text-sub); margin-top:4px; }.ssb-small { font-size:13px; margin-left:12px; }
 .ssb-content { display:grid; grid-template-columns:minmax(0,1fr); gap:16px; }
 /* 浮层须压过宿主侧栏拖拽手柄; 取 60 与其它插件弹窗同档, 仍在宿主抽屉遮罩之下 */
-.ssb-overlay { position:fixed; inset:0; background:color-mix(in srgb, var(--dsw-alias-label-primary) 45%, transparent); display:flex; z-index:60; animation:ssb-fade .15s ease-out; }.ssb-drawer { animation:ssb-slide .2s ease-out; }.ssb-modal-card { animation:ssb-pop .18s ease-out; }@keyframes ssb-fade { from { opacity:0; } }@keyframes ssb-slide { from { transform:translateX(40px); opacity:0; } }@keyframes ssb-pop { from { transform:scale(.96); opacity:0; } }.ssb-overlay-drawer { justify-content:flex-end; }.ssb-overlay-modal { align-items:center; justify-content:center; padding:24px; }.ssb-drawer { width:min(80vw,94vw); height:100%; overflow:auto; background:var(--ssb-bg); border-left:1px solid var(--ssb-border); box-shadow:var(--dsw-shadow-lv3); padding:16px; }.ssb-modal-card { width:min(880px,94vw); max-height:88vh; overflow:auto; background:var(--ssb-bg); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-lg); box-shadow:var(--dsw-shadow-lv3); padding:16px; }.ssb-drawer-head { display:flex; justify-content:flex-end; }.ssb-drawer .ssb-detail, .ssb-drawer .ssb-settings { border:0; padding:0; background:transparent; }.ssb-list-pane,.ssb-detail { border:.5px solid var(--ssb-border); border-radius:var(--ssb-radius-md); min-width:0; }.ssb-detail { padding:16px; background:var(--ssb-bg-sub); }.ssb-detail .ssb-section-head { padding:0; }.ssb-detail-price { font-size:28px; margin:20px 0 4px; }.ssb-table-scroll { max-height:65vh; overflow:auto; border-radius:0 0 var(--ssb-radius-md) var(--ssb-radius-md); }.ssb-foot { margin:12px 0 4px; }.ssb-table { width:100%; border-collapse:collapse; table-layout:auto; }.ssb-table th { color:var(--ssb-text-sub); font-weight:400; font-size:12px; background:var(--ssb-bg-sub); position:sticky; top:0; z-index:1; }.ssb-table td,.ssb-table th { padding:8px 12px; text-align:left; border-top:.5px solid var(--ssb-border); }.ssb-table td.ssb-number { text-align:right; white-space:nowrap; }.ssb-table tr:hover { background:var(--dsw-alias-interactive-bg-hover); }.ssb-selected { background:var(--ssb-accent-wash); }.ssb-stock-name { font:inherit; color:inherit; background:transparent; border:0; padding:0; text-align:left; cursor:pointer; }.ssb-stale td.ssb-number { opacity:.65; }.ssb-up { color:var(--ssb-danger); }.ssb-down { color:var(--ssb-ok); }.ssb-green-up .ssb-up { color:var(--ssb-ok); }.ssb-green-up .ssb-down { color:var(--ssb-danger); }
+.ssb-overlay { position:fixed; inset:0; background:color-mix(in srgb, var(--dsw-alias-label-primary) 45%, transparent); display:flex; z-index:60; animation:ssb-fade .15s ease-out; }.ssb-drawer { animation:ssb-slide .2s ease-out; }.ssb-modal-card {}@keyframes ssb-fade { from { opacity:0; } }@keyframes ssb-slide { from { transform:translateX(40px); opacity:0; } }.ssb-overlay-drawer { justify-content:flex-end; }.ssb-overlay-modal { align-items:center; justify-content:center; padding:24px; }.ssb-drawer { width:min(80vw,94vw); height:100%; overflow:auto; background:var(--ssb-bg); border-left:1px solid var(--ssb-border); box-shadow:var(--dsw-shadow-lv3); padding:16px; }.ssb-modal-card { width:min(880px,94vw); max-height:88vh; overflow:auto; background:var(--ssb-bg); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-lg); box-shadow:var(--dsw-shadow-lv3); padding:16px; }.ssb-drawer-head { display:flex; justify-content:flex-end; }.ssb-drawer .ssb-detail, .ssb-drawer .ssb-settings { border:0; padding:0; background:transparent; }.ssb-list-pane,.ssb-detail { border:.5px solid var(--ssb-border); border-radius:var(--ssb-radius-md); min-width:0; }.ssb-detail { padding:16px; background:var(--ssb-bg-sub); }.ssb-detail .ssb-section-head { padding:0; }.ssb-detail-price { font-size:28px; margin:20px 0 4px; }.ssb-table-scroll { max-height:65vh; overflow:auto; border-radius:0 0 var(--ssb-radius-md) var(--ssb-radius-md); }.ssb-foot { margin:12px 0 4px; }.ssb-table { width:100%; border-collapse:collapse; table-layout:auto; }.ssb-table th { color:var(--ssb-text-sub); font-weight:400; font-size:12px; background:var(--ssb-bg-sub); position:sticky; top:0; z-index:1; }.ssb-table td,.ssb-table th { padding:8px 12px; text-align:left; border-top:.5px solid var(--ssb-border); }.ssb-table td.ssb-number { text-align:right; white-space:nowrap; }.ssb-table tr:hover { background:var(--dsw-alias-interactive-bg-hover); }.ssb-selected { background:var(--ssb-accent-wash); }.ssb-stock-name { font:inherit; color:inherit; background:transparent; border:0; padding:0; text-align:left; cursor:pointer; }.ssb-stale td.ssb-number { opacity:.65; }.ssb-up { color:var(--ssb-danger); }.ssb-down { color:var(--ssb-ok); }.ssb-green-up .ssb-up { color:var(--ssb-ok); }.ssb-green-up .ssb-down { color:var(--ssb-danger); }
 .ssb-table th.ssb-number { text-align:right; }.ssb-table th.ssb-col-status { text-align:right; }
 .ssb-table td { vertical-align:middle; padding-top:8px; padding-bottom:8px; }.ssb-table td:first-child { max-width:240px; }
 .ssb-stock-name { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
