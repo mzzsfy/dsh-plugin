@@ -258,7 +258,7 @@ const MESSAGES_ZH = {
   cachePrecision: '精确缓存命中率',
   cachePrecisionDesc: '将官方用量胶囊及弹窗中的命中率显示为两位小数。',
   recentSpeed: '最近输出速度',
-  recentSpeedDesc: '在官方「用时与速度」弹窗的输出速度下方追加最近 {n} 个可读数步骤的平均输出速度:输出 token 合计 ÷ 耗时合计,耗时优先取首 token 到完成,未记录首 token 的步骤取启动到完成(含首字等待)。',
+  recentSpeedDesc: '在官方「用时与速度」弹窗中追加最近 {n} 条回复消息的平均输出速度。',
   replaceSpeed: '替换默认速度',
   replaceSpeedDesc: '开启后用最近输出速度替换官方用时胶囊上的平均输出速度,关闭则保留官方读数。',
   tokenDetail: '会话 Token 明细',
@@ -411,7 +411,7 @@ const MESSAGES_EN = {
   cachePrecision: 'Precise cache-hit rate',
   cachePrecisionDesc: 'Show two decimals in the official usage pill and Token usage dialog.',
   recentSpeed: 'Recent output speed',
-  recentSpeedDesc: 'Append the average output speed of the latest {n} steps below the speed row of the official time-and-speed dialog: total output tokens ÷ total elapsed time; elapsed prefers first token to completion, falling back to step start (including first-token wait) when no first token was recorded.',
+  recentSpeedDesc: 'Append the average output speed of the latest {n} replies to the official time-and-speed dialog.',
   replaceSpeed: 'Replace default speed',
   replaceSpeedDesc: 'Replace the average output speed on the official time pill with the recent output speed; off keeps the official reading.',
   tokenDetail: 'Session token detail',
@@ -1103,14 +1103,16 @@ const NUMBER_COMPACT_INT_THRESHOLD = 100
 const PERCENT_PRECISE_CAP = 99.99
 const DURATION_MINUTE_SECONDS = 60
 const TPS_INTEGER_THRESHOLD = 10
-// 最近输出速度取样的助手步骤上限:窗口分页只保留近期事件,口径落在"当下能读到的最新几步"
-const RECENT_SPEED_STEPS = 20
+// 最近输出速度取样的消息条数:窗口分页只保留近期事件,口径落在"当下能读到的最新几条"
+const RECENT_SPEED_STEPS = 10
 // 读数行的宿主挂载点:官方「用时与速度」胶囊与其弹窗明细;输出速度是该明细的最后一行
 const SPEED_DIALOG_STAT = 'activity'
 const SPEED_DIALOG_SELECTOR = '[data-session-stats-details]'
 // 读数行自述标记:portal 落在宿主明细里,靠属性把自家 dt/dd 与官方行区分并归位
 const SPEED_ROW_ATTRIBUTE = 'data-ud-speed-detail="recentSpeed"'
 const TEXT_NODE = 3
+// 会话投影键:宿主按会话推送,wire 只带加权读数与窗口步数
+const RECENT_SPEED_PROJECTION = 'usageDashRecentSpeed'
 
 // 官方 billing 分母:三个互斥的 prompt 侧计费桶
 function billedInputTokens(usage) {
@@ -1156,23 +1158,23 @@ function formatTokensPerSecond(tps) {
 }
 
 // ===== 最近输出速度:当前窗口最近若干助手步骤的生成吞吐 =====
-// 单步耗时:优先 decode 口径(完成 - 首 token);流未记录首 token 时回退到端到端
-// (完成 - 步骤启动,含首 token 等待);非有限数字与两者都缺一样不出读数
+// 单步耗时优先取 decode 口径(完成 - 首 token),与宿主 sessionStats 的 decode 定义一致;
+// 客户端节点实测常不记录首 token(流被服务端聚合),此时回退到端到端(完成 - 步骤启动)
 function stepSpanMs(timing) {
-  const completed = timing?.completedTime
+  if (timing === undefined || timing === null) return null
+  const completed = timing.completedTime
   if (!Number.isFinite(completed)) return null
   const anchor = Number.isFinite(timing.firstTokenTime)
     ? timing.firstTokenTime
     : Number.isFinite(timing.stepStartTime) ? timing.stepStartTime : null
   if (anchor === null) return null
-  const span = completed - anchor
-  return Number.isFinite(span) && span > 0 ? span : null
+  return Math.max(0, completed - anchor)
 }
 
-// 单步读数:分子为该步输出 token;零输出、timing 或 usage 缺失的步骤不出读数(零 token 只添分母)
+// 单步读数:分子口径同宿主 usageOutputTokens(零输出合法,只添分母);timing 或 usage 缺失的步骤不出读数
 function stepSpeedReading(node) {
   const outputTokens = node?.usage?.outputTokens
-  if (typeof outputTokens !== 'number' || !Number.isFinite(outputTokens) || outputTokens <= 0) return null
+  if (typeof outputTokens !== 'number' || !Number.isFinite(outputTokens) || outputTokens < 0) return null
   const ms = stepSpanMs(node?.timing)
   return ms === null ? null : { tokens: outputTokens, ms }
 }
@@ -3137,11 +3139,14 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       }, [text])
     }
 
-    // 官方明细追加补充项，底栏保留费用。最近输出速度只吃当前窗口节点，全局口径归统计面板。
+    // 官方明细追加补充项，底栏保留费用。最近输出速度按会话投影订阅，
+    // 投影缺失（旧宿主或本会话未采集到读数）时回落窗口节点估算。
     const StatsLineAppended = React.memo(function StatsLineAppended({ useProjection, useChat, t = defaultT }) {
       if (typeof useProjection !== 'function') return null
       const usage = useProjection('tokenUsage')
       const modelUsage = useProjection(MODEL_USAGE_PROJECTION)
+      // 会话投影由宿主按会话推送:几十个并行会话只有当前会话的更新会到这里
+      const recentSpeedView = useProjection(RECENT_SPEED_PROJECTION)
       // 窗口节点订阅:宿主 dock 标准 props 恒提供 useChat,缺失时最近输出速度按无数据降级
       const windowNodes = typeof useChat === 'function' ? useChat((state) => state?.legacy?.nodes) : null
       const [prefs, setPrefs] = useState(() => statsLineState.get())
@@ -3155,7 +3160,11 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const speedTarget = useSpeedDialogTarget(speedAnchorRef, prefs.recentSpeed)
       // 弹窗关闭且不替换胶囊时无需取样,避免每渲染复制整个窗口节点数组
       const speedWanted = prefs.recentSpeed && (speedTarget !== null || prefs.replaceSpeed)
-      const recentSpeed = speedWanted ? recentSpeedOf(windowNodes) : null
+      // 投影读数优先(与官方同一份 decode 配对),缺失才回落窗口节点估算
+      const projectedSpeed = typeof recentSpeedView?.tps === 'number' && Number.isFinite(recentSpeedView.tps)
+        ? recentSpeedView.tps
+        : null
+      const recentSpeed = speedWanted ? projectedSpeed ?? recentSpeedOf(windowNodes) : null
       const recentSpeedText = recentSpeed === null ? null : `${formatTokensPerSecond(recentSpeed)} tok/s`
       useSpeedCapsulePatch(speedAnchorRef, prefs.replaceSpeed ? recentSpeedText : null)
       useLayoutEffect(() => {

@@ -1,4 +1,4 @@
-// 最近输出速度口径测试:当前窗口最近最多 20 步的加权平均输出速度与官方胶囊替换
+// 最近输出速度口径测试:窗口回退估算(最近 10 条消息加权)与官方胶囊替换
 // Given/When/Then 场景内嵌于用例描述
 // 数据形态取宿主 AssistantMessageNode:timing{stepStartTime,firstTokenTime,completedTime} + usage.outputTokens
 import { test } from 'node:test'
@@ -17,7 +17,7 @@ const step = (outputTokens, firstTokenTime, completedTime) => ({
 })
 
 test('Given 单步 500 token 解码 2 秒 When 取速度 Then 每 token 竖秒为单位换算', () => {
-  assert.equal(RECENT_SPEED_STEPS, 20)
+  assert.equal(RECENT_SPEED_STEPS, 10)
   assert.equal(recentSpeedOf([step(500, 0, 2000)]), 250)
 })
 
@@ -25,7 +25,7 @@ test('Given 两步不同长度 When 聚合 Then 用总 token 除总时长而非�
   assert.equal(recentSpeedOf([step(300, 0, 1000), step(700, 0, 3000)]), 250)
 })
 
-test('Given 超过窗口上限 When 聚合 Then 只取最近 RECENT_SPEED_STEPS 步', () => {
+test('Given 超过窗口上限 When 聚合 Then 只取最近 RECENT_SPEED_STEPS 条消息', () => {
   const slow = Array.from({ length: 5 }, () => step(10, 0, 10000))
   const fast = Array.from({ length: RECENT_SPEED_STEPS }, () => step(100, 0, 1000))
   assert.equal(recentSpeedOf([...slow, ...fast]), 100)
@@ -52,8 +52,13 @@ test('Given 首 token 与步骤启动都缺失 When 聚合 Then 该步不参与'
   assert.equal(recentSpeedOf([{ kind: 'assistant', usage: { outputTokens: 10 } }]), null)
 })
 
-test('Given 步骤零输出或含非有限时长 When 聚合 Then 该步不参与', () => {
-  assert.equal(recentSpeedOf([{ kind: 'assistant', timing: { stepStartTime: 0, firstTokenTime: 0, completedTime: 2000 }, usage: { outputTokens: 0 } }]), null)
+test('Given 步骤零输出或含非有限时长 When 聚合 Then 零输出只添分母且非有限时长跳过', () => {
+  // 宿主 usageOutputTokens 允许 0:零输出步骤只添分母,速度被拉低而不是被排除
+  assert.equal(recentSpeedOf([{ kind: 'assistant', timing: { stepStartTime: 0, firstTokenTime: 0, completedTime: 2000 }, usage: { outputTokens: 0 } }]), 0)
+  assert.equal(recentSpeedOf([
+    { kind: 'assistant', timing: { stepStartTime: 0, firstTokenTime: 0, completedTime: 2000 }, usage: { outputTokens: 100 } },
+    { kind: 'assistant', timing: { stepStartTime: 2000, firstTokenTime: 2000, completedTime: 4000 }, usage: { outputTokens: 0 } },
+  ]), 25)
   assert.equal(recentSpeedOf([{ kind: 'assistant', timing: { stepStartTime: 0, firstTokenTime: Number.NaN, completedTime: Number.POSITIVE_INFINITY }, usage: { outputTokens: 10 } }]), null)
   assert.equal(recentSpeedOf([{ kind: 'assistant', timing: { stepStartTime: 0, firstTokenTime: Number.NaN, completedTime: 2000 }, usage: { outputTokens: 10 } }]), 5)
 })

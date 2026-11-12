@@ -1,4 +1,4 @@
-// 用量统计数据路由:6 个 exact 端点共用守卫/校验/信封管线,粒度由路径分派,
+// 用量统计数据路由:7 个 exact 端点共用守卫/校验/信封管线,粒度由路径分派,
 // pricing 端点守卫放宽(GET/POST 放行、不要求 content-type)。
 // 协议契约见 docs/feat-usage-dash/host-design.md 端点章:成功 {ok:true,value},
 // UsageError 回其 status 与 message(code 恒 usage_api_error),栅栏 forbidden,
@@ -317,7 +317,6 @@ const restoreHandler = (deps) => async (req, res) => {
 
 const STANDARD_GUARDS = [rejectWrongMethod, rejectCrossOrigin, rejectNonJson]
 const PRICING_GUARDS = [rejectPricingMethod, rejectCrossOrigin]
-
 const ENDPOINTS = [
   { path: `${ROUTE_PREFIX}/range`, mount: rangeHandler },
   { path: `${ROUTE_PREFIX}/hours`, mount: hoursHandler },

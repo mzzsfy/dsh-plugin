@@ -16,7 +16,7 @@ const stepNode = (outputTokens, decodeMs) => ({
 })
 
 function render(options = {}) {
-  const { prefs = on, lang = 'zh', pricing = rules, target = {}, speedTarget = null, nodes = [], capture = {} } = options
+  const { prefs = on, lang = 'zh', pricing = rules, target = {}, speedTarget = null, nodes = [], capture = {}, recentSpeed = undefined } = options
   const value = Object.hasOwn(options, 'value') ? options.value : usage
   const source = CLIENT_BODY.match(/const StatsLineAppended = React\.memo\(([\s\S]*?)\n    \}\)/)?.[1] + '\n}'
   let stateIndex = 0
@@ -29,7 +29,7 @@ function render(options = {}) {
   const HintText = (props) => h('span', { className: props.className }, props.children)
   const component = new Function(...names, 'React', 'h', 'useState', 'useEffect', 'useLayoutEffect', 'useRef', 'statsLineState', 'defaultT', 'usePricing', 'useUsageDialogTarget', 'useSpeedDialogTarget', 'useSpeedCapsulePatch', 'createPortal', 'HintText', 'useChat', `return (${source})`)(...Object.values(core), React, h, useState, noop, noop, () => ({ current: null }), { get: () => prefs }, core.createTranslator(core.MESSAGES_ZH), () => ({ rules: pricing }), () => target, () => speedTarget, (ref, text) => { capture.text = text }, (content, container) => ({ type: 'portal', props: { container }, children: [content].flat(Infinity) }), HintText, (selector) => selector({ legacy: { nodes } }))
   return component({
-    useProjection: (key) => key === 'usageDashModelUsage' ? modelUsage : value,
+    useProjection: (key) => (key === 'usageDashModelUsage' ? modelUsage : key === 'usageDashRecentSpeed' ? recentSpeed : value),
     useChat: (selector) => selector({ legacy: { nodes } }),
     t: core.createTranslator(lang === 'en' ? core.MESSAGES_EN : core.MESSAGES_ZH),
   })
@@ -137,4 +137,20 @@ test('Given 统计开关关闭 When 查看偏好卡契约 Then 替换子开关�
   // 偏好卡组件依赖整个组件区上下文,这里锁定条件渲染与复位契约,防止回归
   assert.match(CLIENT_BODY, /prefs\.recentSpeed && h\(StatsLineOptionRow, \{\s*labelKey: 'replaceSpeed'/)
   assert.match(CLIENT_BODY, /recentSpeed: false, replaceSpeed: false/)
+})
+
+test('Given 会话投影有读数 When 渲染 Then 优先于窗口节点估算', () => {
+  // 投影来自宿主 decode 配对,与官方同一份数据;窗口节点只是缺失时的兜底
+  const tree = render({ speedTarget: {}, target: null, nodes: [stepNode(500, 2000)], recentSpeed: { tps: 104, steps: 2 } })
+  assert.match(text(tree), /最近输出速度104 tok\/s/)
+})
+
+test('Given 投影无可读值 When 渲染 Then 回落窗口节点估算', () => {
+  const tree = render({ speedTarget: {}, target: null, nodes: [stepNode(500, 2000)], recentSpeed: { tps: null, steps: 0 } })
+  assert.match(text(tree), /最近输出速度250 tok\/s/)
+})
+
+test('Given 投影带非数值 When 渲染 Then 视为无值回落估算', () => {
+  const tree = render({ speedTarget: {}, target: null, nodes: [stepNode(500, 2000)], recentSpeed: { tps: '104', steps: 2 } })
+  assert.match(text(tree), /最近输出速度250 tok\/s/)
 })

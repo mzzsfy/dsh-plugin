@@ -54,11 +54,11 @@ test('stats 词典关键值逐字节,en 族逐字节', () => {
   assert.equal(MESSAGES_ZH.cachePrecision, '精确缓存命中率')
   assert.equal(MESSAGES_ZH.cachePrecisionDesc, '将官方用量胶囊及弹窗中的命中率显示为两位小数。')
   assert.equal(MESSAGES_ZH.recentSpeed, '最近输出速度')
-  assert.equal(MESSAGES_ZH.recentSpeedDesc, '在官方「用时与速度」弹窗的输出速度下方追加最近 {n} 个可读数步骤的平均输出速度:输出 token 合计 ÷ 耗时合计,耗时优先取首 token 到完成,未记录首 token 的步骤取启动到完成(含首字等待)。')
+  assert.equal(MESSAGES_ZH.recentSpeedDesc, '在官方「用时与速度」弹窗中追加最近 {n} 条回复消息的平均输出速度。')
   assert.equal(MESSAGES_ZH.replaceSpeed, '替换默认速度')
   assert.equal(MESSAGES_ZH.replaceSpeedDesc, '开启后用最近输出速度替换官方用时胶囊上的平均输出速度,关闭则保留官方读数。')
   assert.equal(MESSAGES_EN.recentSpeed, 'Recent output speed')
-  assert.equal(MESSAGES_EN.recentSpeedDesc, 'Append the average output speed of the latest {n} steps below the speed row of the official time-and-speed dialog: total output tokens ÷ total elapsed time; elapsed prefers first token to completion, falling back to step start (including first-token wait) when no first token was recorded.')
+  assert.equal(MESSAGES_EN.recentSpeedDesc, 'Append the average output speed of the latest {n} replies to the official time-and-speed dialog.')
   assert.equal(MESSAGES_EN.replaceSpeed, 'Replace default speed')
   assert.equal(MESSAGES_EN.replaceSpeedDesc, 'Replace the average output speed on the official time pill with the recent output speed; off keeps the official reading.')
   assert.equal(MESSAGES_ZH.tokenDetail, '会话 Token 明细')
@@ -208,6 +208,9 @@ test('buildCostItem usage 缺席为 null', () => {
 test('dock 注册 append 契约:order 排官方 pill(activity 0/usage 1)之后,条目只消费投影与窗口节点', () => {
   assert.ok(CLIENT_BODY.includes("id: 'stats', order: 2, priority: STATS_SLOT_PRIORITY"))
   assert.ok(CLIENT_BODY.includes('StatsLineAppended({ useProjection, useChat, t = defaultT })'))
+  // 最近速度读自家会话投影,不消费官方 sessionStats,也不自建 HTTP 端点
+  assert.ok(CLIENT_BODY.includes("RECENT_SPEED_PROJECTION = 'usageDashRecentSpeed'"))
+  assert.ok(!CLIENT_BODY.includes('/api/usage-dash/recent-speed'))
   assert.ok(!CLIENT_BODY.includes("useProjection('sessionStats')"))
   assert.ok(!CLIENT_BODY.includes('deriveStats'))
 })
