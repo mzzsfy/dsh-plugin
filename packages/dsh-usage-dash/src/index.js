@@ -7,6 +7,7 @@ import schemastery from '@deepseek-ai/schemastery'
 import { UsageCollector } from './collector.js'
 import { CURRENCIES, CONDITION_KINDS, normalizePricingRules, UNIT_PER_MILLION } from './pricing.js'
 import { modelUsageProjectionDefinition } from './session-models.js'
+import { recentSpeedProjectionDefinition } from './recent-speed.js'
 import { registerUsageRoutes } from './routes.js'
 import { DEFAULT_MINUTE_RETENTION_DAYS, MINUTE_RETENTION_MAX_DAYS, sharedStore } from './store.js'
 // 顶层 inject 仅声明 web profile 必然存在的四个服务;settings 在 apply 内
@@ -84,17 +85,22 @@ export function apply(ctx, config) {
       throw new Error('usage-dash: pricing settings inactive')
     },
   }
-  // 底栏模型归属依赖本投影;服务缺席(旧宿主)时嵌套 inject 静默不激活,
-  // 客户端回退到「无 routes 显示占位符」,不阻断插件其余能力。
+  // 底栏模型归属与最近输出速度都依赖投影;服务缺席(旧宿主)时嵌套 inject 静默不激活,
+  // 客户端回退到「无 routes 占位符」与「窗口节点估算」,不阻断插件其余能力。
   ctx.inject(['sessionProjections'], (projectionCtx) => {
     const projections = projectionCtx.sessionProjections
     if (!projections) return
-    try {
-      void projections.register(modelUsageProjectionDefinition).catch((error) => {
-        ctx.logger?.warn(`usage-dash: 用量模型投影注册失败 ${error instanceof Error ? error.message : String(error)}`)
-      })
-    } catch (error) {
-      ctx.logger?.warn(`usage-dash: 用量模型投影注册失败 ${error instanceof Error ? error.message : String(error)}`)
+    for (const [label, definition] of [
+      ['用量模型投影', modelUsageProjectionDefinition],
+      ['最近速度投影', recentSpeedProjectionDefinition],
+    ]) {
+      try {
+        void projections.register(definition).catch((error) => {
+          ctx.logger?.warn(`usage-dash: ${label}注册失败 ${error instanceof Error ? error.message : String(error)}`)
+        })
+      } catch (error) {
+        ctx.logger?.warn(`usage-dash: ${label}注册失败 ${error instanceof Error ? error.message : String(error)}`)
+      }
     }
   })
   ctx.inject(['settings'], (settingsCtx) => {
