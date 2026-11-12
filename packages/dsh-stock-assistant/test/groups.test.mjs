@@ -115,16 +115,23 @@ test('午休与收盘同属安静档', async () => {
   assert.deepEqual([...QUIET_STATES].sort(), ['break', 'closed'], '安静档必须同时含午休与收盘')
 })
 
-test('休市把轮询压到一分钟一拍, 开市跟随设置', async () => {
-  const { floatPollDelay } = await load()
-  assert.equal(floatPollDelay(15, false), 15 * 1000)
-  assert.equal(floatPollDelay(60, false), 60 * 1000)
-  // 设置比一分钟还慢时不该被强行提速
-  assert.equal(floatPollDelay(120, true), 120 * 1000)
-  assert.equal(floatPollDelay(15, true), 60 * 1000)
-  // 设置缺失或非法时退回默认, 且不低于下限
-  assert.equal(floatPollDelay(undefined, false), 15 * 1000)
-  assert.equal(floatPollDelay(1, false), 15 * 1000)
+test('悬浮盯盘轮询只认 3~30 秒档位, 休市压到一分钟一拍', async () => {
+  const { floatPollDelay, floatIntervalOf, FLOAT_INTERVALS, FLOAT_FALLBACK_SECONDS } = await load()
+  const { FLOAT_REFRESH_SECONDS, DEFAULT_FLOAT_REFRESH_SECONDS } = await import('../src/schemas.mjs')
+  assert.equal(JSON.stringify(FLOAT_INTERVALS), JSON.stringify(FLOAT_REFRESH_SECONDS), '两端档位必须一致')
+  assert.equal(FLOAT_FALLBACK_SECONDS, DEFAULT_FLOAT_REFRESH_SECONDS, '两端默认值必须一致')
+  for (const n of FLOAT_INTERVALS) {
+    assert.equal(floatIntervalOf(n), n)
+    assert.equal(floatPollDelay(n, false), n * 1000)
+  }
+  // 越界或缺失回落默认: 列表档位(60)不是悬浮窗的输入
+  for (const bad of [undefined, 0, 7, 60]) {
+    assert.equal(floatIntervalOf(bad), DEFAULT_FLOAT_REFRESH_SECONDS, '归一回落默认')
+    assert.equal(floatPollDelay(bad, false), DEFAULT_FLOAT_REFRESH_SECONDS * 1000)
+  }
+  // 休市不产生新数据, 一律压到一分钟一拍
+  assert.equal(floatPollDelay(3, true), 60 * 1000)
+  assert.equal(floatPollDelay(30, true), 60 * 1000)
 })
 
 // 主序列的键名决定重涂能不能生效: 分时用蜡烛那组键名等于什么都没改

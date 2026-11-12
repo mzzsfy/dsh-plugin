@@ -10,6 +10,7 @@ import { MAIN_ROW_ID, OFFICIAL_ROW_IDS, detectDeadState, rowState, rowScan } fro
 import { officialRowConfig, readSettingsDocument, resolveFromHostTree } from './guard-config.mjs'
 import { officialRowState } from './takeover.mjs'
 import { recordTakeover, retireShellSelectExecutorFiber, shellSelectApplyState, shellSelectTakeoverTrace } from './apply-state.mjs'
+import { withHostGate } from './route-gate.mjs'
 
 // 官方包 npm 名(与行 id 独立:行 id 是 dsh-base 组合行,包名才是模块解析键)
 const OFFICIAL_PACKAGES = {
@@ -311,10 +312,10 @@ export async function installGuard(ctx, {
     ctx.effect(() => webServer.register({
       kind: 'exact',
       path: '/api/shell-select/guard-status',
-      handler: (req, res) => {
+      handler: withHostGate(ctx, (req, res) => {
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify(status()))
-      },
+      }),
     }), 'shell-select/guard status route')
   }
 

@@ -525,3 +525,18 @@ test('F07 Given 无快照旧记录 When resume_from Then 拒绝', async () => {
   assert.equal(rf.ok, false)
   assert.match(String(rf.error ?? ''), /无模板快照/)
 })
+
+test('Given 子 agent 会话 When start Then 拒绝,不落 run', async () => {
+  for (const header of [
+    { origin: 'subagent', parentSession: 'root', delegationDepth: 1 },
+    { parentSession: 'root', delegationDepth: 1 },
+  ]) {
+    const { start, exec } = setup()
+    exec.agent.session = { header }
+    const before = reportStore().list().length
+    const r = await start.execute({ request: '整理仓库', templateId: 'default', plan: fullPlan() }, exec)
+    assert.equal(r.ok, false)
+    assert.match(r.hint, /主会话发起/)
+    assert.equal(reportStore().list().length, before, '拒绝不得落 run')
+  }
+})

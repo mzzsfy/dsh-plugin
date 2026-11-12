@@ -26,4 +26,6 @@ test('client registers panel slots and declares a legal nav icon glyph', () => {
   assert.match(source, /inject: \['slots', 'sessions', 'uiWorkspace', 'uiSession', 'uiConversation', 'conversation'\]/)
   assert.match(source, /uiWorkspace\.openSession\(sessionId\)/)
   assert.match(source, /const NAV_ICON = \{ '公司管理': 'plan', 'dsh-boss-simulator': 'plan' \}/)
+  // 可达集合排除子 agent 会话:ids 含子会话行,通用打开会抛 session/agent-busy
+  assert.match(source, /catalog\.ids\.filter\(\(id\) => catalog\.byId\?\.\[id\]\?\.origin !== 'subagent'\)/)
 })

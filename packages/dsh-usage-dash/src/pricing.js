@@ -5,6 +5,8 @@ export const UNIT_PER_MILLION = 'perMillion'
 export const CURRENCIES = ['¥', '$']
 export const CONDITION_KINDS = ['dailyWindow', 'weekdays', 'monthDays', 'dateRange']
 export const TOKENS_PER_MILLION = 1000 * 1000
+// 全通配模型键:编辑器恒提供该兜底组,归一时恒排最后
+export const GLOBAL_DEFAULT_MODEL = '*/*'
 
 const MODEL_WILDCARD = '*'
 const SEGMENT_SEPARATOR = '/'
@@ -83,6 +85,30 @@ const isRuleShaped = (rule) =>
   && (rule.unit === undefined || rule.unit === UNIT_PER_MILLION)
   && !!rule.price && typeof rule.price === 'object' && !Array.isArray(rule.price)
   && Array.isArray(rule.conditions)
+
+// 规则表归一:同模型至多一条无条件默认价(保留首条,与 matchPrice 同档取首条一致),
+// 条件规则升到默认价前;全通配组恒最后,防全局兜底抢在具体模型规则前。
+// 纯函数且保留命中规则引用;非法条目原样跳过,不在这里补默认价(默认价由编辑器呈现)。
+export const normalizePricingRules = (rules) => {
+  if (!Array.isArray(rules)) return []
+  const groups = new Map()
+  for (const rule of rules) {
+    if (!rule || typeof rule !== 'object') continue
+    const model = typeof rule.model === 'string' ? rule.model : ''
+    if (!groups.has(model)) groups.set(model, [])
+    groups.get(model).push(rule)
+  }
+  const regular = []
+  const global = []
+  for (const [model, group] of groups) {
+    const fallback = group.find((rule) => (rule.conditions ?? []).length === 0)
+    const conditional = group.filter((rule) => (rule.conditions ?? []).length !== 0)
+    const ordered = fallback ? [...conditional, fallback] : conditional
+    if (model === GLOBAL_DEFAULT_MODEL) global.push(...ordered)
+    else regular.push(...ordered)
+  }
+  return [...regular, ...global]
+}
 
 // 规则模型键必须两段式:首个 / 前 vendor 段、后模型段(允许含 /),首位斜杠或无斜杠均非法
 export const splitRuleSegments = (pattern) => {

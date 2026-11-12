@@ -8,7 +8,7 @@ DSH(DeepSeek Harness)插件维护主仓库(monorepo)。
 dsh-plugin/
 ├── packages/         # DSH 插件包
 ├── DEVELOPMENT/      # 开发规约(AGENTS.md 拆分主题)
-├── scripts/          # 发版/开发态链接/CI 聚合测试脚本、compat 与 echo-upstream 工位
+├── scripts/          # 发版/开发态链接/CI 聚合测试、compat 与 echo-upstream 工位、perf 性能基准
 ├── tests/            # 仓库级测试(聚合器/compat 判定/dev-link/publish/echo-upstream 等)
 ├── .github/          # CI workflows(test/compat)
 └── docs/             # 本地资料(除注明外不入库)
@@ -26,6 +26,7 @@ dsh-plugin/
 | @mzzsfy/dsh-think-expand | 流式思考自动展开:始终显示最新一条思考,手动操作优先,打开会话仅展开最后一条,卸载无残留 | 纯前端观察流式渲染,新思考出现即收起上一条;设置卡提供「仅思考(默认)/全部消息」模式开关(localStorage 持久),可选开启独立的工具行展开机;默认形态安装即生效 | DSH 纯前端插件(client 模块,DOM 观察) |
 | @mzzsfy/dsh-turn-notify | 回合事件通知:声音 / 系统弹窗 / 页内提示 / webhook / IM / 宿主桌面通知多通道,六类事件独立开关,多窗口只响一次 | host 端观察回合状态,client 端发声;多窗口经公共 WS 总线快照 + IndexedDB 原子认领唯一呈现;系统弹窗不可用(非回环/未授权)降级标题闪烁 | DSH 双端插件(host 观察投影 + client 发声) |
 | @mzzsfy/dsh-session-manager | 会话生命周期管理:超期会话自动归档(阈值/周期可配)、归档面板(取消归档 / 删除进系统回收站或插件回收区 / 台账一键重挂载)、归档推送提示 | host 三路触发同一幂等归档评估(timer 软依赖缺失自动降级);取消归档后 10 分钟内评估短路防误归档;删除三次确认,系统回收站不可用自动降级插件回收区,台账承载重挂载 | DSH 双端插件(host 自动归档 + client 面板) |
+| @mzzsfy/dsh-keep-working | 持续工作:回合未声明结案就静默结束时自动补一条用户消息把 AI 拉回,直到 present 交付、末行 `(TASK_DONE)` 或 `(TASK_BLOCKED: 原因)`;接管中断恢复与重启扫描,可替代 dsh-client-auto-continue | host 端订阅 session/event,按 turn/end 原因判定(结案凭据 + 失败分类 + 无可见输出),按 grace/冷却/退避节奏 followup 一条 user 消息;冷启动扫存储会话按同一判据恢复并重新武装 goal | DSH 双端插件(host 恢复引擎 + client 设置面板) |
 | @mzzsfy/dsh-rs-workflow | 若水工作流:流程模板管理与一键释放为 Agent 预设组合——主循环编排七工具、分段推进、结构化产出契约强制校验、审批原语、运行记录无截断回看;模板经设置页管理 | host board 行挂 `/api/rsww/*`(模板/配置/运行记录/控制/释放);释放链把模板生成为 `rs-<id>` 预设组合(orchestrator 七工具 + template-tool 行);数据落自有文件不经宿主 settings | DSH 插件(host board 行 + 释放组合两角色) |
 | @mzzsfy/dsh-llm-pi-gateway | 为官方 PiAiAdapter 提供会话标记增强:Anthropic 注入 `metadata.user_id`,Chat 补会话亲和头(`session_id` / `x-client-request-id`);官方 `llm-pi-ai` 保持启用并继续自服务 | 仅装饰官方 namespace 注册且结构匹配的 adapter;OpenAI 请求透传;不接管或注册 provider | DSH host 端插件(adapter 装饰器) |
 | @mzzsfy/dsh-settings-nav-icons | 设置导航分区图标:把千篇一律的齿轮换成各分区专属图形,并为插件市场卡片头像槽提供插件图标,重载页面即恢复官方图标 | 观察设置导航 DOM 与市场卡片 DOM,按分区显示文本贴图;插件面板可声明自己的图标;取图链 声明→内置→关键词→哈希 | DSH 纯前端插件(DOM 观察) |
@@ -62,13 +63,13 @@ pnpm config set --global minimumReleaseAge 360
 
 要求 Node >= 22(各包 engines 字段;其中 dsh-settings-nav-icons 为 >=20)。各包 manifest 以 `dsh.compatibility.dshReleases` 逐版本声明 DSH 完整版本兼容性(实测过的版本记 `compatible`,未经实测验证的版本声明 `unknown`,以各包 manifest 为准)。
 
-- 包内测试:20 个包全部含 test/ 目录,统一 `npm test` 入口(多数包为 `node --test "test/*.test.mjs"`;cron-board/tunnel/turn-notify/usage-panel 四包经 `--experimental-test-module-mocks --import ./test/_mocks.common-tools.mjs` 预载公共依赖桩;shared-terminal 为自定义入口 `node test/run.mjs`,以各包 scripts.test 为准)
+- 包内测试:21 个包全部含 test/ 目录,统一 `npm test` 入口(多数包为 `node --test "test/*.test.mjs"`;cron-board/tunnel/turn-notify/usage-panel 四包经 `--experimental-test-module-mocks --import ./test/_mocks.common-tools.mjs` 预载公共依赖桩;shared-terminal 为自定义入口 `node test/run.mjs`,以各包 scripts.test 为准)
 - CI 测试(`.github/workflows/test.yml`):push 按改动范围收敛(全部改动落在 `packages/<X>/` 只测 X + 冒烟与仓库根测试;触及非包路径回退全量),每 3 天定时与手动触发为全量;amd64/arm64 双架构并行,各跑 10 轮(smoke-load + 全部含 test/ 目录的包自动发现 + 仓库根 tests/ + 公共模拟器 scripts/echo-upstream 测试单元;测试文件按平台过滤,`*.linux.test.mjs`/`*.win.test.mjs` 专属,CI 只跑 linux 侧;宿主 peer 以钉版包装入仓库根 node_modules 作解析桥,包间依赖以 @mzzsfy 符号链接解析、不经 registry,均不入库)
 - CI 兼容性测试(`.github/workflows/compat.yml`):每 3 天定时 + 手动触发,真实 dsh 宿主双槽窗口逐版本全家桶 boot(主测完全适配判定 + 基线不崩溃判定,均阻塞);不被 push 触发,方法见 docs/兼容性测试/测试与隔离方法.md(本地维护,不入库)
 
 ### 宿主兼容性
 
-兼容性目标策略(2026-09-27 起):双槽窗口——主测 = 各渠道 dist-tag 指向版本中最新的 rc(渠道全无 rc 时取各渠道指向版本中语义化版本最大者;与基线同版本则窗口缩为单主测),完全适配(阻塞);基线 = dist-tag `latest` 指向版本,不崩溃底线(阻塞);三版本完全兼容不再执行(难度与收益不成比例)。窗口唯一规则实现为 `node scripts/compat/window.mjs`(实算随 dist-tag 滑动,本节版本号仅为写作日快照,与脚本输出不一致时以脚本为准):2026-11-09 实算 0.2.2-rc.1(主测;与 `latest` 同版本,窗口缩为单槽)。各包 manifest `dsh.compatibility.dshReleases` 为逐版本登记(compatible=实测通过,unknown=未测;存档非承诺,兼容面以窗口实测为准),`dsh.hostMin` 由 compat 装载层按包过滤低于该代际的宿主(声明包:auto-trust-all/boss-simulator/bug-perf/llm-pi-gateway/session-manager/shared-terminal/shell-select/tool-gate)。逐包测试进度与兼容性检查总纲见 [docs/兼容性测试/](docs/兼容性测试/)(本地维护,不入库,干净 clone 不可见):检查维度(D01-D15)、20 包适用矩阵与项目级验收门槛见 [兼容性检查总纲](docs/兼容性测试/兼容性检查总纲.md),逐包断言与证据要求见各包 `兼容性测试.md`。
+兼容性目标策略(2026-09-27 起):双槽窗口——主测 = 各渠道 dist-tag 指向版本中最新的 rc(渠道全无 rc 时取各渠道指向版本中语义化版本最大者;与基线同版本则窗口缩为单主测),完全适配(阻塞);基线 = dist-tag `latest` 指向版本,不崩溃底线(阻塞);三版本完全兼容不再执行(难度与收益不成比例)。窗口唯一规则实现为 `node scripts/compat/window.mjs`(实算随 dist-tag 滑动,本节版本号仅为写作日快照,与脚本输出不一致时以脚本为准):2026-11-09 实算 0.2.2-rc.1(主测;与 `latest` 同版本,窗口缩为单槽)。各包 manifest `dsh.compatibility.dshReleases` 为逐版本登记(compatible=实测通过,unknown=未测;存档非承诺,兼容面以窗口实测为准),`dsh.hostMin` 由 compat 装载层按包过滤低于该代际的宿主(声明包:auto-trust-all/boss-simulator/bug-perf/keep-working/llm-pi-gateway/session-manager/shared-terminal/shell-select/tool-gate)。逐包测试进度与兼容性检查总纲见 [docs/兼容性测试/](docs/兼容性测试/)(本地维护,不入库,干净 clone 不可见):检查维度(D01-D15)、21 包适用矩阵与项目级验收门槛见 [兼容性检查总纲](docs/兼容性测试/兼容性检查总纲.md),逐包断言与证据要求见各包 `兼容性测试.md`。
 
 以下为 2026-09-27 Round 30 实测记录(历史留档,当时窗口仍为三版本:0.1.2-rc.1 基线 / 0.1.5-rc.3 主测 / 0.1.7-rc.2 完全兼容目标;其中 dsh-shell-select 预设架构当时要求 ≥0.1.7-rc.1,对当时基线不可安装——该例外随窗口滑动已不再成立,hostMin 过滤现由装载层通用承载):
 
@@ -106,7 +107,7 @@ node scripts/publish.mjs <包名> --bump patch          # 本地版本已发布�
 规则:
 
 - 版本管控以 git tag 为事实源:每包独立 tag,形如 `<npm包名斜杠换连字符>-v<版本>`(如 `@mzzsfy-dsh-usage-panel-v0.1.0`);发布成功后脚本自动提交该包版本号变更并把 tag 打在该提交上,推送由维护者执行(`git push --tags`)
-- 发版判定(本地版本==线上时)以 tag 后的包目录提交数为准:无提交 → 跳过(该包无需发版);有提交 → 拒绝发布并提示提交数,须显式 `--bump` 才发(防止代码已变而版本号未动被漏发);本地 tag 缺失 → 补打 tag 并跳过
+- 发版判定(本地版本==线上时)以 tag 后的包目录提交数为准:无提交 → 跳过(该包无需发版);有提交 → 拒绝发布并提示提交数,须显式 `--bump` 才发(防止代码已变而版本号未动被漏发);本地 tag 缺失 → 拒绝发布并提示缺失 tag(与 `scripts/publish.mjs` 同一判定,不再自动补打)
 - 本地版本低于线上时拒绝发布(防版本回退);高于线上时直接发布(`--bump` 仅适用于本地等于线上的场景)
 - 各包 package.json 的 `npmPublish` 脚本是无校验的单包发布命令,仅在明确清楚后果时使用
 - 发布要求本机已 `npm login`(2FA 账号按回车走浏览器认证,或使用 automation token)

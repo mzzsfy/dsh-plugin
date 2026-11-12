@@ -6,7 +6,6 @@ const BUSINESS_STATES = ['draft', 'ready', 'implementing', 'awaiting_acceptance'
 const PRIORITIES = ['high', 'normal', 'low']
 const PHASES = ['implement', 'fix', 'accept', 'integrate']
 const PHASE_ROLE = { implement: 'executor', fix: 'executor', accept: 'reviewer', integrate: 'executor|reviewer' }
-const RUN_STATES = ['prepared', 'submitted', 'running', 'settled', 'interrupted', 'rejected', 'unknown']
 const CONTROL_STATES = ['active', 'stopping', 'paused', 'reconciling']
 const CRITERION_ID = /^[A-Za-z0-9_-]+$/
 
@@ -152,8 +151,11 @@ export function reviseDefinition(aggregate, { definition }) {
   return pass({ aggregate: next })
 }
 
+// 未核清的 Run 状态:interrupted 与 settled/rejected 同属终态,不占执行槽
+export const ACTIVE_RUN_STATES = new Set(['prepared', 'submitted', 'running', 'unknown'])
+
 export function hasActiveRuns(aggregate) {
-  return Object.values(aggregate.runs).some((r) => ['prepared', 'submitted', 'running', 'unknown'].includes(r.state))
+  return Object.values(aggregate.runs).some((r) => ACTIVE_RUN_STATES.has(r.state))
 }
 
 // 执行许可十条(生命周期"全局与局部停止代次" + 依赖准入);宿主能力就绪由适配层另行检查
@@ -180,7 +182,7 @@ export function checkExecutionPermission(aggregate, globalControl, { workItemId,
   if (!roles.includes(actorRole)) return fail(E.INVALID_ARGUMENT, `phase ${phase} 不允许角色 ${actorRole}`)
   if (!DISPATCHABLE_BUSINESS.has(aggregate.businessState)) return fail(E.INVALID_ARGUMENT, `业务状态 ${aggregate.businessState} 不可派发`)
   const slotKey = actionKeyOf([aggregate.taskId, workItemId, phase, actorRole])
-  const slotTaken = Object.values(aggregate.runs).some((r) => r.executionSlot === slotKey && ['prepared', 'submitted', 'running', 'unknown'].includes(r.state))
+  const slotTaken = Object.values(aggregate.runs).some((r) => r.executionSlot === slotKey && ACTIVE_RUN_STATES.has(r.state))
   if (slotTaken) return fail(E.EXECUTION_STILL_ACTIVE, '同一执行槽存在未核清 Run')
   return pass({ slotKey })
 }
@@ -372,7 +374,7 @@ export function confirmStopped(aggregate) {
 function settleActiveRuns(runs, state) {
   const next = { ...runs }
   for (const [id, run] of Object.entries(runs)) {
-    if (['prepared', 'submitted', 'running', 'unknown'].includes(run.state)) next[id] = { ...run, state, endedAt: run.startedAt ? undefined : null }
+    if (ACTIVE_RUN_STATES.has(run.state)) next[id] = { ...run, state, endedAt: run.startedAt ? undefined : null }
   }
   return next
 }
@@ -438,7 +440,7 @@ export function replaceWorkItem(aggregate, { oldWorkItemId, newWorkItemId, title
   const old = aggregate.workItems[oldWorkItemId]
   if (!old) return fail(E.NOT_FOUND, `workItem 不存在: ${oldWorkItemId}`)
   if (aggregate.workItems[newWorkItemId]) return fail(E.INVALID_ARGUMENT, `新 workItem ID 已存在: ${newWorkItemId}`)
-  const inFlight = Object.values(aggregate.runs).some((r) => r.workItemId === oldWorkItemId && ['prepared', 'submitted', 'running', 'unknown'].includes(r.state))
+  const inFlight = Object.values(aggregate.runs).some((r) => r.workItemId === oldWorkItemId && ACTIVE_RUN_STATES.has(r.state))
   if (inFlight) return fail(E.EXECUTION_STILL_ACTIVE, '旧执行树存在未核清 Run,不可替代')
   if (!reason) return fail(E.INVALID_ARGUMENT, '替代必须给出解释')
   const draft = { ...aggregate, workItems: { ...aggregate.workItems, [oldWorkItemId]: { ...old, replacedBy: newWorkItemId } } }

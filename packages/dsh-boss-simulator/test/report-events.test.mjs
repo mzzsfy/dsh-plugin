@@ -40,6 +40,16 @@ test('Given 宿主真实扁平 user message 无 turn When 按前置 turn/start �
   assert.ok(f.aggregate.reports['s1:3'])
 })
 
+test('Given Run 已中断 When 迟到回合的 completed 报告到达 Then 不复活为 running', async () => {
+  const f = fixture({ state: 'interrupted' })
+  await f.collector.accept(user())
+  await f.collector.accept(assistant())
+  await f.collector.accept(ended())
+  assert.equal(f.aggregate.runs.r1.state, 'interrupted', '已中断的 Run 不得被迟到报告复活')
+  assert.equal(Object.keys(f.aggregate.reports).length, 0, '不得为已中断 Run 落报告')
+  assert.equal(f.writes.length, 0, '终态 Run 不触发任何写')
+})
+
 test('Given 已派发 Run When durable 报告先于 turn/end 到达 Then 关联报告结算该 Run', async () => {
   const f = fixture()
   await f.collector.accept(user())

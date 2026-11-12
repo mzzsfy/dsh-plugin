@@ -2,6 +2,8 @@
 // 400(shell-select api.mjs 同构:exact 路由 path 唯一键,GET/POST 同
 // handler 分流)。守卫集中在 dispatch,routes 表驱动。
 
+import { withHostGate } from './route-gate.mjs'
+
 const API_ROOT = '/api/tool-gate'
 
 function sendJson(res, status, payload) {
@@ -131,6 +133,6 @@ export function mountRoutes(ctx, faces) {
     },
   ]
   for (const item of routes) {
-    ctx.effect(() => webServer.register({ kind: 'exact', path: item.path, handler: item.handler }), `tool-gate ${item.path}`)
+    ctx.effect(() => webServer.register({ kind: 'exact', path: item.path, handler: withHostGate(ctx, item.handler) }), `tool-gate ${item.path}`)
   }
 }

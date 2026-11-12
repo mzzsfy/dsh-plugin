@@ -158,14 +158,14 @@ test('buildCostItem 开关关恒为 null', () => {
   assert.equal(buildCostItem(COST_USAGE, COST_RULES, PREFS_OFF, zhT, COST_NOW), null)
 })
 
-test('buildCostItem routes 缺席按全通配规则匹配,符号取全局口径(首个非空货币)', () => {
-  // 无 routes → model '*/*',500000 × 1 / 每百万 = 0.5;命中全通配(货币空),符号取表内首个非空 ¥
-  assert.equal(buildCostItem(COST_USAGE, COST_RULES, PREFS_COST_ON, zhT, COST_NOW), '费用 ≈ ¥0.50')
-  assert.equal(buildCostItem(COST_USAGE, COST_RULES, PREFS_COST_ON, enT, COST_NOW), 'Cost ≈ ¥0.50')
+test('buildCostItem routes 缺席不猜全局价,显示占位符', () => {
+  // 无 routes 时不拿 '*/*' 冒充会话精确价;底栏改由宿主小时/模型投影计价
+  assert.equal(buildCostItem(COST_USAGE, COST_RULES, PREFS_COST_ON, zhT, COST_NOW), '—')
+  assert.equal(buildCostItem(COST_USAGE, COST_RULES, PREFS_COST_ON, enT, COST_NOW), '—')
 })
 
-test('buildCostItem routes 首个 model 精确规则优先于通配', () => {
-  const routed = { ...COST_USAGE, routes: [{ provider: 'p', model: 'p/m' }] }
+test('buildCostItem routes 按 provider/model 两段键命中精确规则', () => {
+  const routed = { ...COST_USAGE, routes: [{ provider: 'p', model: 'm' }] }
   const wildcardFirst = [COST_RULES[1], COST_RULES[0]]
   // 500000 × 2 / 每百万 = 1,精确规则货币 ¥
   assert.equal(buildCostItem(routed, wildcardFirst, PREFS_COST_ON, zhT, COST_NOW), '费用 ≈ ¥1.00')
@@ -204,7 +204,8 @@ test('dock append 条目布局契约:官方 pill 满宽不受挤压,空间不足
   assert.ok(!rule.includes('--dsh-composer-side-clearance'), '不再沿用整行侧边距')
   assert.ok(rule.includes('flex:0 999 auto'), '高收缩因子锁定,空间不足时先收缩自身,挤压亏损不由官方 pill 承担')
   assert.ok(rule.includes('padding:0;'), '费用收缩到零时不留下固定内边距挤压官方胶囊')
-  assert.ok(rule.includes('margin-left:calc(0px - var(--ud-dock-gap,0px))') && rule.includes('text-indent:var(--ud-dock-gap,0px)'), '抵消新增 flex gap，文字缩进提供可收缩间距')
+  assert.ok(rule.includes('--ud-dock-gap:0px'), '规则自带 0 兜底,首帧 JS 尚未写入内联值时不失效')
+  assert.ok(rule.includes('margin-left:calc(0px - var(--ud-dock-gap))') && rule.includes('text-indent:var(--ud-dock-gap)'), '抵消新增 flex gap，文字缩进提供可收缩间距')
   assert.ok(rule.includes('min-width:0'), '允许收缩到零')
   assert.ok(rule.includes('overflow:hidden') && rule.includes('white-space:nowrap') && rule.includes('text-overflow:ellipsis'), '收缩残态截断三件套在位,溢出不遮挡官方 pill')
 })

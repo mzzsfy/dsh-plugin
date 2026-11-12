@@ -26,19 +26,30 @@ const attempt = (seq, time, turn, step, stream) => ev('assistant/attempt', seq, 
 const session = (id) => ({ id })
 const tick = () => new Promise((resolve) => setImmediate(resolve))
 
-// 采集器依赖的 store 面:record/seenSessions/liveSequences/markSeenSessions/
-// markLiveSequences/reset/readyPromise,内存态 + 可注入失败
-function fakeStore({ failRecord = false, failMarkLive = false } = {}) {
+// 采集器依赖的 store 面:record/recordSession/seenSessions/liveSequences/
+// markSeenSessions/markLiveSequences/reset/readyPromise,内存态 + 可注入失败
+function fakeStore({ failRecord = false, failMarkLive = false, hasBuckets = false, hasSessions = false } = {}) {
   const samples = []
-  const state = { backfilledSessions: new Set(), liveFirstSeq: new Map() }
+  const sessionIndex = []
+  const state = { backfilledSessions: new Set(), liveFirstSeq: new Map(), hasBuckets, hasSessions }
   const stats = { markLiveCalls: 0, markSeenCalls: 0, resets: 0, lastBoundaries: null }
   return {
     samples,
+    sessionIndex,
     state,
     stats,
     async record(sample) {
       if (failRecord) throw new Error('simulated record failure')
       samples.push(sample)
+    },
+    async recordSession(id, time) {
+      sessionIndex.push([id, time])
+    },
+    hasBucketRows() {
+      return state.hasBuckets
+    },
+    hasSessionRows() {
+      return state.hasSessions
     },
     async seenSessions() {
       return new Set(state.backfilledSessions)
@@ -64,6 +75,7 @@ function fakeStore({ failRecord = false, failMarkLive = false } = {}) {
       state.backfilledSessions.clear()
       state.liveFirstSeq = new Map(boundaries)
       samples.length = 0
+      sessionIndex.length = 0
     },
     async readyPromise() {},
   }
@@ -77,20 +89,20 @@ function fakeSessions(handles = []) {
   }
 }
 
-// definitions: [{ id, events?, inheritedEventCount?, fail? }]
-// 内部统一契约形状(list → [{id}],readLog → {inheritedEventCount, events}),
+// definitions: [{ id, events?, inheritedEventCount?, fail?, header?, derived? }]
+// 内部统一契约形状(list → [{id, derived?}],readLog → {inheritedEventCount, events, derived}),
 // 宿主 persistence 的多版本映射由 archive-reader 测试单独覆盖
 function fakePersistence(definitions = []) {
   const byId = new Map(definitions.map((def) => [def.id, def]))
   return {
     async list() {
-      return definitions.map((def) => ({ id: def.id }))
+      return definitions.map((def) => (def.derived === undefined ? { id: def.id } : { id: def.id, derived: def.derived }))
     },
     async readLog(id) {
       const def = byId.get(id)
       if (!def) throw new Error(`session "${id}" not found`)
       if (def.fail) throw new Error(def.fail)
-      return { inheritedEventCount: def.inheritedEventCount ?? 0, events: def.events ?? [] }
+      return { inheritedEventCount: def.inheritedEventCount ?? 0, events: def.events ?? [], derived: def.derived ?? false }
     },
   }
 }
@@ -99,15 +111,16 @@ function fakePersistence(definitions = []) {
 // rescan → 工厂分派 → backfill 的装配路径测试使用
 function fakeHostPersistence(definitions = []) {
   const byId = new Map(definitions.map((def) => [def.id, def]))
+  const headerOf = (def) => def.header ?? { id: def.id }
   return {
     async list() {
-      return definitions.map((def) => ({ header: { id: def.id }, revision: {} }))
+      return definitions.map((def) => ({ header: headerOf(def), revision: {} }))
     },
     async open(id, access) {
       const def = byId.get(id)
       if (!def) throw new Error(`session "${id}" not found`)
       return {
-        header: { id },
+        header: headerOf(def),
         inheritedEventCount: def.inheritedEventCount ?? 0,
         access,
         async read(offset, length) {
@@ -1156,4 +1169,92 @@ test('status() 返回快照,外部修改不影响内部状态', async () => {
   assert.equal(snapshot.lastSessionId, 's1')
   snapshot.total = 99
   assert.equal(collector.status().total, 1)
+})
+
+// ── 会话索引:真实会话写索引,派生会话只计用量不计会话数 ──────────────────────
+const derivedSession = (id) => ({ id, header: { id, origin: 'subagent', delegationDepth: 1 } })
+
+test('实时:真实会话样本同时写会话索引', async () => {
+  const { ctx, store } = liveCollector()
+  const t = local(2026, 8, 2, 14, 37)
+  ctx.emit('session/event', session('s1'), ev('turn/end', 0, t))
+  await tick()
+  assert.deepEqual(store.sessionIndex, [['s1', t]])
+})
+
+test('实时:派生会话只计回合不写会话索引', async () => {
+  const { ctx, store } = liveCollector()
+  const t = local(2026, 8, 2, 14, 37)
+  ctx.emit('session/event', derivedSession('child'), ev('turn/end', 0, t))
+  await tick()
+  assert.equal(store.samples.length, 1)
+  assert.equal(store.samples[0].turn, true)
+  assert.deepEqual(store.sessionIndex, [])
+})
+
+test('回扫:真实会话每样本写一次会话索引', async () => {
+  const t = local(2026, 8, 2, 14, 0)
+  const persistence = fakePersistence([{
+    id: 's1',
+    events: [
+      ev('request/context', 0, t, { provider: 'deepseek', model: 'chat' }),
+      ev('step/start', 1, t, { turn: 0, step: 0 }),
+      ev('assistant/message', 2, t, { turn: 0, step: 0, usage: usage(), message: {} }),
+      ev('turn/end', 3, t),
+    ],
+  }])
+  const store = fakeStore()
+  const collector = new UsageCollector(fakeCtx({ persistence }), store)
+  await collector.backfill(persistence, fakeSessions())
+  assert.equal(store.samples.length, 3)
+  assert.deepEqual(store.sessionIndex.map(([id]) => id), ['s1', 's1', 's1'])
+})
+
+test('回扫:派生会话不写会话索引但用量照常入库', async () => {
+  const t = local(2026, 8, 2, 14, 0)
+  const persistence = fakePersistence([{
+    id: 'child',
+    derived: true,
+    events: [
+      ev('assistant/message', 0, t, { turn: 0, step: 0, usage: usage(), message: {} }),
+      ev('turn/end', 1, t),
+    ],
+  }])
+  const store = fakeStore()
+  const collector = new UsageCollector(fakeCtx({ persistence }), store)
+  await collector.backfill(persistence, fakeSessions())
+  assert.equal(store.samples.length, 2)
+  assert.deepEqual(store.sessionIndex, [])
+})
+
+test('补扫:有历史用量无会话索引时,只为真实会话重建索引且不重记账', async () => {
+  const t = local(2026, 8, 2, 14, 0)
+  const reader = fakePersistence([
+    { id: 'real', events: [ev('turn/end', 0, t)] },
+    { id: 'child', derived: true, events: [ev('turn/end', 0, t)] },
+    { id: 'unknown-kind', events: [ev('turn/end', 0, t)] },
+  ])
+  const store = fakeStore({ hasBuckets: true, hasSessions: false })
+  const collector = new UsageCollector(fakeCtx(), store)
+  await collector.ensureSessionIndex(reader)
+  assert.deepEqual(store.sessionIndex.map(([id]) => id).sort(), ['real', 'unknown-kind'])
+  assert.equal(store.samples.length, 0)
+  assert.equal(collector.status().total, 3)
+  assert.equal(collector.status().done, 3)
+})
+
+test('补扫:已有会话索引时跳过,不读日志', async () => {
+  const reader = fakePersistence([{ id: 'real', events: [ev('turn/end', 0, local(2026, 8, 2, 14, 0))] }])
+  const store = fakeStore({ hasBuckets: true, hasSessions: true })
+  const collector = new UsageCollector(fakeCtx(), store)
+  await collector.ensureSessionIndex(reader)
+  assert.deepEqual(store.sessionIndex, [])
+})
+
+test('补扫:无历史用量(全新安装)时不补扫', async () => {
+  const reader = fakePersistence([{ id: 'real', events: [ev('turn/end', 0, local(2026, 8, 2, 14, 0))] }])
+  const store = fakeStore({ hasBuckets: false, hasSessions: false })
+  const collector = new UsageCollector(fakeCtx(), store)
+  await collector.ensureSessionIndex(reader)
+  assert.deepEqual(store.sessionIndex, [])
 })

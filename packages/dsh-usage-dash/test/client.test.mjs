@@ -86,7 +86,6 @@ const {
   otherDetailItems,
   parseEnvelope,
   partitionGroupOf,
-  pointerAt,
   providerOf,
   rateAxisTicks,
   removeRulesAt,
@@ -102,7 +101,6 @@ const {
   normalizeHHMMInput,
   shortDay,
   smoothPath,
-  tipPlace,
   translateWith,
   trimSlots,
   trendLayout,
@@ -635,58 +633,6 @@ test('heatLevel 零值为空档其余按峰值四分位', () => {
   assert.equal(heatLevel(1, 1), 5)
 })
 
-const TIP_ANCHOR = { x: 100, y: 100 }
-const TIP_SIZE = { width: 80, height: 40 }
-const TIP_BOUNDS = { left: 0, top: 0, right: 800, bottom: 600 }
-
-test('tipPlace 指针右下空位放右下', () => {
-  assert.deepEqual(tipPlace(TIP_ANCHOR, TIP_SIZE, TIP_BOUNDS), { left: 108, top: 108 })
-})
-
-test('tipPlace 右侧越界翻左侧', () => {
-  assert.deepEqual(tipPlace({ x: 730, y: 100 }, TIP_SIZE, TIP_BOUNDS), { left: 642, top: 108 })
-})
-
-test('tipPlace 下方越界翻上方', () => {
-  assert.deepEqual(tipPlace({ x: 100, y: 570 }, TIP_SIZE, TIP_BOUNDS), { left: 108, top: 522 })
-})
-
-test('tipPlace 右下均越界双翻', () => {
-  assert.deepEqual(tipPlace({ x: 730, y: 570 }, TIP_SIZE, TIP_BOUNDS), { left: 642, top: 522 })
-})
-
-test('tipPlace 双翻后仍越界钳进边界', () => {
-  assert.deepEqual(tipPlace({ x: 798, y: 598 }, TIP_SIZE, TIP_BOUNDS), { left: 710, top: 550 })
-})
-
-test('tipPlace 恰贴右缘等号归属放右侧', () => {
-  assert.deepEqual(tipPlace({ x: 704, y: 100 }, TIP_SIZE, TIP_BOUNDS), { left: 712, top: 108 })
-})
-
-test('tipPlace 左上角指针放右下不翻转', () => {
-  assert.deepEqual(tipPlace({ x: 2, y: 2 }, TIP_SIZE, TIP_BOUNDS), { left: 10, top: 10 })
-})
-
-test('tipPlace 提示框宽于边界钳贴左缘', () => {
-  assert.equal(tipPlace({ x: 400, y: 100 }, { width: 900, height: 40 }, TIP_BOUNDS).left, 8)
-})
-
-test('pointerAt 指针事件取指针坐标', () => {
-  assert.deepEqual(pointerAt({ clientX: 12, clientY: 34 }), { x: 12, y: 34 })
-})
-
-test('pointerAt 焦点事件回退目标矩形中心', () => {
-  const event = {
-    currentTarget: { getBoundingClientRect: () => ({ left: 10, top: 20, right: 30, bottom: 60 }) },
-  }
-  assert.deepEqual(pointerAt(event), { x: 20, y: 40 })
-})
-
-test('tipPlace 零尺寸或非法锚点返回隐藏', () => {
-  assert.equal(tipPlace(TIP_ANCHOR, { width: 0, height: 0 }, TIP_BOUNDS), null)
-  assert.equal(tipPlace(null, TIP_SIZE, TIP_BOUNDS), null)
-  assert.equal(tipPlace({ x: Number.NaN, y: 100 }, TIP_SIZE, TIP_BOUNDS), null)
-})
 
 // —— S8 命中率曲线 ——
 
@@ -1117,6 +1063,8 @@ test('defaultPricingRule 承接给定货币,缺省回落首档', () => {
 test('validatePricingRules 就地校验 model 必填两段式与价格非空非负', () => {
   const valid = [{ model: 'p/m', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] }]
   assert.equal(validatePricingRules(valid).size, 0)
+  // 模型段允许下级斜杠,提交校验不能把 oc/xx/xx 判成单段旧形态
+  assert.equal(validatePricingRules([{ ...valid[0], model: 'oc/xx/xx' }]).size, 0)
   const broken = [
     { model: '  ', currency: '¥', price: { input: '', output: -1, cacheRead: 0, cacheWrite: 0 }, conditions: [] },
     { model: 'solo', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] },
@@ -1283,7 +1231,7 @@ test('groupRulesOf 空表返回空组列表', () => {
   assert.deepEqual(groupRulesOf([]), [])
 })
 
-test('partitionGroupOf 组末无条件规则为默认价,其余为附加规则且保序', () => {
+test('partitionGroupOf 首条无条件规则为默认价,其余为附加规则且保序', () => {
   // Given 组槽位 [条件0, 条件1, 无条件2] When 划分 Then 默认价=索引2,附加=[0,1]
   const cond = { kind: 'dailyWindow', from: '00:00', to: '08:00' }
   const group = { model: 'a/1', slots: [
@@ -1307,15 +1255,15 @@ test('partitionGroupOf 全条件规则组无默认价', () => {
   assert.deepEqual(extras.map((slot) => slot.index), [0, 1])
 })
 
-test('partitionGroupOf 多条无条件规则时末条为默认价,前条按附加规则显示', () => {
-  // Given 组槽位 [无条件0, 无条件1] When 划分 Then 默认价=索引1,附加=[0](存量数据自然收敛)
+test('partitionGroupOf 多条无条件规则时首条为默认价,后续按附加规则显示', () => {
+  // Given 组槽位 [无条件0, 无条件1] When 划分 Then 默认价=索引0,附加=[1](与 matchPrice 首条命中一致)
   const group = { model: 'a/1', slots: [
     { rule: { model: 'a/1', conditions: [] }, index: 0 },
     { rule: { model: 'a/1', conditions: [] }, index: 1 },
   ] }
   const { defaultSlot, extras } = partitionGroupOf(group)
-  assert.equal(defaultSlot.index, 1)
-  assert.deepEqual(extras.map((slot) => slot.index), [0])
+  assert.equal(defaultSlot.index, 0)
+  assert.deepEqual(extras.map((slot) => slot.index), [1])
 })
 
 test('moveRuleTo 跨位移动返回新数组且不动原数组', () => {

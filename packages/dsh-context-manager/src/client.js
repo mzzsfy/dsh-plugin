@@ -33,159 +33,193 @@ window.__ModuleLoader__.load({
     const toast = require('@mzzsfy/dsh-common-tools/client').toast.show
 
 const CSS = [
-  // 开关行(规约 switch 形态):track 胶囊 + thumb 圆点,状态选择器锚定 checkbox
-  '.cx-switch { display:inline-flex; align-items:center; gap:8px; margin-top:10px; cursor:pointer;',
-  '  font:var(--dsw-font-xxs-12, 12px/18px sans-serif); color:var(--dsw-alias-label-caption); }',
+  // 包局部视觉 token(plugin-ui-design 契约):值只引用宿主语义别名,不写字面 fallback。
+  // 四个 UI 岛(历史浮层/克隆弹窗/设置卡/标题栏按钮)各自是根,同一规则挂 token 供内部继承
+  '.cx-hist, .cx-clone-overlay, .cx-card, .cx-sid {',
+  '  --cx-accent:var(--dsw-alias-brand-primary); --cx-accent-deep:var(--dsw-alias-button-primary-hover);',
+  '  --cx-accent-wash:color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent);',
+  '  --cx-ok:var(--dsw-alias-state-success-primary); --cx-warn:var(--dsw-alias-state-warn-primary);',
+  '  --cx-danger:var(--dsw-alias-state-error-primary);',
+  '  --cx-danger-wash:color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent);',
+  '  --cx-bg:var(--dsw-alias-bg-layer-1); --cx-bg-sub:var(--dsw-alias-bg-layer-2);',
+  '  --cx-bg-muted:var(--dsw-alias-bg-module-platform);',
+  '  --cx-card:var(--dsw-alias-bg-layer-1); --cx-card-border:var(--dsw-alias-border-l2);',
+  '  --cx-border:var(--dsw-alias-border-l2); --cx-border-strong:var(--dsw-alias-border-l3);',
+  '  --cx-text:var(--dsw-alias-label-primary); --cx-text-sub:var(--dsw-alias-label-secondary);',
+  '  --cx-text-dim:var(--dsw-alias-label-tertiary);',
+  '  --cx-hover:var(--dsw-alias-interactive-bg-hover); --cx-hover-danger:var(--dsw-alias-interactive-bg-hover-danger);',
+  '  --cx-skeleton:var(--dsw-alias-bg-skeleton); --cx-mask:var(--dsw-alias-bg-mask-1);',
+  '  --cx-switch-thumb:var(--dsw-alias-switch-thumb); --cx-focus:var(--dsw-alias-state-business-primary);',
+  '  --cx-radius-sm:var(--dsw-radius-sm); --cx-radius-md:var(--dsw-radius-md); --cx-radius-lg:var(--dsw-radius-lg);',
+  '}',
+  // 开关行(plugin-client-conventions 规约形态):track 胶囊 + thumb 圆点,状态选择器锚定 checkbox。
+  // 行文本在左、控件在右:row-reverse 只换视觉序,DOM 契约(input 紧跟 track)不变
+  '.cx-switch { display:inline-flex; flex-direction:row-reverse; align-items:center; justify-content:space-between;',
+  '  gap:12px; width:100%; box-sizing:border-box; min-height:36px; cursor:pointer;',
+  '  color:var(--cx-text); font-size:14px; line-height:22px; }',
   '.cx-switch input[type="checkbox"] { position:absolute; width:1px; height:1px; margin:-1px; opacity:0; }',
-  '.cx-switch__track { position:relative; flex:none; width:28px; height:16px; border-radius:999px;',
-  '  background:var(--dsw-alias-border-l2); transition:background .15s; }',
-  '.cx-switch__thumb { position:absolute; left:2px; top:2px; width:12px; height:12px; border-radius:999px;',
-  '  background:var(--dsw-alias-bg-base); box-shadow:0 1px 2px color-mix(in srgb, var(--dsw-alias-label-primary) 25%, transparent); transition:transform .15s; }',
-  '.cx-switch input[type="checkbox"]:checked + .cx-switch__track { background:var(--dsw-alias-brand-primary); }',
-  '.cx-switch input[type="checkbox"]:checked + .cx-switch__track .cx-switch__thumb { transform:translateX(12px); }',
-  '.cx-switch input[type="checkbox"]:focus-visible + .cx-switch__track { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:1px; }',
-  '.cx-switch:hover { color:var(--dsw-alias-label-primary, inherit); }',
+  '.cx-switch__track { position:relative; flex:none; box-sizing:border-box; width:34px; height:19px; border-radius:999px;',
+  '  background:var(--cx-bg-muted); border:1px solid var(--cx-border); transition:background .15s, border-color .15s; }',
+  '.cx-switch__thumb { position:absolute; left:2px; top:2px; width:13px; height:13px; border-radius:50%;',
+  '  background:var(--cx-switch-thumb); transition:left .15s; }',
+  '.cx-switch:hover .cx-switch__track { background:color-mix(in srgb,var(--cx-bg-muted) 88%,var(--cx-text)); }',
+  '.cx-switch input[type="checkbox"]:checked + .cx-switch__track { background:var(--cx-accent); border-color:var(--cx-accent); }',
+  '.cx-switch input[type="checkbox"]:checked + .cx-switch__track .cx-switch__thumb { left:17px; }',
+  '.cx-switch input[type="checkbox"]:focus-visible + .cx-switch__track { outline:2px solid var(--cx-focus); outline-offset:2px; }',
+  '.cx-switch:has(input[type="checkbox"]:disabled) { opacity:.5; cursor:not-allowed; }',
   '@media (prefers-reduced-motion: reduce) { .cx-switch__track, .cx-switch__thumb { transition:none; } }',
-  // 设置分区容器
-  '.cx-panel { display:flex; flex-direction:column; gap:2px; align-items:flex-start; min-width:0;',
-  '  color:var(--dsw-alias-label-primary); font:var(--dsw-font-s-14); }',
-  '.cx-panel__hint { font:var(--dsw-font-xxs-12); color:var(--dsw-alias-label-caption); margin:10px 0 4px; }',
-  // 插件页折叠卡:视觉值与官方 PluginCard 同源实测(border/bg/radius/间距),
-  // open 态换底层色并加深边框,chevron 随开合旋转
-  '.cx-card { border:.5px solid var(--dsw-alias-border-l4); background:var(--dsw-alias-bg-layer-3);',
-  '  border-radius:16px; list-style:none; transition:border-color .16s, background .16s; width:100%; }',
-  '.cx-card:hover { border-color:var(--dsw-alias-label-dimmed); }',
-  '.cx-card--open { background:var(--dsw-alias-bg-layer-2); border-color:var(--dsw-alias-label-dimmed); }',
-  '.cx-card__header { appearance:none; width:100%; font:inherit; color:inherit; text-align:left; cursor:pointer;',
-  '  background:none; border:0; border-radius:12px; align-items:center; gap:12px; padding:14px 16px; display:flex; }',
-  '.cx-card__header:focus-visible { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:-2px; }',
-  '.cx-card__head-text { display:flex; flex-direction:column; flex:1 1 0%; gap:4px; min-width:0; }',
-  '.cx-card__name { color:var(--dsw-alias-label-primary); font-size:15px; font-weight:600; line-height:1.4; }',
-  '.cx-card__description { color:var(--dsw-alias-label-tertiary); font-size:13px; line-height:1.5; }',
-  '.cx-card__chevron { color:var(--dsw-alias-label-tertiary); flex:0 0 auto; transition:transform .16s; display:inline-flex; }',
+  // 插件页折叠卡:L1 卡片(card 底 + 0.5px 描边 + radius-md),标题 16/500,说明 13px text-sub
+  '.cx-card { box-sizing:border-box; width:100%; border:.5px solid var(--cx-card-border);',
+  '  border-radius:var(--cx-radius-md); background:var(--cx-card); color:var(--cx-text);',
+  '  font-size:14px; line-height:22px; transition:border-color .16s; }',
+  '.cx-card:hover, .cx-card--open { border-color:var(--cx-border-strong); }',
+  '.cx-card__header { appearance:none; display:flex; align-items:flex-start; gap:12px; width:100%;',
+  '  padding:16px 20px; border:0; border-radius:var(--cx-radius-md); background:none; font:inherit;',
+  '  color:inherit; text-align:left; cursor:pointer; }',
+  '.cx-card__header:focus-visible { outline:2px solid var(--cx-focus); outline-offset:-2px; }',
+  '.cx-card__head-text { display:flex; flex-direction:column; flex:1 1 auto; gap:2px; min-width:0; }',
+  '.cx-card__name { color:var(--cx-text); font-size:16px; font-weight:500; line-height:24px; }',
+  '.cx-card__description { color:var(--cx-text-sub); font-size:13px; line-height:20px; }',
+  '.cx-card__chevron { flex:none; margin-top:4px; color:var(--cx-text-dim); display:inline-flex; transition:transform .16s; }',
   '.cx-card--open .cx-card__chevron { transform:rotate(180deg); }',
-  '.cx-card__body { border-top:.5px solid var(--dsw-alias-border-l2); margin:0 16px; padding:0 0 8px;',
-  '  display:flex; flex-direction:column; align-items:flex-start; gap:8px; }',
-  '.cx-card__body .cx-panel__hint { margin:10px 0 0; }',
-  // 历史输入:零高度锚点容器 + 浮层(Alt+↑ 唤起);浮层与输入框同宽对齐,
-  // 不透明实底 + 宿主同款卡片投影,与消息流明确区隔。
-  // 色值取自宿主实测(白底卡片/墨色文字/蓝色强调):dsw alias 变量在宿主为空,不可依赖
+  '.cx-card__body { display:flex; flex-direction:column; padding:0 20px 12px; border-top:.5px solid var(--cx-border); }',
+  '.cx-panel__hint { margin:12px 0 0; color:var(--cx-text-sub); font-size:13px; line-height:20px; }',
+  '.cx-card__body > .cx-switch { min-height:0; padding:12px 0; }',
+  '.cx-card__body > .cx-switch + .cx-switch { border-top:.5px solid var(--cx-border); }',
+  // 历史输入:零高度锚点容器 + 浮层(Alt+↑ 唤起);浮层与输入框同宽对齐,不透明实底 + 宿主弹层投影
   '.cx-hist { position:relative; height:0; }',
   // z-index 须高于同插槽兄弟浮层(sm-hist 同为 50,DOM 序靠前时会被其盖住)
-  '.cx-hist__pop { position:absolute; left:0; right:0; bottom:10px; z-index:' + (50 + 1) + ';',
-  '  max-height:min(420px, 46vh); display:flex; flex-direction:column; overflow:hidden;',
-  '  color-scheme:light dark; color:var(--dsw-alias-label-primary);',
-  '  background:var(--dsw-alias-bg-layer-1); border-radius:14px;',
-  '  box-shadow:0 0 0 0.5px color-mix(in srgb, var(--dsw-alias-label-primary) 16%, transparent), var(--dsw-shadow-lv3); }',
-  '.cx-hist__hint { display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding:9px 14px; flex:none;',
-  '  border-bottom:1px solid var(--dsw-alias-border-l2);',
-  '  font:var(--dsw-font-xxs-12, 12px/18px sans-serif); color:color-mix(in srgb, var(--dsw-alias-label-primary) 55%, transparent); }',
-  // 范围 pill 组:点击直达切换,选中实底蓝,未选淡底
-  '.cx-hist__scopebar { display:flex; align-items:center; gap:4px; flex:none; }',
-  '.cx-hist__pill { appearance:none; border:0; cursor:pointer; flex:none; padding:2px 9px;',
-  '  border-radius:999px; font:var(--dsw-font-xxs-12, 12px/18px sans-serif);',
-  '  color:color-mix(in srgb, var(--dsw-alias-label-primary) 60%, transparent);',
-  '  background:var(--dsw-alias-bg-muted); }',
-  '.cx-hist__pill:hover { color:color-mix(in srgb, var(--dsw-alias-label-primary) 85%, transparent);',
-  '  background:var(--dsw-alias-interactive-bg-hover); }',
-  '.cx-hist__pill--on, .cx-hist__pill--on:hover { background:var(--dsw-alias-brand-primary); color:var(--dsw-alias-bg-base); font-weight:600; }',
-  '.cx-hist__pill:focus-visible { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:1px; }',
-  '.cx-hist__search { flex:1; min-width:0; padding:3px 10px; border-radius:8px; color-scheme:light dark;',
-  '  border:1px solid var(--dsw-alias-border-l2);',
-  '  background:transparent; color:inherit; font:var(--dsw-font-xxs-12, 12px/18px sans-serif); }',
-  '.cx-hist__search:focus { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:-1px; }',
-  '.cx-hist__count { flex:none; font:12px/18px var(--ds-font-family-code, monospace);',
-  '  color:color-mix(in srgb, var(--dsw-alias-label-primary) 40%, transparent); font-variant-numeric:tabular-nums; }',
-  '.cx-hist__list { overflow-y:auto; padding:6px; }',
-  '.cx-hist__row { position:relative; display:flex; align-items:center; gap:10px; width:100%; border:0;',
-  '  background:transparent; cursor:pointer; text-align:left; padding:8px 12px 8px 14px;',
-  '  border-radius:8px; min-width:0; }',
-  '.cx-hist__row:hover { background:var(--dsw-alias-interactive-bg-hover); }',
-  '.cx-hist__row--on, .cx-hist__row--on:hover { background:color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent); }',
-  '.cx-hist__row--on::before { content:""; position:absolute; left:0; top:6px; bottom:6px; width:3px;',
-  '  border-radius:2px; background:var(--dsw-alias-brand-primary); }',
-  '.cx-hist__row--on .cx-hist__text { color:var(--dsw-alias-brand-primary); font-weight:600; }',
-  '.cx-hist__row:focus-visible { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:-2px; }',
-  '.cx-hist__text { flex:1; min-width:0; font:var(--dsw-font-s-14, 14px/22px sans-serif);',
-  '  color:inherit; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }',
-  '.cx-hist__time { font:12px/18px var(--ds-font-family-code, monospace);',
-  '  color:color-mix(in srgb, var(--dsw-alias-label-primary) 40%, transparent);',
-  '  font-variant-numeric:tabular-nums; flex:none; }',
-  '.cx-hist__star { border:0; background:transparent; cursor:pointer; flex:none;',
-  '  font-size:15px; line-height:1; padding:2px 4px; border-radius:6px;',
-  '  color:color-mix(in srgb, var(--dsw-alias-label-primary) 35%, transparent);',
-  '  opacity:0; transition:opacity .12s; }',
+  '.cx-hist__pop { position:absolute; left:0; right:0; bottom:8px; z-index:' + (50 + 1) + ';',
+  '  box-sizing:border-box; max-height:min(420px, 46vh); display:flex; flex-direction:column; overflow:hidden;',
+  '  color:var(--cx-text); background:var(--cx-bg); border:.5px solid var(--cx-border);',
+  '  border-radius:var(--cx-radius-md); box-shadow:var(--dsw-shadow-lv3); }',
+  '.cx-hist__hint { display:flex; flex-wrap:wrap; align-items:center; gap:8px; flex:none; padding:8px 12px;',
+  '  border-bottom:.5px solid var(--cx-border); color:var(--cx-text-sub); font-size:12px; line-height:18px; }',
+  // 范围 pill 组:bg-muted 容器 + radius-sm,选中 accent-wash 底 + accent 文字
+  '.cx-hist__scopebar { display:inline-flex; align-items:center; gap:2px; flex:none; padding:2px;',
+  '  border-radius:var(--cx-radius-sm); background:var(--cx-bg-muted); }',
+  '.cx-hist__pill { appearance:none; flex:none; border:0; border-radius:var(--cx-radius-sm); cursor:pointer;',
+  '  min-height:24px; padding:0 10px; background:transparent; color:var(--cx-text-sub);',
+  '  font:inherit; font-size:12px; line-height:18px; }',
+  '.cx-hist__pill:hover { background:var(--cx-hover); color:var(--cx-text); }',
+  '.cx-hist__pill--on, .cx-hist__pill--on:hover { background:var(--cx-accent-wash); color:var(--cx-accent); font-weight:500; }',
+  '.cx-hist__pill:focus-visible { outline:2px solid var(--cx-focus); outline-offset:2px; }',
+  '.cx-hist__search { flex:1; min-width:120px; box-sizing:border-box; min-height:28px; padding:0 10px;',
+  '  border:1px solid var(--cx-border-strong); border-radius:var(--cx-radius-sm);',
+  '  background:var(--cx-bg-sub); color:var(--cx-text); font:inherit; font-size:12px; line-height:18px; }',
+  '.cx-hist__search:focus { outline:2px solid var(--cx-focus); outline-offset:-2px; }',
+  '.cx-hist__count { flex:none; font-family:var(--ds-font-family-code); font-size:11px; line-height:18px;',
+  '  color:var(--cx-text-dim); font-variant-numeric:tabular-nums; }',
+  '.cx-hist__keys { color:var(--cx-text-dim); }',
+  '.cx-hist__list { overflow-y:auto; padding:4px 8px; }',
+  '.cx-hist__row { display:flex; align-items:center; gap:8px; width:100%; box-sizing:border-box;',
+  '  min-height:36px; padding:4px 12px; border:0; border-radius:var(--cx-radius-sm);',
+  '  background:transparent; color:inherit; font:inherit; font-size:12px; line-height:18px;',
+  '  text-align:left; cursor:pointer; }',
+  '.cx-hist__row:hover { background:var(--cx-hover); }',
+  '.cx-hist__row--on, .cx-hist__row--on:hover { background:var(--cx-accent-wash); }',
+  '.cx-hist__row--on .cx-hist__text { color:var(--cx-accent); font-weight:500; }',
+  '.cx-hist__row:focus-visible { outline:2px solid var(--cx-focus); outline-offset:-2px; }',
+  '.cx-hist__text { flex:1; min-width:0; color:inherit; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }',
+  '.cx-hist__time { flex:none; font-family:var(--ds-font-family-code); font-size:11px; line-height:18px;',
+  '  color:var(--cx-text-dim); font-variant-numeric:tabular-nums; }',
+  '.cx-hist__star { flex:none; border:0; border-radius:var(--cx-radius-sm); background:transparent; cursor:pointer;',
+  '  min-height:24px; padding:0 4px; color:var(--cx-text-dim); font-size:14px; line-height:18px;',
+  '  opacity:0; transition:opacity .12s, color .12s; }',
   '.cx-hist__row:hover .cx-hist__star, .cx-hist__star:focus-visible { opacity:1; }',
-  '.cx-hist__star--on { opacity:1; color:var(--dsw-alias-state-warn-primary); }',
-  '.cx-hist__star:hover { color:var(--dsw-alias-state-warn-primary); }',
-  '.cx-hist__editbtn { border:0; background:transparent; cursor:pointer; flex:none; padding:2px 8px;',
-  '  border-radius:999px; font:12px/18px sans-serif; font-weight:600;',
-  '  color:var(--dsw-alias-brand-primary); background:color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent); }',
-  '.cx-hist__editbtn:hover { background:color-mix(in srgb, var(--dsw-alias-brand-primary) 24%, transparent); }',
+  '.cx-hist__star--on { opacity:1; color:var(--cx-warn); }',
+  '.cx-hist__star:hover { color:var(--cx-warn); }',
+  // 触摸设备无悬停:星标常显,否则收藏入口不可发现(已收藏项本已常显)
+  '@media (hover: none) { .cx-hist__star { opacity:1; } }',
+  '.cx-hist__editbtn { flex:none; border:0; border-radius:var(--cx-radius-sm); cursor:pointer;',
+  '  min-height:24px; padding:0 10px; background:transparent; color:var(--cx-text-sub);',
+  '  font:inherit; font-size:12px; font-weight:500; line-height:18px; }',
+  '.cx-hist__editbtn:hover { background:var(--cx-hover); color:var(--cx-text); }',
+  '.cx-hist__editbtn:focus-visible { outline:2px solid var(--cx-focus); outline-offset:2px; }',
   '.cx-hist__editwrap { display:flex; flex-direction:column; flex:1; min-height:0; }',
   '.cx-hist__editwrap .cx-hist__list { flex:1; min-height:0; }',
-  '.cx-hist__editrow { display:flex; align-items:center; gap:6px; padding:4px 8px; }',
-  '.cx-hist__editinput { flex:1; min-width:0; border:1px solid var(--dsw-alias-border-l2);',
-  '  border-radius:8px; padding:6px 10px; font:var(--dsw-font-s-14, 14px/22px sans-serif);',
-  '  color:inherit; background:transparent; }',
-  '.cx-hist__editinput:focus { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:-1px; }',
-  '.cx-hist__del { border:0; background:transparent; cursor:pointer; flex:none;',
-  '  font-size:16px; line-height:1; padding:2px 8px; border-radius:6px;',
-  '  color:color-mix(in srgb, var(--dsw-alias-label-primary) 45%, transparent); }',
-  '.cx-hist__del:hover { color:var(--dsw-alias-state-error-primary); }',
-  '.cx-hist__addrow { display:flex; gap:6px; padding:8px; flex:none;',
-  '  border-top:1px solid var(--dsw-alias-border-l2); }',
-  '.cx-hist__empty { padding:24px 14px; text-align:center; font:var(--dsw-font-s-14, 14px/22px sans-serif);',
-  '  color:color-mix(in srgb, var(--dsw-alias-label-primary) 50%, transparent); }',
-  '.cx-hist__banner { padding:7px 14px; flex:none; text-align:center; font:var(--dsw-font-xxs-12, 12px/18px sans-serif);',
-  '  color:color-mix(in srgb, var(--dsw-alias-label-primary) 55%, transparent);',
-  '  background:var(--dsw-alias-bg-muted); }',
+  '.cx-hist__editrow { display:flex; align-items:center; gap:8px; padding:4px 8px; }',
+  '.cx-hist__editinput { flex:1; min-width:0; box-sizing:border-box; min-height:28px; padding:0 10px;',
+  '  border:1px solid var(--cx-border-strong); border-radius:var(--cx-radius-sm);',
+  '  background:var(--cx-bg-sub); color:var(--cx-text); font:inherit; font-size:12px; line-height:18px; }',
+  '.cx-hist__editinput:focus { outline:2px solid var(--cx-focus); outline-offset:-2px; }',
+  '.cx-hist__del { flex:none; border:0; border-radius:var(--cx-radius-sm); background:transparent; cursor:pointer;',
+  '  min-height:24px; padding:0 8px; color:var(--cx-text-sub); font-size:16px; line-height:18px; }',
+  '.cx-hist__del:hover { color:var(--cx-danger); background:var(--cx-hover-danger); }',
+  // 常用范围编辑态拖动手柄:hover 显示、触摸常显;touch-action:none 防拖动与滚动
+  // 手势打架(触摸设备无它则 pointermove 被滚动吃掉)
+  '.cx-hist__grip { flex:none; display:inline-flex; align-items:center; justify-content:center;',
+  '  appearance:none; border:0; padding:0; background:transparent;',
+  '  width:16px; height:24px; color:var(--cx-text-dim); cursor:grab; opacity:0;',
+  '  transition:opacity .12s, color .12s; touch-action:none; }',
+  '.cx-hist__editrow:hover .cx-hist__grip, .cx-hist__grip:focus-visible { opacity:1; }',
+  '.cx-hist__grip:hover { color:var(--cx-text); }',
+  '.cx-hist__grip:active { cursor:grabbing; }',
+  '.cx-hist__grip:focus-visible { outline:2px solid var(--cx-focus); outline-offset:2px; border-radius:var(--cx-radius-sm); }',
+  '@media (hover: none) { .cx-hist__grip { opacity:1; } }',
+  // 拖动视觉:源行淡化,插入位以 2px accent 线标在目标行上/下边
+  '.cx-hist__editrow--drag { opacity:.45; }',
+  '.cx-hist__editrow--drop-before { box-shadow:inset 0 2px 0 var(--cx-accent); }',
+  '.cx-hist__editrow--drop-after { box-shadow:inset 0 -2px 0 var(--cx-accent); }',
+  '.cx-hist__addrow { display:flex; gap:8px; flex:none; padding:8px 8px 4px; border-top:.5px solid var(--cx-border); }',
+  '.cx-hist__addbtn { flex:none; appearance:none; border:0; border-radius:var(--cx-radius-sm); cursor:pointer;',
+  '  min-height:28px; padding:0 12px; background:var(--cx-accent); color:var(--dsw-alias-bg-base);',
+  '  font:inherit; font-size:12px; font-weight:500; line-height:18px; }',
+  '.cx-hist__addbtn:hover { background:var(--cx-accent-deep); }',
+  '.cx-hist__addbtn:focus-visible { outline:2px solid var(--cx-focus); outline-offset:2px; }',
+  '.cx-hist__empty { padding:24px 16px; text-align:center; font-size:12px; line-height:18px; color:var(--cx-text-sub); }',
+  '.cx-hist__banner { flex:none; padding:8px 12px; text-align:center; font-size:12px; line-height:18px;',
+  '  color:var(--cx-text-sub); background:var(--cx-bg-muted); }',
   // 插话撤回 dock:DOM 注入形态(steering 气泡操作排克隆官方按钮类),本体零占位;
   // 按钮样式全部来自克隆的官方 action 类,无自有样式
   '.cx-steer-host { display:none; }',
   '.cx-fork-host { display:none; }',
-  // 标题栏复制 sessionId:与官方 icon 按钮同尺寸,默认隐藏(opacity 保占位,
+  // 标题栏复制 sessionId:尺寸对齐官方 header 图标按钮,默认隐藏(opacity 保占位,
   // 隐形盒自身仍可悬停/聚焦),悬停标题栏任一位置或按钮自身/键盘聚焦时显示;
   // 宿主 CSS module 类名带哈希前缀但名称后缀稳定,子串选择器跨构建匹配,
   // :has 不可用时自身悬停兜底
-  '.cx-sid { appearance:none; border:0; background:transparent; cursor:pointer; flex:none;',
-  '  display:inline-flex; align-items:center; justify-content:center; width:24px; height:24px; padding:0;',
-  '  border-radius:6px; color:var(--dsw-alias-label-tertiary);',
+  '.cx-sid { appearance:none; flex:none; display:inline-flex; align-items:center; justify-content:center;',
+  '  width:24px; height:24px; padding:0; border:0; border-radius:var(--cx-radius-sm); background:transparent;',
+  '  color:var(--cx-text-dim); cursor:pointer;',
   '  opacity:0; transition:opacity .15s, color .15s; }',
-  '.cx-sid:hover, .cx-sid:focus-visible { opacity:1; color:var(--dsw-alias-label-primary, inherit); }',
-  '.cx-sid:focus-visible { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:1px; }',
+  '.cx-sid:hover, .cx-sid:focus-visible { opacity:1; color:var(--cx-text); }',
+  '.cx-sid:focus-visible { outline:2px solid var(--cx-focus); outline-offset:2px; }',
   '[class*="_header"]:has(.cx-sid):hover .cx-sid, [class*="_header"]:has(.cx-sid):focus-within .cx-sid { opacity:1; }',
   '@media (prefers-reduced-motion: reduce) { .cx-sid { transition:none; } }',
-  // 克隆仓库弹窗:官方浏览目录弹窗之上的自绘覆盖层,视觉基线取 cx-hist 浮层
-  // (不透明实底 + 宿主同款卡片投影,dsw alias 变量在宿主为空不可依赖)
+  // 克隆仓库弹窗:官方浏览目录弹窗之上的自绘覆盖层(L1 表单形态)
   '.cx-clone-overlay { position:fixed; inset:0; z-index:10000; display:flex; align-items:center; justify-content:center;',
-  '  background:color-mix(in srgb, var(--dsw-alias-label-primary) 35%, transparent); }',
-  '.cx-clone { width:min(460px, calc(100vw - 32px)); display:flex; flex-direction:column; gap:10px; padding:18px;',
-  '  border-radius:14px; color-scheme:light dark; color:var(--dsw-alias-label-primary);',
-  '  background:var(--dsw-alias-bg-layer-1);',
-  '  box-shadow:0 0 0 0.5px color-mix(in srgb, var(--dsw-alias-label-primary) 16%, transparent), var(--dsw-shadow-lv3); }',
-  '.cx-clone__title { margin:0; font-size:15px; font-weight:600; }',
-  '.cx-clone__field { display:flex; flex-direction:column; gap:4px;',
-  '  font:var(--dsw-font-xxs-12, 12px/18px sans-serif); color:color-mix(in srgb, var(--dsw-alias-label-primary) 55%, transparent); }',
-  '.cx-clone__input { border:1px solid var(--dsw-alias-border-l2); border-radius:8px;',
-  '  padding:6px 10px; font:var(--dsw-font-s-14, 14px/22px sans-serif); color:inherit; background:transparent; }',
-  '.cx-clone__input:focus { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:-1px; }',
+  '  background:var(--cx-mask); }',
+  '.cx-clone { box-sizing:border-box; width:min(460px, calc(100vw - 32px)); display:flex; flex-direction:column;',
+  '  gap:12px; padding:20px; border:.5px solid var(--cx-card-border); border-radius:var(--cx-radius-lg);',
+  '  background:var(--cx-bg); color:var(--cx-text); box-shadow:var(--dsw-shadow-lv3);',
+  '  font-size:14px; line-height:22px; }',
+  '.cx-clone__title { margin:0; font-size:16px; font-weight:500; line-height:24px; }',
+  '.cx-clone__field { display:flex; flex-direction:column; gap:4px; color:var(--cx-text-sub);',
+  '  font-size:13px; line-height:20px; }',
+  '.cx-clone__input { box-sizing:border-box; min-height:36px; padding:0 10px; border:1px solid var(--cx-border-strong);',
+  '  border-radius:var(--cx-radius-sm); background:var(--cx-bg-sub); color:var(--cx-text);',
+  '  font:inherit; font-size:14px; line-height:22px; }',
+  '.cx-clone__input:focus { outline:2px solid var(--cx-focus); outline-offset:-2px; }',
   '.cx-clone__input:disabled { opacity:.5; }',
-  '.cx-clone__switch { margin-top:0; }',
-  '.cx-clone__status { min-height:18px; font:var(--dsw-font-xxs-12, 12px/18px sans-serif);',
-  '  color:color-mix(in srgb, var(--dsw-alias-label-primary) 55%, transparent); white-space:pre-wrap; word-break:break-all; }',
-  '.cx-clone__status--error { color:var(--dsw-alias-state-error-primary); }',
-  '.cx-clone__actions { display:flex; justify-content:flex-end; gap:8px; }',
-  '.cx-clone__btn { appearance:none; border:0; cursor:pointer; padding:6px 14px; border-radius:8px;',
-  '  font:var(--dsw-font-s-14, 14px/22px sans-serif); font-weight:600;',
-  '  color:var(--dsw-alias-bg-base); background:var(--dsw-alias-brand-primary); }',
-  '.cx-clone__btn:disabled { opacity:.5; cursor:default; }',
-  '.cx-clone__btn--ghost { color:inherit; background:var(--dsw-alias-bg-muted); }',
-  '.cx-clone__btn--ghost:hover { background:var(--dsw-alias-interactive-bg-hover); }',
+  '.cx-clone__switch { color:var(--cx-text-sub); font-size:13px; line-height:20px; }',
+  '.cx-clone__status { min-height:18px; color:var(--cx-text-sub); font-size:12px; line-height:18px;',
+  '  white-space:pre-wrap; word-break:break-all; }',
+  '.cx-clone__status--error { color:var(--cx-danger); }',
+  '.cx-clone__actions { display:flex; justify-content:flex-end; gap:8px; margin-top:4px; }',
+  '.cx-clone__btn { appearance:none; box-sizing:border-box; min-height:36px; padding:0 14px; border:1px solid transparent;',
+  '  border-radius:var(--cx-radius-sm); background:var(--cx-accent); color:var(--dsw-alias-bg-base); cursor:pointer;',
+  '  font:inherit; font-size:14px; font-weight:500; line-height:22px; }',
+  '.cx-clone__btn:hover:not(:disabled) { background:var(--cx-accent-deep); }',
+  '.cx-clone__btn:disabled { opacity:.5; cursor:not-allowed; }',
+  '.cx-clone__btn--ghost { border-color:var(--cx-border-strong); background:transparent; color:var(--cx-text); }',
+  '.cx-clone__btn--ghost:hover:not(:disabled) { background:var(--cx-hover); }',
+  '.cx-clone__btn:focus-visible { outline:2px solid var(--cx-focus); outline-offset:2px; }',
 ].join('\n')
 
 const INPUTS_URL = '/api/context/inputs'
 const PROMPTS_TOGGLE_URL = '/api/context/prompts/toggle'
+const PROMPTS_RENAME_URL = '/api/context/prompts/rename'
+const PROMPTS_REORDER_URL = '/api/context/prompts/reorder'
 const HISTORY_ENABLED_URL = '/api/context/history-enabled'
 const HISTORY_BUTTON_ENABLED_URL = '/api/context/history-button-enabled'
 const STEER_ENABLED_URL = '/api/context/steer-recall-enabled'
@@ -243,6 +277,9 @@ const HISTORY_SCOPE_LABELS = ['常用', '当前会话', '本工作区', '全部�
 const HISTORY_SCOPE_DEFAULT = HISTORY_SCOPES.indexOf('session')
 // 浮层打开期间固定轮询节奏:host 侧对齐是异步的,数据可能晚于首次响应到达
 const HISTORY_REPULL_MS = 3 * 1000
+// 拖动排序:指针距列表上下边缘该距离内持续滚动,每帧步进(4px 网格)
+const DRAG_EDGE_PX = 24
+const DRAG_SCROLL_STEP = 12
 
 // 历史浮层搜索镜像(与 core.mjs filterHistoryInputs 同步维护):
 // 查询词去首尾空白后按不区分大小写子串匹配,空查询原样返回全量
@@ -251,6 +288,37 @@ function filterHistoryInputs(entries, query) {
   const needle = String(query ?? '').trim().toLowerCase()
   if (needle === '') return list
   return list.filter((entry) => String((entry && entry.text) ?? '').toLowerCase().includes(needle))
+}
+
+// ── 常用提示词拖动排序:落位计算与数组移动(纯函数,单文件自包含)──
+
+// 指针纵向位置 → 插入位(0..行数):以每行中点为分界,指针落在该行下半区即插到其后
+function resolveDropIndex(rows, clientY) {
+  const list = Array.isArray(rows) ? rows : []
+  for (let index = 0; index < list.length; index += 1) {
+    const middle = (list[index].top + list[index].bottom) / 2
+    if (clientY < middle) return index
+  }
+  return list.length
+}
+
+// 按插入位移动:把 from 项移到原列表的插入位 insert,向下移动时补偿自身占位
+// (拖到自身原位及其后一位均视为不动,避免"放下即错位一格")
+function moveByInsert(entryList, from, insert) {
+  const list = Array.isArray(entryList) ? entryList : []
+  if (from < 0 || from >= list.length) return list
+  const target = insert > from ? insert - 1 : insert
+  if (target === from) return list
+  const next = list.slice()
+  const [item] = next.splice(from, 1)
+  next.splice(target, 0, item)
+  return next
+}
+
+// 键盘排序的插入位:上移插到前一项之前,下移插到后一项之后;越界(已在端点)返回 -1
+function keyboardInsert(key, index, length) {
+  const insert = key === 'ArrowUp' ? index - 1 : index + 2
+  return insert < 0 || insert > length ? -1 : insert
 }
 
 // fork 错误文案映射镜像(与 core.mjs forkFailureText 同步维护)
@@ -329,6 +397,17 @@ function ensureHistoryButton(doc, row, onToggle) {
   return button
 }
 
+// 新增行提交:按钮点击与 Enter 共用的唯一落点。输入为非受控(每次按键不重渲染),
+// 提交时读 DOM 值,去首尾空白后非空才提交;提交后清空输入框,留在编辑态可继续添加
+function takeAddInput(input, submit) {
+  if (!input) return false
+  const text = String(input.value == null ? '' : input.value).trim()
+  if (text === '') return false
+  submit(text)
+  input.value = ''
+  return true
+}
+
 function HistoryDock({ session, inputActions }) {
   const [open, setOpen] = useState(false)
   const [items, setItems] = useState(null)
@@ -342,11 +421,17 @@ function HistoryDock({ session, inputActions }) {
   // editing 仅常用范围可进入(行内改/删 + 底部新增)
   const [collected, setCollected] = useState(() => new Set())
   const [editing, setEditing] = useState(false)
+  // 拖动排序状态:from 为源行索引,drop 为插入位(0..items.length)。权威值在
+  // dragRef(指针事件与 rAF 中读写),state 仅驱动渲染
+  const [drag, setDrag] = useState({ from: -1, drop: -1 })
+  const dragRef = React.useRef(null)
   // 搜索:query 驱动渲染,原始条目存 rawRef,items 恒为过滤后列表;
   // 组合输入(IME)期间不过滤,上屏后才应用
   const [query, setQuery] = useState('')
   const composingRef = useRef(false)
   const rootRef = React.useRef(null)
+  // 新增行输入节点:非受控,按钮提交时经 ref 读值
+  const addInputRef = React.useRef(null)
   // 键盘层权威状态:监听器挂载一次(空依赖),读写全走 ref,规避 effect 重挂
   // 时序造成的闭包陈旧;state 仅驱动渲染,变更处双写
   const viewRef = React.useRef({ open: false, items: null, cursor: -1, scopeIndex: 0, aligning: false })
@@ -429,11 +514,231 @@ function HistoryDock({ session, inputActions }) {
       })
   }
 
-  // 编辑态改文本 = 移除旧文本 + 收藏新文本(两次 toggle 原子性由"同文本去重"保证:
-  // 中断最坏留下旧文本,重改一次即自愈)
+  // 编辑态改文本 = 原位重命名:host 保持该条位置与收藏时间(清空即删除,
+  // 目标文本已存在则合并),不再走两次 toggle 把条目搬到首位
   function renamePrompt(from, to) {
-    return togglePrompt(from)
-      .then(() => (to === '' ? Promise.resolve() : togglePrompt(to)))
+    const target = to.trim()
+    if (target === from) return Promise.resolve()
+    const scopeIdx = HISTORY_SCOPES.indexOf('prompts')
+    return api(PROMPTS_RENAME_URL, { method: 'POST', body: JSON.stringify({ from, to: target }) })
+      .then((payload) => {
+        const result = payload && payload.result
+        if (result === 'missing') toast('该收藏已不存在,已刷新列表', { kind: 'error' })
+        else if (result === 'merged') toast('目标文本已存在,已合并')
+        else if (result === 'removed') toast('已取消收藏')
+        if (viewRef.current.open && viewRef.current.scopeIndex === scopeIdx) requestScope(scopeIdx)
+        return refreshCollected()
+      })
+      .catch((error) => toast(error && error.message ? error.message : String(error), { kind: 'error' }))
+  }
+
+  // 新增行提交:按钮点击与 Enter 共用落点(触摸设备无 Enter,按钮是主路径)
+  function submitAddPrompt() {
+    takeAddInput(addInputRef.current, togglePrompt)
+  }
+
+  // ── 常用提示词拖动排序(仅编辑态,指针事件实现,桌面与触摸同路径)──
+
+  // 手柄图标:6 点竖排(React 元素,不走 DOM 注入——DOM 节点不能作为 React 子节点)
+  function gripSvg() {
+    return h('svg', { width: 10, height: 14, viewBox: '0 0 10 14', fill: 'currentColor', 'aria-hidden': 'true' },
+      [[3, 2], [7, 2], [3, 7], [7, 7], [3, 12], [7, 12]].map(([cx, cy]) =>
+        h('circle', { key: cx + ':' + cy, cx, cy, r: 1.2 })))
+  }
+
+  // 手柄:原生按钮语义 + 可键盘聚焦(↑/↓ 排序);点击不冒泡触发行内其它动作
+  function gripHandle(text, index) {
+    return h('button', {
+      key: 'grip',
+      type: 'button',
+      className: 'cx-hist__grip',
+      tabIndex: 0,
+      title: '拖动排序,或聚焦后按 ↑/↓ 移动',
+      'aria-label': '拖动排序',
+      onPointerDown: (event) => startDrag(event, index),
+      onClick: (event) => event.stopPropagation(),
+      onKeyDown: (event) => moveByKey(event, text),
+    }, gripSvg())
+  }
+
+  // 行矩形取样:插入位以行中点分界;滚动后必须重取
+  function readRowRects(listEl) {
+    return Array.prototype.map.call(listEl.querySelectorAll('.cx-hist__editrow'), (row) => {
+      const rect = row.getBoundingClientRect()
+      return { top: rect.top, bottom: rect.bottom }
+    })
+  }
+
+  function dragIdle() {
+    return { from: -1, drop: -1 }
+  }
+
+  function syncDrop(pointer) {
+    const drop = resolveDropIndex(pointer.rows, pointer.clientY)
+    if (drop === pointer.drop) return
+    pointer.drop = drop
+    setDrag({ from: pointer.from, drop })
+  }
+
+  function startDrag(event, index) {
+    if (dragRef.current !== null) return
+    // 仅主键/单指起拖(触摸事件无 button 定义)
+    if (event.button !== undefined && event.button !== 0) return
+    const listEl = event.currentTarget.closest('.cx-hist__list')
+    if (!listEl) return
+    event.preventDefault()
+    event.stopPropagation()
+    const pointer = {
+      from: index,
+      drop: index,
+      pointerId: event.pointerId,
+      clientY: event.clientY,
+      listEl,
+      rows: readRowRects(listEl),
+      frame: undefined,
+      listeners: null,
+    }
+    // 监听实例随指针一起存储:关浮层/卸载时按同一引用摘除,防闭包身份过期后摘不掉
+    pointer.listeners = { move: moveDrag, up: endDrag, cancel: cancelDrag, hidden: onVisibilityChange }
+    dragRef.current = pointer
+    setDrag({ from: index, drop: index })
+    // 拖动期间顺序由指针决定:停掉轮询链,防迟到响应覆盖用户顺序
+    stopRepull()
+    document.addEventListener('pointermove', pointer.listeners.move, true)
+    document.addEventListener('pointerup', pointer.listeners.up, true)
+    document.addEventListener('pointercancel', pointer.listeners.cancel, true)
+    document.addEventListener('visibilitychange', pointer.listeners.hidden)
+    // 在浏览器窗口/标签栏松开时文档收不到 pointerup,失焦即视为放弃拖动
+    window.addEventListener('blur', pointer.listeners.cancel)
+    pointer.frame = requestAnimationFrame(autoScrollDrag)
+  }
+
+  function moveDrag(event) {
+    const pointer = dragRef.current
+    if (pointer === null || event.pointerId !== pointer.pointerId) return
+    // 按钮态已松开:指针在文档外松开,取消拖动而非继续跟随
+    if (event.buttons === 0) {
+      cancelDrag()
+      return
+    }
+    event.preventDefault()
+    pointer.clientY = event.clientY
+    syncDrop(pointer)
+  }
+
+  // 拖到列表上下边缘持续滚动(每帧 12px),滚动后重取行矩形重算插入位
+  function autoScrollDrag() {
+    const pointer = dragRef.current
+    if (pointer === null) return
+    const rect = pointer.listEl.getBoundingClientRect()
+    const delta = pointer.clientY < rect.top + DRAG_EDGE_PX
+      ? -DRAG_SCROLL_STEP
+      : (pointer.clientY > rect.bottom - DRAG_EDGE_PX ? DRAG_SCROLL_STEP : 0)
+    if (delta !== 0) {
+      const before = pointer.listEl.scrollTop
+      pointer.listEl.scrollTop = before + delta
+      if (pointer.listEl.scrollTop !== before) {
+        pointer.rows = readRowRects(pointer.listEl)
+        syncDrop(pointer)
+      }
+    }
+    pointer.frame = requestAnimationFrame(autoScrollDrag)
+  }
+
+  // 结束拖动:按存储引用摘监听、停帧并从引用清空当前指针
+  function detachDrag() {
+    const pointer = dragRef.current
+    dragRef.current = null
+    if (pointer !== null) {
+      const listeners = pointer.listeners
+      document.removeEventListener('pointermove', listeners.move, true)
+      document.removeEventListener('pointerup', listeners.up, true)
+      document.removeEventListener('pointercancel', listeners.cancel, true)
+      document.removeEventListener('visibilitychange', listeners.hidden)
+      window.removeEventListener('blur', listeners.cancel)
+      if (pointer.frame !== undefined) cancelAnimationFrame(pointer.frame)
+    }
+    setDrag(dragIdle())
+    return pointer
+  }
+
+  // 恢复常用范围的轮询链:起拖时停链,提交/取消后必须重新拉起(浮层仍开在常用范围时)
+  function restartPromptPoll() {
+    if (!viewRef.current.open || viewRef.current.scopeIndex !== promptsIdx) return
+    requestScope(promptsIdx)
+  }
+
+  // 顺序提交串行化:连续按键/拖动不得先发后到,服务端最终序必须等于最后一次操作
+  const commitChainRef = useRef(Promise.resolve())
+
+  // 顺序落盘:先本地生效(松手即时反馈),再提交服务端;成功与失败都重拉——
+  // 失败时以服务端顺序回滚(不本地假成功),成功时顺带恢复起拖时停掉的轮询链
+  function commitOrder(next) {
+    // 作废在途响应:键盘连按与拖动都要防旧快照先落地覆盖新顺序
+    stopRepull()
+    rawItemsRef.current = next
+    syncView({ items: next, cursor: -1 })
+    setItems(next)
+    setCursor(-1)
+    const texts = next.map((item) => item.text)
+    commitChainRef.current = commitChainRef.current
+      .then(() => api(PROMPTS_REORDER_URL, { method: 'POST', body: JSON.stringify({ texts }) }))
+      .then((payload) => {
+        const order = payload && Array.isArray(payload.texts) ? payload.texts : []
+        // 服务端实际顺序可能与提交不同(未知文本剔除/并发新增保尾):探测到差异即校正
+        if (JSON.stringify(order) !== JSON.stringify(texts)) toast('收藏顺序已按服务端校正')
+      })
+      .catch((error) => toast(error && error.message ? error.message : String(error), { kind: 'error' }))
+      .then(restartPromptPoll)
+  }
+
+  function endDrag(event) {
+    const pointer = dragRef.current
+    if (pointer === null || event.pointerId !== pointer.pointerId) return
+    const { from, drop } = pointer
+    // 在途响应按新代际作废,防旧快照在松手后覆盖乐观顺序
+    stopRepull()
+    detachDrag()
+    const list = rawItemsRef.current
+    if (!Array.isArray(list) || from < 0 || from >= list.length) {
+      restartPromptPoll()
+      return
+    }
+    const next = moveByInsert(list, from, drop)
+    if (next === list) restartPromptPoll()
+    else commitOrder(next)
+  }
+
+  function cancelDrag(event) {
+    const pointer = dragRef.current
+    if (pointer === null) return
+    // 多指场景:其它指针的 pointercancel 不得取消当前拖动
+    if (event && event.type === 'pointercancel' && event.pointerId !== pointer.pointerId) return
+    stopRepull()
+    detachDrag()
+    restartPromptPoll()
+  }
+
+  // 页面切到后台:指针事件链可能断开,视为放弃拖动
+  function onVisibilityChange() {
+    if (document.hidden) cancelDrag()
+  }
+
+  // 键盘排序:手柄聚焦时 ↑/↓ 移动一位并落盘;边界停住(全局键盘层对此放行)
+  // 位置按文本实时定位:连续按键在重渲染前复用旧行索引也不会移错条目
+  function moveByKey(event, text) {
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+    const list = rawItemsRef.current
+    if (!Array.isArray(list) || list.length < 2) return
+    const from = list.findIndex((item) => item.text === text)
+    if (from < 0) return
+    event.preventDefault()
+    event.stopPropagation()
+    const insert = keyboardInsert(event.key, from, list.length)
+    if (insert < 0) return
+    const next = moveByInsert(list, from, insert)
+    if (next === list) return
+    commitOrder(next)
   }
 
   // 应用一次响应:仅当范围未变时生效,防止快速切范围后迟到响应覆盖新范围。
@@ -441,6 +746,8 @@ function HistoryDock({ session, inputActions }) {
   // 落地后经当前搜索词过滤再呈现
   function applyResult(scopeIdx, result) {
     if (viewRef.current.scopeIndex !== scopeIdx) return
+    // 拖动期间顺序由指针决定:迟到的轮询响应不得覆盖用户拖动结果
+    if (dragRef.current !== null) return
     const prev = rawItemsRef.current
     if (prev !== null && JSON.stringify(prev) === JSON.stringify(result.inputs)) {
       syncView({ aligning: !result.aligned })
@@ -502,6 +809,11 @@ function HistoryDock({ session, inputActions }) {
       .catch((error) => {
         if (generation !== scopeGenerationRef.current) return
         if (viewRef.current.scopeIndex !== scopeIdx) return
+        // 拖动期间列表由指针决定,不得被失败响应清空
+        if (dragRef.current !== null) {
+          scheduleNext()
+          return
+        }
         rawItemsRef.current = []
         syncView({ items: [] })
         setLoadError(true)
@@ -562,13 +874,18 @@ function HistoryDock({ session, inputActions }) {
   }
 
   // 轮询链生命周期:关闭浮层即停链(open=false 时没有活动 cleanup,由 effect 体
-  // 主动停);卸载无条件停链。卸载后 viewRef.open 仍为 true,不清理则定时链复活
+  // 主动停);卸载无条件停链。卸载后 viewRef.open 仍为 true,不清理则定时链复活。
+  // 拖动中的指针监听与滚动帧同生命周期:关浮层/卸载即摘除,防悬空回调
   useEffect(() => {
     if (!open) {
+      detachDrag()
       stopRepull()
       return undefined
     }
-    return stopRepull
+    return () => {
+      detachDrag()
+      stopRepull()
+    }
   }, [open])
   useEffect(() => stopRepull, [])
 
@@ -596,6 +913,9 @@ function HistoryDock({ session, inputActions }) {
         && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) {
         if (event.key !== 'Escape') return
       }
+      // 拖动手柄聚焦时 ↑/↓ 是排序指令,不由列表选择消费(边界由手柄自身拦停)
+      if (root && active && active.classList && active.classList.contains('cx-hist__grip')
+        && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) return
       if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
         event.preventDefault()
         event.stopPropagation()
@@ -615,6 +935,9 @@ function HistoryDock({ session, inputActions }) {
         return
       }
       if (event.key === 'Enter') {
+        // 焦点在浮层内按钮上时放行原生激活:按钮自己的 Enter 语义优先于列表回填
+        // (编辑态「添加」按钮在列;残留 cursor 不得把添加偷换成回填)
+        if (root && active && active.tagName === 'BUTTON' && root.contains(active)) return
         // 有选中条目即回填,搜索框聚焦同样成立(IME 组合已在函数头放行,
         // 搜索词过滤后 ↑/↓ 选中 → Enter 是搜索态的主要回填路径)
         if (view.items !== null && view.cursor >= 0 && view.cursor < view.items.length) {
@@ -712,6 +1035,8 @@ function HistoryDock({ session, inputActions }) {
   if (session === undefined || inputActions === undefined || historyEnabled === false) return null
   const promptsIdx = HISTORY_SCOPES.indexOf('prompts')
   const inPrompts = scopeIndex === promptsIdx
+  // 拖动排序仅编辑态、且无搜索词时可用(过滤子集的相对顺序无全局意义)
+  const canDrag = query.trim() === ''
   // 行悬停星标:非常用范围显示,已收藏实星(点击取消),未收藏空心(点击收藏);
   // stopPropagation 防止触发行回填
   const starButton = (item) => h('button', {
@@ -732,17 +1057,25 @@ function HistoryDock({ session, inputActions }) {
     !inPrompts ? starButton(item) : null,
   )
   // 编辑态行:key 用文本而非索引——常用范围内文本唯一,过滤后索引漂移不再重建
-  // 行节点(重建会让编辑中的 input 卸载,未保存的修改静默丢失)
+  // 行节点(重建会让编辑中的 input 卸载,未保存的修改静默丢失)。
+  // 拖动手柄在最左,拖动中源行淡化、插入位以 accent 线标在目标行上/下边
+  // 有效插入位:落回原位或原位下一位都不改变顺序(见 moveByInsert),此时不画插入线
+  const dropIndex = drag.from >= 0 && drag.drop !== drag.from && drag.drop !== drag.from + 1 ? drag.drop : -1
   const editRow = (item, index) => h('div', {
     key: item.text,
-    className: 'cx-hist__editrow',
+    className: 'cx-hist__editrow'
+      + (drag.from === index ? ' cx-hist__editrow--drag' : '')
+      + (dropIndex === index ? ' cx-hist__editrow--drop-before' : '')
+      + (dropIndex === items.length && index === items.length - 1 ? ' cx-hist__editrow--drop-after' : ''),
   },
+    canDrag ? gripHandle(item.text, index) : null,
     h('input', {
       className: 'cx-hist__editinput',
       defaultValue: item.text,
       title: item.text,
       onKeyDown: (event) => {
-        if (event.key === 'Enter') {
+        // 组合输入确认候选不得触发改名提交
+        if (event.key === 'Enter' && !event.isComposing) {
           event.preventDefault()
           renamePrompt(item.text, event.target.value.trim())
         }
@@ -798,7 +1131,7 @@ function HistoryDock({ session, inputActions }) {
           },
         }),
         hitCount !== null ? h('span', { className: 'cx-hist__count' }, String(hitCount)) : null,
-        h('span', null, '↑/↓ 选择 · ←/→ 切换范围 · Enter 填入 · Esc 关闭')),
+        h('span', { className: 'cx-hist__keys' }, '↑/↓ 选择 · ←/→ 切换范围 · Enter 填入 · Esc 关闭')),
       aligning && h('div', { className: 'cx-hist__banner' }, '首次对齐历史中,可能需要稍等'),
       items === null
         ? h('div', { className: 'cx-hist__empty' }, '正在读取历史输入…')
@@ -810,19 +1143,23 @@ function HistoryDock({ session, inputActions }) {
               h('div', { className: 'cx-hist__addrow' },
                 h('input', {
                   className: 'cx-hist__editinput',
-                  placeholder: '输入常用提示词,Enter 添加',
-                  ref: (el) => { if (el) el.dataset.addinput = '1' },
+                  placeholder: '输入常用提示词',
+                  ref: addInputRef,
                   onKeyDown: (event) => {
-                    if (event.key === 'Enter') {
+                    if (event.key === 'Enter' && !event.isComposing) {
                       event.preventDefault()
-                      const text = event.target.value.trim()
-                      if (text !== '') {
-                        togglePrompt(text)
-                        event.target.value = ''
-                      }
+                      submitAddPrompt()
                     }
                   },
                 }),
+                h('button', {
+                  className: 'cx-hist__addbtn',
+                  type: 'button',
+                  title: '添加到常用',
+                  // 按下保持输入框焦点:移动端虚拟键盘不收起,添加后可连续输入
+                  onMouseDown: (event) => event.preventDefault(),
+                  onClick: submitAddPrompt,
+                }, '添加'),
               ),
             )
           : items.length === 0
@@ -1202,6 +1539,9 @@ function ForkDockWithBootstrap({ session, inputActions, useInput, forkSession, c
   // 依赖键 = 会话 id:session 快照身份随每次投影更新漂移,不能作 effect 依赖;
   // loadTurnEnds 闭包身份同样不稳定,经 ref 取用
   const sessionId = session && session.sessionId
+  // 子会话没有可用的 fork 锚点:宿主 follow/page 对 kind:'session' 的子会话地址
+  // 抛 session/agent-busy,注入按钮只会落 console.warn 且永不可点
+  const isSubagentSession = Boolean(session && session.subagent)
   const loadRef = useRef(loadTurnEnds)
   loadRef.current = loadTurnEnds
   // 自动重发通道:宿主 prompt 调用经 apply 闭包注入(与 forkSession 同构),ref 取用
@@ -1233,7 +1573,7 @@ function ForkDockWithBootstrap({ session, inputActions, useInput, forkSession, c
       .catch(() => { refreshPendingRef.current = false })
   }
   useEffect(() => {
-    if (sessionId === undefined) return undefined
+    if (sessionId === undefined || isSubagentSession) return undefined
     let disposed = false
     // 拉取前置空:会话切换后旧会话的映射不得继续服务新会话——轮号跨会话重叠,
     // 旧 seq 会让分叉锚点错位;置空期间 ForkDock 以 null 短路,不注入按钮
@@ -1251,7 +1591,7 @@ function ForkDockWithBootstrap({ session, inputActions, useInput, forkSession, c
         console.warn('[context-manager] fork 轮号映射拉取失败', error)
       })
     return () => { disposed = true }
-  }, [sessionId])
+  }, [sessionId, isSubagentSession])
   // 重试草稿消费:open 切到子会话后本 dock 随之挂载,inputActions 绑定子会话,
   // 暂存文本此刻回填;消费即清除。open 失败时暂存保留,用户手动打开子会话仍兑现。
   // 宿主 open 可能先于点击处登记草稿完成子会话 dock 挂载(实测 ~400ms 切换),
@@ -1298,6 +1638,7 @@ function ForkDockWithBootstrap({ session, inputActions, useInput, forkSession, c
     }
     return undefined
   }, [sessionId, inputActions, draftPollTick])
+  if (isSubagentSession) return null
   return h(ForkDock, { session, forkSession, cancelSession, turnEnds, refreshRef })
 }
 
@@ -2084,8 +2425,8 @@ const ForkAutoResendSwitchRow = switchRow(FORK_AUTO_RESEND_URL, '分叉后自动
 const CopySidSwitchRow = switchRow(COPY_SID_ENABLED_URL, '标题栏复制 sessionId', COPY_SID_SWITCH_TITLE, '标题栏复制 sessionId')
 const CloneSwitchRow = switchRow(CLONE_ENABLED_URL, '克隆仓库按钮', CLONE_SWITCH_TITLE, '克隆仓库按钮')
 
-// 「插件」设置页卡片:与官方 PluginCard 同款折叠卡(header 展开/收起 + body),
-// 视觉值取自宿主实测(见 CSS 注释),组件因缺宿主 i18n/表单状态而自绘
+// 「插件」设置页卡片:与同槽位插件卡一致的折叠卡(header 展开/收起 + body);
+// 采用 L1 卡形制(layer-1 底 + 0.5px 描边 + radius-md),不镜像官方卡的固定像素值
 function ContextPanel() {
   const [open, setOpen] = useState(false)
   return h('div', { className: 'cx-card' + (open ? ' cx-card--open' : '') },

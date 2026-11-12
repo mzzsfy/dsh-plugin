@@ -6,10 +6,13 @@
 // backfill 双路径实现;V3 专有事件由折叠层默认忽略,测试钉住。
 //
 // 统一契约(ArchiveReader):
-//   list(signal)             → Promise<readonly { id }[]>            枚举全部已存会话
-//   readLog(id, signal)      → Promise<{ inheritedEventCount, events }> 整读单会话全部事件
+//   list(signal)             → Promise<readonly { id, derived? }[]>  枚举全部已存会话,
+//                              derived 为 header 已知时的派生标记(直读补齐项暂缺)
+//   readLog(id, signal)      → Promise<{ inheritedEventCount, events, derived }>
+//                              整读单会话全部事件并给出派生判定
 
 import { listSessionIdsDirect, readSessionLogDirect } from './direct-log-reader.js'
+import { isDerivedSessionHeader } from './session-kind.js'
 
 const READER_HINT = 'sessionPersistence API 未识别(宿主再次升级?),请反馈补充适配器'
 const HANDLE_READ_PAGE = 500
@@ -21,6 +24,16 @@ const HOST_REFUSAL_PATTERN = /unsupported descriptor version|stored log is corru
 
 function isHostRefusal(error) {
   return HOST_REFUSAL_PATTERN.test(error instanceof Error ? error.message : String(error))
+}
+
+// 合并宿主枚举与磁盘直扫的会话集:宿主 header 已知时携带派生标记,
+// 直读补齐项(旧宿主不枚举的新代文件名)标记未知,由 readLog 阶段判定
+function mergeSessionIds(known) {
+  const merged = new Map(known)
+  for (const id of listSessionIdsDirect()) {
+    if (!merged.has(id)) merged.set(id, undefined)
+  }
+  return [...merged].map(([id, derived]) => (derived === undefined ? { id } : { id, derived }))
 }
 
 // 现役宿主:list 返回 snapshot(id 在 .header),整读走 read 句柄分页循环。
@@ -37,13 +50,12 @@ class HandleArchiveReader {
     const snapshots = await this.persistence.list(signal === undefined ? undefined : { signal })
     // 畸形行(无有效 header.id)丢弃不炸,单个坏行不放大为整轮失败;
     // 宿主 list 不枚举的磁盘档案(旧宿主不见新代文件名)由直读侧补齐
-    const ids = new Set(
+    const known = new Map(
       snapshots
         .filter((snapshot) => typeof snapshot?.header?.id === 'string' && snapshot.header.id !== '')
-        .map((snapshot) => snapshot.header.id),
+        .map((snapshot) => [snapshot.header.id, isDerivedSessionHeader(snapshot.header)]),
     )
-    for (const id of listSessionIdsDirect()) ids.add(id)
-    return [...ids].map((id) => ({ id }))
+    return mergeSessionIds(known)
   }
 
   async readLog(id, signal) {
@@ -52,25 +64,27 @@ class HandleArchiveReader {
     let handle
     try {
       handle = await this.persistence.open(id, 'read', options)
+      const derived = isDerivedSessionHeader(handle.header)
       const inherited = handle.inheritedEventCount
       const inheritedEventCount = typeof inherited === 'number' && Number.isSafeInteger(inherited) && inherited >= 0 ? inherited : 0
       const events = []
       let offset = 0
       for (;;) {
-        if (signal?.aborted) return { inheritedEventCount, events }
+        if (signal?.aborted) return { inheritedEventCount, events, derived }
         const slice = await handle.read(offset, HANDLE_READ_PAGE, options)
         const page = slice?.events ?? []
         if (page.length === 0) break
         for (const event of page) events.push(event)
         offset += page.length
       }
-      return { inheritedEventCount, events }
+      return { inheritedEventCount, events, derived }
     } catch (error) {
       // 宿主校验拒读而档案数据完好:降级文件直读恢复统计;直读失败
       // (档案缺失等)回抛原拒读错误,降级是尽力而为,不掩盖原状态
       if (isHostRefusal(error)) {
         try {
-          return { inheritedEventCount: 0, events: readSessionLogDirect(id) }
+          const log = readSessionLogDirect(id)
+          return { inheritedEventCount: 0, events: log.events, derived: isDerivedSessionHeader(log.header) }
         } catch {
           throw error
         }
@@ -90,26 +104,27 @@ class InspectArchiveReader {
 
   async list(signal) {
     const headers = await this.persistence.list(signal)
-    const ids = new Set(
+    const known = new Map(
       headers
         .filter((header) => typeof header?.id === 'string' && header.id !== '')
-        .map((header) => header.id),
+        .map((header) => [header.id, isDerivedSessionHeader(header)]),
     )
-    for (const id of listSessionIdsDirect()) ids.add(id)
-    return [...ids].map((id) => ({ id }))
+    return mergeSessionIds(known)
   }
 
   async readLog(id, signal) {
     try {
       const inspection = await this.persistence.inspect(id, signal)
+      const derived = isDerivedSessionHeader(inspection.header ?? inspection.meta)
       const inherited = inspection.inheritedEventCount
       const inheritedEventCount = typeof inherited === 'number' && Number.isSafeInteger(inherited) && inherited >= 0 ? inherited : 0
-      return { inheritedEventCount, events: inspection.events ?? [] }
+      return { inheritedEventCount, events: inspection.events ?? [], derived }
     } catch (error) {
       // 宿主校验拒读而档案数据完好:降级文件直读恢复统计;直读失败回抛原错
       if (isHostRefusal(error)) {
         try {
-          return { inheritedEventCount: 0, events: readSessionLogDirect(id) }
+          const log = readSessionLogDirect(id)
+          return { inheritedEventCount: 0, events: log.events, derived: isDerivedSessionHeader(log.header) }
         } catch {
           throw error
         }

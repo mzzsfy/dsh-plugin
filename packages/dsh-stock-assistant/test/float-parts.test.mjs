@@ -19,7 +19,7 @@ async function load() {
   const localStorage = { getItem: key => store.get(key) ?? null, setItem: (key, value) => store.set(key, String(value)) }
   const window = { __ModuleLoader__: { load: entry => { plugin = entry.factory(name => name === 'react' ? React : {}) } } }
   vm.runInNewContext(source, { window, localStorage, console, fetch: globalThis.fetch, AbortController, URLSearchParams, setTimeout, clearTimeout, setInterval, clearInterval, crypto: globalThis.crypto })
-  return plugin.__testing
+  return { ...plugin.__testing, __store: store }
 }
 
 const items = {
@@ -55,6 +55,23 @@ test('一只都没勾时列表给引导, 刷新按钮不可用', async () => {
   assert.match(foot, /aria-label="自动刷新不可用"/)
   assert.match(foot, /disabled=""/, '没有目标时刷新按钮必须禁用')
   assert.match(foot, /停|刷新/, '禁用态仍要说明原因')
+})
+
+test('底部文案用悬浮盯盘自己的间隔', async () => {
+  const { FloatFoot } = await load()
+  const foot = renderToStaticMarkup(React.createElement(FloatFoot, { mode: 'list', securityId: order[0], picked: order, current: items[order[0]], stamp: Date.now(), stale: false, alertOn: false, error: '', liveOn: true, refresh: 3, onBell() {}, onLive() {}, onDetail() {} }))
+  assert.match(foot, /行情每 3 秒自动刷新/)
+})
+
+// 接线: 面板读的是 preferences.floatRefreshSeconds 而不是列表 refreshSeconds
+test('悬浮窗底部取独立偏好, 不借列表间隔', async () => {
+  const api = await load()
+  api.__store.set('ssb-floating', JSON.stringify({ open: true, live: true, mode: 'list', ids: order, securityId: null, x: null, y: null }))
+  const control = { revision: 1, routingRevision: 0, watchlist: { order, items }, preferences: { refreshSeconds: 60, colorMode: 'red-up', floatRefreshSeconds: 3 } }
+  const runtime = { getSnapshot: () => ({ data: { control, quotes: {} }, view: {}, busy: {} }), subscribe: () => () => {}, updateView() {}, openDetail() {} }
+  const html = renderToStaticMarkup(React.createElement(api.FloatingTicker, { runtime }))
+  assert.match(html, /行情每 3 秒自动刷新/, '底部取悬浮偏好')
+  assert.ok(!html.includes('行情每 60 秒'), '列表间隔不参与')
 })
 
 test('头部与底栏的事件接线传的是同一份回调', async () => {

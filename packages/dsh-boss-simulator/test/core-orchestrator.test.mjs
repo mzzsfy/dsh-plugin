@@ -169,6 +169,16 @@ test('Given idle但队列未清 When reconcileStoppedTask Then 保留stopping且
   assert.equal(settled.aggregate.runs.r1.state, 'interrupted')
 })
 
+test('Given 已settled的会话已被删除 When 停止核对 Then 视为已停而不卡死', async () => {
+  const { agg } = await seeded()
+  const initial = { ...agg, control: { ...agg.control, state: 'stopping' }, runs: { r1: { runId: 'r1', sessionId: 's1', state: 'settled' } } }
+  const store = memoryStore(initial)
+  const result = await reconcileStoppedTask(store, 't1', { inspectSession: async () => { throw new Error('会话不存在') } })
+  assert.equal(result.stopConfirmed, true)
+  assert.equal(result.aggregate.control.state, 'paused')
+  assert.deepEqual(result.reconcileErrors, [])
+})
+
 test('Given 停止落盘失败 When 中断 Then 不调用宿主cancel', async () => {
   const { agg } = await seeded()
   let cancelled = false

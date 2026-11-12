@@ -26,5 +26,5 @@ node scripts/publish.mjs <包名|all> [--bump patch|minor|major] [--skip-test] [
   - 本地 tag 缺失 → 拒绝；维护者必须比较 registry tarball 与可还原的历史提交后恢复 tag，不得自动绑定当前 HEAD
 - 本地版本低于线上:拒绝(防版本回退);高于线上:直接发布(--bump 仅适用于本地等于线上的场景)
 - 推送 main 与 tag 由维护者执行;发版后重跑 `node scripts/dev-link.mjs all`,让 profile 依赖行追上线上新版本
-- 公共依赖包(common-tools)只发库自己:十个消费方 `dependencies` 浮动在同一 minor(`^0.4.0`),库发 patch 时消费方无需重发;改帧集合/导出形状即破坏,须发行破坏版并与消费方范围抬升同批发布(装载行按包名解析,版本范围管不住它,规约见 [client-dependency.md](client-dependency.md))
-- 发布顺序无拓扑保护:`publish.mjs all` 按目录名顺序发,`dsh-boss-simulator` 排在 `dsh-common-tools` 前。**先发库再发消费方**,否则新消费方安装时 `^0.4.0` 解析不到(ETARGET)
+- 公共依赖包(common-tools)只发库自己:十个消费方 `dependencies` 浮动在同一 minor(`^0.5.0`),库发 patch 时消费方无需重发;改帧集合/导出形状即破坏,须发行破坏版并与消费方范围抬升同批发布(装载行按包名解析,版本范围管不住它,规约见 [client-dependency.md](client-dependency.md))
+- 发布顺序无拓扑保护:`publish.mjs all` 按目录名顺序发,`dsh-boss-simulator` 排在 `dsh-common-tools` 前。**先发库再发消费方**,否则新消费方安装时 `^0.5.0` 解析不到(ETARGET)

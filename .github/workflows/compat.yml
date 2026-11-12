@@ -54,8 +54,10 @@ jobs:
           key: compat-pw-${{ env.PLAYWRIGHT_PIN }}
       - name: 安装 chromium
         run: npx -y playwright@${{ env.PLAYWRIGHT_PIN }} install --with-deps chromium
-      # 根解析桥与 playwright 统一读取 package.json 钉版,避免 CLI 旧版覆盖后与 scope peer 冲突
+      # 根解析桥与 playwright 统一读取 package.json 钉版,避免 CLI 旧版覆盖后与 scope peer 冲突。
+      # storage-json 0.2.2 的 peer(cordis ~4.1/storage 0.2.2)与根桥钉版不一致,
+      # 与 test.yml 同口径关闭 peer 仲裁;否则装依赖阶段直接 ERESOLVE。
       - name: 安装仓库根解析桥(宿主 peer 与 zod)+ playwright
-        run: npm install --no-save --no-package-lock --no-audit --no-fund
+        run: npm install --no-save --no-package-lock --no-audit --no-fund --legacy-peer-deps
       - name: 兼容性测试(逐版本全家桶 boot)
         run: node scripts/compat/ci.mjs --window-file .compat/window.json

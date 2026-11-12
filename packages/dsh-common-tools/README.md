@@ -96,17 +96,19 @@ presence 只统计有接收订阅的连接，纯发送实例不计在场。对�
 
 订阅帧替换接收空间清单，与发送资格无关。revision 仅协调接收确认，不是业务消息版本。非法帧或二进制上行关闭连接；明确跨源上行写入被拒绝，身份认证及可达性由宿主承担，不设插件认证层。
 
-host 的 WS 实现多实体以进程级注册表共享传输，同版不重复安装，较新版本接管传输并保留监听；已有 WS 门面动态转发。缺少 registerUpgrade 时告警并停用总线，不注册资源。loader 上下文缺少包名时明确拒绝，不猜测身份。0.2.0 移除旧 SSE、topic、forPlugin 和 version 接口，无兼容路径。升级须统一更新消费方与依赖，完整重启宿主并刷新旧页面；旧代际 SSE(包 0.1)与 WS 代际(注册版本:0.2-0.3 写死 1.0,0.4.0 起与包版本同锁)同进程混装会发生注册表冲突，不支持跨该代际热接管。
+host 的 WS 实现多实体以进程级注册表共享传输，同版不重复安装，较新版本接管传输并保留监听；已有 WS 门面动态转发。upgrade 不经宿主 `/api` prefix 闸门（responder 只按 exact pathname 分发），交付 socket 前自行回问一次 `connection.requestRejection`，非空即写状态码并断 socket；`connection` 服务缺失时放行，与插件 HTTP 路由同口径。缺少 registerUpgrade 时告警并停用总线，不注册资源。loader 上下文缺少包名时明确拒绝，不猜测身份。0.2.0 移除旧 SSE、topic、forPlugin 和 version 接口，无兼容路径。升级须统一更新消费方与依赖，完整重启宿主并刷新旧页面；旧代际 SSE(包 0.1)与 WS 代际(注册版本:0.2-0.3 写死 1.0,0.4.0 起与包版本同锁)同进程混装会发生注册表冲突，不支持跨该代际热接管。
 
 ## 兼容窗口与版本协商
 
-当前窗口 **0.4.x**：帧集合、导出形状与 `setupCommonTools` 门面语义在 0.4.x 内保持向后兼容，**只允许发 patch**。0.5.0 视为破坏性版本（0.x 语义里 minor 即破坏），必须与十个消费方的依赖范围抬升**同批发布**——npm 的 `^0.4.0` 只约束安装，装载行按包名取 profile 顶层那份，单独发 0.5.0 会被 hoist 给仍在 `^0.4.0` 的旧插件。窗口与红线见 [DEVELOPMENT/client-dependency.md](../../DEVELOPMENT/client-dependency.md)。
+当前窗口 **0.5.x**：帧集合、导出形状与 `setupCommonTools` 门面语义在 0.5.x 内保持向后兼容，**只允许发 patch**。0.6.0 视为破坏性版本（0.x 语义里 minor 即破坏），必须与十个消费方的依赖范围抬升**同批发布**——npm 的 `^0.5.0` 只约束安装，装载行按包名取 profile 顶层那份，单独发 0.6.0 会被 hoist 给仍在 `^0.5.0` 的旧插件。窗口与红线见 [DEVELOPMENT/client-dependency.md](../../DEVELOPMENT/client-dependency.md)。
+
+0.4.x → 0.5.0 的实际增量：client 新增导出 `Tooltip` 与 `tipPlacement`（见「悬浮提示」），host 侧 WS upgrade 补一次宿主闸门回问；既有帧集合、门面与 toast 语义未变。
 
 版本协商：client 连接首帧上报 `{ type: 'hello', protocol: 1, version }`，host 回 `{ type: 'hello', protocol, protocols: [1], version }`。协议无交集时 client 打印一条告警并关闭连接、不再重连（页级总线停用）；旧 host（0.3.x 及以前）把未知帧当非法帧直接关连接，client 在 hello 宽限窗内被关即判定为老帧模式，降级为不报版本重连一次，连接从未 open 就断开不触发降级。帧协议改动即递增 `PROTOCOL`；host 侧 `PKG_VERSION` 与包版本同锁（仓库测试守）。
 
 ## 装载与 Toast
 
-client 模块由**每个消费插件自带的装载行**进入宿主：消费方在自己的 `cordis.patch.yml` 里加一行 `id: <本包前缀>-dsh-common-tools`、`name: '@mzzsfy/dsh-common-tools'`。宿主按包名把多行合并成**一份** client 模块（`entriesByName` + `compose`），bundle 只拼一次、模块只注册一次，多行在宿主侧是多个空 `apply()` 条目；本包不 host 别人的行，也不依赖别人 host 自己的行——装任一消费插件即可独立运行。消费方声明 dependencies（范围 `^0.4.0`）与 external `@mzzsfy/dsh-common-tools/client`，factory 内 require 后经命名空间使用；该包须能从 profile 根解析，生产 profile 为 pnpm `nodeLinker: hoisted`。装载规约见 [DEVELOPMENT/client-dependency.md](../../DEVELOPMENT/client-dependency.md)。toast 不要求建立 bus：
+client 模块由**每个消费插件自带的装载行**进入宿主：消费方在自己的 `cordis.patch.yml` 里加一行 `id: <本包前缀>-dsh-common-tools`、`name: '@mzzsfy/dsh-common-tools'`。宿主按包名把多行合并成**一份** client 模块（`entriesByName` + `compose`），bundle 只拼一次、模块只注册一次，多行在宿主侧是多个空 `apply()` 条目；本包不 host 别人的行，也不依赖别人 host 自己的行——装任一消费插件即可独立运行。消费方声明 dependencies（范围 `^0.5.0`）与 external `@mzzsfy/dsh-common-tools/client`，factory 内 require 后经命名空间使用；该包须能从 profile 根解析，生产 profile 为 pnpm `nodeLinker: hoisted`。装载规约见 [DEVELOPMENT/client-dependency.md](../../DEVELOPMENT/client-dependency.md)。toast 不要求建立 bus：
 
 ```js
 const { toast } = require('@mzzsfy/dsh-common-tools/client')
@@ -115,6 +117,22 @@ toast.show('任务完成\n耗时 12 秒', { appearance: 'panel', holdMs: 6000 })
 ```
 
 自 0.3.0 起,`appearance` 支持 `toast`(默认,宿主 toast-bg/toast-label 色对)与 `panel`(宿主 bg-layer-1/label-primary 色对)。两种样式随宿主亮暗主题更新,成功/错误只强调边框,不覆盖底色或文案颜色;多行文本保留换行。未知值使用 `toast`,设置仅作用于本条通知。`kind` 支持 info/ok/error,`sticky: true` 常驻并显示“知道了”,`onClick` 点击直达,`holdMs` 指定自动消失时间(默认 4 秒)。
+
+## 悬浮提示
+
+client 侧通用悬浮提示（0.5.0 起），消费方只给锚点与内容：
+
+```js
+const { Tooltip } = require('@mzzsfy/dsh-common-tools/client')
+
+h(Tooltip, { anchor }, content)
+```
+
+- `anchor` 两种形态：指针 `{ kind: 'point', x, y }`（悬停时给，组件在 `mousemove` 上跟随）与元素矩形 `{ left, top, width, height }`（快照，页面滚动后自动收起）。
+- `panelSelector` 可选：给定时以该面板矩形为夹取边界，提示不飘出弹窗；缺省用视口。
+- 定位：上下越界换侧，两侧都放不下取空间大的一侧再夹取进边界；元素锚点画箭头，指针锚点不画。
+- 渲染：portal 到 `body`，样式类 `dct-tip*` 随 toast 样式表注入（首次使用前经 layout effect 注入，不依赖是否发过 toast）；宿主模块表缺 react-dom 主入口时降级就地渲染，提示仍可见。
+- `tipPlacement` 一并导出（纯函数：`(anchor, tipSize, bounds, options)` → `{ left, top, side, arrowX }`），供消费方在不挂组件时复用同一套定位规则。
 
 ## 测试
 

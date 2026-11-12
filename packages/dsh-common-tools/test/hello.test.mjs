@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 const source = readFileSync(new URL('../src/client.js', import.meta.url), 'utf8')
+// 版本面从 manifest 取:测试不重复声明发版号,发布改版本不会瓦解断言
+const { version: PKG_VERSION } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 
 // 连接首帧必须报 hello:host 回支持集则协商为 ok;无交集停用总线;
 // 旧 host 视未知帧为非法帧关连接时,客户端降级为老帧模式重连一次。
@@ -48,8 +50,8 @@ test('Given 新 host 协议有交集 When 收到 hello Then 协商为 ok 且不�
   f.owner().bus.subscribe(() => {})
   const socket = f.instances[0]
   socket.open()
-  assert.deepEqual(socket.sent[0], { type: 'hello', protocol: 1, version: '0.4.0' })
-  socket.frame({ type: 'hello', protocol: 1, protocols: [1], version: '0.4.0' })
+  assert.deepEqual(socket.sent[0], { type: 'hello', protocol: 1, version: PKG_VERSION })
+  socket.frame({ type: 'hello', protocol: 1, protocols: [1], version: PKG_VERSION })
   assert.equal(f.state().hello, 'ok')
   assert.deepEqual(f.warns, [])
 })

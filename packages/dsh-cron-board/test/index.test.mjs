@@ -42,10 +42,7 @@ test('index:apply 注册 prefix 路由且请求走通(列表接口)', async () =
     },
   }
   const ctx = {
-    effect(fn, label) {
-      if (label === 'cron-board session wait') { fn(); return }
-      fn()
-    },
+    effect(fn) { fn() },
     inject() {},
     get(name) {
       if (name === 'sessionController') return sessionController
@@ -107,11 +104,7 @@ function makeFullCtx({ timerAvailable = true } = {}) {
   }
   const intervals = []
   const ctx = {
-    effect(fn, label) {
-      // 会话等待 effect 是真实定时器轮询形态,桩跳过直接执行体;controller 经 get 即可判
-      if (label === 'cron-board session wait') { fn(); return }
-      fn()
-    },
+    effect(fn) { fn() },
     get(name) {
       if (name === 'settings') return settingsService
       if (name === 'sessionController') return sessionController
@@ -153,41 +146,69 @@ function makeFullCtx({ timerAvailable = true } = {}) {
   return { ctx, routes, registered, intervals, settingsService, sessions, published }
 }
 
-test('index:inject 声明 webServer(总线经 common-tools host 激活)(sessionController 异步就绪等待,不进 inject)', async () => {
+test('index:inject 声明 webServer(sessionController 不进 inject,旧宿主不 pending)', async () => {
   // Given sessionController 由 dsh-web-app 条目异步挂载:inject 声明在 0.1.1-rc.2 上
-  // 永久 pending 拖死 boot,apply 内同步探测又抢在挂载前误判(0.1.2-rc.1 实测 404)
-  // Then 静态锁定 inject 声明;就绪语义由 effect 内轮询等待 + 超时禁用承担;
-  // 推送总线经 common-tools host 激活(webServer shape 到位即装配)
+  // 永久 pending 拖死 boot
+  // Then 静态锁定 inject 只声明 webServer;就绪语义由使用点实时解析承担
+  // (推送总线经 common-tools host 激活,webServer shape 到位即装配)
   assert.deepEqual(mod.inject, ['webServer'])
 })
 
-test('index:sessionController 恒缺失时超时干净禁用会话通道(脚本任务不受影响)', async () => {
-  // Given 无 sessionController 的宿主上下文(等价 0.1.1-rc.2)
-  const routes = new Map()
-  const warnings = []
-  const effects = []
-  const ctx = {
-    effect(fn, label) {
-      if (label === 'cron-board session wait') effects.push(fn)
-      else fn()
-    },
-    inject() {},
-    logger: { warn: (line) => warnings.push(line) },
-    get: () => undefined,
-    webServer: {
-      register(route) {
-        routes.set(route.path, route.handler)
-        return () => {}
-      },
+test('index:sessionController 晚到挂载即恢复就绪,不永久误判(慢启动宿主)', async (t) => {
+  // Given 宿主暂无 sessionController(冷启动期,服务由 dsh-web-app 异步挂载),数据目录隔离
+  const dir = await mkdtemp(join(tmpdir(), 'cron-board-idx-sess-'))
+  t.after(async () => {
+    process.env.DSH_CRON_BOARD_DATA_DIR = isolatedDataDir
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  })
+  process.env.DSH_CRON_BOARD_DATA_DIR = dir
+  let controller
+  const base = makeFullCtx()
+  const ctx = { ...base.ctx, get: (name) => (name === 'sessionController' ? controller : base.ctx.get(name)) }
+  apply(ctx)
+  const handler = base.routes.get('/api/cron-board')
+  const call = (method, path, body) => {
+    const res = { status: null, payload: null }
+    res.writeHead = (status) => { res.status = status }
+    res.end = (text) => { res.payload = JSON.parse(text) }
+    const req = new EventEmitter()
+    req.method = method
+    req.url = 'http://localhost' + path
+    req.headers = body === undefined ? {} : { 'content-type': 'application/json' }
+    setTimeout(() => {
+      if (body !== undefined) req.emit('data', Buffer.from(JSON.stringify(body)))
+      req.emit('end')
+    }, 50)
+    return handler(req, res).then(() => res)
+  }
+  // Then status 未就绪,脚本任务照常,会话任务 400
+  const statusBefore = await call('GET', '/api/cron-board/status')
+  assert.deepEqual(statusBefore.payload.session, { ready: false })
+  const shell = await call('POST', '/api/cron-board/jobs', {
+    name: 'sh', kind: 'shell', command: 'echo x', schedule: '* * * * *', enabled: true,
+  })
+  assert.equal(shell.status, 200)
+  const sessionRejected = await call('POST', '/api/cron-board/jobs', {
+    name: 'sv', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true,
+  })
+  assert.equal(sessionRejected.status, 400)
+  assert.match(sessionRejected.payload.error, /会话任务通道不可用/)
+  // When 服务晚到挂载(同一插件实例,无重建)
+  controller = {
+    create: async () => ({ sessionId: 's-1' }),
+    prompt: async (args, signal) => {
+      signal.throwIfAborted()
+      return { accepted: true }
     },
   }
-  // When apply(路由同步注册,会话等待 effect 挂起)
-  apply(ctx)
-  // Then 路由已注册(脚本任务可用),等待 effect 在列
-  assert.equal(routes.size, 1)
-  assert.equal(effects.length, 1)
-  // When 超时轮询终结(缩短等待:直接跑完等待窗)
-  effects[0]()
+  // Then status 立即就绪,会话任务可建
+  const statusAfter = await call('GET', '/api/cron-board/status')
+  assert.deepEqual(statusAfter.payload.session, { ready: true })
+  const sessionAccepted = await call('POST', '/api/cron-board/jobs', {
+    name: 'sv2', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true,
+  })
+  assert.equal(sessionAccepted.status, 200)
+  assert.equal(sessionAccepted.payload.kind, 'session')
 })
 
 test('index:settings 注册 cron-board 命名空间且 timer 承载默认周期 tick', async () => {
@@ -370,9 +391,7 @@ function makeRc17Ctx({ configStore = {}, configEditorAvailable = true, configure
   const ctx = {
     calls,
     fiber: { entry: { options: { id: 'cron-board', name: '@mzzsfy/dsh-cron-board' } } },
-    effect(fn, label) {
-      // 会话等待轮询为真实定时器形态:桩跳过(与 makeFullCtx 同款),其余同步执行
-      if (label === 'cron-board session wait') return
+    effect(fn) {
       effects.push(fn)
       fn()
     },
@@ -548,10 +567,7 @@ test('index:model-catalog 路由经装配链收到 sessionController(传递契�
     }),
   }
   const ctx = {
-    effect(fn, label) {
-      if (label === 'cron-board session wait') { fn(); return }
-      fn()
-    },
+    effect(fn) { fn() },
     inject() {},
     get(name) {
       if (name === 'sessionController') return sessionController
@@ -564,7 +580,7 @@ test('index:model-catalog 路由经装配链收到 sessionController(传递契�
       },
     },
   }
-  // When 装配,等会话轮询就绪后请求 model-catalog(轮询 250ms 周期,就绪前 ref 为空即空目录)
+  // When 装配后请求 model-catalog(服务经使用点实时解析,无等待窗)
   apply(ctx)
   const handler = routes.get('/api/cron-board')
   const requestCatalog = async () => {

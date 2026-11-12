@@ -46,18 +46,14 @@ function makeStubs({ autoIdle = true, persisted = [], catalog, agentLookupError 
           async modelCatalog() {
             return catalog
           },
-          // 镜像宿主内部 ApiSessionAgentController 契约:resolveAgent 返回 {agent} 或 {error},
-          // selectForNextRequest 收解包后的 live agent 并装会话级 selection
-          agents: {
-            async resolveAgent(sessionId) {
-              resolveAgentIds.push(sessionId)
-              if (agentLookupError) return { error: agentLookupError }
-              if (!sessions.has(sessionId)) sessions.set(sessionId, { id: sessionId, status: 'idle' })
-              return { agent: sessions.get(sessionId) }
-            },
-            selectForNextRequest(agent, selection) {
-              selections.push({ agent, selection })
-            },
+          // 镜像宿主 SessionController.selectModel 契约:自行 resume 会话并返回归一化选择
+          async selectModel(request) {
+            resolveAgentIds.push(request.sessionId)
+            if (agentLookupError) throw agentLookupError
+            if (!sessions.has(request.sessionId)) sessions.set(request.sessionId, { id: request.sessionId, status: 'idle' })
+            const { sessionId, ...selection } = request
+            selections.push({ agent: sessions.get(sessionId), selection })
+            return { selected: selection }
           },
         }
       : {}),
@@ -128,6 +124,44 @@ for (const bound of [false, true]) {
     assert.equal(stubs.prompts.length, 1)
   })
 }
+
+test('session-driver:宿主无控制器时记 fail 并上报缺失告警', async () => {
+  // Given 宿主未挂载 sessionController(旧宿主 / web-app 卸载期)
+  const reported = []
+  const driver = createSessionDriver({
+    getSessionController: () => undefined,
+    reportSessionMissing: () => reported.push(1),
+  })
+  // When 定时触发落到该宿主
+  const outcome = await driver.run({ job: BASE_JOB, env: {} })
+  // Then 记 fail 留痕,并补一次系统告警
+  assert.equal(outcome.status, 'fail')
+  assert.match(outcome.message, /会话服务不可用/)
+  assert.deepEqual(reported, [1])
+})
+
+test('C6 Given host hands each read a distinct service proxy, When two instances overlap, Then admission still excludes', async () => {
+  // 宿主 ctx.get 每次返回新的 traceable 代理:闸门若按控制器对象身份做键,
+  // 两个插件实例会各持一键、互斥失效(热重载实例共享也依赖同一口径)
+  const stubs = makeStubs({ autoIdle: false, persisted: ['s-1'] })
+  const entered = Promise.withResolvers(), release = Promise.withResolvers()
+  const prompt = stubs.sessionController.prompt
+  stubs.sessionController.prompt = async (...args) => { entered.resolve(); await release.promise; return prompt(...args) }
+  const makeProxyDriver = () => createSessionDriver({
+    getSessionController: () => ({ ...stubs.sessionController }),
+    getWorkspaceRegistry: stubs.getWorkspaceRegistry,
+    agents: stubs.agents,
+    sessionQuery: stubs.sessionQuery,
+  })
+  const a = makeProxyDriver(), b = makeProxyDriver()
+  const first = a.run({ job: PINNED_S1, env: {} })
+  await entered.promise
+  const second = b.run({ job: { ...PINNED_S1, id: 'other-job' }, env: {} })
+  release.resolve()
+  const results = await Promise.all([first, second])
+  assert.deepEqual(results.map((result) => result.status), ['success', 'skipped'])
+  assert.equal(stubs.prompts.length, 1)
+})
 
 test('C4 Given pinned admission throws, When same job retries, Then the gate is released', async () => {
   const stubs = makeStubs()
@@ -490,7 +524,7 @@ test('session-driver:指定模型时 agent 解析失败投递前 fail 不投递'
 
 test('session-driver:模型安装异常投递前 fail 带可读前缀', async () => {
   const stubs = makeStubs({ catalog: MODEL_CATALOG })
-  stubs.sessionController.agents.selectForNextRequest = () => { throw new Error('projection modelSelection is not registered') }
+  stubs.sessionController.selectModel = async () => { throw new Error('projection modelSelection is not registered') }
   const driver = makeDriver(stubs)
   const job = { ...BASE_JOB, session: { mode: 'fresh', model: { provider: 'p1', model: 'm1' } } }
   // When 宿主安装面抛错(modelSelection 投影未注册等)
@@ -500,4 +534,33 @@ test('session-driver:模型安装异常投递前 fail 带可读前缀', async ()
   assert.ok(outcome.message.includes('模型安装失败'))
   assert.ok(outcome.message.includes('projection modelSelection is not registered'))
   assert.equal(stubs.prompts.length, 0)
+})
+
+test('session-driver:pinned 指向子 agent 会话时按丢失重建,不向子会话投递', async () => {
+  for (const header of [
+    { id: 'child', origin: 'subagent', parentSession: 'root', delegationDepth: 1 },
+    { id: 'child', parentSession: 'root', delegationDepth: 1 },
+  ]) {
+    const stubs = makeStubs()
+    stubs.sessionQuery.listSessions = async () => [{ header }]
+    const driver = makeDriver(stubs)
+    // When pinned 指向子会话(即便它正在运行,也不得跳过或投递)
+    stubs.sessions.set('child', { id: 'child', status: 'running' })
+    const outcome = await driver.run({ job: { ...BASE_JOB, session: { mode: 'pinned', pinnedSessionId: 'child' } }, env: {} })
+    // Then 新建根会话并投递,pinned 旧 id 不被调用
+    assert.equal(outcome.status, 'success')
+    assert.equal(outcome.pinnedNewId, 'sess-1')
+    assert.equal(stubs.created.length, 1)
+    assert.deepEqual(stubs.prompts.map((prompt) => prompt.sessionId), ['sess-1'])
+  }
+})
+
+test('session-driver:pinned 指向普通 fork(parentSession + depth 0)仍复用', async () => {
+  const stubs = makeStubs()
+  stubs.sessionQuery.listSessions = async () => [{ header: { id: 'fork-1', parentSession: 'root', delegationDepth: 0 } }]
+  const driver = makeDriver(stubs)
+  const outcome = await driver.run({ job: { ...BASE_JOB, session: { mode: 'pinned', pinnedSessionId: 'fork-1' } }, env: {} })
+  assert.equal(outcome.status, 'success')
+  assert.equal(outcome.sessionId, 'fork-1')
+  assert.equal(stubs.created.length, 0)
 })

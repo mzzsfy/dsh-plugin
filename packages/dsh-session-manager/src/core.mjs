@@ -77,11 +77,18 @@ export function workspaceTitleForSession({ workspaces, sessionId, cwd }) {
   return null
 }
 
-/** 归档面板行:session.list 行与归档集合的交集,按更新时间倒序;标题缺失回退会话 id;workspace 为所属工作区标题或 null(与 client 镜像同规)。 */
+/** 子 agent 会话判定:origin 为权威;无 origin 的旧记录按 parentSession + delegationDepth(普通 fork 的 depth 为 0,不算)。 */
+export function isDerivedSessionHeader(header) {
+  if (!header) return false
+  if (header.origin === 'subagent') return true
+  return header.parentSession !== undefined && (header.delegationDepth ?? 0) >= 1
+}
+
+/** 归档面板行:session.list 行与归档集合的交集,按更新时间倒序;标题缺失回退会话 id;workspace 为所属工作区标题或 null(与 client 镜像同规);子 agent 行不入面板。 */
 export function projectArchiveRows({ rows, archivedIds, workspaces }) {
   const archived = new Set(archivedIds)
   return rows
-    .filter((row) => archived.has(row.id))
+    .filter((row) => archived.has(row.id) && !isDerivedSessionHeader(row))
     .map((row) => ({
       id: row.id,
       title: row.title || row.id,

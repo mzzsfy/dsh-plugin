@@ -38,7 +38,7 @@ bundle patch(`cordis.patch.yml`)两条 insert:控制行 `boss-simulator-control`
 
 ## 存储与状态
 
-宿主 storage-domain `boss_simulator` 单表 kv(键空间 `task/<taskId>`、`control`、`settings`、`adminBinding`),无独立文件落盘;Run 报告由会话事件跟随(`run-followers`,断线重试,重启恢复未结 Run)归并。
+宿主 storage-domain `boss_simulator` 单表 kv(键空间 `task/<taskId>`、`control`、`settings`、`adminBinding`),无独立文件落盘;Run 报告由会话事件跟随(`run-followers`,断线重试)归并;会话已无未核清活跃 Run 时结束跟随(`interrupted` 与 `settled`/`rejected` 同为终态,重启后不再恢复)。
 
 ## GUI
 

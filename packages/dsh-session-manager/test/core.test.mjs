@@ -20,6 +20,7 @@ import {
   filterArchiveRows,
   groupArchiveRowsByWorkspace,
   isSessionRunning,
+  isDerivedSessionHeader,
   mergeDeletedEntry,
   pageArchiveRows,
   projectArchiveRows,
@@ -117,6 +118,27 @@ test('归档面板投影:交集过滤且按更新时间倒序', () => {
 test('归档面板投影:标题缺失回退会话 id(与 client 镜像同规)', () => {
   const projected = projectArchiveRows({ rows: [{ id: 'a', title: '', updatedAt: 5 }], archivedIds: ['a'] })
   assert.deepEqual(projected, [{ id: 'a', title: 'a', updatedAt: 5, workspace: null }])
+})
+
+test('归档面板投影:子 agent 行不入面板(origin 与旧格式两路)', () => {
+  const rows = [
+    { id: 'root', title: '根', updatedAt: 3 },
+    { id: 'child', title: '子', updatedAt: 2, origin: 'subagent', parentSession: 'root', delegationDepth: 1 },
+    { id: 'grandchild', title: '孙', updatedAt: 2, origin: 'subagent', parentSession: 'child', delegationDepth: 2 },
+    { id: 'orphan', title: '孤', updatedAt: 2, origin: 'subagent', parentSession: 'missing', delegationDepth: 1 },
+    { id: 'legacy', title: '旧子', updatedAt: 1, parentSession: 'root', delegationDepth: 1 },
+    { id: 'fork', title: '分支', updatedAt: 0, parentSession: 'root', delegationDepth: 0 },
+  ]
+  assert.deepEqual(projectArchiveRows({ rows, archivedIds: ['root', 'child', 'grandchild', 'orphan', 'legacy', 'fork'] }).map((row) => row.id), ['root', 'fork'])
+})
+
+test('子 agent 判定:origin 权威,旧记录只认 parentSession + delegationDepth≥1', () => {
+  assert.equal(isDerivedSessionHeader({ origin: 'subagent' }), true)
+  assert.equal(isDerivedSessionHeader({ parentSession: 'p', delegationDepth: 1 }), true)
+  assert.equal(isDerivedSessionHeader({ parentSession: 'p', delegationDepth: 0 }), false)
+  assert.equal(isDerivedSessionHeader({ parentSession: 'p' }), false)
+  assert.equal(isDerivedSessionHeader({}), false)
+  assert.equal(isDerivedSessionHeader(undefined), false)
 })
 
 const WORKSPACES = [

@@ -75,6 +75,8 @@ export function collectActiveWork(ctx) {
   }
 
   let agentList = []
+  // 升级门统计全量存活:子 agent 会话的 agent/job 同样是升级期进程占用,
+  // 按主会话过滤会漏判,故 agents.list 与 jobs.list 不做归属筛选
   try {
     const agents = ctx.get('agents')
     if (!agents || typeof agents.list !== 'function') throw new Error('agents 服务方法面不可用')
@@ -213,6 +215,26 @@ function rejectCrossOrigin(req, res) {
 }
 
 // 路由样板收敛:方法守卫与跨源守卫统一在此,业务异常统一归一 400,handler 只留业务体
+/**
+ * 插件路由比宿主 /api 闸门更长/更精确,会抢在 connection.admit 之前命中,
+ * 必须自己回问一次宿主闸门,否则无 cookie 的调用直接落到业务面。
+ * 服务缺失(非 web 传输)时放行,与原行为一致。
+ */
+function rejectUnadmitted(ctx, req, res) {
+  let rejection
+  try {
+    const connection = typeof ctx?.get === 'function' ? ctx.get('connection') : undefined
+    rejection = connection?.requestRejection?.(req)
+  } catch {
+    // 闸门自身异常不放行:宁可拒绝,不把故障当认证通过
+    rejection = 403
+  }
+  if (rejection === undefined) return false
+  res.writeHead(rejection, { 'content-type': 'text/plain; charset=utf-8' })
+  res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
+  return true
+}
+
 const route = (method, guards, handler) => async (req, res) => {
   if (req.method !== method) {
     sendJson(res, 405, { error: 'method not allowed' })
@@ -313,13 +335,16 @@ export function discoverRunningInstall({ argv1 = process.argv[1], installAnchor,
 export function apply(ctx, config, dependencies = {}) {
   const maintenance = { active: false }
   // 显式暂停契约(F08):维护态即"已切换/切换中、当前暂停、重启后可用";
-  // pre-step 拒绝携带结构化说明,与 status 快照/审计同口径
+  // pre-step 拒绝携带结构化说明,与 status 快照/审计同口径。
+  // 宿主把 pre-step 作为事件派发(官方消费方一律 ctx.on),没有 hooks 服务面
   const PAUSED_MESSAGE = '宿主已切换或升级进行中,当前暂停新回合;重启后可用'
-  const hooks = ctx.get('hooks')
-  hooks?.on?.('agent/pre-step', ({ signal }, next) => {
-    if (maintenance.active && !signal.aborted) return Promise.resolve({ kind: 'reject', message: PAUSED_MESSAGE })
-    return next()
-  })
+  ctx.effect(
+    () => ctx.on('agent/pre-step', ({ signal }, next) => {
+      if (maintenance.active && !signal.aborted) return Promise.resolve({ kind: 'reject', message: PAUSED_MESSAGE })
+      return next()
+    }),
+    'maintain pause gate',
+  )
   const legacySettingsFace = () => {
     const settings = ctx.get('settings')
     return typeof settings?.register === 'function' && typeof settings?.update === 'function'
@@ -794,7 +819,11 @@ export function apply(ctx, config, dependencies = {}) {
   ]
 
   for (const route of routes) {
-    ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: route.path, handler: route.handler }), 'dsh-maintain ' + route.path)
+    const gated = async (req, res) => {
+      if (rejectUnadmitted(ctx, req, res)) return
+      await route.handler(req, res)
+    }
+    ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: route.path, handler: gated }), 'dsh-maintain ' + route.path)
   }
 
   ctx.inject(['settings'], (settingsCtx) => {
