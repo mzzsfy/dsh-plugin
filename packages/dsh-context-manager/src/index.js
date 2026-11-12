@@ -42,6 +42,7 @@ import {
   maxArtifactBytesForHost,
   promptsToInputs,
   renamePromptItem,
+  trimPrompts,
   reorderPrompts,
 } from './core.mjs'
 import { ensureCacheDir, listWorkspaceCachesCached, readPrompts, readWorkspaceCache, updatePrompts, updateWorkspaceCache } from './history-cache.mjs'
@@ -617,20 +618,11 @@ export function apply(ctx, config) {
             if (at >= 0) {
               items.splice(at, 1)
               collected = false
-            } else {
-              items.unshift({ text, at: Date.now() })
-              // 顺序是用户自定义的,超限淘汰收藏最旧的一条而非尾部(尾部不再是"最旧");
-              // 时间戳相同时保留更靠后的一条——unshift 使数组尾部才是最早收藏
-              if (items.length > HISTORY_PROMPTS_MAX) {
-                let oldest = items.length - 1
-                for (let index = items.length - 2; index >= 0; index -= 1) {
-                  if (items[index].at < items[oldest].at) oldest = index
-                }
-                items.splice(oldest, 1)
-              }
-              collected = true
+              return items
             }
-            return items
+            collected = true
+            // 顺序是用户自定义的:新收藏置顶,超限一次裁剪到上限(淘汰收藏时间最旧的几条)
+            return trimPrompts([{ text, at: Date.now() }].concat(items), HISTORY_PROMPTS_MAX)
           })
           sendJson(res, 200, { collected })
         } catch (error) {

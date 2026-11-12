@@ -11,6 +11,7 @@ const {
   forkRetryText,
   reorderPrompts,
   renamePromptItem,
+  trimPrompts,
   promptsToInputs,
   maxArtifactBytesForHost,
   HISTORY_ALIGN_LEGACY_MAX_ARTIFACT_BYTES,
@@ -241,6 +242,34 @@ test('Given 非对象或畸形 data, When forkRetryText, Then 返回 null 不抛
   assert.equal(forkRetryText(undefined), null)
   assert.equal(forkRetryText({}), null)
   assert.equal(forkRetryText({ source: { kind: 'user' } }), null)
+})
+
+// ── 常用提示词:超限裁剪(一次删净)──
+
+test('收藏裁剪:未超限不改动,超限一次删到上限并保留原序', () => {
+  const small = [{ text: 'A', at: 1 }, { text: 'B', at: 2 }]
+  assert.equal(trimPrompts(small, 2), small, '未超限返回同一引用')
+  const items = [
+    { text: '最新', at: 50 },
+    { text: '最旧', at: 1 },
+    { text: '居中', at: 30 },
+    { text: '次旧', at: 2 },
+  ]
+  const trimmed = trimPrompts(items, 2)
+  assert.deepEqual(trimmed.map((item) => item.text), ['最新', '居中'], '只保留 at 最大的两条,其余按原序')
+  assert.deepEqual(items.map((item) => item.text), ['最新', '最旧', '居中', '次旧'], '不得改动入参')
+})
+
+test('收藏裁剪:时间戳相同时从尾部删(尾部是更早的收藏),畸形 at 按 0 处理', () => {
+  const items = [
+    { text: 'A', at: 5 },
+    { text: 'B', at: 5 },
+    { text: 'C', at: 5 },
+    { text: 'D' },
+    null,
+  ]
+  assert.deepEqual(trimPrompts(items, 2).map((item) => item.text), ['A', 'B'], '同 at 保留靠前的,缺 at 视为最旧')
+  assert.deepEqual(trimPrompts(undefined, 3), [])
 })
 
 // ── 常用提示词:重命名(原位替换,不置顶)──

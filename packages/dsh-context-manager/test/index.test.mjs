@@ -1118,6 +1118,21 @@ test('常用提示词:rename 空 from 400,GET 405', skipMissingDeps, async () =>
   })
 })
 
+test('常用提示词:历史超载文件一次新增即裁剪到上限,不逐条收敛', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async (cacheDir) => {
+    const { handlers } = makeCtx({ headers: [], agents: new Map() })
+    // 手改/旧版遗留的超载文件:超出上限 5 条,越靠后 at 越大(越新)
+    const items = Array.from({ length: HISTORY_PROMPTS_MAX + 5 }, (_, index) => ({ text: '旧' + index, at: 1000 + index }))
+    await writeFile(path.join(cacheDir, 'prompts.json'), JSON.stringify({ items }), 'utf8')
+    await postJson(handlers, '/api/context/prompts/toggle', { text: '新收藏' })
+    const stored = JSON.parse(await readFile(path.join(cacheDir, 'prompts.json'), 'utf8'))
+    assert.equal(stored.items.length, HISTORY_PROMPTS_MAX, '一次新增即裁剪到上限,不再只删一条')
+    assert.equal(stored.items[0].text, '新收藏', '新收藏置顶')
+    assert.deepEqual(stored.items.slice(1, 3).map((item) => item.text), ['旧6', '旧7'], '保留条目原序不变')
+    assert.equal(stored.items.some((item) => item.text === '旧5'), false, '淘汰的是收藏时间最旧的几条')
+  })
+})
+
 test('常用提示词:自定义顺序下新收藏仍插最前,既有相对顺序不变', skipMissingDeps, async () => {
   await withHistoryCacheDir(async () => {
     const { handlers } = makeCtx({ headers: [], agents: new Map() })

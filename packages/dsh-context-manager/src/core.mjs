@@ -169,6 +169,23 @@ export function promptsToInputs(items, { maxChars }) {
 }
 
 /**
+ * 收藏超限裁剪:保留收藏时间最新的 max 条,超出部分一次删净(手改/旧文件可能超出很多)。
+ * 顺序是用户自定义的,保留条目原序不变;at 相同时删更靠后的——unshift 插入使尾部才是更早的收藏。
+ */
+export function trimPrompts(items, max) {
+  const list = Array.isArray(items) ? items : []
+  if (list.length <= max) return list
+  const dropped = new Set(
+    list
+      .map((item, index) => ({ index, at: item && typeof item.at === 'number' ? item.at : 0 }))
+      .sort((a, b) => (a.at - b.at) || (b.index - a.index))
+      .slice(0, list.length - max)
+      .map((entry) => entry.index),
+  )
+  return list.filter((item, index) => !dropped.has(index))
+}
+
+/**
  * 重命名收藏条目:原位替换文本,位置与收藏时间不变(顺序是用户自定义的,重命名不得置顶)。
  * to 为空即删除该条;目标文本已被其它条目占用时合并到既有条目,不留重复文本。
  * @returns {{ items, result: 'renamed'|'removed'|'merged'|'missing'|'unchanged' }}
