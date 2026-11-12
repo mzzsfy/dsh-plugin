@@ -258,7 +258,7 @@ const CSS = [
   // 设计令牌:L1 设置分区与 L3 状态条经包局部 token 引用宿主语义别名,
   // 禁止字面 fallback(暗色主题漏色);状态语义只用 ok/warn/danger 三色
   '.up-panel { --up-accent:var(--dsw-alias-brand-primary); --up-accent-deep:var(--dsw-alias-button-primary-hover); --up-accent-wash:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent); --up-ok:var(--dsw-alias-state-success-primary); --up-warn:var(--dsw-alias-state-warn-primary); --up-danger:var(--dsw-alias-state-error-primary); --up-danger-wash:color-mix(in srgb,var(--dsw-alias-state-error-primary) 10%,transparent); --up-text:var(--dsw-alias-label-primary); --up-text-sub:var(--dsw-alias-label-secondary); --up-text-dim:var(--dsw-alias-label-tertiary); --up-bg:var(--dsw-alias-bg-layer-1); --up-bg-sub:var(--dsw-alias-bg-layer-2); --up-bg-muted:var(--dsw-alias-bg-module-platform); --up-card:var(--dsw-alias-bg-layer-1); --up-card-border:var(--dsw-alias-border-l2); --up-border:var(--dsw-alias-border-l2); --up-border-strong:var(--dsw-alias-border-l3); --up-hover:var(--dsw-alias-interactive-bg-hover); --up-hover-danger:var(--dsw-alias-interactive-bg-hover-danger); --up-skeleton:var(--dsw-alias-bg-skeleton); --up-radius-sm:var(--dsw-radius-sm); --up-radius-md:var(--dsw-radius-md); --up-radius-lg:var(--dsw-radius-lg);',
-  '  display:flex; flex-direction:column; gap:16px; min-width:0; color:var(--up-text); font-size:14px; line-height:22px; }',
+  '  display:flex; flex-direction:column; gap:12px; min-width:0; color:var(--up-text); font-size:14px; line-height:22px; }',
   // ---- 顶栏 ----
   '.up-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }',
   '.up-head__title { font-weight:500; font-size:16px; line-height:24px; }',
@@ -266,19 +266,25 @@ const CSS = [
   '.up-spacer { flex:1; }',
   // ---- 按钮体系:实底主按钮 / 次按钮 / ghost 危险 ----
   '.up-btn { cursor:pointer; border:1px solid var(--up-border-strong); background:transparent;',
-  '  color:var(--up-text); border-radius:var(--up-radius-sm); min-height:36px; padding:0 14px; font-size:14px; line-height:22px; font-family:inherit;',
+  '  color:var(--up-text); border-radius:var(--up-radius-sm); min-height:32px; padding:0 10px; font-size:13px; line-height:20px; font-family:inherit;',
   '  transition:background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease; }',
   '.up-btn:hover { background:var(--up-hover); }',
   '.up-btn:disabled { opacity:0.5; cursor:not-allowed; }',
   '.up-btn:focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:2px; }',
   '.up-btn--primary { background:var(--up-accent); border-color:var(--up-accent); color:var(--dsw-alias-bg-base); font-weight:600; }',
   '.up-btn--primary:hover { background:var(--up-accent-deep); border-color:var(--up-accent-deep); }',
-  '.up-btn--danger { color:var(--up-danger); border-color:transparent; background:transparent; }',
-  '.up-btn--danger:hover { background:var(--up-hover-danger); border-color:transparent; }',
+  '.up-btn--danger { color:var(--up-danger); border-color:var(--up-danger); background:transparent; }',
+  '.up-btn--danger:hover { background:var(--up-hover-danger); border-color:var(--up-danger); }',
   // ---- 账号卡:L1 卡片分组 ----
-  '.up-card { position:relative; border:.5px solid var(--up-card-border); border-radius:var(--up-radius-md); padding:20px;',
-  '  background:var(--up-card); display:flex; flex-direction:column; gap:12px; min-width:0; }',
+  '.up-card { position:relative; border:.5px solid var(--up-card-border); border-radius:var(--up-radius-md); padding:12px 14px;',
+  '  background:var(--up-card); display:flex; flex-direction:column; gap:8px; min-width:0; }',
   '.up-card__row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; min-width:0; }',
+  // 头部操作组不拆行:标题与更新时间可收缩,刷新/编辑/删除保持同一行;读数行仍允许换行
+  '.up-card > .up-card__row:first-child { flex-wrap:nowrap; gap:6px; }',
+  '.up-card > .up-card__row:first-child .up-card__name { flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }',
+  '.up-card > .up-card__row:first-child .up-spacer { min-width:0; }',
+  '.up-card > .up-card__row:first-child .up-meta, .up-card > .up-card__row:first-child .up-badge { flex:none; }',
+  '.up-card > .up-card__row:first-child .up-btn { flex:none; }',
   '.up-card__name { font-weight:600; font-size:14px; line-height:22px; }',
   // 平台徽章:语义槽位着色(ok/warn/accent/text-sub),不引入第四种状态色
   '.up-badge { font-size:11px; line-height:18px; font-weight:500; padding:0 8px; border-radius:999px; white-space:nowrap;',
@@ -335,9 +341,9 @@ const CSS = [
   '  border-bottom:.5px solid var(--up-border); }',
   '.up-dialog th { color:var(--up-text-dim); font-weight:400; font-size:12px; line-height:18px; }',
   // ---- 表单:L1 卡片与 36px 控件 ----
-  '.up-form { border:.5px solid var(--up-card-border); border-radius:var(--up-radius-md); padding:20px;',
-  '  background:var(--up-card); display:flex; flex-direction:column; gap:12px; }',
-  '.up-form--nested { border:0; background:var(--up-bg-sub); padding:16px; }',
+  '.up-form { border:.5px solid var(--up-card-border); border-radius:var(--up-radius-md); padding:12px 14px;',
+  '  background:var(--up-card); display:flex; flex-direction:column; gap:8px; }',
+  '.up-form--nested { border:0; background:var(--up-bg-sub); padding:10px 12px; }',
   '.up-field { display:flex; flex-direction:column; gap:4px; min-width:0; }',
   '.up-field__label { font-size:13px; line-height:20px; color:var(--up-text-sub); }',
   '.up-field input, .up-field select, .up-field textarea {',
@@ -347,7 +353,7 @@ const CSS = [
   '.up-field input:focus-visible, .up-field select:focus-visible, .up-field textarea:focus-visible {',
   '  outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:0; }',
   '.up-field textarea { font-family:var(--ds-font-family-code); font-size:12px; line-height:18px; min-height:72px; padding:8px 10px; resize:vertical; }',
-  '.up-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }',
+  '.up-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }',
   // ---- 通知与提示(L3 紧凑状态条) ----
   '.up-notice { font-size:12px; line-height:18px; padding:8px 12px; border-radius:var(--up-radius-sm);',
   '  border:.5px solid var(--up-border); background:var(--up-bg-muted); color:var(--up-text-sub); }',

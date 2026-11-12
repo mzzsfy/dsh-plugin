@@ -1457,20 +1457,65 @@ const pricingBucketsOf = (usage) => ({
 
 // routes 缺席占位:双段通配模型键,仅被 '*/*' 全通配规则命中(供应商与模型全未知)
 const MODEL_UNROUTED = '*/*'
+// 宿主投影键:底栏按小时/模型取数,不能只靠 tokenUsage 四桶猜模型
+const MODEL_USAGE_PROJECTION = 'usageDashModelUsage'
 
 // 注入点A 费用组装配:开关关/无用量/价格未加载不渲染;规则已载无命中价显示占位符;
-// routes 缺席时 model 取全通配键;时间条件按当前时刻评估(估算口径)
+// routes 缺席不再冒充全通配价:没有模型归属就没有可信单价,交给投影/占位符。
 function buildCostItem(usage, rules, prefs, t, now = new Date()) {
   if (!prefs?.costDisplay || !usage || !Array.isArray(rules)) return null
-  const model = usage.routes?.[0]?.model ?? MODEL_UNROUTED
+  const route = usage.routes?.[0]
+  if (!route || !route.model) return COST_PLACEHOLDER
+  const model = turnModelOf(usage)
   const price = matchPrice(rules, model, now)
   if (!price) return COST_PLACEHOLDER
   return t('stats.cost', { cost: formatCost(costOf(price, pricingBucketsOf(usage)), aggregateCurrencyOf(rules)) })
 }
 
+// 投影桶是否有用量:没有用量的空桶不参与未计价统计
+function usageBucketsUsed(buckets) {
+  return (buckets?.uncachedInputTokens ?? 0) + (buckets?.outputTokens ?? 0)
+    + (buckets?.cacheReadTokens ?? 0) + (buckets?.cacheWriteTokens ?? 0) > 0
+}
+
+// 底栏会话费用:优先按宿主投影的小时/模型桶逐项匹配,时间条件取桶时刻;
+// 投影缺席(旧宿主/注册失败)才回退到 routes 与单个 now,仍不伪造全局价。
+function buildSessionCostItem(usage, modelUsage, rules, prefs, t) {
+  // 未配置规则时不显示费用项:占位符留给「有规则但当前模型未定价」的可见提示
+  if (!prefs?.costDisplay || !usage || !Array.isArray(rules) || rules.length === 0) return null
+  const entries = Array.isArray(modelUsage?.hours) ? modelUsage.hours : []
+  if (entries.length === 0) return { text: buildCostItem(usage, rules, prefs, t), unpriced: 0 }
+  let cost = 0
+  let priced = false
+  const unpricedHours = new Set()
+  for (const entry of entries) {
+    if (!entry || !Number.isFinite(entry.time) || typeof entry.model !== 'string') continue
+    if (!usageBucketsUsed(entry)) continue
+    const price = matchPrice(rules, entry.model, new Date(entry.time))
+    if (!price) {
+      unpricedHours.add(entry.time)
+      continue
+    }
+    cost += costOf(price, pricingBucketsOf(entry))
+    priced = true
+  }
+  return {
+    text: priced
+      ? t('stats.cost', { cost: formatCost(cost, aggregateCurrencyOf(rules)) })
+      : COST_PLACEHOLDER,
+    unpriced: unpricedHours.size,
+  }
+}
+
 // 历史费用口径标注:估算说明,未计价小时桶计数为正时追加后缀
 function costTitleText(t, unpriced) {
   const base = t('costTitle')
+  return unpriced > 0 ? `${base},${t('costUnpriced', { n: unpriced })}` : base
+}
+
+// 会话底栏费用口径标注:投影按小时/模型计价,未计价同样按小时桶计数
+function sessionCostTitleText(t, unpriced) {
+  const base = t('statsCostTitle')
   return unpriced > 0 ? `${base},${t('costUnpriced', { n: unpriced })}` : base
 }
 
@@ -1539,6 +1584,15 @@ function turnUsageSourceOfMessage(nodes, messageId) {
     return tail?.tokenUsage ?? node.data.tokenUsage ?? node.data?.closing?.usage ?? null
   } catch { /* 单节点形状残缺跳过,语义同扫描容错 */ }
   return null
+}
+
+// 回合结束时刻:时间条件应按历史回合发生的时刻匹配,而不是芯片首次渲染的时刻
+function turnTimeOfMessage(nodes, messageId) {
+  if (nodes === null || typeof nodes !== 'object') return null
+  const node = turnUsageIndexOf(nodes).get(messageId)
+  if (node === undefined) return null
+  const time = node?.data?.time ?? node?.time
+  return Number.isFinite(time) ? time : null
 }
 
 // 用量源 → 聚合桶形态:closing.usage 采样字段名不同(inputTokens 即 uncached 口径,实测 total-input=output 恒等),
@@ -1747,16 +1801,73 @@ function coercePricingRules(rules) {
 // 服务端规则为纯 JSON,编辑副本深拷贝与缓存脱钩
 const copyRules = (rules) => JSON.parse(JSON.stringify(rules))
 
+// 与宿主 pricing.js 同源:同模型保留首条无条件默认价并置组末,条件规则前置;*/* 恒最后。
+// 编辑器加载即归一,存量多条无条件规则不会继续出现「显示价不是生效价」。
+const normalizePricingRules = (rules) => {
+  if (!Array.isArray(rules)) return []
+  const groups = new Map()
+  for (const rule of rules) {
+    if (!rule || typeof rule !== 'object') continue
+    const model = typeof rule.model === 'string' ? rule.model : ''
+    if (!groups.has(model)) groups.set(model, [])
+    groups.get(model).push(rule)
+  }
+  const regular = []
+  const global = []
+  for (const [model, group] of groups) {
+    const fallback = group.find((rule) => (rule.conditions ?? []).length === 0)
+    const conditional = group.filter((rule) => (rule.conditions ?? []).length !== 0)
+    const ordered = fallback ? [...conditional, fallback] : conditional
+    if (model === MODEL_UNROUTED) global.push(...ordered)
+    else regular.push(...ordered)
+  }
+  return [...regular, ...global]
+}
+
+// 编辑器展示顺序:全局兜底恒最后,不受规则表首次出现顺序影响
+const displayGroupsOf = (rules) => {
+  const groups = groupRulesOf(rules)
+  return [
+    ...groups.filter((group) => group.model !== MODEL_UNROUTED),
+    ...groups.filter((group) => group.model === MODEL_UNROUTED),
+  ]
+}
+
 // 货币为编辑器级全局设置:整表统一,规则内 currency 由切换值派生(wire 形态不变)
 const applyCurrencyToRules = (rules, currency) => rules.map((rule) => ({ ...rule, currency }))
 
 // 新增规则默认:空模型 + 承接全局货币 + 四桶零价 + 无条件(恒生效);已有条件整条保留原样
-const defaultPricingRule = (currency = CURRENCIES[0]) => ({
-  model: '',
+const defaultPricingRule = (currency = CURRENCIES[0], model = '') => ({
+  model,
   currency,
   price: PRICE_KEYS.reduce((price, key) => ({ ...price, [key]: 0 }), {}),
   conditions: [],
 })
+
+// 值全为空/零视为未配置:合成 */* 槽没有填价时不应写入 wire
+const isZeroPricingRule = (rule) => PRICE_KEYS.every((key) => {
+  const value = rule?.price?.[key]
+  return value === '' || value === null || value === undefined || Number(value) === 0
+})
+
+// 编辑器加载:归一后若无 */* 默认价,补一条未配置的全局槽;synthetic 标记供保存时剔除
+const ensureGlobalDefault = (rules, currency) => {
+  const hasGlobalFallback = rules.some((rule) => rule.model === MODEL_UNROUTED
+    && (rule.conditions ?? []).length === 0)
+  if (hasGlobalFallback) return { rules, synthetic: false }
+  // 已有 */* 条件规则但缺默认价时也补默认槽,保证全局兜底组永远可编辑
+  return {
+    rules: [...rules, defaultPricingRule(currency, MODEL_UNROUTED)],
+    synthetic: true,
+  }
+}
+
+// 保存前草稿:合成全局槽仍全零时剔除,避免把「未配置」落成免费兜底
+const persistablePricingRules = (rules, syntheticGlobal) => syntheticGlobal
+  ? rules.filter((rule) => !(rule.model === MODEL_UNROUTED
+    && (rule.conditions ?? []).length === 0
+    && isZeroPricingRule(rule)))
+  : rules
 
 const patchItemAt = (array, index, patch) => array.map((item, i) => (i === index ? { ...item, ...patch } : item))
 
@@ -1774,14 +1885,15 @@ function groupRulesOf(rules) {
   return [...groups.values()]
 }
 
-// 组内划分:末条无条件规则即该模型的默认价(恒兜底,UI 禁条件/排序/删除),其余为附加计费规则。
-// 全条件组默认价为 null(UI 提供"添加默认价"入口);多条无条件时末条为默认价,存量数据自然收敛
+// 组内划分:首条无条件规则即该模型的实际默认价(与 matchPrice 同档取首条一致),
+// UI 禁条件/排序/删除;其余为附加计费规则。归一会把默认价移到组末,渲染层仍按此口径取槽,
+// 避免存量数据里「显示末条、实际首条」再次分叉。
 function partitionGroupOf(group) {
-  const last = group.slots[group.slots.length - 1]
-  const isDefault = last !== undefined && (last.rule.conditions ?? []).length === 0
+  const fallbackIndex = group.slots.findIndex((slot) => (slot.rule.conditions ?? []).length === 0)
+  if (fallbackIndex < 0) return { defaultSlot: null, extras: group.slots }
   return {
-    defaultSlot: isDefault ? last : null,
-    extras: isDefault ? group.slots.slice(0, -1) : group.slots,
+    defaultSlot: group.slots[fallbackIndex],
+    extras: group.slots.filter((_, index) => index !== fallbackIndex),
   }
 }
 
@@ -2025,9 +2137,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-seg-item:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .ud-seg-item--on{background:var(--dsw-alias-interactive-bg-active);color:var(--dsw-alias-label-primary);font-weight:600}
 .ud-custom-range{display:flex;align-items:center;gap:6px}
-.ud-date-input{border:1px solid var(--ud-border-strong);border-radius:var(--ud-radius-sm);background:var(--ud-card);color:var(--dsw-alias-label-primary);font-size:13px;padding:0 10px;height:36px;box-sizing:border-box}
+.ud-date-input{border:1px solid var(--ud-border-strong);border-radius:var(--ud-radius-sm);background:var(--ud-card);color:var(--dsw-alias-label-primary);font-size:13px;padding:0 10px;height:32px;box-sizing:border-box}
 .ud-custom-sep{color:var(--dsw-alias-label-tertiary)}
-.ud-btn{border:1px solid var(--ud-border-strong);background:var(--ud-card);color:var(--dsw-alias-label-secondary);border-radius:var(--ud-radius-sm);padding:0 12px;height:36px;font-size:13px;line-height:1;cursor:pointer;transition:background .15s,color .15s}
+.ud-btn{border:1px solid var(--ud-border-strong);background:var(--ud-card);color:var(--dsw-alias-label-secondary);border-radius:var(--ud-radius-sm);padding:0 12px;height:32px;font-size:13px;line-height:1;cursor:pointer;transition:background .15s,color .15s}
 .ud-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .ud-btn:disabled{opacity:.5;cursor:default}
 .ud-toolbar-side{display:flex;align-items:center;gap:8px;flex:none;margin-left:auto;align-self:stretch}
@@ -2039,7 +2151,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-error{border:1px solid color-mix(in srgb,var(--dsw-alias-state-warn-primary) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 12%,transparent);color:var(--dsw-alias-state-warn-label);border-radius:var(--ud-radius-sm);padding:8px 12px;font-size:13px;line-height:20px}
 .ud-loading{display:flex;flex-direction:column;gap:8px;padding:24px 0}
 .ud-loading::before,.ud-loading::after{content:"";display:block;height:14px;border-radius:var(--ud-radius-sm);background:var(--dsw-alias-bg-skeleton)}
-.ud-loading::after{width:60%}.ud-empty{border:.5px solid var(--ud-card-border);border-radius:var(--ud-radius-md);color:var(--dsw-alias-label-tertiary);text-align:center;padding:48px 16px;font-size:14px;line-height:22px;background:var(--ud-card)}
+.ud-loading::after{width:60%}.ud-empty{border:.5px solid var(--ud-card-border);border-radius:var(--ud-radius-md);color:var(--dsw-alias-label-tertiary);text-align:center;padding:24px 16px;font-size:14px;line-height:22px;background:var(--ud-card)}
 .ud-foot{color:var(--dsw-alias-label-tertiary);font-size:11px}
 .ud-status{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:4px;font-size:12px;color:var(--dsw-alias-label-tertiary)}
 .ud-status-fold{position:relative;display:inline-flex;align-items:center;justify-content:center;width:28px;height:100%;min-height:28px;border:none;background:none;padding:0;font:inherit;font-size:12px;line-height:1;color:var(--dsw-alias-label-tertiary);cursor:pointer;border-radius:var(--ud-radius-sm)}
@@ -2062,7 +2174,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-cards{display:grid;grid-template-columns:1.35fr 1fr 1fr;gap:12px}
 @media (max-width:560px){.ud-cards{grid-template-columns:1fr 1fr}}
 @media (max-width:380px){.ud-cards{grid-template-columns:1fr}}
-.ud-card{display:flex;flex-direction:column;gap:8px;border:.5px solid var(--ud-card-border);border-radius:var(--ud-radius-md);background:var(--ud-card);padding:16px;min-width:0}
+.ud-card{display:flex;flex-direction:column;gap:8px;border:.5px solid var(--ud-card-border);border-radius:var(--ud-radius-md);background:var(--ud-card);padding:12px 14px;min-width:0}
 .ud-card-head{display:flex;align-items:center;gap:6px}
 .ud-card-cost{margin-left:auto;font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}
 .ud-card-icon{display:inline-flex;color:var(--dsw-alias-label-tertiary)}
@@ -2849,6 +2961,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     const StatsLineAppended = React.memo(function StatsLineAppended({ useProjection, t = defaultT }) {
       if (typeof useProjection !== 'function') return null
       const usage = useProjection('tokenUsage')
+      const modelUsage = useProjection(MODEL_USAGE_PROJECTION)
       const [prefs, setPrefs] = useState(() => statsLineState.get())
       useEffect(() => statsLineState.subscribe(() => setPrefs(statsLineState.get())), [])
       const { rules: pricingRules } = usePricing()
@@ -2863,7 +2976,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const target = useUsageDialogTarget(anchorRef, percent)
       const rows = buildUsageDialogRows(usage, prefs, t)
       const costItem = usage && (billedInputTokens(usage) > 0 || usage.outputTokens > 0)
-        ? buildCostItem(usage, pricingRules, prefs, t)
+        ? buildSessionCostItem(usage, modelUsage, pricingRules, prefs, t)
         : null
       const details = target && createPortal && rows.length > 0
         ? createPortal(rows.map((row) => h(React.Fragment, { key: row.key },
@@ -2872,7 +2985,11 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         : null
       return h(React.Fragment, null,
         h('span', { ref: anchorRef, hidden: true }),
-        costItem !== null && h(HintText, { innerRef: costRef, className: 'ud-statsline-root', text: t('statsCostTitle') }, costItem),
+        costItem !== null && h(HintText, {
+          innerRef: costRef,
+          className: 'ud-statsline-root',
+          text: sessionCostTitleText(t, costItem.unpriced),
+        }, costItem.text),
         details)
     })
 
@@ -2886,15 +3003,17 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const usageSource = typeof messageId === 'string' && messageId !== ''
         ? useChat((state) => turnUsageSourceOfMessage(state?.nodes, messageId))
         : null
+      const turnTime = typeof messageId === 'string' && messageId !== ''
+        ? useChat((state) => turnTimeOfMessage(state?.nodes, messageId))
+        : null
       const [prefs, setPrefs] = useState(() => statsLineState.get())
       useEffect(() => statsLineState.subscribe(() => setPrefs(statsLineState.get())), [])
       const { rules: pricingRules } = usePricing()
       const matched = usageSourceBuckets(usageSource)
-      // 计价时点 = 回合结束事件被观测的时刻(F15 决策:统一用当时价格、按回合
-      // 事件时点匹配当前规则表)。官方 tokenUsage 无事件时间戳,以用量首次到
-      // 达的观测时刻冻结:后续规则重渲染不再漂移,同一回合计价时点恒定
+      // 计价时点 = 回合结束事件时刻;节点缺时刻的旧形态才冻结在首次观测时刻,
+      // 保证历史回合的时间条件不会随打开页面的时刻漂移
       const observedAtRef = useRef(null)
-      if (matched && observedAtRef.current === null) observedAtRef.current = Date.now()
+      if (matched && observedAtRef.current === null) observedAtRef.current = turnTime ?? Date.now()
       const price = matched && prefs.costDisplay && pricingRules !== null && observedAtRef.current !== null
         ? matchPrice(pricingRules, turnModelOf(matched), new Date(observedAtRef.current))
         : null
@@ -3052,10 +3171,10 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           }, CONDITION_KIND_OPTIONS.map((kind) => h('option', { key: kind, value: kind }, t(CONDITION_KIND_LABEL_KEYS[kind])))),
           h('div', { className: 'ud-cond-fields' }, ...(fields[condition.kind] ?? [])),
           errorTextOf(condPath),
-          h('button', {
+          (rule.conditions ?? []).length > 1 ? h('button', {
             className: 'ud-btn ud-btn--text', type: 'button', onClick: () => removeConditionAt(conditionIndex),
             'aria-label': t('deleteCondition'), title: t('deleteCondition'),
-          }, '×'))
+          }, '×') : null)
       }
       return h('div', { className: 'ud-rule' },
         h('div', { className: 'ud-slot-head' },
@@ -3082,11 +3201,12 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     }
 
     // 模型组卡:组头 = 模型键输入(整组一次改名)+ 删除整组;组内 = 默认价槽(禁条件/排序/删除,恒兜底)
-    // + 附加计费规则列表(从上到下首个命中生效,全不命中落默认价)。
+    // + 附加计费规则列表(从上到下首个命中生效,全不命中落默认价)。全局 */* 组模型键锁定且不可删除。
     // 组件 key 由调用方锚定首槽位平面索引,改名引发的重新聚合不会丢焦点
     function PricingModelGroup({ group, currency, errors, t, onModelChange, onGroupRemove, onSlotPatch, onSlotRemove, onSlotMove, onSlotAdd }) {
       const modelError = group.slots.map((slot) => errors.get(`${slot.index}.model`)).find(Boolean)
       const { defaultSlot, extras } = partitionGroupOf(group)
+      const isGlobalDefault = group.model === MODEL_UNROUTED
       // 新附加规则插到默认价平面位之前(无默认价则组末),保证默认价恒居组末
       const insertPosition = defaultSlot ? defaultSlot.index - 1 : group.slots[group.slots.length - 1].index
       return h('div', { className: 'ud-rule-group' },
@@ -3095,11 +3215,13 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             h('span', { className: 'ud-field-label' }, t('pricingModel')),
             h('input', {
               type: 'text', className: 'ud-input', value: group.model,
-              placeholder: t('pricingModelPlaceholder'),
+              placeholder: t('pricingModelPlaceholder'), readOnly: isGlobalDefault,
               onChange: (event) => onModelChange(event.target.value),
             }),
             modelError ? h('span', { className: 'ud-field-error' }, t(modelError)) : null),
-          h(DeleteArmedButton, { labelKey: 'deleteGroup', confirmKey: 'confirmDelete', onConfirm: onGroupRemove, t })),
+          isGlobalDefault ? null : h(DeleteArmedButton, {
+            labelKey: 'deleteGroup', confirmKey: 'confirmDelete', onConfirm: onGroupRemove, t,
+          })),
         h('div', { className: 'ud-rule-group-slots' },
           defaultSlot ? h('div', { className: 'ud-rule ud-rule-default' },
             h('div', { className: 'ud-slot-head' },
@@ -3124,7 +3246,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           }))),
         h('button', {
           className: 'ud-rule-add', type: 'button',
-          onClick: () => onSlotAdd(insertPosition, group.model),
+          onClick: () => onSlotAdd(insertPosition, group.model, !defaultSlot),
         }, defaultSlot ? t('addRule') : t('addDefaultPrice')))
     }
 
@@ -3138,6 +3260,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const [saved, setSaved] = useState(false)
       const savedTimerRef = useRef(null)
       const aliveRef = useRef(false)
+      const syntheticGlobalRef = useRef(false)
       useEffect(() => {
         aliveRef.current = true
         return () => { aliveRef.current = false }
@@ -3151,11 +3274,13 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             setPhase(PRICING_STATE_UNAVAILABLE)
             return
           }
-          // 打开即按首个非空货币归一显示(无非空则回落首档),整表状态与全局货币恒一致
-          const loaded = copyRules(value.rules)
+          // 打开即归一规则并补全局兜底槽;货币取首个非空,无非空回落首档
+          const loaded = normalizePricingRules(copyRules(value.rules))
           const unified = aggregateCurrencyOf(loaded) || CURRENCIES[0]
+          const ensured = ensureGlobalDefault(loaded, unified)
+          syntheticGlobalRef.current = ensured.synthetic
           setCurrency(unified)
-          setRules(applyCurrencyToRules(loaded, unified))
+          setRules(applyCurrencyToRules(ensured.rules, unified))
           setPhase(PRICING_STATE_READY)
         })
         return () => { alive = false }
@@ -3166,12 +3291,13 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       }, [])
 
       const save = async () => {
-        const found = validatePricingRules(rules)
+        const draft = persistablePricingRules(rules, syntheticGlobalRef.current)
+        const found = validatePricingRules(draft)
         setErrors(found)
         setSaved(false)
         if (found.size > 0) return
         setSaving(true)
-        const result = await requestPost(ENDPOINTS.pricing, { rules: coercePricingRules(rules) })
+        const result = await requestPost(ENDPOINTS.pricing, { rules: coercePricingRules(draft) })
         // 保存属于共享数据提交,编辑器退出后仍广播;局部状态只由存活实例更新。
         if (result.ok && validPricing(result.value)) applyPricingValue(result.value, true)
         if (!aliveRef.current) return
@@ -3180,10 +3306,15 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           setSaveError(result.message || '价格响应无效')
           return
         }
-        // 编辑副本同步为本次保存返回的规则,其他编辑器草稿保持独立。
+        // 编辑副本同步为本次保存返回的规则;空表仍保留可见的未配置全局槽。
+        const savedRules = normalizePricingRules(copyRules(result.value.rules))
+        const unified = aggregateCurrencyOf(savedRules) || currency
+        const ensured = ensureGlobalDefault(savedRules, unified)
+        syntheticGlobalRef.current = ensured.synthetic
         setSaveError('')
         setErrors(new Map())
-        setRules(copyRules(result.value.rules))
+        setCurrency(unified)
+        setRules(applyCurrencyToRules(ensured.rules, unified))
         setSaved(true)
         if (savedTimerRef.current) clearTimeout(savedTimerRef.current)
         savedTimerRef.current = setTimeout(() => setSaved(false), PRICING_SAVED_NOTICE_MS)
@@ -3216,7 +3347,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             h('button', { className: 'ud-btn', type: 'button', disabled: saving, onClick: save }, t('save')))),
         saveError ? h('div', { className: 'ud-error' }, saveError) : null,
         h('span', { className: 'ud-rule-cond' }, t('ruleOrderHint')),
-        groupRulesOf(rules).map((group) => h(PricingModelGroup, {
+        displayGroupsOf(rules).map((group) => h(PricingModelGroup, {
           // key 锚定首槽位平面索引:改名重聚合不重建组件,输入焦点不丢
           key: String(group.slots[0].index),
           group,
@@ -3228,11 +3359,10 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           onSlotPatch: (index, part) => setRules((prev) => patchItemAt(prev, index, part)),
           onSlotRemove: (index) => setRules((prev) => prev.filter((_, i) => i !== index)),
           onSlotMove: (fromIndex, toIndex) => setRules((prev) => moveRuleTo(prev, fromIndex, toIndex)),
-          onSlotAdd: (position, model) => setRules((prev) => insertRuleAt(prev, position, {
-            ...defaultPricingRule(currency),
-            model,
-            // 附加规则默认带全天时段条件:默认价已独立成槽,附加规则应以可编辑条件呈现
-            conditions: [defaultCondition(CONDITION_KIND_OPTIONS[0])],
+          onSlotAdd: (position, model, asDefault) => setRules((prev) => insertRuleAt(prev, position, {
+            ...defaultPricingRule(currency, model),
+            // 默认价槽无条件;附加规则至少带一条条件,防止删光后变成隐藏默认价
+            conditions: asDefault ? [] : [defaultCondition(CONDITION_KIND_OPTIONS[0])],
           })),
         })),
         h('button', {

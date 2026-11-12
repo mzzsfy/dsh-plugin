@@ -1093,7 +1093,7 @@ window.__ModuleLoader__.load({
       '  --te-hover:var(--dsw-alias-interactive-bg-hover); --te-hover-danger:var(--dsw-alias-interactive-bg-hover-danger);',
       '  --te-skeleton:var(--dsw-alias-bg-skeleton); --te-switch-thumb:var(--dsw-alias-switch-thumb);',
       '  --te-radius-sm:var(--dsw-radius-sm); --te-radius-md:var(--dsw-radius-md); --te-radius-lg:var(--dsw-radius-lg);',
-      '  width:100%; box-sizing:border-box; padding:20px; border:.5px solid var(--te-card-border);',
+      '  width:100%; box-sizing:border-box; padding:14px 16px; border:.5px solid var(--te-card-border);',
       '  border-radius:var(--te-radius-md); background:var(--te-card); color:var(--te-text);',
       '  font-size:14px; line-height:22px; transition:border-color .16s; }',
       '.te-card:hover { border-color:var(--te-border-strong); }',

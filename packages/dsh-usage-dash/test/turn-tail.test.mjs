@@ -16,6 +16,7 @@ const {
   turnCostAmountOf,
   turnCostTitleText,
   turnModelOf,
+  turnTimeOfMessage,
   turnTokenUsageOfMessage,
   turnUsageSourceOfMessage,
   usageSourceBuckets,
@@ -98,6 +99,15 @@ test('反查:同一容器重复调用命中索引,结果一致', () => {
   assert.equal(second, tokenUsage)
   // 未命中的 messageId 二次查询仍为 null(索引缓存不放大误命中)
   assert.equal(turnTokenUsageOfMessage(nodes, 'm-2'), null)
+})
+
+test('反查时刻:命中返回回合尾部 data.time,缺时刻为 null', () => {
+  // Given 回合尾节点带结束时刻 When 反查 Then 返回该时刻,供时间条件按历史回合计价
+  const node = tailNode('m-1', { uncachedInputTokens: 1, outputTokens: 1 })
+  node.data.time = 1_700_000_000_000
+  assert.equal(turnTimeOfMessage([node], 'm-1'), 1_700_000_000_000)
+  assert.equal(turnTimeOfMessage([{ kind: 'turn-tail', data: { closing: { finalNode: { messageId: 'm-1' } } } }], 'm-1'), null)
+  assert.equal(turnTimeOfMessage([], 'm-1'), null)
 })
 
 test('反查源:命中返回仓库内原始引用,采样形态不归一(归一属渲染层)', () => {

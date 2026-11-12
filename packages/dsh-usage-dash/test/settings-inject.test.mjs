@@ -167,6 +167,25 @@ test('0.1.7 形态:settings 激活即门面生效,GET 读 configRef,POST 经 con
   assert.equal(savedParsed.value.revision, 1)
 })
 
+test('0.1.7 形态:GET/POST 归一重复 */* 与同模型多条无条件', async () => {
+  // Given 存量规则含两条 */* 与一个精确模型,全局组排在前面
+  // When GET 回读、再 POST 一组新的重复规则
+  // Then GET/POST 都把精确模型放前,*/* 只保留首条并放最后
+  const globalOne = { ...RULE, model: '*/*', price: { ...RULE.price, input: 1 } }
+  const globalTwo = { ...RULE, model: '*/*', price: { ...RULE.price, input: 9 } }
+  const exact = { ...RULE, model: 'p/m', price: { ...RULE.price, input: 3 } }
+  const rc = makeRc17({ configStore: { pricing: { rules: [globalOne, exact, globalTwo] } } })
+  apply(rc.ctx, rc.configRef)
+  rc.activateSettings()
+  const read = JSON.parse((await invoke(rc.routes, PATH_PRICING, { method: 'GET' })).body)
+  assert.deepEqual(read.value.rules.map((item) => [item.model, item.price.input]), [['p/m', 3], ['*/*', 1]])
+  // When 再写一组重复规则:提交序首条 9 胜出,POST 回读同口径
+  const saved = JSON.parse((await invokeJson(rc.routes, PATH_PRICING, {
+    payload: { rules: [globalTwo, globalOne, exact] },
+  })).body)
+  assert.deepEqual(saved.value.rules.map((item) => [item.model, item.price.input]), [['p/m', 3], ['*/*', 9]])
+})
+
 test('0.1.7 形态:configEditor 缺失即 POST 拒绝,GET 回读不受影响', async () => {
   // Given configEditor 服务缺席
   const rc = makeRc17({ configEditorAvailable: false })

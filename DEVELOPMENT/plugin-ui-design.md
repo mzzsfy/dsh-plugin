@@ -10,13 +10,13 @@
 
 | 层 | 适用 | 正文 | 控件高 | 容器圆角 | 行距 | 页面标题 |
 |---|---|---|---|---|---|---|
-| L1 设置类 | `settings.section` 分区、设置弹窗内表单 | 14px/22px | 36px | radius-md | 行 padding 12px(卡内)/16px(卡外) | 16px/500(默认省略,分区名不重复) |
+| L1 设置类 | `settings.section` 分区、设置弹窗内表单 | 14px/22px | 32px | radius-md | 行 padding 8-12px(卡内)/16px(卡外) | 18px/600 分区标题(与导航同名),说明 13px |
 | L2 面板类 | 侧栏入口的全屏页面(股票/定时任务/公司管理/穿透隧道等) | 13px/20px,表格 13px | 32px | radius-md | 行高 40px | 20px/500 |
 | L3 注入类 | 输入区按钮、思维块、终端、提示条、状态栏 | 12px/18px | 24-28px | radius-sm | 紧凑 8-12px | 不适用 |
 
 控件(按钮、输入、下拉)自身圆角统一 radius-sm,上表的"容器圆角"指卡片、面板、弹窗容器。
 
-L1 的尺度与宿主官方设置页一致(宿主设置行 14px/22px、控件 36px、行 padding 16px);卡内行 12px 是压缩密度的既定选择,与宿主行 16px 并存但不得用于宿主原生行替换。这是"与宿主浑然一体"的硬约束,不得以"信息密度"为由回退到 12px。
+L1 的尺度与宿主官方设置页同一密度带(宿主设置行 14px/22px、控件 32-36px、行 padding 16px);卡内行 8-12px 是压缩密度的既定选择,与宿主行 16px 并存但不得用于宿主原生行替换。设置页顶部保留 18px/600 分区标题,与导航标签同名是允许且推荐的(标题是页面身份,不是重复噪音);空态与卡片不得用大留白撑高页面。设置面板内容宽度上限 560px(宽屏不铺满),列表操作列紧随内容,禁止用 `1fr` 把操作推到行尾留出大片空白。
 
 宿主原生同构例外:与宿主官方行(如 BashRow 13px/24px、代码块小号 11px/16px)混排的注入面,允许按官方像素实现,优先级高于本表 L3 的 12px/18px;需在注释注明对齐目标。
 
@@ -95,7 +95,7 @@ L1 设置分区:
 </section>
 ```
 
-- 设置导航已显示分区名,页面内默认不再重复 16px 标题,只保留一行说明;确需副标题时用 16px/500,但不得与导航标签同名(如导航「账号余额」、页内「账号详情」)。
+- 设置导航已显示分区名,页面顶部仍保留 18px/600 分区标题(与导航同名),下接一行 13px 说明;标题是页面定位锚点,不得以"重复"为由省略。
 - 分区内的每组设置各成一张卡片,卡片之间 16px;卡内行用 0.5px 分隔线,最后一行不留线。
 
 L2 全屏页面:
@@ -122,12 +122,12 @@ L2 全屏页面:
 - **开关**:track 胶囊 34×19px、thumb 圆点 13px(参考 `.tn-switch` 存量值,防仿制漂移),关闭态底色 `<pfx>-bg-muted`,选中底色 `<pfx>-accent`,过渡 0.15s ease;禁用态统一见文末"禁用"。禁止 40×24 等放大变体。
 - **按钮**:主按钮实底 `<pfx>-accent` + `--dsw-alias-bg-base` 文字、hover `<pfx>-accent-deep`;次按钮透明底 + `<pfx>-border-strong` 边框 + text 色,hover `<pfx>-hover`;ghost 按钮无边框、text-sub,hover `<pfx>-hover`;危险按钮默认 ghost + `<pfx>-danger` 文字,hover `<pfx>-hover-danger`,实底危险仅用于确认弹窗主操作。高度 L1 36 / L2 32 / L3 28,圆角 radius-sm,内边距水平 12/14。图标按钮 28×28,`aria-label` 必填。
 - **输入框**:白底(`<pfx>-bg`)+ `<pfx>-border-strong` 边框,radius-sm,焦点环 `outline: 2px solid var(--dsw-alias-state-business-primary)`。L1 高 36,L2/L3 高 32/28。数字输入右侧单位用 `<pfx>-text-dim` 11px。
-- **卡片 / 面板**:L1 `<pfx>-card` 底 + `<pfx>-card-border` 0.5px 描边 + radius-md + padding 16-20;L2 `<pfx>-bg` 底 + `<pfx>-border` 描边 + radius-md;嵌套分层用 bg-sub,不再加边框。与官方 PluginCard 同槽位并列的卡片,二选一并全页一致:镜像官方像素(注释豁免),或统一为 L1 卡并在注释说明不镜像。
+- **卡片 / 面板**:L1 `<pfx>-card` 底 + `<pfx>-card-border` 0.5px 描边 + radius-md + padding 10-16;L2 `<pfx>-bg` 底 + `<pfx>-border` 描边 + radius-md;嵌套分层用 bg-sub,不再加边框。与官方 PluginCard 同槽位并列的卡片,二选一并全页一致:镜像官方像素(注释豁免),或统一为 L1 卡并在注释说明不镜像。
 - **表格 / 列表**:表头 12px text-dim,行高 40px(L2)/36px(L3),hover `<pfx>-hover`,选中行 accent-wash 底 + accent 文字或左侧 accent 竖线(二选一,包内一致);操作列在最右,默认 opacity .75,hover 行时 1。
 - **徽标 / 状态点**:状态语义只允许 ok / warn / danger 三色,文字用对应语义色、底色统一 `color-mix(in srgb, var(<pfx>-<状态>) 10-14%, transparent)`(包内固定一档);计数徽标用 `<pfx>-bg-muted` 底 + text-sub。禁止独立配色。
 - **pill 组**:容器 `<pfx>-bg-muted` + radius-sm + padding 2-4;选项高 28(普通 pill)/30(导航 tab,参考 `.tn-tab`);选中 accent 实底 + `--dsw-alias-bg-base` 文字,或 accent-wash 底 + accent 文字(包内二选一)。
 - **悬浮提示**:鼠标悬停出现的提示统一用公共依赖 `@mzzsfy/dsh-common-tools/client` 导出的 `Tooltip`(视觉 `.dct-tip`,由 dsh-usage-dash 悬浮窗迁移而来):`bg-layer-2` 底 + 1px border-l2 + radius-md + shadow-lv3 + 12px/1.5 + padding 10/12 + max-width 420 + 8px 箭头 + 0.12s 透明度过渡。消费方只传 `anchor`(`{kind:'point',x,y}` 指针跟随或 `{kind:'rect',left,top,width,height}` 元素锚点)、内容与可选 `panelSelector` 裁剪边界;禁止各包再写定位算法或自定义提示外观。图表十字线等高频跟随提示可保留专用定位,但视觉参数必须与 `.dct-tip` 一致;dsh-usage-dash 的 `.ud-tip` 是公共提示的迁移来源,其图表浮层保留专用实现,改动任一侧须同步另一侧。
-- **空态**:一行说明(14px text-sub)+ 一个主操作按钮,居中,上下留白 48px;不插图不造插画。加载态用骨架条(不含文案)或纯"加载中…"文案,二者不可混排;禁止空白。
+- **空态**:一行说明(14px text-sub)+ 一个主操作按钮,居中,上下留白 24px;不插图不造插画。加载态用骨架条(不含文案)或纯"加载中…"文案,二者不可混排;禁止空白。
 - **错误与 toast**:错误文案 text 色不飘红,红只给图标 / 边框 / 操作按钮;toast 底色 `var(--dsw-alias-toast-bg)`,文案 `var(--dsw-alias-toast-label)`。
 - **折叠**:头部整行可点,chevron 14px;展开内容顶部 8px,说明 12px text-dim。
 - **禁用**:统一 opacity 0.5 + cursor not-allowed,不换色相(开关、按钮、输入一致)。
@@ -146,7 +146,7 @@ L2 全屏页面:
 - 未重定义任何 `--dsw-*` / `--ds-*` 变量;未引用宿主未定义的变量名;等宽字体只用 `--ds-font-family-code`
 - 无新增奇数间距与 9/10px 字号;圆角只经 radius token / 999px / 50%,或官方卡镜像例外(须注释)
 - 状态色只用 ok / warn / danger,无第四种语义色
-- 页面骨架符合所处层的规格(L1 默认不重复 16px 分区名、有卡片分组;L2 有 20px 页头与唯一主操作;L3 紧凑;宿主原生同构面按例外条款)
+- 页面骨架符合所处层的规格(L1 有 18px 分区标题与卡片分组;L2 有 20px 页头与唯一主操作;L3 紧凑;宿主原生同构面按例外条款)
 - 开关 / pill 结构符合 plugin-client-conventions.md,类名带包前缀
 - 列表有 hover 与列对齐;空态有说明 + 主操作;加载态不空白
 - 亮暗主题各验证一遍,无对比度失效

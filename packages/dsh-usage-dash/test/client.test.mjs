@@ -1229,7 +1229,7 @@ test('groupRulesOf 空表返回空组列表', () => {
   assert.deepEqual(groupRulesOf([]), [])
 })
 
-test('partitionGroupOf 组末无条件规则为默认价,其余为附加规则且保序', () => {
+test('partitionGroupOf 首条无条件规则为默认价,其余为附加规则且保序', () => {
   // Given 组槽位 [条件0, 条件1, 无条件2] When 划分 Then 默认价=索引2,附加=[0,1]
   const cond = { kind: 'dailyWindow', from: '00:00', to: '08:00' }
   const group = { model: 'a/1', slots: [
@@ -1253,15 +1253,15 @@ test('partitionGroupOf 全条件规则组无默认价', () => {
   assert.deepEqual(extras.map((slot) => slot.index), [0, 1])
 })
 
-test('partitionGroupOf 多条无条件规则时末条为默认价,前条按附加规则显示', () => {
-  // Given 组槽位 [无条件0, 无条件1] When 划分 Then 默认价=索引1,附加=[0](存量数据自然收敛)
+test('partitionGroupOf 多条无条件规则时首条为默认价,后续按附加规则显示', () => {
+  // Given 组槽位 [无条件0, 无条件1] When 划分 Then 默认价=索引0,附加=[1](与 matchPrice 首条命中一致)
   const group = { model: 'a/1', slots: [
     { rule: { model: 'a/1', conditions: [] }, index: 0 },
     { rule: { model: 'a/1', conditions: [] }, index: 1 },
   ] }
   const { defaultSlot, extras } = partitionGroupOf(group)
-  assert.equal(defaultSlot.index, 1)
-  assert.deepEqual(extras.map((slot) => slot.index), [0])
+  assert.equal(defaultSlot.index, 0)
+  assert.deepEqual(extras.map((slot) => slot.index), [1])
 })
 
 test('moveRuleTo 跨位移动返回新数组且不动原数组', () => {

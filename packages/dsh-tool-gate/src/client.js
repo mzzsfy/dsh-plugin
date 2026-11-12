@@ -39,7 +39,7 @@ window.__ModuleLoader__.load({
   display: flex; flex-direction: column; gap: 16px; color: var(--tg-text); font-size: 14px; line-height: 22px; }
 .tg-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
 .tg-head__hint { color: var(--tg-text-sub); font-size: 13px; line-height: 20px; }
-.tg-card { display: flex; flex-direction: column; padding: 20px; background: var(--tg-card); border: .5px solid var(--tg-card-border); border-radius: var(--tg-radius-md); }
+.tg-card { display: flex; flex-direction: column; padding: 14px 16px; background: var(--tg-card); border: .5px solid var(--tg-card-border); border-radius: var(--tg-radius-md); }
 .tg-card__head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; padding-bottom: 8px; }
 .tg-card__title { font-weight: 600; font-size: 14px; line-height: 22px; color: var(--tg-text); }
 .tg-card__meta { margin-left: auto; color: var(--tg-text-dim); font-size: 12px; line-height: 18px; }
@@ -74,7 +74,7 @@ window.__ModuleLoader__.load({
 .tg-error { padding: 8px 0 0; color: var(--tg-danger); font-size: 12px; line-height: 18px; }
 .tg-skeleton { display: flex; flex-direction: column; gap: 8px; padding: 12px 0; }
 .tg-skeleton__row { height: 16px; border-radius: var(--tg-radius-sm); background: var(--tg-skeleton); }
-.tg-switch { position: relative; display: inline-flex; align-items: center; gap: 8px; min-height: 36px; cursor: pointer; }
+.tg-switch { position: relative; display: inline-flex; align-items: center; gap: 8px; min-height: 32px; cursor: pointer; }
 .tg-switch input[type="checkbox"] { position: absolute; opacity: 0; width: 0; height: 0; }
 .tg-switch__track { position: relative; flex: none; width: 34px; height: 19px; box-sizing: border-box; border-radius: 999px; background: var(--tg-bg-muted); border: 1px solid var(--tg-border); transition: background .15s, border-color .15s; }
 .tg-switch__thumb { position: absolute; top: 50%; left: 2px; width: 13px; height: 13px; border-radius: 50%; background: var(--tg-text-dim); transform: translateY(-50%); transition: left .15s, background .15s; }

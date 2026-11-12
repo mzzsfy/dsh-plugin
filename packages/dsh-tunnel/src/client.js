@@ -174,7 +174,7 @@ body{
 .tu-row:hover .tu-actions,.tu-row:focus-within .tu-actions{opacity:1}
 .tu-icon{min-height:28px;border:none;background:transparent;color:var(--tu-text-sub);cursor:pointer;font-size:var(--tu-font-sm);padding:0 8px;border-radius:var(--tu-radius-sm);transition:background .15s,color .15s}
 .tu-icon:hover{background:var(--tu-hover);color:var(--tu-text)}
-.tu-empty{display:flex;flex-direction:column;align-items:center;gap:12px;font-size:var(--tu-font-base);color:var(--tu-text-sub);padding:48px 0;text-align:center}
+.tu-empty{display:flex;flex-direction:column;align-items:center;gap:12px;font-size:var(--tu-font-base);color:var(--tu-text-sub);padding:24px 0;text-align:center}
 .tu-error{font-size:var(--tu-font-sm);color:var(--tu-text);background:var(--tu-bg-sub);border:1px solid color-mix(in srgb,var(--tu-danger) 40%,transparent);border-left:3px solid var(--tu-danger);border-radius:var(--tu-radius-sm);padding:8px 12px}
 .tu-switch{position:relative;display:inline-flex;align-items:center;cursor:pointer;gap:var(--tu-space-2)}
 .tu-switch input[type="checkbox"] { position:absolute;opacity:0;width:1px;height:1px }
@@ -220,7 +220,7 @@ body{
 .tu-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--tu-space-4)}
 .tu-field{display:flex;flex-direction:column;gap:6px;font-size:var(--tu-font-sm);min-width:0;color:var(--tu-text-sub)}
 .tu-field--wide{grid-column:1 / -1}
-.tu-field input[type="text"],.tu-field input[type="number"]{min-height:36px;border:1px solid var(--tu-border-strong);border-radius:var(--tu-radius-sm);padding:0 10px;font:inherit;font-size:var(--tu-font-base);background:var(--tu-bg);color:var(--tu-text);min-width:0;transition:border-color .15s,box-shadow .15s}
+.tu-field input[type="text"],.tu-field input[type="number"]{min-height:32px;border:1px solid var(--tu-border-strong);border-radius:var(--tu-radius-sm);padding:0 10px;font:inherit;font-size:var(--tu-font-base);background:var(--tu-bg);color:var(--tu-text);min-width:0;transition:border-color .15s,box-shadow .15s}
 .tu-field input:focus{outline:none;border-color:var(--tu-accent);box-shadow:0 0 0 2px var(--tu-accent-wash)}
 .tu-hint{font-size:var(--tu-font-sm);line-height:18px;color:var(--tu-text-dim)}
 @media (max-width: 560px){

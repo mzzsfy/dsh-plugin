@@ -10,6 +10,7 @@ import {
   costOf as hostCostOf,
   conditionMatches as hostConditionMatches,
   isTwoSegmentModel as hostIsTwoSegmentModel,
+  normalizePricingRules as hostNormalizePricingRules,
   UNIT_PER_MILLION as hostUnitPerMillion,
   CURRENCIES as hostCurrencies,
   CONDITION_KINDS as hostConditionKinds,
@@ -24,6 +25,7 @@ const {
   costOf: clientCostOf,
   conditionMatches: clientConditionMatches,
   isTwoSegmentModel: clientIsTwoSegmentModel,
+  normalizePricingRules: clientNormalizePricingRules,
   UNIT_PER_MILLION: clientUnitPerMillion,
   CURRENCIES: clientCurrencies,
   CONDITION_KINDS: clientConditionKinds,
@@ -325,4 +327,52 @@ test(`路由引用键双侧一致(${REF_VECTORS.length} 向量)`, () => {
   assert.equal(hostRefOf(null), undefined)
   assert.equal(clientTurnModelOf({ routes: [] }), clientModelUnrouted)
   assert.equal(clientTurnModelOf(null), clientModelUnrouted)
+})
+
+// 归一为双实现共享的同一语义:默认价取首条无条件、组末,`*/*` 恒最后。
+// 同一输入喂双侧,除顺序外再断言保留下来的对象引用与原数组一致(不得克隆或改写)
+const NORMALIZE_VECTORS = [
+  {
+    name: '重复 */* 保留首条并移到最后',
+    rules: [
+      { model: '*/*', price: { input: 1 }, conditions: [] },
+      { model: 'p/m', price: { input: 3 }, conditions: [] },
+      { model: '*/*', price: { input: 9 }, conditions: [] },
+    ],
+    expected: [['p/m', 3], ['*/*', 1]],
+  },
+  {
+    name: '同模型首条无条件为默认价,条件规则前置',
+    rules: [
+      { model: 'p/m', price: { input: 1 }, conditions: [] },
+      { model: 'p/m', price: { input: 2 }, conditions: [{ kind: 'weekdays', days: [1] }] },
+      { model: 'p/m', price: { input: 3 }, conditions: [] },
+    ],
+    expected: [['p/m', 2], ['p/m', 1]],
+  },
+  {
+    name: '全条件组不合成默认价',
+    rules: [{ model: 'p/m', price: { input: 1 }, conditions: [{ kind: 'weekdays', days: [1] }] }],
+    expected: [['p/m', 1]],
+  },
+  {
+    name: '缺失 conditions 视作无条件',
+    rules: [{ model: 'p/m', price: { input: 1 } }, { model: 'p/m', price: { input: 2 }, conditions: [] }],
+    expected: [['p/m', 1]],
+  },
+  {
+    name: '非数组安全回落',
+    rules: null,
+    expected: [],
+  },
+]
+
+test(`规则归一双侧一致(${NORMALIZE_VECTORS.length} 向量)`, () => {
+  for (const vector of NORMALIZE_VECTORS) {
+    const host = hostNormalizePricingRules(vector.rules)
+    const client = clientNormalizePricingRules(vector.rules)
+    assert.deepEqual(client, host, vector.name)
+    assert.deepEqual(host.map((rule) => [rule.model, rule.price.input]), vector.expected, vector.name)
+    for (const rule of host) assert.ok(vector.rules?.includes(rule), `${vector.name}: 保留原对象引用`)
+  }
 })

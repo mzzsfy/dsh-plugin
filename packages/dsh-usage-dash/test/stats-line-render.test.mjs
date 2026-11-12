@@ -5,7 +5,8 @@ import { CLIENT_BODY, DECLARATION_NAMES } from './client-eval.mjs'
 const core = new Function(`${CLIENT_BODY}\nreturn { ${DECLARATION_NAMES.join(', ')} }`)()
 const usage = { uncachedInputTokens: 1000, cacheReadTokens: 4000, cacheWriteTokens: 0, outputTokens: 500 }
 const on = { cachePrecision: true, tokenDetail: true, costDisplay: true }
-const rules = [{ model: '*/*', currency: '¥', price: { input: 2, cacheRead: 0, cacheWrite: 0, output: 0 }, conditions: [] }]
+const rules = [{ model: 'p/m', currency: '¥', price: { input: 2, cacheRead: 0, cacheWrite: 0, output: 0 }, conditions: [] }]
+const modelUsage = { hours: [{ time: new Date(2026, 2, 15, 10, 0).getTime(), model: 'p/m', ...usage }] }
 
 function render(options = {}) {
   const { prefs = on, lang = 'zh', pricing = rules, target = {} } = options
@@ -20,7 +21,10 @@ function render(options = {}) {
   // 悬浮包装件在整源求值区之外(组件区),测试只关心文本与结构,用保留类名与子节点的桩
   const HintText = (props) => h('span', { className: props.className }, props.children)
   const component = new Function(...names, 'React', 'h', 'useState', 'useEffect', 'useLayoutEffect', 'useRef', 'statsLineState', 'defaultT', 'usePricing', 'useUsageDialogTarget', 'createPortal', 'HintText', `return (${source})`)(...Object.values(core), React, h, useState, noop, noop, () => ({ current: null }), { get: () => prefs }, core.createTranslator(core.MESSAGES_ZH), () => ({ rules: pricing }), () => target, (content, container) => ({ type: 'portal', props: { container }, children: [content].flat(Infinity) }), HintText)
-  return component({ useProjection: () => value, t: core.createTranslator(lang === 'en' ? core.MESSAGES_EN : core.MESSAGES_ZH) })
+  return component({
+    useProjection: (key) => key === 'usageDashModelUsage' ? modelUsage : value,
+    t: core.createTranslator(lang === 'en' ? core.MESSAGES_EN : core.MESSAGES_ZH),
+  })
 }
 const nodes = (tree) => tree && typeof tree === 'object' ? [tree, ...tree.children.flatMap(nodes)] : []
 const text = (tree) => typeof tree === 'string' ? tree : tree?.children.map(text).join('') ?? ''

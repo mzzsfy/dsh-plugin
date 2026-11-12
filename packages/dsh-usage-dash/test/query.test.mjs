@@ -465,7 +465,7 @@ test('attachCosts 多行同桶多规则累加且残缺规则跳过后回落通�
   assert.equal(out.unpriced, 0)
 })
 
-test('attachCosts 无规则时 cost 恒零且 unpriced 按有 token 的 H 桶去重', () => {
+test('attachCosts 无规则时不挂 cost/unpriced,不把未配置显示成零价', () => {
   const rows = [
     makeRow({ bucket: '2020-01-01T01', model: 'm1', inputTokens: 5 }),
     makeRow({ bucket: '2020-01-01T01', model: 'm2', inputTokens: 5 }),
@@ -476,10 +476,10 @@ test('attachCosts 无规则时 cost 恒零且 unpriced 按有 token 的 H 桶去
   for (const rules of [[], undefined]) {
     const result = aggregateRange(rows, 'H', '2020-01-01T00', '2020-01-01T02')
     const out = attachCosts(result, rows, 'H', rules)
-    assert.equal(out.cost, 0)
-    assert.equal(out.unpriced, 2)
-    assert.deepEqual(out.daily.map((slot) => slot.cost), [0, 0, 0])
-    assert.deepEqual(out.models.map((entry) => entry.cost), [0, 0])
+    assert.equal(out.cost, undefined)
+    assert.equal(out.unpriced, undefined)
+    assert.deepEqual(out.daily.map((slot) => slot.cost), [undefined, undefined, undefined])
+    assert.deepEqual(out.models.map((entry) => entry.cost), [undefined, undefined])
   }
 })
 
@@ -503,7 +503,7 @@ test('attachCosts M 行 unpriced 按父 H 桶去重', () => {
     makeRow({ bucket: '2020-01-01T02:00', model: 'm1', inputTokens: 5 }),
   ]
   const result = aggregateRange(rows, 'M', '2020-01-01T01:10', '2020-01-01T02:00')
-  const out = attachCosts(result, rows, 'M', [])
+  const out = attachCosts(result, rows, 'M', [ruleOf({ model: 'other/*' })])
   assert.equal(out.unpriced, 2)
 })
 
@@ -538,7 +538,7 @@ test('attachCosts D 端点 unpriced 按 H 行桶去重而非日', () => {
     makeRow({ bucket: '2020-01-02T00', inputTokens: 5 }),
   ]
   const result = aggregateRange(rows, 'D', '2020-01-01', '2020-01-02')
-  const out = attachCosts(result, rows, 'D', [])
+  const out = attachCosts(result, rows, 'D', [ruleOf({ model: 'other/*' })])
   assert.equal(out.unpriced, 3)
 })
 
@@ -555,7 +555,7 @@ test('attachCosts 截断后被丢槽的行整体不参与计价', () => {
   assert.deepEqual(out.daily.filter((slot) => slot.cost !== 0).map((slot) => slot.day), ['2025-06-23'])
   assert.deepEqual(out.models.map((entry) => entry.cost), [2])
   assert.equal(out.unpriced, 0)
-  const unpricedOnly = attachCosts(result, [dropped, kept], 'D', [])
+  const unpricedOnly = attachCosts(result, [dropped, kept], 'D', [ruleOf({ model: 'other/*' })])
   assert.equal(unpricedOnly.unpriced, 1)
 })
 
@@ -618,16 +618,19 @@ test('attachCosts D 折叠按日归集 costByModel', () => {
   assert.deepEqual(out.daily[0].costByModel, { m1: 3 })
 })
 
-test('attachCosts 无规则或无费用槽 costByModel 为空表', () => {
-  // Given 无命中规则 When 计价 Then 全部槽挂空表,unpriced 照常计数
+test('attachCosts 无规则不挂费用字段,无命中规则才挂空 costByModel', () => {
+  // Given 无规则 When 计价 Then 连 cost/costByModel 都不出现;有规则但无命中才挂空表
   const rows = [
     makeRow({ bucket: '2020-01-01T01', model: 'm1', inputTokens: 5 }),
     makeRow({ bucket: '2020-01-01T02', model: 'm1', inputTokens: 5 }),
   ]
   const result = aggregateRange(rows, 'H', '2020-01-01T00', '2020-01-01T02')
-  const out = attachCosts(result, rows, 'H', [])
-  assert.deepEqual(out.daily.map((slot) => slot.costByModel), [{}, {}, {}])
-  assert.equal(out.unpriced, 2)
+  const empty = attachCosts(result, rows, 'H', [])
+  assert.equal(empty.cost, undefined)
+  assert.deepEqual(empty.daily.map((slot) => slot.costByModel), [undefined, undefined, undefined])
+  const unmatched = attachCosts(result, rows, 'H', [ruleOf({ model: 'other/*' })])
+  assert.deepEqual(unmatched.daily.map((slot) => slot.costByModel), [{}, {}, {}])
+  assert.equal(unmatched.unpriced, 2)
 })
 
 test('attachCosts M 槽 costByModel 按模型拆分', () => {

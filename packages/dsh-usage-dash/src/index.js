@@ -5,7 +5,8 @@
 import schemastery from '@deepseek-ai/schemastery'
 
 import { UsageCollector } from './collector.js'
-import { CURRENCIES, CONDITION_KINDS, UNIT_PER_MILLION } from './pricing.js'
+import { CURRENCIES, CONDITION_KINDS, normalizePricingRules, UNIT_PER_MILLION } from './pricing.js'
+import { modelUsageProjectionDefinition } from './session-models.js'
 import { registerUsageRoutes } from './routes.js'
 import { DEFAULT_MINUTE_RETENTION_DAYS, MINUTE_RETENTION_MAX_DAYS, sharedStore } from './store.js'
 // 顶层 inject 仅声明 web profile 必然存在的四个服务;settings 在 apply 内
@@ -83,6 +84,19 @@ export function apply(ctx, config) {
       throw new Error('usage-dash: pricing settings inactive')
     },
   }
+  // 底栏模型归属依赖本投影;服务缺席(旧宿主)时嵌套 inject 静默不激活,
+  // 客户端回退到「无 routes 显示占位符」,不阻断插件其余能力。
+  ctx.inject(['sessionProjections'], (projectionCtx) => {
+    const projections = projectionCtx.sessionProjections
+    if (!projections) return
+    try {
+      void projections.register(modelUsageProjectionDefinition).catch((error) => {
+        ctx.logger?.warn(`usage-dash: 用量模型投影注册失败 ${error instanceof Error ? error.message : String(error)}`)
+      })
+    } catch (error) {
+      ctx.logger?.warn(`usage-dash: 用量模型投影注册失败 ${error instanceof Error ? error.message : String(error)}`)
+    }
+  })
   ctx.inject(['settings'], (settingsCtx) => {
     const settings = settingsCtx.settings
     // legacy(≤0.1.6)方法面:register/get/update/describe 命名空间语义
@@ -92,14 +106,14 @@ export function apply(ctx, config) {
       store.retentionDays = () =>
         settings.get(SETTINGS_NAMESPACE)?.minuteRetentionDays ?? DEFAULT_MINUTE_RETENTION_DAYS
       pricing.active = true
-      pricing.rules = () => settings.get(SETTINGS_NAMESPACE)?.pricing?.rules ?? []
+      pricing.rules = () => normalizePricingRules(settings.get(SETTINGS_NAMESPACE)?.pricing?.rules)
       // revision 取 describe 中本 ns 描述符,settings 任何写入都会自增
       pricing.revision = () =>
         settings.describe().find((descriptor) => descriptor.ns === SETTINGS_NAMESPACE)?.revision ?? 0
       pricing.replace = async (rules) => {
         // update 深合并下数组整体替换,不动 minuteRetentionDays 用户层
-        await settings.update(SETTINGS_NAMESPACE, { pricing: { rules } })
-        return settings.get(SETTINGS_NAMESPACE)?.pricing?.rules ?? []
+        await settings.update(SETTINGS_NAMESPACE, { pricing: { rules: normalizePricingRules(rules) } })
+        return normalizePricingRules(settings.get(SETTINGS_NAMESPACE)?.pricing?.rules)
       }
       return
     }
@@ -111,7 +125,7 @@ export function apply(ctx, config) {
     }
     store.retentionDays = () => unwrapVolatile(config)?.minuteRetentionDays ?? DEFAULT_MINUTE_RETENTION_DAYS
     pricing.active = true
-    pricing.rules = () => unwrapVolatile(config)?.pricing?.rules ?? []
+    pricing.rules = () => normalizePricingRules(unwrapVolatile(config)?.pricing?.rules)
     pricing.revision = () =>
       settings.describe?.().find((descriptor) => descriptor.ns === ctx.fiber?.entry?.options?.id)?.revision ?? 0
     pricing.replace = async (rules) => {
@@ -121,8 +135,9 @@ export function apply(ctx, config) {
         throw new Error('usage-dash: configEditor inactive')
       }
       // change 回调整体替换 pricing 节,不动 minuteRetentionDays 用户层
-      await editor.edit(entry, (current) => ({ ...current, pricing: { rules } }))
-      return unwrapVolatile(config)?.pricing?.rules ?? []
+      const normalized = normalizePricingRules(rules)
+      await editor.edit(entry, (current) => ({ ...current, pricing: { rules: normalized } }))
+      return normalizePricingRules(unwrapVolatile(config)?.pricing?.rules)
     }
   })
   const bootScan = async () => {

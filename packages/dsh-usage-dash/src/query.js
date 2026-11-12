@@ -241,6 +241,8 @@ const COST_SLOT_KEYS = {
 // 鑱氬悎璁′环:浠ュ彲瑙佹Ы涓哄敮涓€鍙ｅ緞,cost 琛屾寜 H 妲借捣鐐瑰尮閰嶄环鏍煎悗绱姞;
 // 妲界骇閫愭ā鍨嬫媶鍒?costByModel 渚涢噾棰濇煴鐘跺浘鎸夋ā鍨嬪爢鍙?
 export function attachCosts(result, costRows, granularity, rules) {
+  // 未配置规则不是零价:不挂 cost/unpriced,避免汇总卡把「未计价」显示成 ¥0.00
+  if (!Array.isArray(rules) || rules.length === 0) return result
   const slotKeyOf = COST_SLOT_KEYS[granularity]
   const slotOfDay = new Map(result.daily.map((slot) => [slot.day, slot]))
   const slotCosts = new Map()

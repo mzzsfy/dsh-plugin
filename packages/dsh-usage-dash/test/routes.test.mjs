@@ -532,7 +532,7 @@ test('改规则重查 range cost 随之变化', async () => {
     const res = await invokeJson(routes, PATH_RANGE, { payload: { from: '2026-02-01', to: '2026-02-01' } })
     return JSON.parse(res.body).value.cost
   }
-  assert.equal(await rangeCost(), 0)
+  assert.equal(await rangeCost(), undefined)
   await invokeJson(routes, PATH_PRICING, { payload: { rules: [ruleWithInputPrice(1)] } })
   assert.equal(await rangeCost(), 1)
   await invokeJson(routes, PATH_PRICING, { payload: { rules: [ruleWithInputPrice(3)] } })
