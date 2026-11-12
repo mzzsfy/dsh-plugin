@@ -66,6 +66,20 @@ jobs:
       # legacy 语义跳过 peer 仲裁,与"peer 不经 registry 落地"的既定形态一致
       - name: 安装含外部依赖的包
         run: node scripts/install-externals.mjs
+      # stock 浏览器用例走 playwright 内置 chromium: channel:'chrome' 依赖系统
+      # Chrome, Google 不发 Linux arm64 版, arm64 runner 恒缺(amd64 预装才绿);
+      # 内置构建两平台一致, 只装 chromium 本体(含 headless shell), 不装全量;
+      # 缓存挂 ms-playwright, key 锁 playwright 1.63.0, 版本升级手动换 key 防旧二进制
+      - name: 缓存 playwright chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ms-playwright-chromium-1.63.0-${{ matrix.arch }}
+      - name: 安装 playwright chromium
+        run: npx playwright install --with-deps chromium
+      # stock 浏览器用例在此渠道下跑: 置空系统 Chrome 形态, 用上面装的内置 chromium
+      - name: 渠道变量
+        run: echo "DSH_BROWSER_CHANNEL=chromium" >> "$GITHUB_ENV"
       # 包间依赖禁止经 npm registry 解析(不自依赖):@mzzsfy 全量符号链接到本地工作副本,
       # 必须在全部 npm install 之后执行,防止被安装过程清理
       - name: 自依赖全走本地(@mzzsfy 符号链接桥)

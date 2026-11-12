@@ -22,7 +22,10 @@ before(async () => {
     })
     fixture.on('exit', code => { if (!buffer) { clearTimeout(timer); reject(new Error(`夹具退出 ${code}`)) } })
   })
-  browser = await chromium.launch({ headless: true, channel: 'chrome' })
+  // 浏览器渠道按环境选择: CI 用 playwright 内置 chromium(workflow 装配, Google
+  // 不发 Linux arm64 系统版, amd64 预装的系统 Chrome 是环境差异不是契约);
+  // 本地与 amd64 缺省走系统 Chrome, DSH_BROWSER_CHANNEL 置空走内置 chromium
+  browser = await chromium.launch({ headless: true, channel: process.env.DSH_BROWSER_CHANNEL === 'chromium' ? undefined : 'chrome' })
   page = await browser.newPage({ viewport: { width: 1280, height: 900 }, locale: 'zh-CN' })
   errors = []
   page.on('pageerror', error => errors.push(error.message))
