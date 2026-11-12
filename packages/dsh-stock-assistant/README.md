@@ -86,7 +86,7 @@ dsh plugin --profile web add @mzzsfy/dsh-stock-assistant
 
 随后重启该 profile 的宿主。仓库 README 对应 `main`（可能含尚未发版的改动），npm 页面上的说明是发版时的快照。仓库开发挂载遵循根目录 `scripts/dev-link.mjs dsh-stock-assistant`（工作副本 junction），装载层变更不走热重载，同样需要重启宿主。
 
-要求 Node>=22，宿主已有 `webServer`（包括upgrade）、`storageDomain` 与有效 backend。本包 0.4.0 及更早的发布版只读 Host 进程环境变量；本包 0.5.0 起把 `credentials` 列入注入服务，由宿主凭据服务托管，接口不全时回退环境变量。client 需要 `slots/locale/layout`。缺必需服务干净禁用。公共 client 依赖 `@mzzsfy/dsh-common-tools` 由本包 `cordis.patch.yml` 自带的装载行 `stock-assistant-dsh-common-tools` 引入，装本包即可独立运行；宿主按包名把各消费插件的装载行合并成一份 client 模块。本包声明公共依赖范围 `^0.4.0`(与库同 minor,当前 0.4.x)与 `dsh.client.external`，该依赖是普通 npm 包，不进 profile 依赖清单、不单独成插件卡（只在所属插件详情页作为只读部件行出现）。Host/client 使用同代 common-tools 0.4.x，装载与兼容窗口规则见 [DEVELOPMENT/client-dependency.md](../../DEVELOPMENT/client-dependency.md)。
+要求 Node>=22，宿主已有 `webServer`（包括upgrade）、`storageDomain` 与有效 backend。本包 0.4.0 及更早的发布版只读 Host 进程环境变量；本包 0.5.0 起把 `credentials` 列入注入服务，由宿主凭据服务托管，接口不全时回退环境变量。client 需要 `slots/locale/layout`。缺必需服务干净禁用。公共 client 依赖 `@mzzsfy/dsh-common-tools` 由本包 `cordis.patch.yml` 自带的装载行 `stock-assistant-dsh-common-tools` 引入，装本包即可独立运行；宿主按包名把各消费插件的装载行合并成一份 client 模块。本包声明公共依赖范围 `^0.5.0`(与库同 minor,当前 0.5.x)与 `dsh.client.external`，该依赖是普通 npm 包，不进 profile 依赖清单、不单独成插件卡（只在所属插件详情页作为只读部件行出现）。Host/client 使用同代 common-tools 0.5.x，装载与兼容窗口规则见 [DEVELOPMENT/client-dependency.md](../../DEVELOPMENT/client-dependency.md)。
 
 ```sh
 npm install --omit=peer

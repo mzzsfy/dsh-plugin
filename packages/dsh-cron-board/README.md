@@ -47,7 +47,7 @@
         name: '@mzzsfy/dsh-common-tools'
   ```
 
-  宿主按包名把各消费插件的多行装载行合并成一份 client 模块(bundle 只拼一次,多行在宿主侧是多个空 `apply()` 条目);条目 id 带本包前缀防树内冲突。条目缺失时 client factory 抛错、由装载层在控制台报出缺失模块(0.7.2 起;此前静默禁用为已知缺陷)。依赖范围 `^0.4.0`;兼容窗口(0.4.x 只准 patch、0.5.0 须与十个消费方范围抬升同批)与 hello 版本协商见 [DEVELOPMENT/client-dependency.md](../../DEVELOPMENT/client-dependency.md)
+  宿主按包名把各消费插件的多行装载行合并成一份 client 模块(bundle 只拼一次,多行在宿主侧是多个空 `apply()` 条目);条目 id 带本包前缀防树内冲突。条目缺失时 client factory 抛错、由装载层在控制台报出缺失模块(0.7.2 起;此前静默禁用为已知缺陷)。依赖范围 `^0.5.0`;兼容窗口(0.5.x 只准 patch、0.6.0 须与十个消费方范围抬升同批)与 hello 版本协商见 [DEVELOPMENT/client-dependency.md](../../DEVELOPMENT/client-dependency.md)
 - 宿主服务:settings / timer(软依赖)、webServer;sessionController 不进 `inject`(0.1.1-rc.2 及更早宿主无此服务,声明会永久 pending 拖死 boot),改使用点实时解析:服务缺失时看板与脚本任务照常,建会话任务(或把脚本任务改成会话任务)回 400 并一次性告警,既有会话任务的停用/改名/改期不受影响;服务晚到挂载后无需重建插件即恢复(慢启动宿主不会永久误判)
 
 ## 开发

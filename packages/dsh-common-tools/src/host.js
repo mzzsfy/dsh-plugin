@@ -14,7 +14,7 @@ try {
 const REGISTRY_KEY = '__dshCommonTools'
 const BUS_ROUTE = '/api/bus/ws'
 // 与 package.json 同锁(仓库测试守):注册表按此版本决定哪份 host 半区持有传输
-const PKG_VERSION = '0.4.0'
+const PKG_VERSION = '0.5.0'
 // 帧协议版本:client 在连接首帧上报,host 回支持集;集合无交集即停用总线
 const PROTOCOL = 1
 const SUPPORTED_PROTOCOLS = [PROTOCOL]

@@ -33,7 +33,7 @@
 
 ## client 依赖
 
-看板通过 `@mzzsfy/dsh-common-tools/client` 订阅数据变更，该依赖的装载行 `tunnel-dsh-common-tools` 随本包 `cordis.patch.yml` 自带（依赖 `^0.4.0`），宿主按包名把多个消费插件的装载行合并成一份 client 模块，装本包即可独立运行。公共模块缺失时装载层会报告具体依赖错误；宿主 React 模块缺失时控制台报告原因并禁用面板。剪贴板在非安全上下文(内网 http)自动降级到选区复制。
+看板通过 `@mzzsfy/dsh-common-tools/client` 订阅数据变更，该依赖的装载行 `tunnel-dsh-common-tools` 随本包 `cordis.patch.yml` 自带（依赖 `^0.5.0`），宿主按包名把多个消费插件的装载行合并成一份 client 模块，装本包即可独立运行。公共模块缺失时装载层会报告具体依赖错误；宿主 React 模块缺失时控制台报告原因并禁用面板。剪贴板在非安全上下文(内网 http)自动降级到选区复制。
 
 ## 验证
 
