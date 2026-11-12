@@ -243,7 +243,10 @@ window.__ModuleLoader__.load({
       ['auth|login|pass|secret|token|lock|guard|crypt', SHIELD],
       ['mcp', MCP],
       ['market|store|registry|catalog', MARKET],
-      ['im|chat|msg|notify|notif|bot|bark|wechat|qq|telegram|wecom|dingtalk|push', BOT],
+      // 扩展/插件是比 Agent 更具体的大类:Agent 扩展取魔方,Agent 管理才取星芒。
+      ['extension|plugin|扩展|插件', CUBE],
+      ['agent|智能体|助手', SPARK],
+      ['im|chat|msg|notify|notif|bot|bark|wechat|qq|telegram|wecom|dingtalk|push|机器人', BOT],
       ['plan|time|timer|clock|calendar|cron', PLAN],
       ['code|lint|graph|dev|debug|patch', CODE],
       ['llm|gpt|claude|deepseek|gemini|prompt|think|reason', SPARK],
