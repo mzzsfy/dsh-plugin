@@ -6,7 +6,9 @@
 
 ## 结案规则
 
-一句话:改过文件就 `present` 交付(之后不要再改文件、不再写 `(TASK_DONE)`),没改文件就末行写 `(TASK_DONE)`,做不下去末行写 `(TASK_BLOCKED: 原因)`。
+一句话:改过文件就 `present` 交付(之后不要再改文件、不再写 `TASK_DONE`),没改文件就最后一行单独写 `TASK_DONE`,做不下去最后一行写 `TASK_BLOCKED: 原因`。
+
+判定层严格匹配裸标记:最后一行必须恰好是 `TASK_DONE`,或 `TASK_BLOCKED: 非空原因`。括号、下划线、连字符、反引号、粗体与句末标点都不算结案。
 
 `write` / `edit` / `apply_patch` / `str_replace_editor` 都算改过文件;失败的写与 `str_replace_editor` 的 `view` 子命令不算。判定层在 present 有效时即判定结案,不追罚多余标记;二选一由提示词约束。
 

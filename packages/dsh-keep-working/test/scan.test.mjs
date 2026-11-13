@@ -43,7 +43,7 @@ const danglingTail = [
 const closedTail = [
   turnStart(1, TURN),
   userMessage(2),
-  assistant(3, TURN, '结论\n(TASK_DONE)'),
+  assistant(3, TURN, '结论\nTASK_DONE'),
   turnEnd(4, TURN, { kind: 'completed' }),
 ]
 

@@ -26,7 +26,7 @@ export const inject = ['agents', 'systemPrompt']
 export const SECTION_NAME = 'keep-working:closure'
 
 export const PROMPT_TEXT =
-  '结束必须显式提交:没改文件末行追加 (TASK_DONE);任务阻塞末行追加 (TASK_BLOCKED: 原因);改过文件必须最后只使用 present;禁止同时present和(TASK_DONE);present 的时机以本段为准,交付产物本身就是 present 的用途,不受"不要只为列出源文件调用 present"约束'
+  '结束必须显式提交:没改文件末行单独写 TASK_DONE;任务阻塞末行单独写 TASK_BLOCKED: 原因;改过文件必须最后只使用 present;禁止同时 present 和 TASK_DONE;present 的时机以本段为准,不受"不要只为列出源文件调用 present"约束'
 
 /**
  * 结案段落必须排在宿主的文件引用建议之后:那段写着"不要只为列出源文件调

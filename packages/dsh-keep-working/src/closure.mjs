@@ -3,20 +3,18 @@
  *
  * 判定对象是一个 turn 的事件切片。结案凭据有两种:
  * - present:本回合成功交付文件,且交付之后没有再改文件
- * - marker:末行独占 (TASK_DONE) 或 (TASK_BLOCKED: ...)
+ * - marker:末行独占 TASK_DONE 或 TASK_BLOCKED: ...
  *
  * 有文件写入的回合只认 present,否则模型会退化成写一行标记就交差。
  */
 
-export const DONE_MARKER = '(TASK_DONE)'
-export const BLOCKED_PREFIX = '(TASK_BLOCKED'
+export const DONE_MARKER = 'TASK_DONE'
+export const BLOCKED_PREFIX = 'TASK_BLOCKED'
+
+const BLOCKED_LINE = new RegExp(`^${BLOCKED_PREFIX}:\\s*\\S.*$`)
 
 /** 宿主写文件的工具名;新增写入面时在此登记。 */
 export const FILE_WRITE_TOOLS = new Set(['write', 'edit', 'apply_patch', 'str_replace_editor'])
-
-/** 末行尾部的句号与包裹反引号属于排版噪声,不参与匹配。 */
-const TRAILING_NOISE = /[.。]+$/
-const WRAPPING_TICKS = /^`+|`+$/g
 
 /** 取 assistant 消息里的可见文本,工具块不计入。 */
 export function assistantText(message) {
@@ -44,18 +42,12 @@ export function turnSlice(events, turn) {
   return events.slice(Math.max(start, 0), end)
 }
 
-/** 末行标记;仅识别独占最后一行的写法。 */
+/** 末行标记;严格匹配裸标记,括号、下划线、连字符等装饰都不算。 */
 export function matchMarker(text) {
   if (typeof text !== 'string' || text === '') return null
-  const lines = text.trimEnd().split('\n')
-  const last = (lines.at(-1) ?? '')
-    .trim()
-    .replace(WRAPPING_TICKS, '')
-    .trim()
-    .replace(TRAILING_NOISE, '')
-    .trim()
+  const last = (text.trimEnd().split('\n').at(-1) ?? '').trim()
   if (last === DONE_MARKER) return 'done'
-  if (last.startsWith(BLOCKED_PREFIX)) return 'blocked'
+  if (BLOCKED_LINE.test(last)) return 'blocked'
   return null
 }
 

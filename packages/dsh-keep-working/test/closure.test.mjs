@@ -53,15 +53,22 @@ const presented = (seq, turn) =>
 const userMessage = (seq, kind = 'user') =>
   event(seq, 'user/message', { id: `m-${seq}`, source: { kind }, content: [{ type: 'text', text: 'go' }] })
 
-test('marker 只认独占末行,DONE 精确、BLOCKED 前缀', () => {
-  assert.equal(matchMarker('done\n(TASK_DONE)'), 'done')
-  assert.equal(matchMarker('done\n  (TASK_DONE)  '), 'done')
-  assert.equal(matchMarker('done\n`(TASK_DONE)`'), 'done')
-  assert.equal(matchMarker('done\n(TASK_DONE).'), 'done')
-  assert.equal(matchMarker('done\n(TASK_DONE)。'), 'done')
-  assert.equal(matchMarker('(TASK_BLOCKED: 缺依赖)'), 'blocked')
-  assert.equal(matchMarker('(TASK_DONE) 后面还有话'), null)
-  assert.equal(matchMarker('提到 (TASK_DONE) 但不在末行\n结论如上'), null)
+test('marker 只认裸标记独占末行,括号与装饰不算', () => {
+  assert.equal(matchMarker('done\nTASK_DONE'), 'done')
+  assert.equal(matchMarker('done\n  TASK_DONE  '), 'done')
+  assert.equal(matchMarker('TASK_BLOCKED: 缺依赖'), 'blocked')
+  assert.equal(matchMarker('TASK_BLOCKED:缺依赖'), 'blocked')
+  assert.equal(matchMarker('done\n(TASK_DONE)'), null)
+  assert.equal(matchMarker('done\n__TASK_DONE'), null)
+  assert.equal(matchMarker('done\n-TASK_DONE'), null)
+  assert.equal(matchMarker('done\n`TASK_DONE`'), null)
+  assert.equal(matchMarker('done\n**TASK_DONE**'), null)
+  assert.equal(matchMarker('TASK_DONE。'), null)
+  assert.equal(matchMarker('TASK_DONE 后面还有话'), null)
+  assert.equal(matchMarker('TASK_BLOCKED'), null)
+  assert.equal(matchMarker('TASK_BLOCKED:'), null)
+  assert.equal(matchMarker('TASK_BLOCKED:   '), null)
+  assert.equal(matchMarker('提到 TASK_DONE 但不在末行\n结论如上'), null)
   assert.equal(matchMarker(''), null)
   assert.equal(matchMarker(undefined), null)
 })
@@ -85,10 +92,17 @@ test('S1 有文件写入但无 present 且无标记:未结案', () => {
 })
 
 test('S2 无文件写入且末行 DONE:结案', () => {
-  const events = [turnStart(0, TURN), userMessage(1), assistant(2, TURN, '结论\n(TASK_DONE)')]
+  const events = [turnStart(0, TURN), userMessage(1), assistant(2, TURN, '结论\nTASK_DONE')]
   const verdict = closureVerdict(events, TURN)
   assert.equal(verdict.closed, true)
   assert.equal(verdict.reason, 'marker')
+})
+
+test('S2b 无文件写入且末行旧括号标记:未结案', () => {
+  const events = [turnStart(0, TURN), userMessage(1), assistant(2, TURN, '结论\n(TASK_DONE)')]
+  const verdict = closureVerdict(events, TURN)
+  assert.equal(verdict.closed, false)
+  assert.equal(verdict.reason, 'no-signal')
 })
 
 test('S3 present 之后又写文件:present 作废,未结案', () => {
@@ -113,14 +127,14 @@ test('S4 有文件写入且 present 有效:结案', () => {
 })
 
 test('S5 无文件写入且末行 BLOCKED:结案', () => {
-  const events = [turnStart(0, TURN), userMessage(1), assistant(2, TURN, '(TASK_BLOCKED: 缺 API)')]
+  const events = [turnStart(0, TURN), userMessage(1), assistant(2, TURN, 'TASK_BLOCKED: 缺 API')]
   const verdict = closureVerdict(events, TURN)
   assert.equal(verdict.closed, true)
   assert.equal(verdict.reason, 'marker')
 })
 
 test('S6 有文件写入时标记无效:未结案', () => {
-  const events = [turnStart(0, TURN), userMessage(1), toolCall(2, TURN, 'write'), assistant(3, TURN, '完成\n(TASK_DONE)')]
+  const events = [turnStart(0, TURN), userMessage(1), toolCall(2, TURN, 'write'), assistant(3, TURN, '完成\nTASK_DONE')]
   const verdict = closureVerdict(events, TURN)
   assert.equal(verdict.closed, false)
   assert.equal(verdict.reason, 'file-write-requires-present')
@@ -175,8 +189,8 @@ test('文件写入工具集合覆盖宿主写入面', () => {
 })
 
 test('导出标记字面量稳定', () => {
-  assert.equal(DONE_MARKER, '(TASK_DONE)')
-  assert.equal(BLOCKED_PREFIX, '(TASK_BLOCKED')
+  assert.equal(DONE_MARKER, 'TASK_DONE')
+  assert.equal(BLOCKED_PREFIX, 'TASK_BLOCKED')
 })
 
 // 宿主先注入上下文(agent-instructions 等)再投递真人消息,首条 user/message 不是真人
@@ -236,7 +250,7 @@ test('失败的写不算改过文件', () => {
     userMessage(2),
     { seq: 3, time: 1_000, type: 'tool/call', data: { turn: 1, step: 1, callId: 'c1', name: 'write', arguments: '{}' } },
     { seq: 4, time: 1_000, type: 'tool/result', data: { turn: 1, step: 1, message: { toolCallId: 'c1', isError: true, content: [] } } },
-    assistant(5, 1, '写不了\n(TASK_DONE)'),
+    assistant(5, 1, '写不了\nTASK_DONE'),
     { seq: 6, time: 1_000, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
   ]
   assert.equal(closureVerdict(events, 1).closed, true, '写失败没有产物,应允许标记结案')
@@ -252,7 +266,7 @@ test('编辑器 view 子命令不算改过文件', () => {
       type: 'tool/call',
       data: { turn: 1, step: 1, callId: 'c1', name: 'str_replace_editor', arguments: '{"command":"view","path":"a.ts"}' },
     },
-    assistant(4, 1, '看完了\n(TASK_DONE)'),
+    assistant(4, 1, '看完了\nTASK_DONE'),
     { seq: 5, time: 1_000, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
   ]
   assert.equal(closureVerdict(events, 1).closed, true)
@@ -278,7 +292,7 @@ test('成功的写不因同回合其它工具失败被剔除', () => {
     { seq: 4, time: 1_000, type: 'tool/result', data: { turn: 1, step: 1, message: { toolCallId: 'c1', isError: false, content: [] } } },
     { seq: 5, time: 1_000, type: 'tool/call', data: { turn: 1, step: 2, callId: 'c2', name: 'bash', arguments: '{}' } },
     { seq: 6, time: 1_000, type: 'tool/result', data: { turn: 1, step: 2, message: { toolCallId: 'c2', isError: true, content: [] } } },
-    assistant(7, 1, '改好了\n(TASK_BLOCKED: 测试失败)'),
+    assistant(7, 1, '改好了\nTASK_BLOCKED: 测试失败'),
     { seq: 8, time: 1_000, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
   ]
   assert.equal(closureVerdict(events, 1).closed, false, '成功的写仍要求 present')

@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
+import { DEFAULTS } from '../src/config.mjs'
 import { PROMPT_TEXT, SECTION_NAME, buildSection } from '../src/index.js'
 
 /** 宿主文件引用段的真实位置,取自 dsh-system-prompt 的 SECTION_ORDERS。 */
@@ -15,11 +16,17 @@ test('结案段落排在文件引用建议之后', () => {
 })
 
 test('结案段落保留显式提交要求', () => {
-  for (const marker of ['(TASK_DONE)', '(TASK_BLOCKED: 原因)', 'present']) {
+  for (const marker of ['TASK_DONE', 'TASK_BLOCKED: 原因', 'present']) {
     assert.ok(PROMPT_TEXT.includes(marker), `缺少 ${marker}`)
   }
 })
 
 test('结案段落声明 present 时机不受文件引用建议约束', () => {
   assert.ok(PROMPT_TEXT.includes('present 的时机以本段为准'))
+})
+
+test('默认结案提醒与新标记一致', () => {
+  for (const marker of ['TASK_DONE', 'TASK_BLOCKED: 原因']) {
+    assert.ok(DEFAULTS.closureText.includes(marker), `缺少 ${marker}`)
+  }
 })
