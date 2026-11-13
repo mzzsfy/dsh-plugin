@@ -27,7 +27,7 @@ export const DEFAULTS = Object.freeze({
   continueTextSilent: '继续。上一轮没有可见输出,直接说明结果或继续执行。',
   continueTextInterrupted: '继续。上一步结果未知,确认后继续。',
   closureText:
-    '[keepWork] 结束必须显式提交:没改文件末行追加 (TASK_DONE);任务阻塞末行追加 (TASK_BLOCKED: 原因);改过文件必须最后只使用 present;禁止同时present和(TASK_DONE)',
+    '[keepWork] 结束必须显式提交:没改文件末行单独写 TASK_DONE;任务阻塞末行单独写 TASK_BLOCKED: 原因;改过文件必须最后只使用 present;禁止同时 present 和 TASK_DONE',
 })
 
 const numberOr = (value, fallback) =>

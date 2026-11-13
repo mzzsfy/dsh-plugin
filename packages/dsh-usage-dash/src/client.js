@@ -261,6 +261,7 @@ const MESSAGES_ZH = {
   recentSpeedDesc: '在官方「用时与速度」弹窗中追加最近 {n} 条回复消息的平均输出速度。',
   replaceSpeed: '替换默认速度',
   replaceSpeedDesc: '开启后用最近输出速度替换官方用时胶囊上的平均输出速度,关闭则保留官方读数。',
+  replaceSpeedReading: '最近{speed}',
   tokenDetail: '会话 Token 明细',
   tokenDetailDesc: '在官方 Token 用量弹窗末尾追加含缓存输入合计；存在缓存写入时追加未命中合计。',
   costDisplay: '费用显示',
@@ -414,6 +415,7 @@ const MESSAGES_EN = {
   recentSpeedDesc: 'Append the average output speed of the latest {n} replies to the official time-and-speed dialog.',
   replaceSpeed: 'Replace default speed',
   replaceSpeedDesc: 'Replace the average output speed on the official time pill with the recent output speed; off keeps the official reading.',
+  replaceSpeedReading: 'Recent {speed}',
   tokenDetail: 'Session token detail',
   tokenDetailDesc: 'Append total input including cache to the official Token usage dialog; add total cache misses when cache writes exist.',
   costDisplay: 'Cost display',
@@ -1093,8 +1095,10 @@ function tipPlacement(anchor, tipSize, bounds, options = {}) {
   return { left, top, side, arrowX }
 }
 
-// ===== 底部信息栏(append 模式):官方 pill 数据后追加增强项 + usp 双开关 =====
-const STATS_LINE_STORAGE_KEY = 'dsh-usage-dash:stats-line'
+// ===== 底部信息栏(append 模式):官方 pill 数据后追加增强项 =====
+// 偏好存宿主 settings:命名空间即 profile entry id,字段由 host SETTINGS_SCHEMA 的 statsLine 承载
+const STATS_LINE_SETTINGS_NAMESPACE = 'usage-dash'
+const STATS_LINE_FIELD = 'statsLine'
 const LOCALE_NS = 'usage-dash'
 const MS_PER_SECOND = 1000
 const SECONDS_PER_MINUTE = 60
@@ -1235,8 +1239,16 @@ function keepSpeedRowLast(list) {
 // 胶囊速度文本改写:只替换「数值 + 每秒单位」片段,保留轮/步前缀与分隔;单位随宿主语言
 // (tok/s、jetons/s、ток/с),text 为 null 时原样返回,便于调用方以同一入口表达"不启用"
 const SPEED_READING_PATTERN = /[\d.]+ \S*?\/(?:s|с)/
+// 目标读数已在尾部时不再替换:带「最近」前缀的值若被观察器再次命中,会无限叠加前缀
+function speedReadingApplied(text, value) {
+  if (text === value) return true
+  if (!text.endsWith(value)) return false
+  const before = text[text.length - value.length - 1]
+  return before === undefined || !/[\d.]/.test(before)
+}
 function rewriteSpeedText(text, value) {
   if (typeof text !== 'string' || value === null) return text
+  if (speedReadingApplied(text, value)) return text
   return SPEED_READING_PATTERN.test(text) ? text.replace(SPEED_READING_PATTERN, value) : text
 }
 
@@ -1360,53 +1372,84 @@ function observeUsageDialog(anchor, document, Observer, onTarget, percent) {
   }
 }
 
-// usp stats-line 偏好状态工厂:storage 注入便于 Node 测试,读写全防御,内存值始终生效
-// 四项展示增强默认开(存储缺键/非法值一律按开,仅显式 false 视为用户关闭);
-// 替换官方读数是侵入性改写,缺键按关
-function createStatsLineState(storage) {
+// stats-line 偏好状态工厂:宿主 settings 投影(configForms.get)注入便于 Node 测试
+// 四项展示增强默认开(投影缺键/非法值一律按开,仅显式 false 视为用户关闭);
+// 替换官方读数是侵入性改写,缺键按关。写入先乐观更新,宿主拒绝或异常时回读宿主快照回滚
+function createStatsLineState(form) {
   const DEFAULT_PREFS = { cachePrecision: true, tokenDetail: true, costDisplay: true, recentSpeed: true, replaceSpeed: false }
-  const listeners = new Set()
+  const KEYS = Object.keys(DEFAULT_PREFS)
+  const normalize = (value) => ({
+    cachePrecision: value?.cachePrecision !== false,
+    tokenDetail: value?.tokenDetail !== false,
+    costDisplay: value?.costDisplay !== false,
+    recentSpeed: value?.recentSpeed !== false,
+    replaceSpeed: value?.replaceSpeed === true,
+  })
   const read = () => {
-    if (!storage) return { ...DEFAULT_PREFS }
     try {
-      const parsed = JSON.parse(storage.getItem(STATS_LINE_STORAGE_KEY))
-      if (!parsed || typeof parsed !== 'object') return { ...DEFAULT_PREFS }
-      return {
-        cachePrecision: parsed.cachePrecision !== false,
-        tokenDetail: parsed.tokenDetail !== false,
-        costDisplay: parsed.costDisplay !== false,
-        recentSpeed: parsed.recentSpeed !== false,
-        replaceSpeed: parsed.replaceSpeed === true,
-      }
+      return normalize(form?.getSnapshot?.()?.value?.[STATS_LINE_FIELD])
     } catch {
       return { ...DEFAULT_PREFS }
     }
   }
+  const same = (left, right) => KEYS.every((key) => left[key] === right[key])
   let state = read()
+  const listeners = new Set()
+  let offForm = null
   const notify = () => {
     for (const listener of listeners) listener()
+  }
+  const adopt = () => {
+    const next = read()
+    if (same(next, state)) return
+    state = next
+    notify()
   }
   return {
     get: () => state,
     set(patch) {
-      state = { ...state, ...patch }
-      if (storage) {
-        try {
-          storage.setItem(STATS_LINE_STORAGE_KEY, JSON.stringify(state))
-        } catch {
-          // 写失败仅丢持久化
-        }
-      }
+      const next = { ...state, ...patch }
+      if (same(next, state)) return
+      state = next
       notify()
+      if (!form) return
+      const ops = Object.entries(patch).map(([field, value]) => ({ op: 'set', path: [STATS_LINE_FIELD, field], value }))
+      let pending
+      try {
+        pending = form.mutate(ops)
+      } catch (error) {
+        console.warn('[usage-dash] 底部信息栏偏好写入异常', error)
+        adopt()
+        return
+      }
+      Promise.resolve(pending).then((accepted) => {
+        if (accepted === false) {
+          console.warn('[usage-dash] 底部信息栏偏好写入未生效')
+          adopt()
+        }
+      }, (error) => {
+        console.warn('[usage-dash] 底部信息栏偏好写入异常', error)
+        adopt()
+      })
     },
     subscribe(listener) {
       listeners.add(listener)
-      return () => listeners.delete(listener)
+      if (offForm === null && form && typeof form.subscribe === 'function') {
+        offForm = form.subscribe(adopt)
+        adopt()
+      } else if (listeners.size > 1) {
+        // 已有订阅者时,晚挂载的组件不会触发 adopt;立即回放当前投影,避免停在缺省值
+        listener()
+      }
+      return () => {
+        listeners.delete(listener)
+        if (listeners.size === 0 && offForm !== null) {
+          offForm()
+          offForm = null
+        }
+      }
     },
-    reload() {
-      state = read()
-      notify()
-    },
+    reload: adopt,
   }
 }
 
@@ -2116,8 +2159,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     // locale 服务缺席时的回退翻译器(zh 固定);槽组件以 props.t 缺省参数承接宿主响应式 t
     const defaultT = createTranslator(MESSAGES_ZH)
 
-    // stats-line 偏好单例:模块表内同实例,面板偏好卡与底部信息栏订阅互通
-    const statsLineState = createStatsLineState(typeof localStorage !== 'undefined' ? localStorage : null)
+    // stats-line 偏好单例:模块表内同实例,面板偏好卡与底部信息栏订阅互通;
+    // apply 时注入宿主 settings 投影,服务未就绪前以默认值渲染
+    let statsLineState = createStatsLineState(null)
 
     // 价格规则内存缓存单例:TTL 内直读,失败回退旧值待下次重试;禁 localStorage 持久化价格
     const PRICING_CACHE_TTL_MS = 5 * 60 * 1000
@@ -3165,8 +3209,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         ? recentSpeedView.tps
         : null
       const recentSpeed = speedWanted ? projectedSpeed ?? recentSpeedOf(windowNodes) : null
-      const recentSpeedText = recentSpeed === null ? null : `${formatTokensPerSecond(recentSpeed)} tok/s`
-      useSpeedCapsulePatch(speedAnchorRef, prefs.replaceSpeed ? recentSpeedText : null)
+      const recentSpeedReading = recentSpeed === null ? null : `${formatTokensPerSecond(recentSpeed)} tok/s`
+      const replacementSpeedText = recentSpeedReading === null ? null : t('replaceSpeedReading', { speed: recentSpeedReading })
+      useSpeedCapsulePatch(speedAnchorRef, prefs.replaceSpeed ? replacementSpeedText : null)
       useLayoutEffect(() => {
         const element = costRef.current
         const dock = anchorRef.current?.closest('[data-slot="conversation.composer.dock"]')?.parentElement
@@ -3180,10 +3225,10 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         h('dt', { 'data-ud-usage-detail': row.key }, row.label),
         h('dd', { 'data-ud-usage-detail': row.key }, row.value)))
       const details = target && createPortal && detailRows.length > 0 ? createPortal(detailRows, target) : null
-      const speedDetails = speedTarget && createPortal && recentSpeedText !== null
+      const speedDetails = speedTarget && createPortal && recentSpeedReading !== null
         ? createPortal([
             h('dt', { key: 'speedLabel', 'data-ud-speed-detail': 'recentSpeed' }, t('recentSpeed')),
-            h('dd', { key: 'speedValue', 'data-ud-speed-detail': 'recentSpeed' }, recentSpeedText),
+            h('dd', { key: 'speedValue', 'data-ud-speed-detail': 'recentSpeed' }, recentSpeedReading),
           ], speedTarget)
         : null
       return h(React.Fragment, null,
@@ -4054,9 +4099,11 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     }
 
     return {
-      inject: ['slots', 'locale'],
+      inject: ['slots', 'locale', 'configForms'],
       apply(ctx) {
         ensureStyle(document)
+        // 偏好唯一来源:宿主 settings 投影(profile entry config 的 statsLine 字段)
+        statsLineState = createStatsLineState(ctx.configForms.get(STATS_LINE_SETTINGS_NAMESPACE))
         // locale 座随槽声明,语言切换经新 t 引用驱动重渲染;旧宿主无 locale 服务时由 cordis 门控整体未激活
         ctx.effect(() => ctx.locale.register(LOCALE_NS, { zh: MESSAGES_ZH, en: MESSAGES_EN }), 'usage-dash: dictionaries')
         ctx.slots.inject('settings.section', () =>
@@ -4085,10 +4132,6 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         } catch (error) {
           console.warn('[usage-dash] 回合费用芯片未注册(宿主无 conversation.chat.assistant-actions 插槽)', error)
         }
-        // 跨实例同步:其他实例写开关经 storage 事件触发重读(同实例写入不触发该事件)
-        window.addEventListener('storage', (event) => {
-          if (event.key === STATS_LINE_STORAGE_KEY) statsLineState.reload()
-        })
       },
     }
   }

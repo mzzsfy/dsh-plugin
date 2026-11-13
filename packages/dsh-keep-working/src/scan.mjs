@@ -25,8 +25,38 @@ export function trace(message) {
 /** 宿主重启产生的取消原因,值得在重启后补一次。 */
 const RESTART_CANCEL_CAUSES = new Set(['disposed', 'legacy'])
 
+/**
+ * 重放会话日志里的 durable inbox 投影,得到仍在排队的输入。
+ *
+ * 宿主把排队消息持久化为 `agent/inbox/spliced`;重启只重建投影,不会自动唤醒
+ * agent,所以扫描必须自己发现这些消息。next-turn 全部算待处理输入;next-step
+ * 只算真人插话——其余是运行时上下文注入,重启后不该凭它拉起整轮。
+ * 返回条数与最后一次入队时间。
+ */
+export function pendingInbox(events) {
+  const queues = { 'next-turn': [], 'next-step': [] }
+  let lastAt = 0
+  for (const event of events) {
+    if (event?.type !== 'agent/inbox/spliced') continue
+    const data = event.data ?? {}
+    const queue = queues[data.target]
+    if (queue === undefined) continue
+    const declared = Number.isSafeInteger(data.start) ? data.start : 0
+    const start = declared < 0 ? Math.max(queue.length + declared, 0) : Math.min(declared, queue.length)
+    const removed = Math.min(
+      Math.max(Number.isSafeInteger(data.removedCount) ? data.removedCount : 0, 0),
+      queue.length - start,
+    )
+    const inserted = Array.isArray(data.inserted) ? data.inserted : []
+    queues[data.target] = [...queue.slice(0, start), ...inserted, ...queue.slice(start + removed)]
+    if (typeof event.time === 'number') lastAt = Math.max(lastAt, event.time)
+  }
+  const steering = queues['next-step'].filter((message) => message?.source?.kind === 'user').length
+  return { count: queues['next-turn'].length + steering, lastAt }
+}
+
 /** 尾部是否还有活;openTurn 表示回合没闭合,等同于被打断。 */
-function tailVerdict(events, nowTime, config) {
+function tailVerdict(events, nowTime, config, inbox = pendingInbox(events)) {
   let lastEnd
   let lastStart
   for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -37,13 +67,17 @@ function tailVerdict(events, nowTime, config) {
   }
   const openTurn = lastStart !== undefined && (lastEnd === undefined || lastStart.seq > lastEnd.seq)
   if (!openTurn && lastEnd === undefined) return 'skip:空日志'
-  const touchedAt = openTurn ? (events.at(-1)?.time ?? 0) : lastEnd.time
+  const tailAt = openTurn ? (events.at(-1)?.time ?? 0) : lastEnd.time
+  // 排队消息自带时间:上一回合可能早已结束,重启前才入队的消息仍是新鲜输入
+  const touchedAt = Math.max(tailAt, inbox.lastAt)
   if (touchedAt < nowTime - config.freshMs) return 'skip:超出时间窗口'
   if (openTurn) return 'resume:interrupted'
 
   const reason = lastEnd.data?.reason ?? {}
   switch (reason.kind) {
     case 'completed': {
+      // 正常结束也可能留着未消费的排队消息:宿主重启后无人唤醒它们
+      if (inbox.count > 0) return 'resume:queued'
       // 有有效写入却没交付时必须恢复:重启后重做一遍也比永远不交付安全
       const verdict = closureVerdict(events, lastEnd.data.turn)
       if (verdict.reason === 'file-write-requires-present') return 'resume:closure'
@@ -388,7 +422,8 @@ export async function scanStoredSessions({
       const events = observation?.events
       if (!Array.isArray(events) || events.length === 0) continue
       result.scanned += 1
-      const verdict = tailVerdict(events, now(), config)
+      const inbox = pendingInbox(events)
+      const verdict = tailVerdict(events, now(), config, inbox)
       trace(`会话 ${sessionId} 事件 ${events.length} 判定 ${verdict}`)
       if (!verdict.startsWith('resume')) continue
       const agent = await materialize(ctx, sessionId, candidate.presetId)
@@ -404,7 +439,9 @@ export async function scanStoredSessions({
         content: [{ type: 'text', text: resumeText(config, verdict) }],
         source: { kind: 'user' },
       })
-      agent.followup(message)
+      // 有排队消息时必须插队唤醒:followup 会追加到 next-turn 队尾,排在用户消息之后
+      if (inbox.count > 0) agent.steer(message)
+      else agent.followup(message)
       result.resumed += 1
       trace(`已恢复 ${sessionId}`)
       ctx.logger?.info?.(`[keep-working] 重启恢复 ${sessionId}`)

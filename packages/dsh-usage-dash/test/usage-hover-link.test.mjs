@@ -32,8 +32,8 @@ function load(extra) {
   }
   const window = { __ModuleLoader__: { load: (entry) => { factory = entry.factory } } }
   const source = CLIENT_SOURCE.replace(
-    "inject: ['slots', 'locale'],",
-    `__test: { ${extra.join(', ')} }, inject: ['slots', 'locale'],`,
+    "inject: ['slots', 'locale', 'configForms'],",
+    `__test: { ${extra.join(', ')} }, inject: ['slots', 'locale', 'configForms'],`,
   )
   new Function('window', 'localStorage', source)(window, { getItem: () => null, setItem() {} })
   return factory((name) => (name === 'react' ? React : {})).__test

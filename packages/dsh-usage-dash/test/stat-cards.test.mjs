@@ -23,7 +23,7 @@ function renderCards(stats) {
     useCallback: (fn) => fn,
   }
   const window = { __ModuleLoader__: { load: (entry) => { factory = entry.factory } } }
-  const source = CLIENT_SOURCE.replace("inject: ['slots', 'locale'],", "__test: { StatCards }, inject: ['slots', 'locale'],")
+  const source = CLIENT_SOURCE.replace("inject: ['slots', 'locale', 'configForms'],", "__test: { StatCards }, inject: ['slots', 'locale', 'configForms'],")
   new Function('window', 'localStorage', source)(window, { getItem: () => null, setItem() {} })
   const { StatCards } = factory((name) => (name === 'react' ? React : {})).__test
   return StatCards({ stats, t: core.createTranslator(core.MESSAGES_ZH) })

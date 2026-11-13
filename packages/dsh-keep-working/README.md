@@ -6,7 +6,9 @@
 
 ## 结案规则
 
-一句话:改过文件就 `present` 交付(之后不要再改文件、不再写 `(TASK_DONE)`),没改文件就末行写 `(TASK_DONE)`,做不下去末行写 `(TASK_BLOCKED: 原因)`。
+一句话:改过文件就 `present` 交付(之后不要再改文件、不再写 `TASK_DONE`),没改文件就最后一行单独写 `TASK_DONE`,做不下去最后一行写 `TASK_BLOCKED: 原因`。
+
+判定层严格匹配裸标记:最后一行必须恰好是 `TASK_DONE`,或 `TASK_BLOCKED: 非空原因`。括号、下划线、连字符、反引号、粗体与句末标点都不算结案。
 
 `write` / `edit` / `apply_patch` / `str_replace_editor` 都算改过文件;失败的写与 `str_replace_editor` 的 `view` 子命令不算。判定层在 present 有效时即判定结案,不追罚多余标记;二选一由提示词约束。
 
@@ -42,6 +44,8 @@
 冷启动延迟 5 秒扫存储会话:直接扫 `$DSH_HOME/sessions` 取最近 `freshMs` 内写过的候选(上千个文件 stat 一遍是百毫秒级,候选通常只有几个),再按日志规模从小到大逐个判定。拿不到归档集合时本轮不恢复,下一轮重试。
 
 判定只看尾部:回合正常结束且有可见回复就跳过(重启后重复执行整轮任务的代价,高于漏恢复的概率),未闭合回合、临时错误、重启中断、截断、无可见输出才恢复。子会话(origin 或旧格式 parentSession+depth)、已归档、用户主动取消同样排除。剩余会话物化后补一条恢复消息,每轮最多 `scanLimit` 个。
+
+重启前已进入宿主 durable inbox 的排队消息是例外:它们不会自动唤醒 agent。扫描重放 `agent/inbox/spliced` 投影,`next-turn` 全部、`next-step` 中真人插话计为待处理输入;有排队消息的会话即使尾部正常结束也恢复。恢复消息必须插队发送(`agent.steer` 进 next-step),不追加到排队队列尾部、不重排或丢弃队列。
 
 `goal` 在进程重启后会被宿主 disarm,`resumeGoals` 开启时对 `active` 且 `disarmed` 的 goal 重新武装。
 
