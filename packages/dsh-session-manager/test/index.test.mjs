@@ -253,6 +253,19 @@ function request(sessionId, method = 'POST') {
   return req
 }
 
+// 批量路由请求体:与 request 区分(后者固定 sessionId 字段)
+function requestJson(body, method = 'POST') {
+  const req = new EventEmitter()
+  req.method = method
+  if (method !== 'GET') {
+    process.nextTick(() => {
+      req.emit('data', Buffer.from(typeof body === 'string' ? body : JSON.stringify(body)))
+      req.emit('end')
+    })
+  }
+  return req
+}
+
 function response() {
   const state = { status: undefined, body: undefined }
   state.writeHead = (status) => { state.status = status }
@@ -515,6 +528,97 @@ test('info 路由:产物已缺失按 missing 返回,不裸抛', skipMissingDeps,
   await handlers.get('/api/session-manager/info')(request('s1'), res)
   assert.equal(res.status, 200)
   assert.deepEqual(res.body, { supported: true, sizeBytes: 0, missing: true })
+})
+
+test('sizes 路由:批量返回产物大小,缺失与 locate 缺失按标记返回,重复 id 去重', skipMissingDeps, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'sm-sizes-'))
+  const presentPath = path.join(dir, 'session.jsonl.zstd')
+  await writeFile(presentPath, 'log-bytes')
+  try {
+    const { handlers } = makeCtx({
+      archivedIds: [],
+      headers: [
+        { id: 's1', cwd: 'C:\\x', createdAt: 0 },
+        { id: 's2', cwd: 'C:\\x', createdAt: 0 },
+        { id: 's3', cwd: 'C:\\x', createdAt: 0 },
+      ],
+      agents: new Map(),
+      sessionPersistence: {
+        locate: (header) => header.id === 's1'
+          ? { path: presentPath }
+          : header.id === 's2' ? { path: GHOST_PATH } : undefined,
+      },
+    })
+    const res = response()
+    await handlers.get('/api/session-manager/sizes')(requestJson({ sessionIds: ['s1', 's2', 's3', 'unknown', 's1'] }), res)
+    assert.equal(res.status, 200)
+    assert.deepEqual(res.body.sizes, {
+      s1: { supported: true, sizeBytes: Buffer.byteLength('log-bytes') },
+      s2: { supported: true, sizeBytes: 0, missing: true },
+      s3: { supported: false },
+      unknown: { supported: false },
+    })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('sizes 路由:单个会话 locate 抛错不拖垮整批', skipMissingDeps, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'sm-sizes-err-'))
+  const presentPath = path.join(dir, 'session.jsonl.zstd')
+  await writeFile(presentPath, 'ok')
+  try {
+    const { handlers, logger } = makeCtx({
+      archivedIds: [],
+      headers: [
+        { id: 's1', cwd: 'C:\\x', createdAt: 0 },
+        { id: 's2', cwd: 'C:\\x', createdAt: 0 },
+      ],
+      agents: new Map(),
+      sessionPersistence: {
+        locate: (header) => {
+          if (header.id === 's1') throw new Error('后端故障')
+          return { path: presentPath }
+        },
+      },
+    })
+    const res = response()
+    await handlers.get('/api/session-manager/sizes')(requestJson({ sessionIds: ['s1', 's2'] }), res)
+    assert.equal(res.status, 200)
+    assert.deepEqual(res.body.sizes, {
+      s1: { supported: false },
+      s2: { supported: true, sizeBytes: 2 },
+    })
+    assert.ok(logger.warns.some((message) => message.includes('s1')), '单条失败应落服务端日志')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('sizes 路由:sessionIds 缺失、非数组或空集拒绝', skipMissingDeps, async () => {
+  const { handlers } = makeCtx({ archivedIds: [], headers: [], agents: new Map() })
+  for (const body of [{}, { sessionIds: 's1' }, { sessionIds: [] }, { sessionIds: ['', '  '] }]) {
+    const res = response()
+    await handlers.get('/api/session-manager/sizes')(requestJson(body), res)
+    assert.equal(res.status, 400, JSON.stringify(body))
+    assert.match(res.body.error, /sessionIds/)
+  }
+})
+
+test('sizes 路由:超过批量上限拒绝', skipMissingDeps, async () => {
+  const { handlers } = makeCtx({ archivedIds: [], headers: [], agents: new Map() })
+  const ids = Array.from({ length: indexModule.SIZES_MAX_IDS + 1 }, (_, index) => 's' + index)
+  const res = response()
+  await handlers.get('/api/session-manager/sizes')(requestJson({ sessionIds: ids }), res)
+  assert.equal(res.status, 400)
+  assert.match(res.body.error, new RegExp(String(indexModule.SIZES_MAX_IDS)))
+})
+
+test('sizes 路由:非 POST 方法拒绝', skipMissingDeps, async () => {
+  const { handlers } = makeCtx({ archivedIds: [], headers: [], agents: new Map() })
+  const res = response()
+  await handlers.get('/api/session-manager/sizes')(requestJson({ sessionIds: ['s1'] }, 'GET'), res)
+  assert.equal(res.status, 405)
 })
 
 test('删除路由:运行中会话被守卫拒绝,不触发 locate 与 trash', skipMissingDeps, async () => {
@@ -1957,6 +2061,7 @@ test('写路由守卫:跨源 POST 403 / 非 JSON 内容类型 415 / 同源 JSON 
   const POST_ROUTES = [
     '/api/session-manager/unarchive',
     '/api/session-manager/info',
+    '/api/session-manager/sizes',
     '/api/session-manager/delete',
     '/api/session-manager/auto-archive',
     '/api/session-manager/remount',

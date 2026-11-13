@@ -32,6 +32,7 @@ const CSS = [
   '.sm-head { display:flex; align-items:center; gap:12px; flex-wrap:wrap; min-width:0; }',
   '.sm-head__title { font-size:16px; line-height:24px; font-weight:500; }',
   '.sm-head__count { font-family:var(--ds-font-family-code); font-size:12px; line-height:18px; color:var(--sm-text-dim); font-variant-numeric:tabular-nums; }',
+  '.sm-head__missing { color:var(--sm-danger); }',
   '.sm-head__hint { font-size:13px; line-height:20px; color:var(--sm-text-sub); }',
   '.sm-spacer { flex:1; }',
   '.sm-card { display:flex; flex-direction:column; gap:10px; min-width:0; }',
@@ -42,19 +43,27 @@ const CSS = [
   '.sm-tray { display:flex; flex-direction:column; min-width:0; background:var(--sm-bg-muted); border-radius:10px; padding:4px 0; }',
   '.sm-row { display:grid; grid-template-columns:88px minmax(0,1fr) auto; justify-content:start; align-items:center; gap:8px;',
   '  padding:7px 10px; border-radius:8px; }',
+  // 归档行:标题与元信息单列纵向排布,操作列贴右;紧凑 padding 换取信息密度,
+  // 已删除行继续使用上面的 grid 结构(原位置路径需要跨列)
+  '.sm-row--archive { display:flex; align-items:center; gap:8px; padding:4px 10px; }',
+  '.sm-row__main { flex:1; min-width:0; display:flex; flex-direction:column; }',
+  '.sm-row__meta { display:flex; align-items:center; gap:4px; font-family:var(--ds-font-family-code); font-size:11px; line-height:16px;',
+  '  color:var(--sm-text-dim); font-variant-numeric:tabular-nums; }',
+  '.sm-row--archive .sm-row__title { font-size:14px; line-height:20px; }',
+  '.sm-row--archive .sm-row__time, .sm-row--archive .sm-row__size { font-size:11px; line-height:16px; }',
   '.sm-row:first-child { border-top:0; }',
   '.sm-row:hover, .sm-row:focus-within { background:var(--sm-hover); }',
   '.sm-row--armed { background:var(--sm-danger-wash); }',
   '.sm-row--busy { opacity:.5; pointer-events:none; }',
   '.sm-row__time, .sm-row__size { font-family:var(--ds-font-family-code); font-size:12px; line-height:18px; color:var(--sm-text-dim); font-variant-numeric:tabular-nums; }',
-  '.sm-row__size { color:var(--sm-danger); }',
-  '.sm-row__title-wrap { display:flex; align-items:center; gap:8px; min-width:0; }',
+  '.sm-row__size { color:var(--sm-text-dim); }',
+  '.sm-row--armed .sm-row__size { color:var(--sm-danger); }',
   '.sm-row__ws { flex:none; max-width:40%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;',
-  '  padding:0 8px; border-radius:999px; font-family:var(--ds-font-family-code); font-size:11px; line-height:18px;',
+  '  padding:0 6px; border-radius:999px; font-family:var(--ds-font-family-code); font-size:11px; line-height:16px;',
   '  color:var(--sm-text-dim); background:var(--sm-bg-muted); }',
   '.sm-row__ws--none { background:transparent; box-shadow:inset 0 0 0 1px var(--sm-border-strong); }',
   '.sm-row__title { font-size:14px; line-height:22px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }',
-  '.sm-row__error { grid-column:2 / -1; font-size:12px; line-height:18px; color:var(--sm-danger); }',
+  '.sm-row__error { font-size:12px; line-height:18px; color:var(--sm-danger); }',
   '.sm-row__path { grid-column:2 / -1; font-family:var(--ds-font-family-code); font-size:12px; line-height:18px; color:var(--sm-text-dim);',
   '  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }',
   '.sm-deleted { display:flex; flex-direction:column; gap:12px; min-width:0; }',
@@ -106,7 +115,7 @@ const CSS = [
   '.sm-libbar__count { flex:none; font-family:var(--ds-font-family-code); font-size:12px; line-height:18px; color:var(--sm-text-dim); font-variant-numeric:tabular-nums; }',
   '.sm-group { display:flex; flex-direction:column; }',
   '.sm-group__head { display:flex; align-items:center; gap:8px; width:100%; border:0; background:transparent; cursor:pointer;',
-  '  min-height:44px; padding:0 12px; border-radius:var(--sm-radius-sm); text-align:left; color:inherit; font-size:14px; line-height:22px; font-weight:500; }',
+  '  min-height:40px; padding:0 12px; border-radius:var(--sm-radius-sm); text-align:left; color:inherit; font-size:14px; line-height:22px; font-weight:500; }',
   '.sm-group__head:hover { background:var(--sm-hover); }',
   '.sm-group__head:focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:2px; }',
   '.sm-group__chev { flex:none; font-size:14px; color:var(--sm-text-dim); transition:transform .15s ease; }',
@@ -138,6 +147,11 @@ const DELETED_URL = '/api/session-manager/deleted'
 const REMOUNT_URL = '/api/session-manager/remount'
 const FORGET_URL = '/api/session-manager/forget'
 const STATUS_URL = '/api/session-manager/status'
+const SIZES_URL = '/api/session-manager/sizes'
+
+// 批量大小查询单批上限:与 host SIZES_MAX_IDS 同值,由 client-size 契约测试锁定。
+// 归档集合可达数百条,按批发送避免单请求体超过 host 读取上限。
+const SIZES_BATCH_SIZE = 500
 
 // 删除确认链文案:两击行内确认后弹窗强提示,弹窗内确认才发请求。
 // 删除产物不可再生,其他插件(用量统计等)依赖会话产物,删后其会话级数据一并消失
@@ -202,6 +216,43 @@ function fmtSize(bytes) {
   if (n < UNIT_STEP) return n + ' B'
   if (n < UNIT_STEP * UNIT_STEP) return (n / UNIT_STEP).toFixed(1) + ' KB'
   return (n / (UNIT_STEP * UNIT_STEP)).toFixed(1) + ' MB'
+}
+
+// 行内大小文案:未加载显示占位,后端不支持显示破折,产物缺失明确标注
+function sizeLabelOf(size) {
+  if (!size) return '…'
+  if (size.supported === false) return '—'
+  if (size.missing) return '产物已丢失'
+  return fmtSize(size.sizeBytes)
+}
+
+// 归档大小汇总:仅统计可读大小;缺失、不可得与未加载分桶,供面板头展示
+function sizeSummaryOf(rows, sizes) {
+  const list = Array.isArray(rows) ? rows : []
+  const byId = sizes || {}
+  let totalBytes = 0
+  let known = 0
+  let missing = 0
+  let unsupported = 0
+  let pending = 0
+  for (const row of list) {
+    const size = byId[row.id]
+    if (!size) {
+      pending += 1
+      continue
+    }
+    if (size.supported === false || !Number.isFinite(size.sizeBytes)) {
+      unsupported += 1
+      continue
+    }
+    if (size.missing) {
+      missing += 1
+      continue
+    }
+    totalBytes += size.sizeBytes
+    known += 1
+  }
+  return { totalBytes, known, missing, unsupported, pending }
 }
 
 function useSnapshot(source) {
@@ -363,19 +414,22 @@ function ArchiveRow(props) {
         h('button', { key: 'restore', className: 'sm-btn sm-btn--restore', disabled: busy, title: RESTORE_BUTTON_TITLE, onClick: props.onUnarchive }, '恢复'),
       ]
   return h('div', {
-    className: 'sm-row' + (armed ? ' sm-row--armed' : '') + (busy ? ' sm-row--busy' : ''),
+    className: 'sm-row sm-row--archive' + (armed ? ' sm-row--armed' : '') + (busy ? ' sm-row--busy' : ''),
   },
-    armed && confirm && !confirm.error
-      ? h('span', { key: 'meta', className: 'sm-row__size' }, confirm.missing ? '产物已丢失' : fmtSize(confirm.sizeBytes))
-      : h('span', { key: 'meta', className: 'sm-row__time', title: new Date(row.updatedAt).toLocaleString() }, fmtTime(row.updatedAt)),
-    h('span', { className: 'sm-row__title-wrap' },
-      row.workspace
-        ? h('span', { className: 'sm-row__ws', title: row.workspace }, row.workspace)
-        : h('span', { className: 'sm-row__ws sm-row__ws--none', title: '该会话不属于任何已登记工作区' }, '未分组'),
+    h('div', { className: 'sm-row__main' },
       h('span', { className: 'sm-row__title', title: row.title }, row.title),
+      h('span', { className: 'sm-row__meta' },
+        row.workspace
+          ? h('span', { className: 'sm-row__ws', title: row.workspace }, row.workspace)
+          : h('span', { className: 'sm-row__ws sm-row__ws--none', title: '该会话不属于任何已登记工作区' }, '未分组'),
+        h('span', { key: 'time', className: 'sm-row__time', title: new Date(row.updatedAt).toLocaleString() }, ' · ' + fmtTime(row.updatedAt) + ' · '),
+        armed && confirm && !confirm.error
+          ? h('span', { key: 'size', className: 'sm-row__size' }, confirm.missing ? '产物已丢失' : fmtSize(confirm.sizeBytes))
+          : h('span', { key: 'size', className: 'sm-row__size', title: '会话日志文件大小' }, sizeLabelOf(props.size)),
+      ),
+      confirm && confirm.error ? h('span', { className: 'sm-row__error' }, confirm.error) : null,
     ),
     h('div', { className: 'sm-row__actions' }, actions),
-    confirm && confirm.error ? h('span', { className: 'sm-row__error' }, confirm.error) : null,
   )
 }
 
@@ -461,6 +515,17 @@ function SessionManagerApp(props) {
   const [libraryCount, setLibraryCount] = useState(ARCHIVE_PAGE_SIZE)
   const [openGroups, setOpenGroups] = useState(() => new Set())
   const [groupCounts, setGroupCounts] = useState({})
+  // 归档行文件大小:按会话 id 缓存,请求过的 id 不重复发
+  const [sizes, setSizes] = useState({})
+  const requestedSizesRef = useRef(new Set())
+  // 行 id 序列作为 effect 依赖:行内容更新但 id 集合不变时不重跑,避免取消在途请求
+  const rowIdsKey = rows.map((row) => row.id).join('\u0000')
+  const sizeSummary = sizeSummaryOf(rows, sizes)
+  const sizeSummaryTitle = sizeSummary.pending === 0 && sizeSummary.known > 0
+    ? '按可读取大小的 ' + sizeSummary.known + ' 条统计'
+      + (sizeSummary.missing > 0 ? ';产物缺失 ' + sizeSummary.missing + ' 条' : '')
+      + (sizeSummary.unsupported > 0 ? ';大小不可得 ' + sizeSummary.unsupported + ' 条' : '')
+    : undefined
 
   function toggleGroup(key) {
     setOpenGroups((prev) => {
@@ -492,6 +557,40 @@ function SessionManagerApp(props) {
       .then((payload) => setPeriodic(payload && payload.periodic))
       .catch(() => {})
   }, [])
+
+  // 归档行文件大小:按行 id 序列分批请求,失败批次清除标记供下次渲染重试;
+  // 卸载或行集合变化时只释放未完成批次,已取到的 id 不重复请求
+  useEffect(() => {
+    const ids = rowIdsKey === '' ? [] : rowIdsKey.split('\u0000')
+    const pending = ids.filter((id) => !requestedSizesRef.current.has(id))
+    if (pending.length === 0) return
+    for (const id of pending) requestedSizesRef.current.add(id)
+    const settled = new Set()
+    let cancelled = false
+    void (async () => {
+      for (let at = 0; at < pending.length; at += SIZES_BATCH_SIZE) {
+        const batch = pending.slice(at, at + SIZES_BATCH_SIZE)
+        try {
+          const payload = await api(SIZES_URL, { method: 'POST', body: JSON.stringify({ sessionIds: batch }) })
+          if (cancelled) return
+          for (const id of batch) settled.add(id)
+          setSizes((prev) => ({ ...prev, ...(payload && payload.sizes) }))
+        } catch (error) {
+          if (cancelled) return
+          // 失败批次按不可得落态,避免占位符永久停留;清除请求标记供行集合变化时重试
+          for (const id of batch) requestedSizesRef.current.delete(id)
+          setSizes((prev) => ({ ...prev, ...Object.fromEntries(batch.map((id) => [id, { supported: false }])) }))
+          console.warn('[session-manager] 会话大小加载失败', error)
+        }
+      }
+    })()
+    return () => {
+      cancelled = true
+      for (const id of pending) {
+        if (!settled.has(id)) requestedSizesRef.current.delete(id)
+      }
+    }
+  }, [rowIdsKey])
 
   function run(sessionId, action, successText) {
     setBusyId(sessionId)
@@ -552,6 +651,7 @@ function SessionManagerApp(props) {
   const renderArchiveRow = (row) => h(ArchiveRow, {
     key: row.id,
     row,
+    size: sizes[row.id],
     armed: armedId === row.id,
     busy: busyId === row.id,
     confirm: confirms[row.id],
@@ -649,7 +749,17 @@ function SessionManagerApp(props) {
         : h('span', { className: 'sm-head__title' }, '会话归档'),
       view === 'library' ? h('span', { className: 'sm-head__title' }, '按工作区浏览') : null,
       h('span', { className: 'sm-spacer' }),
-      rows.length > 0 ? h('span', { className: 'sm-head__count' }, rows.length + ' 条') : null,
+      rows.length > 0
+        ? h('span', { className: 'sm-head__count', title: sizeSummaryTitle },
+            rows.length + ' 条',
+            sizeSummary.pending === 0 && sizeSummary.known > 0 ? ' · ' + fmtSize(sizeSummary.totalBytes) : null,
+            sizeSummary.pending === 0 && sizeSummary.missing > 0
+              ? h('span', { key: 'missing', className: 'sm-head__missing' }, ' · 缺失 ' + sizeSummary.missing + ' 条')
+              : null,
+            sizeSummary.pending === 0 && sizeSummary.unsupported > 0
+              ? h('span', { key: 'unsupported' }, ' · ' + sizeSummary.unsupported + ' 条不可得')
+              : null)
+        : null,
       view === 'recent' && rows.length > 0
         ? h('button', { className: 'sm-btn', onClick: () => setView('library') }, '按工作区浏览')
         : null,

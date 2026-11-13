@@ -68,6 +68,9 @@ const HOUR_MS = 60 * 60 * 1000
 const PERIODIC_TICK_MS = 60 * 1000
 // 台账单次读改写超时:宿主存储域挂起时锁内 job 超时放行,防互斥链死锁与 inFlight 泄漏
 const LEDGER_OP_TIMEOUT_MS = 10 * 1000
+// 归档行批量大小查询:单次请求上限(前端按同批大小分批),并发上限为宿主 IO 压力与聚合等待的折中
+export const SIZES_MAX_IDS = 500
+const SIZES_CONCURRENCY = 8
 
 // 路由响应文案;导出供测试断言与实现同步。
 // trash 半失败聚合 5 条在 core.DELETE_MESSAGES(经 aggregateDeleteOutcome 组装),此处不重复
@@ -656,23 +659,52 @@ export function apply(ctx, config) {
             return
           }
           const persistence = ctx.get('sessionPersistence')
-          const location = persistence ? persistence.locate(header) : undefined
-          if (location === undefined) {
-            sendJson(res, 200, { supported: false })
-            return
-          }
-          let info
+          sendJson(res, 200, await probeArtifactSize(persistence, header))
+        } catch (error) {
+          respondError(ctx, res, error)
+        }
+      },
+    },
+    {
+      path: '/api/session-manager/sizes',
+      handler: async (req, res) => {
+        if (!rejectMethod(req, res, 'POST')) return
+        if (guardWrite(req, res)) return
+        try {
+          let body
           try {
-            info = await stat(location.path)
-          } catch (error) {
-            // live 记录可指向已删除会话,产物缺失是常规状态而非故障
-            if (error && error.code === 'ENOENT') {
-              sendJson(res, 200, { supported: true, sizeBytes: 0, missing: true })
+            body = JSON.parse(await readBody(req))
+          } catch {
+            throw new Error(MESSAGES.badJsonBody)
+          }
+          if (!body || !Array.isArray(body.sessionIds)) throw new Error('sessionIds 必须为数组')
+          const sessionIds = [...new Set(body.sessionIds
+            .filter((value) => typeof value === 'string')
+            .map((value) => value.trim())
+            .filter((value) => value !== ''))]
+          if (sessionIds.length === 0) throw new Error('sessionIds 不能为空')
+          if (sessionIds.length > SIZES_MAX_IDS) {
+            throw new Error('一次最多查询 ' + SIZES_MAX_IDS + ' 个会话的产物大小')
+          }
+          const records = await ctx.sessionQuery.listSessions()
+          const headerById = new Map(records.map((recordItem) => [String(recordItem.header.id), recordItem.header]))
+          const persistence = ctx.get('sessionPersistence')
+          const sizes = {}
+          await mapWithConcurrency(sessionIds, SIZES_CONCURRENCY, async (sessionId) => {
+            const header = headerById.get(sessionId)
+            if (header === undefined) {
+              sizes[sessionId] = { supported: false }
               return
             }
-            throw error
-          }
-          sendJson(res, 200, { supported: true, sizeBytes: info.size })
+            try {
+              sizes[sessionId] = await probeArtifactSize(persistence, header)
+            } catch (error) {
+              // 单条定位/探测失败不拖垮整批:该行按不可得处理,原始错误进服务端日志
+              ctx.logger && ctx.logger.warn('session-manager 产物大小查询失败(' + sessionId + '): ' + String(error && error.message || error))
+              sizes[sessionId] = { supported: false }
+            }
+          })
+          sendJson(res, 200, { sizes })
         } catch (error) {
           respondError(ctx, res, error)
         }
@@ -1045,6 +1077,34 @@ export function apply(ctx, config) {
     void healDerivedArchived()
     evaluateArchives()
   })
+}
+
+// 批量任务并发池:worker 自行落结果;limit 非正整数时按串行处理
+async function mapWithConcurrency(items, limit, worker) {
+  const list = Array.isArray(items) ? items : []
+  const width = Number.isInteger(limit) && limit > 0 ? limit : 1
+  let next = 0
+  const run = async () => {
+    while (next < list.length) {
+      const index = next
+      next += 1
+      await worker(list[index], index)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(width, list.length) }, run))
+}
+
+// 产物大小探测:locate 缺失按不支持,ENOENT 按产物缺失,其余错误上抛由调用方处置
+async function probeArtifactSize(persistence, header) {
+  const location = persistence ? persistence.locate(header) : undefined
+  if (location === undefined) return { supported: false }
+  try {
+    const info = await stat(location.path)
+    return { supported: true, sizeBytes: info.size }
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return { supported: true, sizeBytes: 0, missing: true }
+    throw error
+  }
 }
 
 // 产物缺失时按无活跃处理(null),不阻断整轮评估;null 与真实 mtime=0 不混淆
