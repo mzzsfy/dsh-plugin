@@ -140,6 +140,14 @@ test('Config 导出契约:根级 volatile 包装,validate 产整节单 ref,默�
   assert.equal(section.minuteRetentionDays, DEFAULT_MINUTE_RETENTION_DAYS)
   // pricing 缺省对象校验补全:rules 数组缺省为空
   assert.deepEqual(section.pricing?.rules ?? [], [])
+  // 底栏偏好默认值与 client DEFAULT_PREFS 同源:四项展示增强开、替换官方读数关
+  assert.deepEqual(section.statsLine, {
+    cachePrecision: true,
+    tokenDetail: true,
+    costDisplay: true,
+    recentSpeed: true,
+    replaceSpeed: false,
+  })
 })
 
 test('0.1.7 形态:settings 激活即门面生效,GET 读 configRef,POST 经 configEditor.edit 整节替换', async () => {

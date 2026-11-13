@@ -91,11 +91,37 @@ test('Given 文本没有速度读数或值为空 When 改写 Then 原样返回',
   assert.equal(rewriteSpeedText(null, '267 tok/s'), null)
 })
 
+test('Given 改写文本或目标带最近前缀 When 再次改写 Then 不重复叠加前缀', () => {
+  assert.equal(rewriteSpeedText('最近267 tok/s', '最近267 tok/s'), '最近267 tok/s')
+  assert.equal(rewriteSpeedText('3 轮 3 步·最近267 tok/s', '最近267 tok/s'), '3 轮 3 步·最近267 tok/s')
+  // 数值前缀不能被误判为已应用:1250 仍需替换成 250
+  assert.equal(rewriteSpeedText('1250 tok/s', '250 tok/s'), '250 tok/s')
+})
+
 test('Given 官方用时胶囊 When 接管读数 Then 文本与 aria-label 同步替换', () => {
   const fixture = capsuleFixture('3 轮 3 步 · 0.2 tok/s', '0.2 tok/s')
   const stop = observeSpeedCapsule(fixture.anchor, fixture.document, observerStub(), '267 tok/s')
   assert.equal(fixture.speedTextNode.nodeValue, '267 tok/s')
   assert.equal(fixture.button._aria, '3 轮 3 步 · 267 tok/s')
+  stop()
+})
+
+test('Given 观察器重复回调 When 读数已带最近前缀 Then 文本不继续叠加', () => {
+  const fixture = capsuleFixture('3 轮 3 步·0.2 tok/s', '0.2 tok/s')
+  const Stub = observerStub()
+  const stop = observeSpeedCapsule(fixture.anchor, fixture.document, Stub, '最近267 tok/s')
+  Stub.notify()
+  Stub.notify()
+  assert.equal(fixture.speedTextNode.nodeValue, '最近267 tok/s')
+  assert.equal(fixture.button._aria, '3 轮 3 步·最近267 tok/s')
+  stop()
+})
+
+test('Given 替换读数带最近前缀 When 接管胶囊 Then 可见文本与 aria-label 都保留前缀', () => {
+  const fixture = capsuleFixture('3 轮 3 步·0.2 tok/s', '0.2 tok/s')
+  const stop = observeSpeedCapsule(fixture.anchor, fixture.document, observerStub(), '最近267 tok/s')
+  assert.equal(fixture.speedTextNode.nodeValue, '最近267 tok/s')
+  assert.equal(fixture.button._aria, '3 轮 3 步·最近267 tok/s')
   stop()
 })
 

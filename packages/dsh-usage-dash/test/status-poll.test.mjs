@@ -76,6 +76,7 @@ function fixture() {
       inject: (_name, fn) => fn(),
       register: (entry, component) => slots.set(entry.name, component),
     },
+    configForms: { get: () => ({ getSnapshot: () => ({ value: undefined }), subscribe: () => () => {}, mutate: async () => true }) },
   })
 
   const render = (owner) => {

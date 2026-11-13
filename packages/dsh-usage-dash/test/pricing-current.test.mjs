@@ -59,7 +59,12 @@ function fixture() {
   const Clock = class extends Date { static now() { return now } }
   new Function('window', 'document', 'fetch', 'localStorage', 'MutationObserver', 'setTimeout', 'clearTimeout', 'Date', CLIENT_SOURCE)(window, document, fetch, null, class { observe() {} disconnect() {} takeRecords() { return [] } }, schedule, id => timers.delete(id), Clock)
   const mod = factory(name => name === 'react' ? hooks : { createPortal: null })
-  mod.apply({ effect: fn => fn(), locale: { register() {} }, slots: { inject: (_name, fn) => fn(), register: (entry, component) => slots.set(entry.name, component) } })
+  mod.apply({
+    effect: fn => fn(),
+    locale: { register() {} },
+    slots: { inject: (_name, fn) => fn(), register: (entry, component) => slots.set(entry.name, component) },
+    configForms: { get: () => ({ getSnapshot: () => ({ value: undefined }), subscribe: () => () => {}, mutate: async () => true }) },
+  })
   const render = owner => {
     current = owner; owner.cursor = 0; owner.dirty = false
     owner.tree = owner.component(owner.props); current = null
