@@ -10,6 +10,7 @@ import z from '@deepseek-ai/schemastery'
 import { DEFAULT_CONFIG, migrateConfig, normalizeConfig } from './config.mjs'
 import { installListSlim } from './list-slim.mjs'
 import { installSessionWindow } from './session-window.mjs'
+import { installTerminalCoalesce } from './terminal-coalesce.mjs'
 
 export const name = 'dsh-bug-perf'
 // web profile 必有 webServer; 声明依赖让 apply 在服务就绪后执行,缺服务宿主即不激活本行
@@ -35,6 +36,10 @@ const SETTINGS_SCHEMA = z.object({
     stallMs: z.number().default(DEFAULT_CONFIG.terminalWatchdog.stallMs).description('判定停滞的输出静默时长(毫秒)'),
     cooldownMs: z.number().default(DEFAULT_CONFIG.terminalWatchdog.cooldownMs).description('单个视图两次自愈的最小间隔(毫秒)'),
   }).description('终端输出看门狗'),
+  terminalCoalesce: z.object({
+    enabled: z.boolean().default(DEFAULT_CONFIG.terminalCoalesce.enabled).description('终端输出合并:有订阅者时把连续小块按窗口合并成一次广播,降低逐帧渲染造成的吞吐上限'),
+    windowMs: z.number().default(DEFAULT_CONFIG.terminalCoalesce.windowMs).description('合并窗口(毫秒);窗口越大帧数越少,代价是输出延迟'),
+  }).description('终端输出合并'),
   socketKeepAlive: z.object({
     enabled: z.boolean().default(DEFAULT_CONFIG.socketKeepAlive.enabled).description('会话流保活:空闲时向会话流连接发送无害帧,避免宿主短心跳把公网连接误判为失联'),
     intervalMs: z.number().default(DEFAULT_CONFIG.socketKeepAlive.intervalMs).description('保活帧间隔(毫秒)'),
@@ -103,7 +108,7 @@ const readConfig = (ctx, config) => {
   const settings = ctx.get('settings')
   const stored = settings !== undefined && typeof settings.get === 'function' ? settings.get(NAMESPACE) : undefined
   const known = stored !== null && typeof stored === 'object'
-    && ['restartCoalesce', 'terminalWatchdog', 'socketKeepAlive', 'stuckSession', 'jobStreamLimit', 'sessionWindow', 'listSlim', 'diag']
+    && ['restartCoalesce', 'terminalWatchdog', 'terminalCoalesce', 'socketKeepAlive', 'stuckSession', 'jobStreamLimit', 'sessionWindow', 'listSlim', 'diag']
       .some((key) => stored[key] !== null && typeof stored[key] === 'object')
   return migrateConfig(known ? stored : unwrapVolatile(config))
 }
@@ -208,8 +213,13 @@ export function apply(ctx, config) {
       return { maxMessages: window.maxMessages, minMessages: window.minMessages, minTurns: window.minTurns }
     },
   })
+  // 终端输出合并只在宿主半区生效:包装 BrowserTerminal#output,无订阅者时直通
   const server = ctx.get('webServer')
   if (server === undefined || typeof server.register !== 'function') return
+  installTerminalCoalesce(ctx, {
+    isEnabled: () => normalizeConfig(unwrapVolatile(config)).terminalCoalesce.enabled,
+    readWindow: () => normalizeConfig(unwrapVolatile(config)).terminalCoalesce.windowMs,
+  })
 
   // 设置页持久化双形:legacy settings 命名空间 / 0.1.7 行配置编辑器
   const installSettings = (scope) => {

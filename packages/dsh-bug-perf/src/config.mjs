@@ -16,6 +16,7 @@ export const DEFAULT_CONFIG = Object.freeze({
   configVersion: CONFIG_VERSION,
   restartCoalesce: Object.freeze({ enabled: true, windowMs: 100 }),
   terminalWatchdog: Object.freeze({ enabled: true, checkMs: 2000, stallMs: 8000, cooldownMs: 60000 }),
+  terminalCoalesce: Object.freeze({ enabled: true, windowMs: 8 }),
   socketKeepAlive: Object.freeze({ enabled: true, intervalMs: 1500 }),
   stuckSession: Object.freeze({ enabled: true, checkMs: 3000, stallMs: 60000, reconnect: true, maxReconnectAttempts: 2, reconnectIntervalMs: 120000 }),
   jobStreamLimit: Object.freeze({ enabled: true, base: 32, max: 48 }),
@@ -32,6 +33,7 @@ export const LIMITS = Object.freeze({
     stallMs: Object.freeze({ min: 1000, max: 600000 }),
     cooldownMs: Object.freeze({ min: 1000, max: 3600000 }),
   }),
+  terminalCoalesce: Object.freeze({ windowMs: Object.freeze({ min: 4, max: 500 }) }),
   socketKeepAlive: Object.freeze({ intervalMs: Object.freeze({ min: 500, max: 60000 }) }),
   stuckSession: Object.freeze({
     checkMs: Object.freeze({ min: 250, max: 60000 }),
@@ -76,6 +78,7 @@ export function normalizeConfig(raw) {
   const input = sectionOf(raw)
   const restart = sectionOf(input.restartCoalesce)
   const watchdog = sectionOf(input.terminalWatchdog)
+  const coalesce = sectionOf(input.terminalCoalesce)
   const keepAlive = sectionOf(input.socketKeepAlive)
   const stuck = sectionOf(input.stuckSession)
   const jobLimit = sectionOf(input.jobStreamLimit)
@@ -93,6 +96,10 @@ export function normalizeConfig(raw) {
       checkMs: numberWithin(watchdog.checkMs, LIMITS.terminalWatchdog.checkMs, DEFAULT_CONFIG.terminalWatchdog.checkMs),
       stallMs: numberWithin(watchdog.stallMs, LIMITS.terminalWatchdog.stallMs, DEFAULT_CONFIG.terminalWatchdog.stallMs),
       cooldownMs: numberWithin(watchdog.cooldownMs, LIMITS.terminalWatchdog.cooldownMs, DEFAULT_CONFIG.terminalWatchdog.cooldownMs),
+    },
+    terminalCoalesce: {
+      enabled: booleanOr(coalesce.enabled, DEFAULT_CONFIG.terminalCoalesce.enabled),
+      windowMs: numberWithin(coalesce.windowMs, LIMITS.terminalCoalesce.windowMs, DEFAULT_CONFIG.terminalCoalesce.windowMs),
     },
     socketKeepAlive: {
       enabled: booleanOr(keepAlive.enabled, DEFAULT_CONFIG.socketKeepAlive.enabled),
