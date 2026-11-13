@@ -10,7 +10,7 @@
 
 判定层严格匹配裸标记:最后一行必须恰好是 `TASK_DONE`,或 `TASK_BLOCKED: 非空原因`。括号、下划线、连字符、反引号、粗体与句末标点都不算结案。
 
-`write` / `edit` / `apply_patch` / `str_replace_editor` 都算改过文件;失败的写与 `str_replace_editor` 的 `view` 子命令不算。判定层在 present 有效时即判定结案,不追罚多余标记;二选一由提示词约束。
+`write` / `edit` / `str_replace_editor` 的写调用都算改过文件,不区分路径。`apply_patch` 不是本宿主工具,不计。失败的写与 `str_replace_editor` 的 `view` 子命令不算。判定层在 present 有效时即判定结案,不追罚多余标记;二选一由提示词约束。
 
 边界:经 shell 工具改写文件(`sed -i`、重定向)不在识别面内,这类回合不会被要求 present。工具名穷举不可能覆盖所有写路径,这里不追罚也不补判,是显式的口径边界。
 
@@ -23,15 +23,17 @@
 | `turn/end` 原因 | 动作 |
 |---|---|
 | `completed` 且已结案 | 清连续计数,不发送 |
-| `completed` 且有可见输出但未结案 | 结案提醒 |
-| `completed` 且无可见输出 | 无输出提醒(用户已在回合中插话则让路) |
-| `error` | 分类后恢复;鉴权、余额、模型不存在、上下文超限等永久错误跳过。宿主把 HTTP 状态并进错误消息而非独立字段,401/403 按文本识别 |
-| `interrupted` | 重启中断提醒 |
-| `max-tokens` | 截断提醒 |
-| `aborted` | 用户取消不恢复;`disposed` / `legacy` 按中断恢复 |
+| `completed` 且有可见输出但未结案 | 实时结案提醒;重启扫描有可见回答直接跳过 |
+| `completed` 且无可见输出 | 无输出提醒;有写入没 present 时改为结案提醒 |
+| `error` | 先看结案;已结案不发送,否则分类恢复。鉴权、余额、模型不存在、上下文超限等永久错误跳过 |
+| `interrupted` | 重启中断提醒,不看结案标记 |
+| `max-tokens` | 先看结案;已结案不发送,否则截断提醒 |
+| `aborted` | 用户取消不恢复;`disposed` / `legacy` 按中断恢复,不看结案标记 |
 | `forked` 等 | 不处理 |
 
 以下回合一律不发送:子会话(`origin === 'subagent'`,旧记录按 `parentSession` + `delegationDepth >= 1`)、用户中途插话的回合、非用户发起的回合的结案提醒、已达连续上限的会话。
+
+实时路径的 `interrupted` 与 `disposed` / `legacy` 取消不看标记,始终补中断提醒;这是插件的主恢复功能。重启扫描的 `interrupted` / 未闭合回合同样恢复中断,只有正常结束的回合才用可见回答 / done / present 判断是否冷启动恢复。
 
 ## 节奏
 
@@ -43,9 +45,9 @@
 
 冷启动延迟 5 秒扫存储会话:直接扫 `$DSH_HOME/sessions` 取最近 `freshMs` 内写过的候选(上千个文件 stat 一遍是百毫秒级,候选通常只有几个),再按日志规模从小到大逐个判定。拿不到归档集合时本轮不恢复,下一轮重试。
 
-判定只看尾部:回合正常结束且有可见回复就跳过(重启后重复执行整轮任务的代价,高于漏恢复的概率),未闭合回合、临时错误、重启中断、截断、无可见输出才恢复。子会话(origin 或旧格式 parentSession+depth)、已归档、用户主动取消同样排除。剩余会话物化后补一条恢复消息,每轮最多 `scanLimit` 个。
+正常结束的回合:有可见回答(含 done)就跳过;没有可见回答时,本回合最近 10 条消息里的 `present` 也算结案;仍没有且写过文件,补 present 提醒,否则按空回合处理。未闭合、`interrupted`、`disposed` / `legacy` 取消不看 done / present,一律恢复中断。子会话(origin 或旧格式 parentSession+depth)、已归档、用户主动取消同样排除。剩余会话物化后补一条恢复消息,每轮最多 `scanLimit` 个。
 
-重启前已进入宿主 durable inbox 的排队消息是例外:它们不会自动唤醒 agent。扫描重放 `agent/inbox/spliced` 投影,`next-turn` 全部、`next-step` 中真人插话计为待处理输入;有排队消息的会话即使尾部正常结束也恢复。恢复消息必须插队发送(`agent.steer` 进 next-step),不追加到排队队列尾部、不重排或丢弃队列。
+重启前已进入宿主 durable inbox 的排队消息是例外:它们不会自动唤醒 agent。扫描重放 `agent/inbox/spliced` 投影,`next-turn` 全部、`next-step` 中真人插话计为待处理输入;有排队消息的会话即使已 done / present 也恢复,用户主动取消除外。恢复消息只写「继续」,必须插队发送(`agent.steer` 进 next-step),不追加到排队队列尾部、不重排或丢弃队列。
 
 `goal` 在进程重启后会被宿主 disarm,`resumeGoals` 开启时对 `active` 且 `disarmed` 的 goal 重新武装。
 

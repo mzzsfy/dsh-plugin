@@ -14,6 +14,7 @@ import {join} from 'node:path'
  *   2. 公共依赖包残留 bundles 条目 -> 移出;非本仓条目(官方内盒)不动
  *   3. 单包模式 -> 只对账该包,清单内其他插件包不动
  *   4. 已一致 -> 报告无需更新(幂等)
+ *   5. 市场禁用 -> 插件包保持"装而未载"且校验通过;残留装载条目移出后校验通过
  *
  * 对账语义镜像官方 dsh plugin reconcilePlugins(dsh lib/plugin-Ddi42qoW.js):
  * 依赖行解析到 dsh.bundle 声明包即入层(尾部追加),失去声明或依赖行即出层。
@@ -32,7 +33,7 @@ function fileSpec(sandRepo, dir) {
   return `file:${join(sandRepo, 'packages', dir).replace(/\\/g, '/')}`
 }
 
-function sandbox(t, {packages, profileDeps = {}, bundles}) {
+function sandbox(t, {packages, profileDeps = {}, bundles, disabled = []}) {
   const home = mkdtempSync(join(tmpdir(), 'dev-link-bundles-home-'))
   const sandRepo = mkdtempSync(join(tmpdir(), 'dev-link-bundles-repo-'))
   t.after(() => {
@@ -58,6 +59,10 @@ function sandbox(t, {packages, profileDeps = {}, bundles}) {
     }),
   )
   writeFileSync(join(profile, 'pnpm-workspace.yaml'), '# sandbox\n')
+  if (disabled.length > 0) {
+    mkdirSync(join(profile, '.dsh-market'), {recursive: true})
+    writeFileSync(join(profile, '.dsh-market', 'state.json'), JSON.stringify({disabled}))
+  }
   return {home, sandRepo, profile}
 }
 
@@ -187,4 +192,37 @@ test('all 模式:批量加入缺失插件包并移出公共依赖包残留', (t)
   const out = runDevLink(sand, ['all'])
   assert.match(out, /校验通过:3 个包/, '终态校验应通过')
   assert.deepEqual(readBundles(sand), ['@deepseek-ai/dsh-base', '@mzzsfy/pkg-a', '@mzzsfy/pkg-b'])
+})
+
+test('市场禁用:插件包保持装而未载,校验通过', (t) => {
+  const sand = sandbox(t, {
+    packages: {'pkg-plugin': PLUGIN_MANIFEST},
+    profileDeps: {'@mzzsfy/pkg-plugin': ''},
+    disabled: ['@mzzsfy/pkg-plugin'],
+  })
+  const profileManifest = JSON.parse(readFileSync(join(sand.profile, 'package.json'), 'utf8'))
+  profileManifest.dependencies['@mzzsfy/pkg-plugin'] = fileSpec(sand.sandRepo, 'pkg-plugin')
+  writeFileSync(join(sand.profile, 'package.json'), JSON.stringify(profileManifest))
+
+  const out = runDevLink(sand, ['pkg-plugin'])
+  assert.match(out, /pkg-plugin.*市场已禁用,不入装载层/, '输出应说明被市场否决的原因')
+  assert.match(out, /校验通过:1 个包.*市场禁用/, '禁用是合法终态,不得判失败')
+  assert.deepEqual(readBundles(sand) ?? [], [], '禁用包不得回填装载层')
+})
+
+test('市场禁用:残留装载条目移出后校验通过', (t) => {
+  const sand = sandbox(t, {
+    packages: {'pkg-plugin': PLUGIN_MANIFEST},
+    profileDeps: {'@mzzsfy/pkg-plugin': ''},
+    bundles: ['@deepseek-ai/dsh-base', '@mzzsfy/pkg-plugin'],
+    disabled: ['@mzzsfy/pkg-plugin'],
+  })
+  const profileManifest = JSON.parse(readFileSync(join(sand.profile, 'package.json'), 'utf8'))
+  profileManifest.dependencies['@mzzsfy/pkg-plugin'] = fileSpec(sand.sandRepo, 'pkg-plugin')
+  writeFileSync(join(sand.profile, 'package.json'), JSON.stringify(profileManifest))
+
+  const out = runDevLink(sand, ['pkg-plugin'])
+  assert.match(out, /pkg-plugin.*移出 dsh\.profile\.bundles\(市场已禁用\)/, '与市场互搏的装载条目应被移出')
+  assert.match(out, /校验通过/, '移出后终态应通过')
+  assert.deepEqual(readBundles(sand), ['@deepseek-ai/dsh-base'], '其他条目不得被动')
 })

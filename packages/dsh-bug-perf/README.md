@@ -10,13 +10,14 @@
 |------|--------|----------|------|
 | session/follow 重建合并 | `restartCoalesce` | discussion #11272:每次 assistant rebaseline 都全量重建 `session/follow` | 包装 `RemoteStream.prototype.restart`,同一 stream 在窗口内的多次重启只保留一次尾随执行;`restart()` 无参数,最新一次可代表期间全部重建请求 |
 | 终端输出看门狗 | `terminalWatchdog` | discussion #11271:并发 `terminal/attach` 流释放后 UI 输出冻结 | 监控 `webTerminals` 视图;本端曾持有写权、输出停滞超过阈值且仍持有 attach 流时调用 `view.connect()` 重连,冷却期内不重复 |
+| 终端输出合并 | `terminalCoalesce` | 宿主对每个 PTY chunk 广播一帧、客户端逐帧 ack 并逐帧提交渲染,吞吐被单帧成本锁死(实测 `seq 1 20000` 仅约 182 行/秒,且内容越多越慢) | 宿主半区包装 `BrowserTerminal#output`:有订阅者时把连续小块按窗口(默认 8ms)合并成一次广播,累积到 32KB 立即刷出;无订阅者直通;进程退出与卸载前排空;逐帧 ack 的根因仍在宿主 |
 | 会话流保活 | `socketKeepAlive` | 公网/反代链路下,宿主短周期心跳把仍可用的连接判为失联 | 在 `/api/remote.mux` 连接空闲(客户端自己没有上行帧)时发送一条随机 streamId 的 `item` 帧;宿主对任意入帧刷新存活标记,未知 streamId 的 item 被忽略;仅覆盖补丁安装之后新建的连接,发过保活帧的连接被协议级关闭码关闭时累计,累计两次即熔断、健康存活后清零 |
 | 任务状态流上限 | `jobStreamLimit` | 会话行与其它消费方(会话头、文件夹运行标记、子会话树等)各订阅一条常驻 `job/list` 流(实测 361 条 job 流),job 变化时宿主逐条推全量帧,主线程出现数百毫秒长任务,页面越用越卡 | 默认窗口只放行未归档会话前 `base` 条;当前视图的会话与点击过的会话不占窗口(否则窗口被名册占满后打开会话看不到任务状态);归档会话与超出窗口的会话只在点击时订阅;总数到 `max` 后淘汰最先加入的一条 |
 | 会话停滞自愈 | `stuckSession` | 连接重建期间会话停在 loading 且长时间无任何进展 | 会话流无有效消息行且直接子节点是加载提示时进入停滞计时;计时期间节点数、有效行数或最后一行文本长度任一变化都视为进展并重新计时,页面不可见或定时器被挂起时作废本轮计时;持续无进展超过阈值才调用宿主 `connection.reconnect()` 主动重建连接(中止当前 generation 并立即重试,不刷新页面、不丢草稿),重建后重新计时;连续多次无效才显示提示条与刷新入口 |
 | 会话列表瘦身 | `listSlim` | `session/list` 为每个会话下发完整投影快照(上下文请求头、回合大纲等),会话多时单次响应数十 MB、服务端重建要数十秒,每次打开页面都重来一遍 | 宿主半区包装 `sessionController.list`:只下发列表行消费的投影字段(`title` / `sessionListMetadata` / `inbox` / `modelSelection` / `tokenUsage`),结果缓存;会话增删即时失效,TTL 兜底标题漂移;被裁字段经会话详情接口完整返回;非 owner Remote 主体不读写缓存、每次透传原方法;关闭时包装保留、透传原方法;响应形状不符时原样透传 |
 | 历史窗口收敛 | `sessionWindow` | 宿主首屏与重连窗口固定为 500 条消息 / 至少 2 轮(`HISTORY_PAGE_OPTIONS`),工具密集的会话一轮就有上千事件:实测首屏可达 17MB(含 context-manager 的 fork 预取,当时 2000 条/页、现 100 条/页)、上万事件,客户端一次渲染 55 个条目、4176 个节点,打开与重连出现 1.3–2.1s 长任务 | 宿主半区包装 `sessionController.follow` / `page` / `events`,把 `maxMessages`、`turnWindow.minMessages`、`minTurns` 都按配置收敛(只降不升),并保证 `minMessages ≤ maxMessages`;首屏规模实际由 `minMessages` 决定,`maxMessages` 只兜上限;请求身份字段不动,关闭、形状不符或读取配置抛错时透传原请求 |
 
-这些补丁的根因仍在宿主内部(`cancellableStream` 丢弃同 tick 的 `next()` 值、terminal-controller 队列交错、assistant rebaseline 状态机、会话流心跳判死与重建成本叠加、列表投影无按需裁剪),本插件只消除用户可观察到的后果,不改变根因。
+这些补丁的根因仍在宿主内部(`cancellableStream` 丢弃同 tick 的 `next()` 值、terminal-controller 队列交错、终端输出逐帧 ack 与逐帧渲染、assistant rebaseline 状态机、会话流心跳判死与重建成本叠加、列表投影无按需裁剪),本插件只消除用户可观察到的后果,不改变根因。
 
 ## 配置
 
@@ -35,6 +36,9 @@
       checkMs: 2000
       stallMs: 8000
       cooldownMs: 60000
+    terminalCoalesce:
+      enabled: true
+      windowMs: 8
     socketKeepAlive:
       enabled: true
       intervalMs: 1500

@@ -80,7 +80,12 @@ function fixture() {
     for (let i = 0; i < 12; i++) { await flush(); mounted.filter(owner => owner.alive && owner.dirty).forEach(render) }
   }
   const panel = () => mount(slots.get('settings.section'))
-  const editor = () => { const p = panel(); return mount(nodes(p.tree).find(n => n.type?.name === 'PricingEditor').type) }
+  const editor = () => {
+    const p = panel()
+    const section = nodes(p.tree).find(n => n.type?.name === 'PricingSection')
+    const holder = mount(section.type, section.props)
+    return mount(nodes(holder.tree).find(n => n.type?.name === 'PricingEditor').type)
+  }
   const stats = () => mount(slots.get('conversation.composer.dock'), { useProjection: () => usage })
   const chip = () => mount(slots.get('conversation.chat.assistant-actions'), { messageId: 'm1', useChat: select => select({ nodes: [{ kind: 'turn-tail', data: { closing: { finalNode: { messageId: 'm1' } }, tokenUsage: usage } }] }) })
   const resolve = (item, value) => item.resolve({ json: async () => ({ ok: true, value }) })
@@ -93,6 +98,39 @@ function fixture() {
 }
 
 const withFixture = async (t, fn) => { const f = fixture(); t.after(f.cleanup); await fn(f) }
+
+test('P0 Given 使用统计设置页, When 渲染, Then 显示与增强和定价规则默认折叠且最近开关独立成组', t => withFixture(t, async f => {
+  const p = f.panel()
+  assert.equal(f.nodes(p.tree).filter(n => n.type?.name === 'StatsLineOptions').length, 1)
+  assert.equal(f.nodes(p.tree).filter(n => n.type?.name === 'PricingSection').length, 1)
+
+  const optionsEl = f.nodes(p.tree).find(n => n.type?.name === 'StatsLineOptions')
+  const options = f.mount(optionsEl.type)
+  const settingsFoldEl = f.nodes(options.tree).find(n => n.type?.name === 'SectionFold')
+  assert.equal(settingsFoldEl.props.open, false)
+  const settingsFold = f.mount(settingsFoldEl.type, { ...settingsFoldEl.props, children: settingsFoldEl.children })
+  assert.equal(settingsFold.tree.children[0].props['aria-expanded'], false)
+  assert.equal(settingsFold.tree.children[1].props.hidden, true)
+  assert.match(f.text(options.tree), /显示补全/)
+  assert.match(f.text(options.tree), /最近请求/)
+  assert.ok(f.nodes(options.tree).some(n => n.props?.className === 'ud-pref-group ud-pref-group--recent'))
+  settingsFoldEl.props.onToggle()
+  await f.settle()
+  const settingsFoldOpen = f.nodes(options.tree).find(n => n.type?.name === 'SectionFold')
+  assert.equal(settingsFoldOpen.props.open, true)
+
+  const pricingEl = f.nodes(p.tree).find(n => n.type?.name === 'PricingSection')
+  const pricing = f.mount(pricingEl.type, pricingEl.props)
+  const pricingFoldEl = f.nodes(pricing.tree).find(n => n.type?.name === 'SectionFold')
+  assert.equal(pricingFoldEl.props.open, false)
+  const pricingFold = f.mount(pricingFoldEl.type, { ...pricingFoldEl.props, children: pricingFoldEl.children })
+  assert.equal(pricingFold.tree.children[0].props['aria-expanded'], false)
+  assert.equal(pricingFold.tree.children[1].props.hidden, true)
+  pricingFoldEl.props.onToggle()
+  await f.settle()
+  const pricingFoldOpen = f.nodes(pricing.tree).find(n => n.type?.name === 'SectionFold')
+  assert.equal(pricingFoldOpen.props.open, true)
+}))
 
 test('P1 Given concurrent consumers, When cold mounted, Then only one pricing GET is sent', t => withFixture(t, async f => {
   f.stats(); f.stats(); f.panel(); f.editor()

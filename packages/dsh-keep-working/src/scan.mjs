@@ -5,7 +5,7 @@
  * 判定尾部状态、再按需 resume。
  */
 
-import { closureVerdict, hasVisibleOutput, turnSlice } from './closure.mjs'
+import { closureVerdict, hasVisibleOutput, lastAssistantText, matchMarker, turnSlice } from './closure.mjs'
 import { fillTemplate } from './config.mjs'
 import { isTransientFailure, parseFailureFacts } from './failure.mjs'
 import { isDerivedSessionHeader } from './session-kind.mjs'
@@ -55,6 +55,24 @@ export function pendingInbox(events) {
   return { count: queues['next-turn'].length + steering, lastAt }
 }
 
+/** 计入“最近 N 条消息”的事件类型;present 以交付事件为准。 */
+const RECENT_MESSAGE_TYPES = new Set(['assistant/message', 'user/message', 'tool/result', 'deliverables/presented'])
+const PRESENT_WINDOW = 10
+
+/** 本回合最近 N 条会话消息里是否有 present。 */
+function recentPresent(events, turn) {
+  return turnSlice(events, turn)
+    .filter((event) => RECENT_MESSAGE_TYPES.has(event?.type))
+    .slice(-PRESENT_WINDOW)
+    .some((event) => event.type === 'deliverables/presented')
+}
+
+/** 本回合最后一条 assistant 文本是否以结案标记结尾。 */
+function lastMessageClosed(events, turn) {
+  const text = lastAssistantText(events, turn)
+  return text.trim() !== '' && matchMarker(text) !== null
+}
+
 /** 尾部是否还有活;openTurn 表示回合没闭合,等同于被打断。 */
 function tailVerdict(events, nowTime, config, inbox = pendingInbox(events)) {
   let lastEnd
@@ -71,18 +89,24 @@ function tailVerdict(events, nowTime, config, inbox = pendingInbox(events)) {
   // 排队消息自带时间:上一回合可能早已结束,重启前才入队的消息仍是新鲜输入
   const touchedAt = Math.max(tailAt, inbox.lastAt)
   if (touchedAt < nowTime - config.freshMs) return 'skip:超出时间窗口'
+  const reason = openTurn ? {} : (lastEnd.data?.reason ?? {})
+  // 用户主动取消优先于排队消息:这是人的决定,不能被队列改写
+  if (reason.kind === 'aborted' && !RESTART_CANCEL_CAUSES.has(reason.reason?.kind)) return 'skip:用户取消'
+  // 有排队消息必须唤醒;结案标记不能让消息永远留在 durable inbox
+  if (inbox.count > 0) return 'resume:queued'
+  const turn = openTurn ? lastStart.data.turn : lastEnd.data.turn
+  // 中断类回合不认 done/present:宿主可能杀在工具中途,标记不能证明过程完整
+  const interruptedLike =
+    openTurn || reason.kind === 'interrupted' || (reason.kind === 'aborted' && RESTART_CANCEL_CAUSES.has(reason.reason?.kind))
+  if (!interruptedLike && turn !== undefined && (lastMessageClosed(events, turn) || recentPresent(events, turn))) {
+    return 'skip:已结案'
+  }
   if (openTurn) return 'resume:interrupted'
 
-  const reason = lastEnd.data?.reason ?? {}
   switch (reason.kind) {
     case 'completed': {
-      // 正常结束也可能留着未消费的排队消息:宿主重启后无人唤醒它们
-      if (inbox.count > 0) return 'resume:queued'
-      // 有有效写入却没交付时必须恢复:重启后重做一遍也比永远不交付安全
-      const verdict = closureVerdict(events, lastEnd.data.turn)
-      if (verdict.reason === 'file-write-requires-present') return 'resume:closure'
-      // 回合正常结束就当它做完了:重启后重复执行的代价高于漏恢复的概率
-      if (verdict.closed || hasVisibleOutput(turnSlice(events, lastEnd.data.turn))) return 'skip:正常结束'
+      if (hasVisibleOutput(turnSlice(events, lastEnd.data.turn))) return 'skip:有可见回答'
+      if (closureVerdict(events, lastEnd.data.turn).reason === 'file-write-requires-present') return 'resume:closure'
       return config.resumeSilentTurns ? 'resume:silent' : 'skip:无可见输出'
     }
     case 'error': {
@@ -98,15 +122,19 @@ function tailVerdict(events, nowTime, config, inbox = pendingInbox(events)) {
     case 'max-tokens':
       return 'resume:max-tokens'
     case 'aborted':
-      return RESTART_CANCEL_CAUSES.has(reason.reason?.kind) ? 'resume:interrupted' : 'skip:用户取消'
+      return 'resume:interrupted'
     default:
       return 'skip:无需恢复'
   }
 }
 
+/** 排队消息只缺一次唤醒,不需要解释上一轮状态。 */
+const QUEUED_RESUME_TEXT = '继续'
+
 /** 恢复文案:按尾部原因取对应说法,默认用中断文案。 */
 function resumeText(config, verdict) {
   const reason = verdict.slice('resume:'.length)
+  if (reason === 'queued') return QUEUED_RESUME_TEXT
   const template =
     reason === 'error'
       ? config.continueText
@@ -114,7 +142,9 @@ function resumeText(config, verdict) {
         ? config.continueTextMaxTokens
         : reason === 'silent'
           ? config.continueTextSilent
-          : config.continueTextInterrupted
+          : reason === 'closure'
+            ? config.closureText
+            : config.continueTextInterrupted
   return fillTemplate(template, {})
 }
 

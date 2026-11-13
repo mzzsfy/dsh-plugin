@@ -2,7 +2,8 @@ import { createRequire } from 'node:module'
 import { readFile, realpath } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
 import { createTerminalTool } from './lib/tool.mjs'
-import { readControllerViewport } from './lib/private-screen.mjs'
+import { readControllerViewport, readActiveBufferType } from './lib/private-screen.mjs'
+import { createTerminalReply } from './lib/terminal-reply.mjs'
 import { createPumpFactory } from './lib/attach-pump.mjs'
 import { createWaitSkipRegistry } from './lib/wait-skip.mjs'
 import { withHostGate } from './route-gate.mjs'
@@ -10,7 +11,7 @@ import { withHostGate } from './route-gate.mjs'
 export const name = 'dsh-shared-terminal'
 export const inject = ['terminalController', 'tools', 'webServer']
 // 仅实测过私有结构的精确版本;其余版本 clean-disable。
-export const SUPPORTED_VERSIONS = Object.freeze(['0.2.0-rc.1', '0.2.0-rc.2', '0.2.1-alpha.2', '0.2.1-rc.2', '0.2.1-rc.3', '0.2.1-rc.4', '0.2.1-rc.5', '0.2.2-alpha.3', '0.2.2-rc.1', '0.2.2-rc.2'])
+export const SUPPORTED_VERSIONS = Object.freeze(['0.2.0-rc.1', '0.2.0-rc.2', '0.2.1-alpha.2', '0.2.1-rc.2', '0.2.1-rc.3', '0.2.1-rc.4', '0.2.1-rc.5', '0.2.2-alpha.3', '0.2.2-rc.1', '0.2.2-rc.2', '0.2.2-rc.3'])
 // 两代写模型:0.2.0 系(自 rc.1 起)与 0.2.1-alpha.2 蹭 UI 附着直调 write;0.2.1-rc.2 起 write 移除,改自持 attach 泵
 const METHODS_LEGACY = ['shells', 'list', 'create', 'write', 'close', 'terminal']
 const METHODS_SHARED = ['shells', 'list', 'create', 'attach', 'close', 'terminal']
@@ -121,10 +122,21 @@ function registerSharedTerminalRoutes(ctx, { waitSkipRegistry, tools, controller
     return
   }
   const pumpFactory = hasLegacyWrite ? undefined : createPumpFactory(controller)
+  const terminalReply = createTerminalReply(ctx.logger)
   const waitSkipHandler = createWaitSkipHandler(waitSkipRegistry)
   const pumpStateHandler = createPumpStateHandler(pumpFactory)
   ctx.effect(() => {
-    const stopTool = tools.register(createTerminalTool({ controller, readScreen: readControllerViewport, defineTool, pumpFactory, waitSkipRegistry }))
+    // 先装终端应答器:ConPTY 的尺寸查询必须由服务端唯一应答,不能经远端 xterm 回写
+    terminalReply.ensure(controller)
+    const stopTool = tools.register(createTerminalTool({
+      controller,
+      readScreen: readControllerViewport,
+      defineTool,
+      pumpFactory,
+      waitSkipRegistry,
+      ensureReply: () => terminalReply.ensure(controller),
+      readBufferType: readActiveBufferType,
+    }))
     // 形状漂移(有服务无 register)直接抛错暴露宿主 API 变更,不做静默降级
     const unregisterRoute = webServer.register({ kind: 'exact', path: WAIT_SKIP_PATH, handler: withHostGate(ctx, waitSkipHandler) })
     const unregisterPumpRoute = webServer.register({ kind: 'exact', path: PUMP_STATE_PATH, handler: withHostGate(ctx, pumpStateHandler) })
@@ -133,6 +145,7 @@ function registerSharedTerminalRoutes(ctx, { waitSkipRegistry, tools, controller
       unregisterRoute?.()
       unregisterPumpRoute?.()
       waitSkipRegistry.abortAll()
+      terminalReply.dispose()
       return pumpFactory?.dispose()
     }
   })

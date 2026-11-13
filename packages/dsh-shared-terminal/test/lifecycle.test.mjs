@@ -125,6 +125,8 @@ function realFixture(t) {
   controller.config = { maxInputBytes: 1024, maxCols: 100, maxRows: 100 }
   const owner = { terminals: new Map([['term', terminal]]), pending: new Map(), allocations: new Map(), closedIds: new Set() }
   controller.owners = new Map([['session', owner]])
+  // rc.2 的 close 收尾经 Controller.rosters 通知订阅者;夹具是裸原型实例,须显式补字段
+  controller.rosters = new Map()
   const factory = createPumpFactory(controller)
   const tool = createTerminalTool({ controller, pumpFactory: factory, defineTool, readScreen: async () => ({}) })
   const terminate = handle.terminate

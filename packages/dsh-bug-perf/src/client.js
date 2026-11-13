@@ -26,6 +26,7 @@ window.__ModuleLoader__.load({
       configVersion: 2,
       restartCoalesce: { enabled: true, windowMs: 100 },
       terminalWatchdog: { enabled: true, checkMs: 2000, stallMs: 8000, cooldownMs: 60000 },
+      terminalCoalesce: { enabled: true, windowMs: 8 },
       socketKeepAlive: { enabled: true, intervalMs: 1500 },
       stuckSession: { enabled: true, checkMs: 3000, stallMs: 60000, reconnect: true, maxReconnectAttempts: 2, reconnectIntervalMs: 120000 },
       jobStreamLimit: { enabled: true, base: 32, max: 48 },
@@ -40,6 +41,7 @@ window.__ModuleLoader__.load({
         stallMs: { min: 1000, max: 600000 },
         cooldownMs: { min: 1000, max: 3600000 },
       },
+      terminalCoalesce: { windowMs: { min: 4, max: 500 } },
       socketKeepAlive: { intervalMs: { min: 500, max: 60000 } },
       stuckSession: {
         checkMs: { min: 250, max: 60000 },
@@ -73,6 +75,7 @@ window.__ModuleLoader__.load({
       const input = sectionOf(raw)
       const restart = sectionOf(input.restartCoalesce)
       const watchdog = sectionOf(input.terminalWatchdog)
+      const coalesce = sectionOf(input.terminalCoalesce)
       const keepAlive = sectionOf(input.socketKeepAlive)
       const stuck = sectionOf(input.stuckSession)
       const jobLimit = sectionOf(input.jobStreamLimit)
@@ -90,6 +93,10 @@ window.__ModuleLoader__.load({
           checkMs: numberWithin(watchdog.checkMs, LIMITS.terminalWatchdog.checkMs, DEFAULT_CONFIG.terminalWatchdog.checkMs),
           stallMs: numberWithin(watchdog.stallMs, LIMITS.terminalWatchdog.stallMs, DEFAULT_CONFIG.terminalWatchdog.stallMs),
           cooldownMs: numberWithin(watchdog.cooldownMs, LIMITS.terminalWatchdog.cooldownMs, DEFAULT_CONFIG.terminalWatchdog.cooldownMs),
+        },
+        terminalCoalesce: {
+          enabled: booleanOr(coalesce.enabled, DEFAULT_CONFIG.terminalCoalesce.enabled),
+          windowMs: numberWithin(coalesce.windowMs, LIMITS.terminalCoalesce.windowMs, DEFAULT_CONFIG.terminalCoalesce.windowMs),
         },
         socketKeepAlive: {
           enabled: booleanOr(keepAlive.enabled, DEFAULT_CONFIG.socketKeepAlive.enabled),
@@ -908,6 +915,12 @@ window.__ModuleLoader__.load({
           { name: 'stallMs', label: '停滞判定', unit: '毫秒' },
           { name: 'cooldownMs', label: '自愈冷却', unit: '毫秒' },
         ],
+      },
+      {
+        key: 'terminalCoalesce',
+        title: '终端输出合并',
+        description: '宿主逐帧广播、客户端逐帧渲染,大输出吞吐被帧率锁死;把连续小块按窗口合并后,构建日志与刷屏不再拖慢终端。',
+        fields: [{ name: 'windowMs', label: '合并窗口', unit: '毫秒' }],
       },
       {
         key: 'socketKeepAlive',
