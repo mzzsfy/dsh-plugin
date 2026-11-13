@@ -15,7 +15,8 @@
     },
     "compatibility": {
       "dshReleases": {
-        "0.2.2-rc.1": "compatible"
+        "0.2.2-rc.1": "compatible",
+        "0.2.2-rc.3": "compatible"
       }
     },
     "hostMin": "0.2.2-rc.1",
@@ -49,3 +50,4 @@
     "README.md"
   ]
 }
+

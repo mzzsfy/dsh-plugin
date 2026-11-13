@@ -20,7 +20,8 @@
       "dshReleases": {
         "0.2.1-rc.2": "compatible",
         "0.2.1-rc.3": "unknown",
-        "0.2.2-rc.1": "compatible"
+        "0.2.2-rc.1": "compatible",
+        "0.2.2-rc.3": "compatible"
       }
     },
     "hostMin": "0.2.1-rc.2"
@@ -52,3 +53,4 @@
     "兼容性测试.md"
   ]
 }
+

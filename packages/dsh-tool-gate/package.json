@@ -30,7 +30,8 @@
         "0.2.0-rc.2": "unknown",
         "0.2.1-alpha.1": "unknown",
         "0.2.1-rc.5": "unknown",
-        "0.2.2-rc.1": "compatible"
+        "0.2.2-rc.1": "compatible",
+        "0.2.2-rc.3": "compatible"
       }
     }
   },
@@ -72,3 +73,4 @@
     "README.md"
   ]
 }
+
