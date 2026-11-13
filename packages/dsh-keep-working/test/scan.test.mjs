@@ -26,6 +26,14 @@ const assistant = (seq, turn, text) =>
   })
 const userMessage = (seq, kind = 'user') =>
   event(seq, 'user/message', { id: `m-${seq}`, source: { kind }, content: [{ type: 'text', text: 'go' }] })
+const queuedMessage = (seq, text = '排队消息') => ({
+  id: `q-${seq}`,
+  role: 'user',
+  content: [{ type: 'text', text }],
+  source: { kind: 'user' },
+})
+const inboxSpliced = (seq, target, inserted, start = 0, removedCount = 0) =>
+  event(seq, 'agent/inbox/spliced', { target, start, removedCount, inserted })
 
 const openTail = [
   turnStart(1, TURN),
@@ -81,7 +89,8 @@ function createHarness({ records, archived = [], goals, resumeFails = false, reg
           id: resumeSessionId,
           session: { id: resumeSessionId },
           inbox: { nextTurn: [] },
-          followup: (message) => sent.push({ id: resumeSessionId, message }),
+          followup: (message) => sent.push({ id: resumeSessionId, message, via: 'followup' }),
+          steer: (message) => sent.push({ id: resumeSessionId, message, via: 'steer' }),
         })
         return { agent: agentsById.get(resumeSessionId) }
       },
@@ -385,6 +394,99 @@ test('已结案的会话不恢复', async () => {
   })
   assert.equal(result.resumed, 0)
   assert.equal(h.sent.length, 0)
+})
+
+test('正常结束但仍有排队消息的会话被恢复,恢复消息插队发送', async () => {
+  for (const tail of [openTail, closedTail]) {
+    const events = [...tail, inboxSpliced(5, 'next-turn', [queuedMessage(5)])]
+    const h = createHarness({ records: [record('s1', events)] })
+    const result = await scanStoredSessions({
+      ctx: h.ctx,
+      config: resolveConfig(),
+      createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+      now: () => NOW,
+      scanDirectory: () => undefined,
+    })
+    assert.equal(result.resumed, 1)
+    assert.equal(h.sent.length, 1)
+    assert.equal(h.sent[0].via, 'steer', '排队消息存在时必须插队,不能追加到 next-turn 队尾')
+  }
+})
+
+test('未闭合回合带排队消息时同样插队恢复', async () => {
+  const events = [...danglingTail, inboxSpliced(4, 'next-turn', [queuedMessage(4)])]
+  const h = createHarness({ records: [record('s1', events)] })
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.equal(result.resumed, 1)
+  assert.equal(h.sent[0].via, 'steer')
+})
+
+test('next-step 的运行时上下文不算排队消息,真人插话才算', async () => {
+  const context = [{ id: 'c-1', role: 'user', content: [], source: { kind: 'runtime-context' } }]
+  const withContext = createHarness({
+    records: [record('s1', [...openTail, inboxSpliced(5, 'next-step', context)])],
+  })
+  const contextResult = await scanStoredSessions({
+    ctx: withContext.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.equal(contextResult.resumed, 0)
+
+  const withSteering = createHarness({
+    records: [record('s1', [...openTail, inboxSpliced(5, 'next-step', [queuedMessage(5)])])],
+  })
+  const steeringResult = await scanStoredSessions({
+    ctx: withSteering.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.equal(steeringResult.resumed, 1)
+  assert.equal(withSteering.sent[0].via, 'steer')
+})
+
+test('用户主动取消的回合即使有排队消息也不恢复', async () => {
+  const events = [
+    ...openTail.slice(0, 3),
+    turnEnd(4, TURN, { kind: 'aborted', reason: { kind: 'user' } }),
+    inboxSpliced(5, 'next-turn', [queuedMessage(5)]),
+  ]
+  const h = createHarness({ records: [record('s1', events)] })
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.equal(result.resumed, 0)
+  assert.equal(h.sent.length, 0)
+})
+
+test('排队消息本身超出新鲜窗口时不恢复', async () => {
+  const stale = [...openTail, inboxSpliced(5, 'next-turn', [queuedMessage(5)])].map((item) => ({
+    ...item,
+    time: NOW - 60 * 60_000,
+  }))
+  const h = createHarness({ records: [record('s1', stale)] })
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.equal(result.resumed, 0)
 })
 
 test('子会话不单独恢复', async () => {
