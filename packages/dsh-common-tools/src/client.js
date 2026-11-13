@@ -26,7 +26,7 @@ window.__ModuleLoader__.load({
     }
 
     // 与 package.json 同锁(仓库测试守):hello 首帧上报,也是消费方读取的版本面
-    const VERSION = '0.5.0'
+    const VERSION = '0.5.1'
     // 帧协议版本:改动帧集合即递增,host 回支持集,无交集即停用总线
     const PROTOCOL = 1
 
