@@ -22,8 +22,8 @@ const {
 } = core
 
 const USAGE = { uncachedInputTokens: 1000, cacheReadTokens: 4000, cacheWriteTokens: 0, outputTokens: 500 }
-// 展示项默认全开;替换官方读数属侵入性改写,缺键按关
-const DEFAULT_EXPECT = { cachePrecision: true, tokenDetail: true, costDisplay: true, recentSpeed: true, replaceSpeed: false }
+// 展示项默认全开;替换官方读数与最近请求详情属额外注入,缺键按关
+const DEFAULT_EXPECT = { cachePrecision: true, tokenDetail: true, costDisplay: true, recentSpeed: true, replaceSpeed: false, requestDetails: false }
 const PREFS_OFF = { cachePrecision: false, tokenDetail: false, costDisplay: false }
 const PREFS_COST_ON = { cachePrecision: false, tokenDetail: false, costDisplay: true }
 const zhT = createTranslator(MESSAGES_ZH)
@@ -73,6 +73,9 @@ test('stats 词典关键值逐字节,en 族逐字节', () => {
   assert.equal(MESSAGES_ZH.cachePrecisionDesc, '将官方用量胶囊及弹窗中的命中率显示为两位小数。')
   assert.equal(MESSAGES_ZH.recentSpeed, '最近输出速度')
   assert.equal(MESSAGES_ZH.recentSpeedDesc, '在官方「用时与速度」弹窗中追加最近 {n} 条回复消息的平均输出速度。')
+  assert.equal(MESSAGES_ZH.recentTtft, '最近首 token 平均')
+  assert.equal(MESSAGES_EN.recentTtft, 'Recent average TTFT')
+  assert.equal(MESSAGES_ZH.requestDetails, '最近请求详情')
   assert.equal(MESSAGES_ZH.replaceSpeed, '替换默认速度')
   assert.equal(MESSAGES_ZH.replaceSpeedDesc, '开启后用最近输出速度替换官方用时胶囊上的平均输出速度,关闭则保留官方读数。')
   assert.equal(MESSAGES_ZH.replaceSpeedReading, '最近{speed}')
@@ -130,10 +133,10 @@ test('formatTokensPerSecond 钳负值且阈值上下分别取整', () => {
   assert.equal(formatTokensPerSecond(3.24), '3.2')
 })
 
-test('createStatsLineState 展示项默认四开、替换项默认关,宿主投影非法值回落默认', () => {
+test('createStatsLineState 展示项默认开、替换与请求详情默认关,宿主投影非法值回落默认', () => {
   assert.deepEqual(createStatsLineState(null).get(), DEFAULT_EXPECT)
   assert.deepEqual(createStatsLineState(fakeForm(undefined)).get(), DEFAULT_EXPECT)
-  const junk = fakeForm({ cachePrecision: 'yes', tokenDetail: 1, replaceSpeed: 'yes' })
+  const junk = fakeForm({ cachePrecision: 'yes', tokenDetail: 1, replaceSpeed: 'yes', requestDetails: 'yes' })
   assert.deepEqual(createStatsLineState(junk).get(), DEFAULT_EXPECT)
   const partialOff = fakeForm({ cachePrecision: false, tokenDetail: true })
   assert.deepEqual(createStatsLineState(partialOff).get(), { ...DEFAULT_EXPECT, cachePrecision: false })
@@ -141,6 +144,8 @@ test('createStatsLineState 展示项默认四开、替换项默认关,宿主投�
   assert.deepEqual(createStatsLineState(speedOff).get(), { ...DEFAULT_EXPECT, recentSpeed: false })
   const replaceOn = fakeForm({ replaceSpeed: true })
   assert.deepEqual(createStatsLineState(replaceOn).get(), { ...DEFAULT_EXPECT, replaceSpeed: true })
+  const detailsOn = fakeForm({ requestDetails: true })
+  assert.deepEqual(createStatsLineState(detailsOn).get(), { ...DEFAULT_EXPECT, requestDetails: true })
 })
 
 test('createStatsLineState set 乐观生效、按 statsLine 路径写宿主并通知订阅者', async () => {

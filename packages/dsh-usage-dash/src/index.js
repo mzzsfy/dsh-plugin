@@ -7,6 +7,7 @@ import schemastery from '@deepseek-ai/schemastery'
 import { UsageCollector } from './collector.js'
 import { CURRENCIES, CONDITION_KINDS, normalizePricingRules, UNIT_PER_MILLION } from './pricing.js'
 import { modelUsageProjectionDefinition } from './session-models.js'
+import { recentRequestsProjectionDefinition } from './recent-requests.js'
 import { recentSpeedProjectionDefinition } from './recent-speed.js'
 import { registerUsageRoutes } from './routes.js'
 import { DEFAULT_MINUTE_RETENTION_DAYS, MINUTE_RETENTION_MAX_DAYS, sharedStore } from './store.js'
@@ -25,6 +26,7 @@ const STATS_LINE_DEFAULTS = {
   costDisplay: true,
   recentSpeed: true,
   replaceSpeed: false,
+  requestDetails: false,
 }
 
 const STATS_LINE_SCHEMA = schemastery.object({
@@ -33,6 +35,7 @@ const STATS_LINE_SCHEMA = schemastery.object({
   costDisplay: schemastery.boolean().default(STATS_LINE_DEFAULTS.costDisplay),
   recentSpeed: schemastery.boolean().default(STATS_LINE_DEFAULTS.recentSpeed),
   replaceSpeed: schemastery.boolean().default(STATS_LINE_DEFAULTS.replaceSpeed),
+  requestDetails: schemastery.boolean().default(STATS_LINE_DEFAULTS.requestDetails),
 }).default(STATS_LINE_DEFAULTS)
 
 // 定价形状与 pricing.js 契约同源:kind 判别 required 恒成立,
@@ -111,6 +114,7 @@ export function apply(ctx, config) {
     for (const [label, definition] of [
       ['用量模型投影', modelUsageProjectionDefinition],
       ['最近速度投影', recentSpeedProjectionDefinition],
+      ['最近请求投影', recentRequestsProjectionDefinition],
     ]) {
       try {
         void projections.register(definition).catch((error) => {
