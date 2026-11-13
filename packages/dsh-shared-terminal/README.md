@@ -29,7 +29,7 @@ wait 等待期间，工具卡片以等待子串替代「执行中」摘要（提
 
 ## 只读终端自愈
 
-宿主在附着结束时只把 `controller` 清空，不把 `writable` 交还 UI——宿主按 `controller === follower` 判定可写，泵 detach 后 UI 即长期只读，直到用户点「接管输入」。UI 只读分支跳过 `fitScreen`，只按 `info.cols/rows` 固定 xterm；窗口或侧栏变矮后，底部内容被 `.screen{overflow:hidden}` 裁掉且 viewport 不可滚，用户于是「看不全」。0.4.3 起插件客户端做兜底自愈：每 2s 扫可见的 `[data-sidebar-terminal]`，若「宿主只读状态栏在场 + 内容超出容器（扣除状态栏自身占位，状态栏挤矮不算裁切）+ 屏上 Session 没有附着中的泵」同时成立，就点宿主「接管输入」，UI 重新附着成控制者后由宿主自己按容器重算几何。泵附着期间不动（宁可漏自愈也不抢 AI 的写入，否则下一次 `write` 会以 read-only 被拒），命中后 5s 冷却防抖。
+宿主在附着结束时只把 `controller` 清空，不把 `writable` 交还 UI——宿主按 `controller === follower` 判定可写，泵 detach 后 UI 即长期只读，直到用户点「接管输入」。UI 只读分支跳过 `fitScreen`，只按 `info.cols/rows` 固定 xterm；窗口或侧栏变矮后，底部内容被 `.screen{overflow:hidden}` 裁掉且 viewport 不可滚，用户于是「看不全」。0.4.3 起插件客户端做兜底自愈：每 2s 扫可见的 `[data-sidebar-terminal]`，若「宿主只读状态栏在场 + 内容超出容器（扣除状态栏自身占位，状态栏挤矮不算裁切）+ 屏上 Session 没有附着中的泵」同时成立，就点宿主「接管输入」，UI 重新附着成控制者后由宿主自己按容器重算几何。泵附着期间不动（宁可漏自愈也不抢 AI 的写入，否则下一次 `write` 会以 read-only 被拒），命中后 5s 冷却防抖。0.4.8 起两处收紧：viewport 仍可滚动（`overflowY` 非 hidden）时不算被裁，裁掉的只是用户能滚回去的 scrollback，避免每次 AI 写完都白抢一次；接管会让宿主把焦点拉到终端，因此点击后若用户焦点原本不在终端，下一帧（`requestAnimationFrame`）把焦点还给原元素，仅在 `document.activeElement` 已落进终端时才动作。
 
 附着判定经宿主路由 `/api/shared-terminal/pump`（POST JSON `{sessionId}`）回答整条 Session 是否有泵在写，返回 `{ok, attached}`；查询失败或超时按「仍在附着」处理。该判断按 Session 汇总而非按 tab：tab id 在不同 Session 之间会重号，按 Session 保守处理只会漏自愈，不会误抢控制权。
 

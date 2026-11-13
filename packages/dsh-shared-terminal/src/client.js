@@ -361,12 +361,37 @@ window.__ModuleLoader__.load({
     const HEAL_QUERY_TIMEOUT_MS = 3 * 1000
 
     // 只读状态栏会把 .xterm 挤矮,那部分不算内容溢出:否则每次 AI 写完都会白抢一次控制权
+    // 内容仍可滚动时也不算被裁:裁掉的只是视口外的 scrollback,用户能滚回去
+    // overflow:hidden 的视口只能编程滚动,用户滚不动,仍按被裁处理
+    const overflowScrollable = (viewport) => {
+      if (typeof getComputedStyle !== 'function') return true
+      try { return getComputedStyle(viewport).overflowY !== 'hidden' } catch { return true }
+    }
     const clipped = (root) => {
       const content = root.querySelector('.xterm-screen')?.getBoundingClientRect()
       const box = root.querySelector('.xterm')?.getBoundingClientRect()
       if (content === undefined || box === undefined) return false
+      const viewport = root.querySelector('.xterm-viewport')
+      const scrollable = viewport !== null && viewport !== undefined
+        && viewport.clientHeight > 0
+        && viewport.scrollHeight > viewport.clientHeight + HEAL_OVERFLOW_PX
+        && overflowScrollable(viewport)
+      if (scrollable) return false
       const status = root.querySelector('[role="status"]')?.getBoundingClientRect().height ?? 0
       return content.height - box.height - status > HEAL_OVERFLOW_PX || content.width - box.width > HEAL_OVERFLOW_PX
+    }
+
+    const inTerminal = (el) => typeof el?.closest === 'function' && el.closest('[data-sidebar-terminal]') !== null
+
+    // 接管的副作用是宿主把焦点拉到终端;用户原本在别处时,下一帧把焦点还回去
+    const restoreFocus = (previous) => {
+      if (previous === null || previous === undefined || previous.isConnected === false || inTerminal(previous)) return
+      const restore = () => {
+        if (previous.isConnected === false || !inTerminal(document.activeElement)) return
+        previous.focus?.({ preventScroll: true })
+      }
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(restore)
+      else restore()
     }
 
     // 状态栏按钮随终端状态变化:退出态是「新建终端」,按位置取会误建终端
@@ -424,7 +449,9 @@ window.__ModuleLoader__.load({
             const fresh = takeoverButton(root)
             if (fresh === undefined) continue
             remember(sessionId, Date.now())
+            const previous = document.activeElement
             fresh.click()
+            restoreFocus(previous)
           }
         } catch {
           // 自愈是宿主行为的兜底,失败不得影响渲染

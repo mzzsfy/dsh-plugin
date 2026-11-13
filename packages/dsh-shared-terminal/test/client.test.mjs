@@ -298,6 +298,7 @@ const fakeRoot = (options = { clicks: [] }) => {
       }
       if (selector === '.xterm-screen') return { getBoundingClientRect: () => ({ width: 400, height: state.content }) }
       if (selector === '.xterm') return { getBoundingClientRect: () => ({ width: 400, height: 300 }) }
+      if (selector === '.xterm-viewport') return options.scrollable === true ? { clientHeight: 300, scrollHeight: 900 } : null
       return null
     },
   }
@@ -350,6 +351,13 @@ test('Given only the read-only status bar shortens the box, When healing ticks, 
   const app = healingFixture({ roots: [fakeRoot({ clicks, contentHeight: 311 })] })
   await app.heal()
   assert.deepEqual(clicks, [])
+})
+
+test('Given content scrolls inside the viewport, When healing ticks, Then it is not treated as clipped', async () => {
+  const clicks = []
+  const app = healingFixture({ roots: [fakeRoot({ clicks, scrollable: true })] })
+  await app.heal()
+  assert.deepEqual(clicks, [], '可滚动的溢出是 scrollback,不该抢控制权')
 })
 
 test('Given the terminal is not read-only, When healing ticks, Then the status button is never clicked', async () => {
