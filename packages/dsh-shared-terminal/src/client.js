@@ -353,7 +353,7 @@ window.__ModuleLoader__.load({
     // 宿主在附着结束时只清 controller,不把 writable 交还 UI(宿主按 controller===follower 判定);
     // UI 只读时跳过 fitScreen,窗口或侧栏变矮后底部被 overflow:hidden 裁掉且不可滚。
     // 无控制者时点宿主「接管输入」,UI 重新附着后由宿主自己按容器重算几何。
-    const HEAL_INTERVAL_MS = 2 * 1000
+    const HEAL_INTERVAL_MS = 6 * 1000
     const HEAL_COOLDOWN_MS = 5 * 1000
     const HEAL_OVERFLOW_PX = 2
     const HEAL_SESSIONS_MAX = 64
