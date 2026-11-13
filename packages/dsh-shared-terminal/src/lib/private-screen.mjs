@@ -17,6 +17,16 @@ export function resolvePrivateTerminal(controller, agent, id) {
   return terminal
 }
 
+// active buffer 类型:alternate 表示 TUI 占用整屏,行编辑复位在那里会破坏程序界面。
+export function readActiveBufferType(controller, agent, id) {
+  try {
+    const type = resolvePrivateTerminal(controller, agent, id).screen?.buffer?.active?.type
+    return typeof type === 'string' ? type : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export async function readControllerViewport(controller, agent, id, lines) {
   if (!Number.isSafeInteger(lines) || lines < 1 || lines > MAX_SCREEN_LINES) {
     throw new RangeError(`lines must be an integer between 1 and ${MAX_SCREEN_LINES}`)

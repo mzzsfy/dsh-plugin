@@ -96,6 +96,7 @@ export function createEngine({
         return { reason: 'closure', text: config.closureText }
       }
       case 'error': {
+        if (closureVerdict(events, turn).closed) return { closed: true }
         const failure = parseFailureFacts(reason.error)
         if (failure === undefined) return undefined
         if (config.classify && !isTransientFailure(failure, config.retryableErrorPatterns)) {
@@ -112,6 +113,7 @@ export function createEngine({
         }
       }
       case 'max-tokens':
+        if (closureVerdict(events, turn).closed) return { closed: true }
         return { reason: 'max-tokens', text: config.continueTextMaxTokens }
       case 'interrupted':
         return { reason: 'interrupted', text: config.continueTextInterrupted }

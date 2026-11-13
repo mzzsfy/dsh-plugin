@@ -259,6 +259,73 @@ const MESSAGES_ZH = {
   cachePrecisionDesc: '将官方用量胶囊及弹窗中的命中率显示为两位小数。',
   recentSpeed: '最近输出速度',
   recentSpeedDesc: '在官方「用时与速度」弹窗中追加最近 {n} 条回复消息的平均输出速度。',
+  recentTtft: '最近首 token 平均',
+  requestDetails: '最近请求详情',
+  requestDetailsDesc: '在官方用时弹窗中增加最近首 token 平均行与查看详情入口;关闭时不注入任何内容。',
+  secondsUnit: '秒',
+  requestDetailsEntry: '查看最近请求详情',
+  requestDetailsTitle: '最近请求详情',
+  requestDetailsSubtitle: '当前会话 · 最近 {n} 条',
+  requestCurrent: '当前请求',
+  requestInfo: '请求',
+  requestGenerating: '生成中',
+  requestWaitingFirst: '等待首 token',
+  requestCompleted: '完成',
+  requestTime: '时间',
+  requestStatus: '状态',
+  requestModel: '模型',
+  requestFirstToken: '首字',
+  requestFirstDelay: '首字延迟',
+  requestSpeed: '速度',
+  requestOutput: '输出',
+  requestTotalTokens: '总 Token',
+  requestTokenSection: 'Token',
+  requestEstimate: '预估',
+  requestMean: '均 {n} 条',
+  requestMeanTokens: '平均 Token',
+  requestMeanCost: '平均预估',
+  requestTurnStep: '轮次 / 步骤',
+  requestAttemptsCount: '尝试次数',
+  requestEmpty: '还没有完成的请求',
+  requestAttempts: '第 {turn} 轮 / 第 {step} 步 · 尝试 {attempts} 次',
+  requestStartedAt: '开始',
+  requestFirstAt: '首字时刻',
+  requestCompletedAt: '完成',
+  requestDecode: '生成时长',
+  requestUncachedInput: '未缓存输入',
+  requestCacheRead: '缓存读',
+  requestCacheWrite: '缓存写',
+  requestInputTotal: '输入合计',
+  requestCacheHit: '缓存命中率',
+  requestCost: '费用',
+  requestCostInput: '输入费用',
+  requestCostCacheRead: '缓存读费用',
+  requestCostCacheWrite: '缓存写费用',
+  requestCostOutput: '输出费用',
+  requestRule: '规则',
+  requestPriceTime: '计价时点',
+  requestUnpriced: '未配置该模型价格',
+  requestPartialUnpriced: '{n} 条未定价',
+  requestClose: '关闭',
+  requestExpand: '展开明细',
+  requestCollapse: '收起明细',
+  requestElapsed: '已 {duration}',
+  requestLiveEstimate: '生成中估算',
+  requestCostHint: '按当前定价规则估算,不代表账单',
+  requestUnavailable: '本会话暂无请求指标',
+  requestTotal: '合计',
+  requestPrice: '价格',
+  requestCurrentTag: '当前',
+  settingsSection: '显示与增强',
+  settingsSectionDesc: '官方弹窗补全与费用显示开关',
+  displayGroup: '显示补全',
+  displayGroupDesc: '官方用量与费用显示',
+  recentGroup: '最近请求',
+  recentGroupDesc: '最近输出速度与请求详情',
+  pricingSectionDesc: '按模型与时段估算费用',
+  settingsOnCount: '已开启 {n} 项',
+  pricingRuleCount: '{n} 条规则',
+  pricingNotConfigured: '未配置',
   replaceSpeed: '替换默认速度',
   replaceSpeedDesc: '开启后用最近输出速度替换官方用时胶囊上的平均输出速度,关闭则保留官方读数。',
   replaceSpeedReading: '最近{speed}',
@@ -413,6 +480,73 @@ const MESSAGES_EN = {
   cachePrecisionDesc: 'Show two decimals in the official usage pill and Token usage dialog.',
   recentSpeed: 'Recent output speed',
   recentSpeedDesc: 'Append the average output speed of the latest {n} replies to the official time-and-speed dialog.',
+  recentTtft: 'Recent average TTFT',
+  requestDetails: 'Recent request details',
+  requestDetailsDesc: 'Add a recent average TTFT row and a details entry to the official time dialog; nothing is injected while off.',
+  secondsUnit: 's',
+  requestDetailsEntry: 'View recent request details',
+  requestDetailsTitle: 'Recent request details',
+  requestDetailsSubtitle: 'Current session · last {n}',
+  requestCurrent: 'Current request',
+  requestInfo: 'Request',
+  requestGenerating: 'Generating',
+  requestWaitingFirst: 'Waiting for first token',
+  requestCompleted: 'Completed',
+  requestTime: 'Time',
+  requestStatus: 'Status',
+  requestModel: 'Model',
+  requestFirstToken: 'TTFT',
+  requestFirstDelay: 'TTFT',
+  requestSpeed: 'Speed',
+  requestOutput: 'Output',
+  requestTotalTokens: 'Total tokens',
+  requestTokenSection: 'Token',
+  requestEstimate: 'Est.',
+  requestMean: 'Avg {n}',
+  requestMeanTokens: 'Avg tokens',
+  requestMeanCost: 'Avg est.',
+  requestTurnStep: 'Turn / step',
+  requestAttemptsCount: 'Attempts',
+  requestEmpty: 'No completed requests yet',
+  requestAttempts: 'Turn {turn} / step {step} · {attempts} attempts',
+  requestStartedAt: 'Started',
+  requestFirstAt: 'First token at',
+  requestCompletedAt: 'Completed',
+  requestDecode: 'Decode time',
+  requestUncachedInput: 'Uncached input',
+  requestCacheRead: 'Cache read',
+  requestCacheWrite: 'Cache write',
+  requestInputTotal: 'Input total',
+  requestCacheHit: 'Cache hit',
+  requestCost: 'Cost',
+  requestCostInput: 'Input cost',
+  requestCostCacheRead: 'Cache read cost',
+  requestCostCacheWrite: 'Cache write cost',
+  requestCostOutput: 'Output cost',
+  requestRule: 'Rule',
+  requestPriceTime: 'Priced at',
+  requestUnpriced: 'No price configured for this model',
+  requestPartialUnpriced: '{n} unpriced',
+  requestClose: 'Close',
+  requestExpand: 'Expand details',
+  requestCollapse: 'Collapse details',
+  requestElapsed: '{duration} elapsed',
+  requestLiveEstimate: 'Live estimate',
+  requestCostHint: 'Estimated from current pricing rules, not a bill',
+  requestUnavailable: 'No request metrics in this session',
+  requestTotal: 'Total',
+  requestPrice: 'Price',
+  requestCurrentTag: 'Current',
+  settingsSection: 'Display & enhancements',
+  settingsSectionDesc: 'Official dialog additions and cost display',
+  displayGroup: 'Display additions',
+  displayGroupDesc: 'Official usage and cost display',
+  recentGroup: 'Recent requests',
+  recentGroupDesc: 'Recent output speed and request details',
+  pricingSectionDesc: 'Estimate costs by model and time',
+  settingsOnCount: '{n} enabled',
+  pricingRuleCount: '{n} rules',
+  pricingNotConfigured: 'Not configured',
   replaceSpeed: 'Replace default speed',
   replaceSpeedDesc: 'Replace the average output speed on the official time pill with the recent output speed; off keeps the official reading.',
   replaceSpeedReading: 'Recent {speed}',
@@ -1117,6 +1251,7 @@ const SPEED_ROW_ATTRIBUTE = 'data-ud-speed-detail="recentSpeed"'
 const TEXT_NODE = 3
 // 会话投影键:宿主按会话推送,wire 只带加权读数与窗口步数
 const RECENT_SPEED_PROJECTION = 'usageDashRecentSpeed'
+const RECENT_REQUESTS_PROJECTION = 'usageDashRecentRequests'
 
 // 官方 billing 分母:三个互斥的 prompt 侧计费桶
 function billedInputTokens(usage) {
@@ -1225,6 +1360,27 @@ function observeStatDialog(anchor, document, Observer, onTarget, stat, dialogSel
   return () => observer.disconnect()
 }
 
+// 详情入口不依赖自身 dock 节点,直接跟随官方 activity 胶囊的展开态;
+// anchor 用于把查询限定在当前会话的 dock,避免多窗格时读到别的窗格按钮
+function observeActivityStatDialog(anchor, document, Observer, onTarget) {
+  let current = null
+  const update = () => {
+    const pill = anchor?.closest('[data-slot="conversation.composer.dock"]')?.querySelector('[data-composer-stat="activity"]')
+    const button = pill?.querySelector('button')
+    const dialogs = document.querySelectorAll(SPEED_DIALOG_SELECTOR)
+    const next = button?.getAttribute('aria-expanded') === 'true' && dialogs.length === 1 ? dialogs[0] : null
+    if (next !== current) {
+      current = next
+      onTarget(next)
+    }
+    observer.takeRecords()
+  }
+  const observer = new Observer(update)
+  observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-expanded'] })
+  update()
+  return () => observer.disconnect()
+}
+
 // 读数行归位:官方弹窗后续追加行会排在 portal 节点之后,这里把读数行搬回明细末尾
 function keepSpeedRowLast(list) {
   if (!list || typeof list.querySelector !== 'function') return false
@@ -1234,6 +1390,111 @@ function keepSpeedRowLast(list) {
   if (list.lastElementChild === dd) return false
   list.append(dt, dd)
   return true
+}
+
+const RECENT_TTFT_ATTRIBUTE = 'data-ud-recent-ttft'
+const REQUEST_DETAILS_ENTRY_ATTRIBUTE = 'data-ud-request-entry'
+
+const childListOf = (element) => (element?.children ? [...element.children] : [])
+
+function findOfficialTtft(list) {
+  const children = childListOf(list)
+  for (let index = 0; index < children.length; index += 1) {
+    const dt = children[index]
+    if (dt.tagName !== 'DT' || dt.hasAttribute(RECENT_TTFT_ATTRIBUTE)) continue
+    if (!String(dt.textContent ?? '').includes('TTFT')) continue
+    const dd = children[index + 1]
+    if (dd?.tagName === 'DD') return { dt, dd }
+  }
+  return null
+}
+
+function removeMarkedPair(list, attribute) {
+  for (const child of childListOf(list)) {
+    if (child.hasAttribute(attribute)) child.remove()
+  }
+}
+
+// 最近首 token 平均行:只跟随官方 TTFT 行,找不到或没有有效值就不注入;重复同步复用同一对节点
+function syncRecentTtftRow(list, { label, value, unit }) {
+  if (!list?.children) return false
+  const official = findOfficialTtft(list)
+  if (!official || !Number.isFinite(value)) {
+    removeMarkedPair(list, RECENT_TTFT_ATTRIBUTE)
+    return false
+  }
+  const current = childListOf(list).filter((child) => child.hasAttribute(RECENT_TTFT_ATTRIBUTE))
+  let dt = current.find((child) => child.tagName === 'DT')
+  let dd = current.find((child) => child.tagName === 'DD')
+  if (!dt || !dd) {
+    if (dt) dt.remove()
+    if (dd) dd.remove()
+    dt = list.ownerDocument.createElement('dt')
+    dd = list.ownerDocument.createElement('dd')
+    dt.setAttribute(RECENT_TTFT_ATTRIBUTE, 'label')
+    dd.setAttribute(RECENT_TTFT_ATTRIBUTE, 'value')
+    const reference = official.dd.nextSibling
+    list.insertBefore(dt, reference)
+    list.insertBefore(dd, reference)
+  }
+  dt.textContent = label
+  dd.textContent = `${value}${unit}`
+  return true
+}
+
+// 详情入口:挂在官方明细之后;enabled 为假时清掉旧按钮,避免无数据残留
+function syncRequestDetailsEntry(list, { label, onOpen, enabled = true }, document = list?.ownerDocument) {
+  const parent = list?.parentElement
+  if (!parent) return null
+  const existing = childListOf(parent).find((child) => child.hasAttribute(REQUEST_DETAILS_ENTRY_ATTRIBUTE))
+  if (!enabled) {
+    existing?.remove()
+    return null
+  }
+  const button = existing ?? document.createElement('button')
+  if (!existing) {
+    button.setAttribute(REQUEST_DETAILS_ENTRY_ATTRIBUTE, 'entry')
+    button.setAttribute('type', 'button')
+    button.setAttribute('aria-haspopup', 'dialog')
+    button.className = 'ud-request-entry'
+    button.__udOpen = onOpen
+    button.addEventListener('click', () => button.__udOpen?.())
+    parent.insertBefore(button, list.nextSibling)
+  }
+  button.__udOpen = onOpen
+  button.textContent = label
+  return button
+}
+
+function clearRequestDetailsExtras(target) {
+  if (!target?.children) return
+  removeMarkedPair(target, RECENT_TTFT_ATTRIBUTE)
+  const parent = target.parentElement
+  if (!parent) return
+  for (const child of childListOf(parent)) {
+    if (child.hasAttribute(REQUEST_DETAILS_ENTRY_ATTRIBUTE)) child.remove()
+  }
+}
+
+// 官方弹窗重渲染会清掉手工节点,观察器只负责补回并保持唯一;目标关闭时由 effect 清理
+function observeRequestDetailsExtras(target, document, Observer, options) {
+  if (!target?.children) return undefined
+  const apply = () => {
+    syncRecentTtftRow(target, { label: options.ttftLabel, value: options.ttftValue, unit: options.unit })
+    syncRequestDetailsEntry(target, {
+      label: options.entryLabel,
+      onOpen: options.onOpen,
+      enabled: options.enabled,
+    })
+    observer.takeRecords()
+  }
+  const observer = new Observer(apply)
+  observer.observe(document.body, { childList: true, subtree: true, characterData: true })
+  apply()
+  return () => {
+    observer.disconnect()
+    clearRequestDetailsExtras(target)
+  }
 }
 
 // 胶囊速度文本改写:只替换「数值 + 每秒单位」片段,保留轮/步前缀与分隔;单位随宿主语言
@@ -1373,10 +1634,9 @@ function observeUsageDialog(anchor, document, Observer, onTarget, percent) {
 }
 
 // stats-line 偏好状态工厂:宿主 settings 投影(configForms.get)注入便于 Node 测试
-// 四项展示增强默认开(投影缺键/非法值一律按开,仅显式 false 视为用户关闭);
-// 替换官方读数是侵入性改写,缺键按关。写入先乐观更新,宿主拒绝或异常时回读宿主快照回滚
+// 展示增强默认开;替换官方读数与最近请求详情属额外注入,缺键按关。写入先乐观更新,宿主拒绝或异常时回读宿主快照回滚
 function createStatsLineState(form) {
-  const DEFAULT_PREFS = { cachePrecision: true, tokenDetail: true, costDisplay: true, recentSpeed: true, replaceSpeed: false }
+  const DEFAULT_PREFS = { cachePrecision: true, tokenDetail: true, costDisplay: true, recentSpeed: true, replaceSpeed: false, requestDetails: false }
   const KEYS = Object.keys(DEFAULT_PREFS)
   const normalize = (value) => ({
     cachePrecision: value?.cachePrecision !== false,
@@ -1384,6 +1644,7 @@ function createStatsLineState(form) {
     costDisplay: value?.costDisplay !== false,
     recentSpeed: value?.recentSpeed !== false,
     replaceSpeed: value?.replaceSpeed === true,
+    requestDetails: value?.requestDetails === true,
   })
   const read = () => {
     try {
@@ -1570,12 +1831,12 @@ const toLocalDate = (timestamp) => {
 
 // 匹配链:全名 > 模型名(vendor 通配)> 供应商(model 通配)> '*/*' 全通;
 // 档位最小者胜,同档按数组序取首个;高档条件不满足自然落低档;无命中为 null(调用方计 unpriced)
-function matchPrice(rules, model, timestamp) {
+function matchPriceRule(rules, model, timestamp) {
   const date = toLocalDate(timestamp)
   if (!Array.isArray(rules) || !date || typeof model !== 'string') return null
   const requestSegments = splitRequestSegments(model)
   let bestTier = Infinity
-  let bestPrice = null
+  let bestRule = null
   for (const rule of rules) {
     if (!isRuleShaped(rule)) continue
     const ruleSegments = splitRuleSegments(rule.model)
@@ -1584,9 +1845,13 @@ function matchPrice(rules, model, timestamp) {
     if (tier === null || tier >= bestTier) continue
     if (!rule.conditions.every((condition) => conditionMatches(condition, date))) continue
     bestTier = tier
-    bestPrice = rule.price
+    bestRule = rule
   }
-  return bestPrice
+  return bestRule === null ? null : { rule: bestRule, price: bestRule.price }
+}
+
+function matchPrice(rules, model, timestamp) {
+  return matchPriceRule(rules, model, timestamp)?.price ?? null
 }
 
 const BUCKET_PRICE_KEYS = [
@@ -1657,6 +1922,124 @@ const pricingBucketsOf = (usage) => ({
   cacheReadTokens: usage.cacheReadTokens,
   cacheWriteTokens: usage.cacheWriteTokens,
 })
+
+// 最近请求行的展示值:投影只存原始四桶,价格与速度在渲染时派生
+const REQUEST_NUMBER_DECIMALS = 1
+const REQUEST_TTFT_SECONDS_SCALE = 10 ** REQUEST_NUMBER_DECIMALS
+const RECENT_TTFT_AVERAGE_STEPS = 10
+// 毫秒级事件时间下,短 decode 窗口会把单次吞吐放大到无意义量级;低于该窗口不作为速度样本
+const REQUEST_SPEED_MIN_DECODE_MS = MS_PER_SECOND / 10
+const REQUEST_TOKEN_KEYS = ['uncachedInputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens']
+
+function requestTotalTokens(row) {
+  const usage = row?.usage
+  if (!usage) return null
+  return REQUEST_TOKEN_KEYS.reduce((sum, key) => sum + toFiniteNumber(usage[key]), 0)
+}
+
+function hasRequestSpeedSample(row) {
+  return Boolean(row?.usage) && Number.isFinite(row.decodeMs) && row.decodeMs >= REQUEST_SPEED_MIN_DECODE_MS
+}
+
+function requestDecodeSpeed(row) {
+  if (!hasRequestSpeedSample(row)) return null
+  return toFiniteNumber(row.usage.outputTokens) / (row.decodeMs / MS_PER_SECOND)
+}
+
+function requestCostOf(row, rules) {
+  const usage = row?.usage
+  if (!usage) return null
+  const matched = matchPriceRule(rules, row?.model, row?.startedAt)
+  if (!matched) return null
+  return {
+    total: costOf(matched.price, pricingBucketsOf(usage)),
+    price: matched.price,
+    rule: matched.rule,
+  }
+}
+
+function formatRequestCost(value, currency, partial = false) {
+  if (!Number.isFinite(value)) return COST_PLACEHOLDER
+  const decimals = value > 0 && value < COST_MICRO_THRESHOLD ? COST_MICRO_DECIMALS : COST_DECIMALS
+  return `${partial ? '≥' : '≈'}${formatCost(value, currency, decimals)}`
+}
+
+function requestTtftAverageSeconds(rows) {
+  if (!Array.isArray(rows)) return null
+  const values = rows
+    .slice(-RECENT_TTFT_AVERAGE_STEPS)
+    .map((row) => row?.ttftMs)
+    .filter((value) => Number.isFinite(value) && value >= 0)
+  if (values.length === 0) return null
+  const averageMs = values.reduce((sum, value) => sum + value, 0) / values.length
+  return Math.round((averageMs / MS_PER_SECOND) * REQUEST_TTFT_SECONDS_SCALE) / REQUEST_TTFT_SECONDS_SCALE
+}
+
+function summarizeRequests(rows, rules) {
+  const list = Array.isArray(rows) ? rows : []
+  let ttftTotal = 0
+  let ttftCount = 0
+  let outputTokens = 0
+  let outputCount = 0
+  let decodeMs = 0
+  let tokenTotal = 0
+  let tokenCount = 0
+  let costTotal = 0
+  let pricedCount = 0
+  for (const row of list) {
+    if (Number.isFinite(row?.ttftMs) && row.ttftMs >= 0) {
+      ttftTotal += row.ttftMs
+      ttftCount += 1
+    }
+    if (hasRequestSpeedSample(row)) {
+      outputTokens += toFiniteNumber(row.usage.outputTokens)
+      outputCount += 1
+      decodeMs += row.decodeMs
+    }
+    const total = requestTotalTokens(row)
+    if (total !== null) {
+      tokenTotal += total
+      tokenCount += 1
+    }
+    const priced = requestCostOf(row, rules)
+    if (priced) {
+      costTotal += priced.total
+      pricedCount += 1
+    }
+  }
+  return {
+    count: list.length,
+    ttftMs: ttftCount > 0 ? ttftTotal / ttftCount : null,
+    speed: decodeMs > 0 ? outputTokens / (decodeMs / MS_PER_SECOND) : null,
+    outputTokens: outputCount > 0 ? outputTokens / outputCount : null,
+    totalTokens: tokenCount > 0 ? tokenTotal / tokenCount : null,
+    cost: pricedCount > 0 ? costTotal / pricedCount : null,
+    pricedCount,
+    unpricedCount: list.length - pricedCount,
+  }
+}
+
+function formatRequestRowModel(model) {
+  if (typeof model !== 'string' || model === '') return COST_PLACEHOLDER
+  const slash = model.indexOf(SEGMENT_SEPARATOR)
+  return slash >= 0 && slash < model.length - 1 ? model.slice(slash + 1) : model
+}
+
+const formatClock = (time) => {
+  const date = new Date(time)
+  return Number.isNaN(date.getTime())
+    ? COST_PLACEHOLDER
+    : `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+const bucketCostOf = (price, key, tokens) =>
+  toFiniteNumber(tokens) * toFiniteNumber(price?.[key]) / TOKENS_PER_MILLION
+
+function cacheHitRateOf(usage) {
+  if (!usage) return null
+  const billedInput = usage.uncachedInputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
+  return billedInput > 0 ? (usage.cacheReadTokens / billedInput) * 100 : null
+}
 
 // routes 缺席占位:双段通配模型键,仅被 '*/*' 全通配规则命中(供应商与模型全未知)
 const MODEL_UNROUTED = '*/*'
@@ -2247,6 +2630,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     const ICON_STROKE_WIDTH = 2
     const NOTE_SEPARATOR = ' · '
     const TIP_Z_INDEX = 1100
+    const MODAL_Z_INDEX = 1200
     // 与注册 id 同源:既作样式查重键,又作 data-plugin 标记值,短名会使自身 rebuilt 删不到旧样式
     const STYLE_ID = '@mzzsfy/dsh-usage-dash'
     // 开关视觉常量(规约形态:隐藏 checkbox + track 胶囊 + thumb 圆点;尺寸全仓统一 34×19/13)
@@ -2294,6 +2678,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       rate: ['M22 12h-4l-3 9L9 3l-3 9H2'],
       days: ['M5 5h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z', 'M16 3v4', 'M8 3v4', 'M3 11h18'],
       trash: ['M3 6h18', 'M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6', 'M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2', 'M10 11v6', 'M14 11v6'],
+      close: ['M18 6 6 18', 'M6 6l12 12'],
+      chevron: ['m9 18 6-6-6-6'],
     }
 
     function Icon({ paths }) {
@@ -2485,7 +2871,27 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-switch input[type="checkbox"]:checked + .ud-switch__track .ud-switch__thumb{transform:translateX(${SWITCH_THUMB_TRAVEL}px)}
 .ud-switch input[type="checkbox"]:focus-visible + .ud-switch__track{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
 .ud-switch input[type="checkbox"]:disabled + .ud-switch__track{opacity:.45;cursor:default}
+.ud-settings-stack{display:flex;flex-direction:column;gap:8px}
+.ud-fold{border:1px solid var(--ud-card-border);border-radius:var(--ud-radius-md);background:var(--ud-card);overflow:hidden}
+.ud-fold-head{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;box-sizing:border-box;padding:12px 16px;border:0;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;text-align:left;cursor:pointer}
+.ud-fold-head:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.ud-fold-head:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px}
+.ud-fold-heading{display:flex;flex-direction:column;gap:2px;min-width:0}
+.ud-fold-title{font-size:14px;line-height:22px;font-weight:600}
+.ud-fold-desc{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}
+.ud-fold-side{display:flex;align-items:center;gap:8px;flex:none}
+.ud-fold-summary{font-size:12px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}
+.ud-fold-caret{display:flex;align-items:center;justify-content:center;color:var(--dsw-alias-label-tertiary);transition:transform .15s ease}
+.ud-fold-caret svg{display:block;width:14px;height:14px}
+.ud-fold--open .ud-fold-caret{transform:rotate(90deg)}
+.ud-fold-body{padding:8px 16px 16px;border-top:.5px solid var(--dsw-alias-border-l1)}
+.ud-fold-body[hidden]{display:none}
 .ud-pref-group{display:flex;flex-direction:column;gap:4px;border:1px solid var(--dsw-alias-border-l1);border-radius:var(--ud-radius-sm);padding:12px 16px}
+.ud-pref-group + .ud-pref-group{margin-top:8px}
+.ud-pref-group-head{display:flex;flex-direction:column;gap:2px;padding-bottom:4px;border-bottom:.5px solid var(--dsw-alias-border-l1)}
+.ud-pref-group-title{font-size:12px;line-height:18px;font-weight:600;color:var(--dsw-alias-label-secondary)}
+.ud-pref-group-desc{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
+.ud-pref-group--recent{background:color-mix(in srgb,var(--dsw-alias-bg-layer-2) 55%,transparent);border-color:var(--dsw-alias-border-l2)}
 .ud-pref-row{display:flex;align-items:center;justify-content:space-between;gap:16px}
 .ud-pref-text{display:flex;flex-direction:column;gap:2px;min-width:0}
 .ud-pref-title{font-size:13px;color:var(--dsw-alias-label-primary)}
@@ -2527,6 +2933,59 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-statsline-root{--ud-dock-gap:0px;text-align:center;max-width:var(--dsh-chat-content-width);box-sizing:border-box;flex:0 999 auto;min-width:0;padding:0;font-size:var(--dsh-content-font-size-secondary);line-height:calc(20px + var(--dsh-content-font-delta-secondary));color:var(--dsw-alias-label-tertiary);white-space:nowrap;text-overflow:ellipsis;margin:0;margin-left:calc(0px - var(--ud-dock-gap));text-indent:var(--ud-dock-gap);display:block;overflow:hidden}
 /* 芯片 portal 至动作行末尾,历史轮悬停/焦点显隐随父级 data-actions-reveal,无需自绘规则 */
 .ud-turn-cost{font-size:var(--dsh-content-font-size-secondary);color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;white-space:nowrap;margin-left:${TURN_COST_GAP_PX}px}
+/* 官方用时弹窗入口:按钮挂在 dl 之后,不参与 dl 的 dt/dd 语义 */
+.ud-request-anchor{display:none}
+.ud-request-entry{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;box-sizing:border-box;border:0;border-top:.5px solid var(--dsw-alias-border-l2);background:transparent;color:var(--dsw-alias-state-business-primary);font:inherit;font-size:12px;line-height:18px;padding:8px 0 2px;margin-top:8px;text-align:left;cursor:pointer}
+.ud-request-entry:hover{color:var(--dsw-alias-button-primary-hover)}
+.ud-request-entry:focus-visible,.ud-request-close:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
+.ud-request-entry::after{content:"›";font-size:16px;line-height:16px}
+.ud-request-backdrop{position:fixed;inset:0;z-index:${MODAL_Z_INDEX};display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;background:color-mix(in srgb,var(--dsw-alias-label-primary) 18%,transparent)}
+.ud-request-modal{width:min(840px,100%);max-height:min(80vh,780px);display:flex;flex-direction:column;overflow:hidden;background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);box-shadow:var(--dsw-shadow-lv3);color:var(--dsw-alias-label-primary);font-size:12px;line-height:18px}
+.ud-request-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:16px 20px 12px;border-bottom:.5px solid var(--dsw-alias-border-l2)}
+.ud-request-head-text{display:flex;flex-direction:column;gap:2px;min-width:0}
+.ud-request-title{font-size:14px;line-height:22px;font-weight:600}
+.ud-request-subtitle{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
+.ud-request-close{display:grid;place-items:center;width:28px;height:28px;flex:none;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer}
+.ud-request-close:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.ud-request-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;padding:12px 20px;border-bottom:.5px solid var(--dsw-alias-border-l2)}
+.ud-request-metric{display:flex;flex-direction:column;gap:2px;min-width:0;padding:8px 10px;border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2)}
+.ud-request-metric-label{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
+.ud-request-metric-value{font-size:14px;line-height:20px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.ud-request-table-wrap{overflow:auto;min-height:0}
+.ud-request-table{width:100%;min-width:660px;border-collapse:collapse;table-layout:fixed}
+.ud-request-table th{position:sticky;top:0;z-index:1;background:var(--dsw-alias-bg-layer-1);font-size:11px;line-height:16px;font-weight:500;color:var(--dsw-alias-label-tertiary);text-align:left;padding:8px 8px;border-bottom:.5px solid var(--dsw-alias-border-l2);white-space:nowrap}
+.ud-request-table td{padding:8px;border-bottom:.5px solid var(--dsw-alias-border-l1);vertical-align:middle;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ud-request-table th:first-child,.ud-request-table td:first-child{padding-left:20px;width:40px}
+.ud-request-table th:last-child,.ud-request-table td:last-child{padding-right:20px}
+.ud-request-row{cursor:pointer}
+.ud-request-row:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px}
+.ud-request-row:hover td{background:var(--dsw-alias-interactive-bg-hover)}
+.ud-request-row--live td{background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 7%,transparent)}
+.ud-request-row--open td{background:var(--dsw-alias-bg-layer-2)}
+.ud-request-time{color:var(--dsw-alias-label-secondary)}
+.ud-request-status{display:inline-flex;align-items:center;gap:6px;color:var(--dsw-alias-label-tertiary)}
+.ud-request-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-state-success-primary)}
+.ud-request-dot--live{background:var(--dsw-alias-state-business-primary);animation:ud-request-pulse 1.2s ease-in-out infinite}
+@keyframes ud-request-pulse{0%,100%{opacity:.35}50%{opacity:1}}
+.ud-request-live-note{display:block;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary);margin-top:2px}
+.ud-request-number{text-align:right}
+.ud-request-price{text-align:right;color:var(--dsw-alias-label-secondary)}
+.ud-request-model{max-width:150px;color:var(--dsw-alias-label-secondary)}
+.ud-request-chevron{display:inline-block;width:12px;color:var(--dsw-alias-label-tertiary);transition:transform .15s}
+.ud-request-row--open .ud-request-chevron{transform:rotate(90deg)}
+.ud-request-expanded td{padding:0;background:var(--dsw-alias-bg-layer-2)}
+.ud-request-detail{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px 24px;padding:16px 20px;align-items:start}
+.ud-request-detail-col{display:flex;flex-direction:column;gap:16px;min-width:0}
+.ud-request-detail-section{display:flex;flex-direction:column;gap:4px;min-width:0}
+.ud-request-detail-title{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
+.ud-request-detail-line{display:flex;justify-content:space-between;gap:12px;font-size:12px;line-height:18px;min-width:0}
+.ud-request-detail-line span:first-child{color:var(--dsw-alias-label-tertiary);flex:none}
+.ud-request-detail-line span:last-child{text-align:right;overflow-wrap:anywhere;min-width:0}
+.ud-request-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 20px;border-top:.5px solid var(--dsw-alias-border-l2);font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-layer-1)}
+.ud-request-empty{padding:24px 20px;text-align:center;color:var(--dsw-alias-label-tertiary)}
+.ud-request-current-tag{font-size:11px;line-height:16px;color:var(--dsw-alias-state-business-primary)}
+@media (max-width:640px){.ud-request-backdrop{padding:12px}.ud-request-modal{max-height:88vh}.ud-request-summary{grid-template-columns:repeat(2,minmax(0,1fr));padding:10px 16px}.ud-request-head{padding:12px 16px 10px}.ud-request-detail{grid-template-columns:1fr;padding:12px 16px;position:sticky;left:0;width:calc(100vw - 48px);box-sizing:border-box}.ud-request-table th:first-child,.ud-request-table td:first-child{padding-left:16px}.ud-request-table th:last-child,.ud-request-table td:last-child{padding-right:16px}}
+@media (prefers-reduced-motion:reduce){.ud-request-dot--live{animation:none}.ud-request-chevron{transition:none}}
 `
 
     function ensureStyle(document) {
@@ -3183,6 +3642,304 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       }, [text])
     }
 
+    function useRecentRequestsDialog(enabled, anchorRef) {
+      const [target, setTarget] = useState(null)
+      useEffect(() => {
+        if (!enabled) {
+          setTarget(null)
+          return undefined
+        }
+        return observeActivityStatDialog(anchorRef.current, document, MutationObserver, setTarget)
+      }, [enabled])
+      return enabled ? target : null
+    }
+
+    const requestCostText = (value, currency, partial = false) => formatRequestCost(value, currency, partial)
+    const requestSpeedText = (value) => (Number.isFinite(value) ? `${formatTokensPerSecond(value)} tok/s` : COST_PLACEHOLDER)
+    const requestDurationText = (value, t) => (Number.isFinite(value) ? formatDuration(value, t) : COST_PLACEHOLDER)
+    const requestTokenText = (value) => (Number.isFinite(value) ? formatTokens(value) : COST_PLACEHOLDER)
+
+    function requestDetailLine(label, value) {
+      return h('div', { className: 'ud-request-detail-line', key: label },
+        h('span', null, label),
+        h('span', null, value))
+    }
+
+    function requestDetailSection(title, lines, key) {
+      return h('div', { className: 'ud-request-detail-section', key },
+        h('div', { className: 'ud-request-detail-title' }, title),
+        lines)
+    }
+
+    function RequestDetailsModal({ view, rules, t = defaultT, onClose }) {
+      const rows = Array.isArray(view?.rows) ? [...view.rows].reverse() : []
+      const current = view?.open ?? null
+      const [expanded, setExpanded] = useState(null)
+      const [now, setNow] = useState(() => Date.now())
+      const modalRef = useRef(null)
+      const closeRef = useRef(null)
+      const closeRefValue = useRef(onClose)
+      closeRefValue.current = onClose
+      const summary = summarizeRequests(rows, rules)
+      const currency = aggregateCurrencyOf(rules)
+      const visibleCount = rows.length + (current ? 1 : 0)
+
+      useEffect(() => {
+        const previous = document.activeElement
+        const previousOverflow = document.body.style.overflow
+        // 官方弹层在独立 portal 且层级接近,打开详情时临时隐藏,避免两层弹窗叠在一起
+        const sourcePanel = document.querySelector('[data-session-stats-details]')?.parentElement
+        const previousVisibility = sourcePanel?.style.visibility
+        if (sourcePanel) sourcePanel.style.visibility = 'hidden'
+        document.body.style.overflow = 'hidden'
+        closeRef.current?.focus()
+        const onKey = (event) => {
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            closeRefValue.current?.()
+            return
+          }
+          if (event.key !== 'Tab' || !modalRef.current) return
+          const focusable = [...modalRef.current.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')]
+            .filter((node) => !node.disabled && node.offsetParent !== null)
+          if (focusable.length === 0) return
+          const first = focusable[0]
+          const last = focusable[focusable.length - 1]
+          if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault()
+            last.focus()
+          } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault()
+            first.focus()
+          }
+        }
+        document.addEventListener('keydown', onKey)
+        return () => {
+          document.removeEventListener('keydown', onKey)
+          document.body.style.overflow = previousOverflow
+          if (sourcePanel) {
+            if (previousVisibility === undefined) sourcePanel.style.removeProperty('visibility')
+            else sourcePanel.style.visibility = previousVisibility
+          }
+          if (previous?.isConnected) previous.focus()
+          else document.querySelector('[data-composer-stat="activity"] button')?.focus?.()
+        }
+      }, [])
+
+      useEffect(() => {
+        if (!current) return undefined
+        const timer = setInterval(() => setNow(Date.now()), MS_PER_SECOND)
+        return () => clearInterval(timer)
+      }, [current?.turn, current?.step])
+
+      const currentUsage = current?.usage ?? null
+      const currentTotal = currentUsage ? currentUsage.uncachedInputTokens + currentUsage.outputTokens + currentUsage.cacheReadTokens + currentUsage.cacheWriteTokens : null
+      const currentFirst = current?.firstTokenTime ?? null
+      const currentTtft = currentFirst === null ? null : Math.max(0, currentFirst - current.startTime)
+      const currentDecode = currentFirst === null ? null : Math.max(0, now - currentFirst)
+      const currentSpeed = currentUsage && currentDecode !== null && currentDecode > 0
+        ? currentUsage.outputTokens / (currentDecode / MS_PER_SECOND)
+        : null
+      const currentCost = currentUsage && current
+        ? requestCostOf({
+            startedAt: current.startTime,
+            model: current.model,
+            usage: currentUsage,
+          }, rules)
+        : null
+
+      const liveRow = current
+        ? h('tr', { className: 'ud-request-row ud-request-row--live' },
+            h('td', null, h('span', { className: 'ud-request-dot ud-request-dot--live', 'aria-hidden': true })),
+            h('td', null, h('span', { className: 'ud-request-time' }, formatClock(current.startTime))),
+            h('td', null,
+              h('span', { className: 'ud-request-status' }, t('requestGenerating')),
+              h('span', { className: 'ud-request-live-note' }, t('requestElapsed', { duration: formatDuration(Math.max(0, now - current.startTime), t) }))),
+            h('td', { className: 'ud-request-model', title: current.model ?? '' }, formatRequestRowModel(current.model)),
+            h('td', { className: 'ud-request-number' }, requestDurationText(currentTtft, t)),
+            h('td', { className: 'ud-request-number' }, currentSpeed === null ? COST_PLACEHOLDER : `~${requestSpeedText(currentSpeed)}`),
+            h('td', { className: 'ud-request-number' }, currentUsage ? `~${requestTokenText(currentUsage.outputTokens)}` : COST_PLACEHOLDER),
+            h('td', { className: 'ud-request-number' }, currentTotal === null ? COST_PLACEHOLDER : `~${requestTokenText(currentTotal)}`),
+            h('td', { className: 'ud-request-price' }, currentCost ? `~${requestCostText(currentCost.total, currency)}` : COST_PLACEHOLDER))
+        : null
+
+      const bodyRows = []
+      rows.forEach((row, index) => {
+        const key = `${row.turn}:${row.step}`
+        const open = expanded === key
+        const cost = requestCostOf(row, rules)
+        const usage = row.usage
+        bodyRows.push(h('tr', {
+          key,
+          className: cx('ud-request-row', open && 'ud-request-row--open'),
+          tabIndex: 0,
+          'aria-expanded': open,
+          onClick: () => setExpanded(open ? null : key),
+          onKeyDown: (event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault()
+              setExpanded(open ? null : key)
+            }
+          },
+        },
+          h('td', null,
+            h('span', { className: 'ud-request-chevron', 'aria-hidden': true }, '›'),
+            h('span', { className: 'ud-request-time' }, index + 1)),
+          h('td', { className: 'ud-request-time' }, formatClock(row.startedAt)),
+          h('td', null, h('span', { className: 'ud-request-status' },
+            h('span', { className: 'ud-request-dot', 'aria-hidden': true }), t('requestCompleted'))),
+          h('td', { className: 'ud-request-model', title: row.model ?? '' }, formatRequestRowModel(row.model)),
+          h('td', { className: 'ud-request-number' }, requestDurationText(row.ttftMs, t)),
+          h('td', { className: 'ud-request-number' }, requestSpeedText(requestDecodeSpeed(row))),
+          h('td', { className: 'ud-request-number' }, usage ? requestTokenText(usage.outputTokens) : COST_PLACEHOLDER),
+          h('td', { className: 'ud-request-number' }, requestTokenText(requestTotalTokens(row))),
+          h('td', { className: 'ud-request-price' }, cost ? requestCostText(cost.total, currency) : COST_PLACEHOLDER)))
+        if (open) {
+          const inputTotal = usage ? usage.uncachedInputTokens + usage.cacheReadTokens + usage.cacheWriteTokens : null
+          const hit = cacheHitRateOf(usage)
+          const priced = cost !== null
+          bodyRows.push(h('tr', { key: `${key}:detail`, className: 'ud-request-expanded' },
+            h('td', { colSpan: 9 },
+              h('div', { className: 'ud-request-detail' },
+                h('div', { className: 'ud-request-detail-col' },
+                  requestDetailSection(t('requestInfo'), [
+                    requestDetailLine(t('requestTurnStep'), `${row.turn} / ${row.step}`),
+                    requestDetailLine(t('requestAttemptsCount'), String(row.attempts)),
+                    requestDetailLine(t('requestStatus'), t('requestCompleted')),
+                    requestDetailLine(t('requestModel'), row.model ?? COST_PLACEHOLDER),
+                  ], 'request'),
+                  requestDetailSection(t('requestTokenSection'), [
+                    requestDetailLine(t('requestUncachedInput'), usage ? requestTokenText(usage.uncachedInputTokens) : COST_PLACEHOLDER),
+                    requestDetailLine(t('requestCacheRead'), usage ? requestTokenText(usage.cacheReadTokens) : COST_PLACEHOLDER),
+                    requestDetailLine(t('requestCacheWrite'), usage ? requestTokenText(usage.cacheWriteTokens) : COST_PLACEHOLDER),
+                    requestDetailLine(t('requestOutput'), usage ? requestTokenText(usage.outputTokens) : COST_PLACEHOLDER),
+                    requestDetailLine(t('requestInputTotal'), requestTokenText(inputTotal)),
+                    requestDetailLine(t('requestTotalTokens'), requestTokenText(requestTotalTokens(row))),
+                    requestDetailLine(t('requestCacheHit'), hit === null ? COST_PLACEHOLDER : formatPercent(hit)),
+                  ], 'tokens')),
+                h('div', { className: 'ud-request-detail-col' },
+                  requestDetailSection(t('requestTime'), [
+                    requestDetailLine(t('requestStartedAt'), formatClock(row.startedAt)),
+                    requestDetailLine(t('requestFirstAt'), row.firstTokenTime === null ? COST_PLACEHOLDER : formatClock(row.firstTokenTime)),
+                    requestDetailLine(t('requestCompletedAt'), formatClock(row.completedAt)),
+                    requestDetailLine(t('requestFirstDelay'), requestDurationText(row.ttftMs, t)),
+                    requestDetailLine(t('requestDecode'), requestDurationText(row.decodeMs, t)),
+                  ], 'timing'),
+                  requestDetailSection(t('requestCost'), priced ? [
+                    requestDetailLine(t('requestCostInput'), requestCostText(bucketCostOf(cost.price, 'input', usage?.uncachedInputTokens), currency)),
+                    requestDetailLine(t('requestCostCacheRead'), requestCostText(bucketCostOf(cost.price, 'cacheRead', usage?.cacheReadTokens), currency)),
+                    requestDetailLine(t('requestCostCacheWrite'), requestCostText(bucketCostOf(cost.price, 'cacheWrite', usage?.cacheWriteTokens), currency)),
+                    requestDetailLine(t('requestCostOutput'), requestCostText(bucketCostOf(cost.price, 'output', usage?.outputTokens), currency)),
+                    requestDetailLine(t('requestCost'), requestCostText(cost.total, currency)),
+                    requestDetailLine(t('requestPriceTime'), formatClock(row.startedAt)),
+                    requestDetailLine(t('requestRule'), `${cost.rule.model} · ${cost.rule.currency || '—'}`),
+                  ] : [requestDetailLine(t('requestCost'), t('requestUnpriced'))], 'cost'))))))
+        }
+      })
+
+      return h('div', {
+        className: 'ud-request-backdrop',
+        onMouseDown: (event) => { if (event.target === event.currentTarget) closeRefValue.current?.() },
+      },
+      h('div', {
+        className: 'ud-request-modal',
+        role: 'dialog',
+        'aria-modal': 'true',
+        'aria-labelledby': 'ud-request-title',
+        ref: modalRef,
+        onPointerDown: (event) => event.stopPropagation(),
+        onMouseDown: (event) => event.stopPropagation(),
+        onClick: (event) => event.stopPropagation(),
+      },
+        h('div', { className: 'ud-request-head' },
+          h('div', { className: 'ud-request-head-text' },
+            h('div', { className: 'ud-request-title', id: 'ud-request-title' }, t('requestDetailsTitle')),
+            h('div', { className: 'ud-request-subtitle' }, `${t('requestDetailsSubtitle', { n: visibleCount })}${summary.unpricedCount > 0 ? ` · ${t('requestPartialUnpriced', { n: summary.unpricedCount })}` : ''}`)),
+          h('button', {
+            className: 'ud-request-close', type: 'button', ref: closeRef,
+            'aria-label': t('requestClose'), title: t('requestClose'), onClick: () => closeRefValue.current?.(),
+          }, h(Icon, { paths: ICONS.close }))),
+        h('div', { className: 'ud-request-summary' },
+          h('div', { className: 'ud-request-metric' },
+            h('span', { className: 'ud-request-metric-label' }, t('requestFirstToken')),
+            h('span', { className: 'ud-request-metric-value' }, requestDurationText(summary.ttftMs, t))),
+          h('div', { className: 'ud-request-metric' },
+            h('span', { className: 'ud-request-metric-label' }, t('requestSpeed')),
+            h('span', { className: 'ud-request-metric-value' }, requestSpeedText(summary.speed))),
+          h('div', { className: 'ud-request-metric' },
+            h('span', { className: 'ud-request-metric-label' }, t('requestMeanTokens')),
+            h('span', { className: 'ud-request-metric-value' }, requestTokenText(summary.totalTokens))),
+          h('div', { className: 'ud-request-metric' },
+            h('span', { className: 'ud-request-metric-label' }, t('requestMeanCost')),
+            h('span', { className: 'ud-request-metric-value' }, requestCostText(summary.cost, currency, summary.unpricedCount > 0)))),
+        h('div', { className: 'ud-request-table-wrap' },
+          h('table', { className: 'ud-request-table' },
+            h('colgroup', null,
+              ['40px', '72px', '72px', '132px', '64px', '84px', '72px', '88px', '88px'].map((width, index) => h('col', { key: index, style: { width } }))),
+            h('thead', null, h('tr', null,
+              ['#', t('requestTime'), t('requestStatus'), t('requestModel'), t('requestFirstToken'), t('requestSpeed'), t('requestOutput'), t('requestTotalTokens'), t('requestEstimate')]
+                .map((label, index) => h('th', { key: index, scope: 'col' }, label)))),
+            h('tbody', null,
+              liveRow,
+              bodyRows.length > 0 ? bodyRows : h('tr', null,
+                h('td', { colSpan: 9, className: 'ud-request-empty' }, t('requestEmpty')))))),
+        h('div', { className: 'ud-request-foot' },
+          h('span', null, `${t('requestMean', { n: summary.count })}${summary.unpricedCount > 0 ? ` · ${t('requestPartialUnpriced', { n: summary.unpricedCount })}` : ''}`),
+          h('span', { title: t('requestCostHint') }, `${t('requestCost')} ${requestCostText(summary.cost, currency, summary.unpricedCount > 0)}`))))
+    }
+
+    // 详情入口不占 dock 布局:只在官方弹窗打开时注入按钮与最近首 token 平均行,弹窗关闭即清理
+    const RequestDetailsAppended = React.memo(function RequestDetailsAppended({ useProjection, t = defaultT }) {
+      if (typeof useProjection !== 'function') return null
+      const view = useProjection(RECENT_REQUESTS_PROJECTION)
+      const [prefs, setPrefs] = useState(() => statsLineState.get())
+      useEffect(() => statsLineState.subscribe(() => setPrefs(statsLineState.get())), [])
+      const featureEnabled = prefs.requestDetails && typeof createPortal === 'function'
+      const { rules } = usePricing()
+      const [open, setOpen] = useState(false)
+      const openRef = useRef(false)
+      const anchorRef = useRef(null)
+      openRef.current = open
+      const requestOpen = useRef(() => {})
+      requestOpen.current = () => setOpen(true)
+      const target = useRecentRequestsDialog(featureEnabled, anchorRef)
+      const rows = Array.isArray(view?.rows) ? view.rows : []
+      const ttftAverage = requestTtftAverageSeconds(rows)
+      const ttftKey = ttftAverage === null ? '' : String(ttftAverage)
+      const ttftLabel = t('recentTtft')
+      const entryLabel = t('requestDetailsEntry')
+      const unit = t('secondsUnit')
+      const hasData = rows.length > 0 || (view?.open ?? null) !== null
+
+      useEffect(() => {
+        if (!featureEnabled && open) setOpen(false)
+      }, [featureEnabled, open])
+
+      useEffect(() => {
+        if (!featureEnabled || !target) return undefined
+        return observeRequestDetailsExtras(target, document, MutationObserver, {
+          ttftLabel,
+          ttftValue: ttftAverage,
+          unit,
+          entryLabel,
+          enabled: hasData,
+          onOpen: () => requestOpen.current?.(),
+        })
+      }, [featureEnabled, target, ttftKey, hasData, ttftLabel, entryLabel, unit])
+
+      if (!featureEnabled) return null
+      return h(React.Fragment, null,
+        h('span', { ref: anchorRef, className: 'ud-request-anchor', 'aria-hidden': 'true' }),
+        featureEnabled && open && createPortal
+          ? createPortal(h(RequestDetailsModal, {
+              view,
+              rules,
+              t,
+              onClose: () => setOpen(false),
+            }), document.body)
+          : null)
+    })
+
     // 官方明细追加补充项，底栏保留费用。最近输出速度按会话投影订阅，
     // 投影缺失（旧宿主或本会话未采集到读数）时回落窗口节点估算。
     const StatsLineAppended = React.memo(function StatsLineAppended({ useProjection, useChat, t = defaultT }) {
@@ -3288,6 +4045,23 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       return h('span', { ref: anchorRef, style: ported ? { display: 'none' } : undefined }, ported ?? children)
     }
 
+    // 设置区折叠容器:标题按钮承担展开/收起语义,body 保留子树状态
+    function SectionFold({ title, description, summary, open, onToggle, children }) {
+      const bodyId = React.useId()
+      return h('section', { className: cx('ud-fold', open && 'ud-fold--open') },
+        h('button', {
+          type: 'button', className: 'ud-fold-head', 'aria-expanded': open, 'aria-controls': bodyId,
+          onClick: onToggle,
+        },
+          h('span', { className: 'ud-fold-heading' },
+            h('span', { className: 'ud-fold-title' }, title),
+            description ? h('span', { className: 'ud-fold-desc' }, description) : null),
+          h('span', { className: 'ud-fold-side' },
+            summary ? h('span', { className: 'ud-fold-summary' }, summary) : null,
+            h('span', { className: 'ud-fold-caret', 'aria-hidden': 'true' }, h(Icon, { paths: ICONS.chevron })))),
+        h('div', { className: 'ud-fold-body', id: bodyId, hidden: !open }, children))
+    }
+
     // 偏好卡行:说明文案承担 aria-describedby 目标
     function StatsLineOptionRow({ labelKey, descKey, descParams, checked, onToggle, t = defaultT }) {
       const describeId = React.useId()
@@ -3298,49 +4072,73 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         h(Switch, { checked, onChange: onToggle, describedbyId: describeId }))
     }
 
-    // 偏好卡:与底部信息栏同 store 实例,改动即时互通
+    // 偏好卡:与底部信息栏同 store 实例,改动即时互通;设置区默认折叠,最近相关开关单独成组
     function StatsLineOptions({ t = defaultT }) {
       const [prefs, setPrefs] = useState(() => statsLineState.get())
+      const [open, setOpen] = useState(false)
       useEffect(() => statsLineState.subscribe(() => setPrefs(statsLineState.get())), [])
-      return h('div', { className: 'ud-pref-group' },
-        h(StatsLineOptionRow, {
-          labelKey: 'cachePrecision',
-          descKey: 'cachePrecisionDesc',
-          checked: prefs.cachePrecision,
-          onToggle: (value) => statsLineState.set({ cachePrecision: value }),
-          t,
-        }),
-        h(StatsLineOptionRow, {
-          labelKey: 'recentSpeed',
-          descKey: 'recentSpeedDesc',
-          descParams: { n: RECENT_SPEED_STEPS },
-          checked: prefs.recentSpeed,
-          // 关统计时连带复位替换项:否则子开关隐藏后仍武装着,重开父开关会突然接管官方读数
-          onToggle: (value) => statsLineState.set(value ? { recentSpeed: true } : { recentSpeed: false, replaceSpeed: false }),
-          t,
-        }),
-        // 子开关只在最近输出速度开启时可见:关闭统计后其替换读数已无意义
-        prefs.recentSpeed && h(StatsLineOptionRow, {
-          labelKey: 'replaceSpeed',
-          descKey: 'replaceSpeedDesc',
-          checked: prefs.replaceSpeed,
-          onToggle: (value) => statsLineState.set({ replaceSpeed: value }),
-          t,
-        }),
-        h(StatsLineOptionRow, {
-          labelKey: 'tokenDetail',
-          descKey: 'tokenDetailDesc',
-          checked: prefs.tokenDetail,
-          onToggle: (value) => statsLineState.set({ tokenDetail: value }),
-          t,
-        }),
-        h(StatsLineOptionRow, {
-          labelKey: 'costDisplay',
-          descKey: 'costDisplayDesc',
-          checked: prefs.costDisplay,
-          onToggle: (value) => statsLineState.set({ costDisplay: value }),
-          t,
-        }))
+      const activeCount = ['cachePrecision', 'tokenDetail', 'costDisplay', 'recentSpeed', 'requestDetails']
+        .filter((key) => prefs[key] === true).length + (prefs.recentSpeed && prefs.replaceSpeed ? 1 : 0)
+      return h(SectionFold, {
+        title: t('settingsSection'),
+        description: t('settingsSectionDesc'),
+        summary: t('settingsOnCount', { n: activeCount }),
+        open,
+        onToggle: () => setOpen((value) => !value),
+      }, h(React.Fragment, null,
+        h('div', { className: 'ud-pref-group' },
+          h('div', { className: 'ud-pref-group-head' },
+            h('span', { className: 'ud-pref-group-title' }, t('displayGroup')),
+            h('span', { className: 'ud-pref-group-desc' }, t('displayGroupDesc'))),
+          h(StatsLineOptionRow, {
+            labelKey: 'cachePrecision',
+            descKey: 'cachePrecisionDesc',
+            checked: prefs.cachePrecision,
+            onToggle: (value) => statsLineState.set({ cachePrecision: value }),
+            t,
+          }),
+          h(StatsLineOptionRow, {
+            labelKey: 'tokenDetail',
+            descKey: 'tokenDetailDesc',
+            checked: prefs.tokenDetail,
+            onToggle: (value) => statsLineState.set({ tokenDetail: value }),
+            t,
+          }),
+          h(StatsLineOptionRow, {
+            labelKey: 'costDisplay',
+            descKey: 'costDisplayDesc',
+            checked: prefs.costDisplay,
+            onToggle: (value) => statsLineState.set({ costDisplay: value }),
+            t,
+          })),
+        h('div', { className: 'ud-pref-group ud-pref-group--recent' },
+          h('div', { className: 'ud-pref-group-head' },
+            h('span', { className: 'ud-pref-group-title' }, t('recentGroup')),
+            h('span', { className: 'ud-pref-group-desc' }, t('recentGroupDesc'))),
+          h(StatsLineOptionRow, {
+            labelKey: 'recentSpeed',
+            descKey: 'recentSpeedDesc',
+            descParams: { n: RECENT_SPEED_STEPS },
+            checked: prefs.recentSpeed,
+            // 关统计时连带复位替换项:否则子开关隐藏后仍武装着,重开父开关会突然接管官方读数
+            onToggle: (value) => statsLineState.set(value ? { recentSpeed: true } : { recentSpeed: false, replaceSpeed: false }),
+            t,
+          }),
+          // 子开关只在最近输出速度开启时可见:关闭统计后其替换读数已无意义
+          prefs.recentSpeed && h(StatsLineOptionRow, {
+            labelKey: 'replaceSpeed',
+            descKey: 'replaceSpeedDesc',
+            checked: prefs.replaceSpeed,
+            onToggle: (value) => statsLineState.set({ replaceSpeed: value }),
+            t,
+          }),
+          h(StatsLineOptionRow, {
+            labelKey: 'requestDetails',
+            descKey: 'requestDetailsDesc',
+            checked: prefs.requestDetails,
+            onToggle: (value) => statsLineState.set({ requestDetails: value }),
+            t,
+          }))))
     }
 
     // 定价规则编辑器:货币为编辑器级全局设置(标题右侧切换,整表统一,不逐模型设置);
@@ -3517,7 +4315,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         }, defaultSlot ? t('addRule') : t('addDefaultPrice')))
     }
 
-    function PricingEditor({ t = defaultT }) {
+    function PricingEditor({ t = defaultT, showTitle = true }) {
       const [phase, setPhase] = useState(null)
       const [currency, setCurrency] = useState(CURRENCIES[0])
       const [rules, setRules] = useState(null)
@@ -3589,7 +4387,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 
       if (phase === PRICING_STATE_UNAVAILABLE) {
         return h('div', { className: 'ud-pref-group' },
-          h('span', { className: 'ud-pref-title' }, t('pricing')),
+          showTitle ? h('span', { className: 'ud-pref-title' }, t('pricing')) : null,
           h('div', { className: 'ud-empty' }, t('pricingUnavailable')))
       }
       if (phase !== PRICING_STATE_READY) return null
@@ -3597,7 +4395,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       return h('div', { className: 'ud-pref-group' },
         h('div', { className: 'ud-pref-row' },
           h('div', { className: 'ud-pref-text' },
-            h('span', { className: 'ud-pref-title' }, t('pricing')),
+            showTitle ? h('span', { className: 'ud-pref-title' }, t('pricing')) : null,
             saved ? h('span', { className: 'ud-pref-desc' }, t('saved')) : null),
           h('div', { className: 'ud-pricing-actions' },
             h('span', { className: 'ud-unit-note' }, t('pricingUnit')),
@@ -3636,6 +4434,22 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           className: 'ud-rule-add', type: 'button',
           onClick: () => setRules((prev) => [...prev, defaultPricingRule(currency)]),
         }, t('addGroup')))
+    }
+
+    // 定价规则折叠区:编辑器保持挂载以保留草稿,折叠只隐藏 body
+    function PricingSection({ rules = null, t = defaultT }) {
+      const [open, setOpen] = useState(false)
+      const groups = Array.isArray(rules) ? displayGroupsOf(rules) : null
+      const summary = groups === null
+        ? undefined
+        : groups.length > 0 ? t('pricingRuleCount', { n: groups.length }) : t('pricingNotConfigured')
+      return h(SectionFold, {
+        title: t('pricing'),
+        description: t('pricingSectionDesc'),
+        summary,
+        open,
+        onToggle: () => setOpen((value) => !value),
+      }, h(PricingEditor, { t, showTitle: false }))
     }
 
     // 扫描异常日志入口:仅箭头标识,明细在展开的日志块中展示;
@@ -4094,8 +4908,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           : null,
         !emptyVisible && usageModels ? h(ModelUsage, { key: 'models', models: usageModels, colorFor, costCurrency, t, onHoverModel: setHoverModel }) : null,
         cardsStats?.to ? h('div', { className: 'ud-foot' }, `${t('asOf')} ${slotLabelFor(view)(cardsStats.to)}`) : null,
-        h(StatsLineOptions, { key: 'prefs', t }),
-        h(PricingEditor, { key: 'pricing', t }))
+        h('div', { className: 'ud-settings-stack' },
+          h(StatsLineOptions, { key: 'prefs', t }),
+          h(PricingSection, { key: 'pricing', t, rules: pricingRules })))
     }
 
     return {
@@ -4113,6 +4928,15 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           ))
         // 两段式注册官方 dock 槽增强条目:宿主缺该插槽时注册抛错即禁用本功能;
         // order 2 排官方 activity(0)/usage(1) 之后,append 在官方数据后面
+        try {
+          ctx.slots.inject('conversation.composer.dock', () =>
+            ctx.slots.register(
+              { name: 'conversation.composer.dock', id: 'request-details', order: 3, locale: LOCALE_NS },
+              RequestDetailsAppended,
+            ))
+        } catch (error) {
+          console.warn('[usage-dash] 最近请求详情未注册(宿主无 conversation.composer.dock 插槽)', error)
+        }
         try {
           ctx.slots.inject('conversation.composer.dock', () =>
             ctx.slots.register(

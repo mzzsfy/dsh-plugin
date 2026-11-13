@@ -22,8 +22,8 @@ const assistant = (seq, turn, text) =>
     stream: [],
   })
 
-const toolCall = (seq, turn, name) =>
-  event(seq, 'tool/call', { turn, step: 1, callId: `c-${seq}`, name, arguments: '{}' })
+const toolCall = (seq, turn, name, args = '{}') =>
+  event(seq, 'tool/call', { turn, step: 1, callId: `c-${seq}`, name, arguments: args })
 
 const presented = (seq, turn) =>
   event(seq, 'deliverables/presented', { turn, callId: `c-${seq}`, files: [{ path: 'out.md' }] })
@@ -137,6 +137,18 @@ test('S2 末行 TASK_DONE:不发送', () => {
   assert.equal(h.timers.count(), 0)
   h.timers.flush()
   assert.equal(h.sent.length, 0)
+})
+
+test('S2c 任何写入后标记结案:仍提醒', () => {
+  const h = createHarness()
+  h.emit(turnStart(0, TURN))
+  h.emit(userMessage(1))
+  h.emit(toolCall(2, TURN, 'write', JSON.stringify({ file_path: 'C:/tmp/restart-watchdog.ps1' })))
+  h.emit(assistant(3, TURN, '完成\nTASK_DONE'))
+  h.emit(turnEnd(4, TURN, { kind: 'completed' }))
+  assert.equal(h.timers.count(), 1)
+  h.timers.flush()
+  assert.equal(h.sent.length, 1)
 })
 
 test('S3 子会话:不发送', () => {
@@ -253,6 +265,17 @@ test('S6 可重试错误:发送继续文案', () => {
   assert.match(textOf(h.sent[0]), /结果未知/)
 })
 
+test('S6b 可重试错误但已 present:不发送', () => {
+  const h = createHarness()
+  h.emit(turnStart(0, TURN))
+  h.emit(userMessage(1))
+  h.emit(presented(2, TURN))
+  h.emit(turnEnd(3, TURN, { kind: 'error', error: { code: 'UPSTREAM', message: 'bad gateway', status: 502 } }))
+  assert.equal(h.timers.count(), 0)
+  h.timers.flush()
+  assert.equal(h.sent.length, 0)
+})
+
 test('S7 永久错误:不发送', () => {
   const h = createHarness()
   h.emit(turnStart(0, TURN))
@@ -271,11 +294,34 @@ test('S8 max-tokens:发送截断文案', () => {
   assert.match(textOf(h.sent[0]), /输出上限/)
 })
 
+test('S8b max-tokens 但已 present:不发送', () => {
+  const h = createHarness()
+  h.emit(turnStart(0, TURN))
+  h.emit(userMessage(1))
+  h.emit(presented(2, TURN))
+  h.emit(turnEnd(3, TURN, { kind: 'max-tokens' }))
+  assert.equal(h.timers.count(), 0)
+  h.timers.flush()
+  assert.equal(h.sent.length, 0)
+})
+
 test('S9 interrupted:发送重启文案', () => {
   const h = createHarness()
   h.emit(turnStart(0, TURN))
   h.emit(userMessage(1))
   h.emit(turnEnd(2, TURN, { kind: 'interrupted' }))
+  h.timers.flush()
+  assert.equal(h.sent.length, 1)
+  assert.match(textOf(h.sent[0]), /结果未知/)
+})
+
+test('S9b interrupted 即使末行 TASK_DONE:仍发送', () => {
+  const h = createHarness()
+  h.emit(turnStart(0, TURN))
+  h.emit(userMessage(1))
+  h.emit(assistant(2, TURN, '完成\nTASK_DONE'))
+  h.emit(turnEnd(3, TURN, { kind: 'interrupted' }))
+  assert.equal(h.timers.count(), 1)
   h.timers.flush()
   assert.equal(h.sent.length, 1)
   assert.match(textOf(h.sent[0]), /结果未知/)
@@ -294,6 +340,17 @@ test('S11 宿主重启取消:按 interrupted 恢复', () => {
   h.emit(turnStart(0, TURN))
   h.emit(userMessage(1))
   h.emit(turnEnd(2, TURN, { kind: 'aborted', reason: { kind: 'disposed' } }))
+  h.timers.flush()
+  assert.equal(h.sent.length, 1)
+})
+
+test('S11b 宿主重启取消即使末行 TASK_DONE:仍发送', () => {
+  const h = createHarness()
+  h.emit(turnStart(0, TURN))
+  h.emit(userMessage(1))
+  h.emit(assistant(2, TURN, '完成\nTASK_DONE'))
+  h.emit(turnEnd(3, TURN, { kind: 'aborted', reason: { kind: 'disposed' } }))
+  assert.equal(h.timers.count(), 1)
   h.timers.flush()
   assert.equal(h.sent.length, 1)
 })

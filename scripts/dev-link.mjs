@@ -24,7 +24,8 @@
  *     (pnpm 只认精确版本并集,^ ~ * 均拒绝),新发版本重跑即纳入,清单永不过期
  *   - 终态校验不过即退出码 1:已发布包依赖行必须等于 ^线上最新,未发布包必须等于
  *     file 仓库路径,挂载必须是指向仓库的 junction,pnpm install 必须成功 ——
- *     不存在"看起来 link 了"的中间态
+ *     不存在"看起来 link 了"的中间态;市场禁用的插件包是"装而未载"的合法终态
+ *     (不在装载层即通过,仍在装载层才算与市场开关互搏)
  *
  * 原理与约束:
  *   - junction 只覆盖 node_modules 物理目录,dsh bundle 加载走 node_modules
@@ -295,7 +296,11 @@ function normalizeBundles(packages) {
   for (const dir of packages) {
     const key = SCOPE + dir
     const shouldLoad = declared[key] !== undefined && !isLibPackage(dir) && !disabled.has(key)
-    if (shouldLoad === plugins.includes(key)) continue
+    if (shouldLoad === plugins.includes(key)) {
+      // 被市场否决是合法终态,但要说明"为什么我的包没生效",避免误判成挂载失败
+      if (disabled.has(key)) console.log(`WARN ${key}: 市场已禁用,不入装载层(需装载先在市场启用)`)
+      continue
+    }
     const reason = shouldLoad ? '插件包且依赖行已声明'
       : disabled.has(key) ? '市场已禁用'
       : declared[key] === undefined ? '无依赖行' : '公共依赖包不进装载层'
@@ -489,7 +494,9 @@ function readJunctionTarget(linkPath) {
 function verifyAll(packages, latests, unlink, scope) {
   const manifest = readProfileManifest()
   const bundles = manifest.dsh?.profile?.bundles ?? []
+  const disabled = marketDisabled()
   const failures = []
+  let vetoed = 0
   // 依赖供给属于终态:根桥缺依赖时工作副本即使挂上也只在运行期 ERR_MODULE_NOT_FOUND
   if (!unlink) {
     for (const [dep] of externalDeps(packages)) {
@@ -523,7 +530,11 @@ function verifyAll(packages, latests, unlink, scope) {
     const want = latest === null ? fileSpec(dir) : `^${latest}`
     const dep = manifest.dependencies[key]
     if (dep !== want) failures.push(`${key}: 依赖行 ${dep ?? '(缺声明)'} 应为 ${want}`)
-    if (!unlink && !bundles.includes(key)) failures.push(`${key}: 未在 dsh.profile.bundles,装而不载`)
+    // 市场否决是额外否决:禁用包的合法终态是"已装未载";与装载层互搏才是失败
+    const vetoedByMarket = disabled.has(key)
+    if (vetoedByMarket) vetoed += 1
+    if (!unlink && vetoedByMarket && bundles.includes(key)) failures.push(`${key}: 市场已禁用却在 dsh.profile.bundles(与市场开关互搏)`)
+    if (!unlink && !vetoedByMarket && !bundles.includes(key)) failures.push(`${key}: 未在 dsh.profile.bundles,装而不载`)
 
     if (unlink) {
       if (readJunctionTarget(phys) !== null) {
@@ -556,7 +567,8 @@ function verifyAll(packages, latests, unlink, scope) {
     process.exitCode = 1
     return false
   }
-  console.log(`\n校验通过:${scope.length} 个包(插件包依赖行 = ^线上最新且在装载层,公共依赖包验挂载且不入装载层),挂载/安装/装载层状态与声明一致`)
+  const veto = vetoed === 0 ? '' : `,其中 ${vetoed} 个被市场禁用(装而未载)`
+  console.log(`\n校验通过:${scope.length} 个包(插件包依赖行 = ^线上最新且在装载层,公共依赖包验挂载且不入装载层${veto}),挂载/安装/装载层状态与声明一致`)
   return true
 }
 

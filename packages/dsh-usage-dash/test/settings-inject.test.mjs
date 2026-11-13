@@ -140,13 +140,14 @@ test('Config 导出契约:根级 volatile 包装,validate 产整节单 ref,默�
   assert.equal(section.minuteRetentionDays, DEFAULT_MINUTE_RETENTION_DAYS)
   // pricing 缺省对象校验补全:rules 数组缺省为空
   assert.deepEqual(section.pricing?.rules ?? [], [])
-  // 底栏偏好默认值与 client DEFAULT_PREFS 同源:四项展示增强开、替换官方读数关
+  // 底栏偏好默认值与 client DEFAULT_PREFS 同源:展示增强开、替换与请求详情关
   assert.deepEqual(section.statsLine, {
     cachePrecision: true,
     tokenDetail: true,
     costDisplay: true,
     recentSpeed: true,
     replaceSpeed: false,
+    requestDetails: false,
   })
 })
 
