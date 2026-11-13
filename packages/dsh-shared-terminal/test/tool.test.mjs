@@ -28,6 +28,52 @@ test('attach泵工具层_拒绝错误_映射TERMINAL_ERROR', async () => {
   assert.match(result.error.message, /接管/)
 })
 
+// ── write 行编辑复位(终端查询应答残片的兜底) ────────────────────────
+const posixRow = { id: 'term-a', shell: { path: 'C:\\Program Files\\Git\\bin\\bash.exe', args: [], name: 'bash' } }
+const pumpRecorder = (writes) => ({ for: () => ({ write: async (text) => { writes.push(text) } }) })
+
+test('Given a POSIX shell terminal, When writing with submit, Then the payload starts with Ctrl+U', async () => {
+  const writes = []
+  const controller = makeController({ list() { return [posixRow] } })
+  const result = await makeTool(controller, undefined, pumpRecorder(writes), undefined, () => undefined)
+    .execute({ action: 'write', terminal_id: 'term-a', text: 'echo hi', submit: true }, exec)
+  assert.equal(result.ok, true)
+  assert.deepEqual(writes, ['\x15echo hi\r'])
+})
+
+test('Given the alternate buffer is active, When writing with submit, Then no line reset is sent', async () => {
+  const writes = []
+  const controller = makeController({ list() { return [posixRow] } })
+  await makeTool(controller, undefined, pumpRecorder(writes), undefined, () => 'alternate')
+    .execute({ action: 'write', terminal_id: 'term-a', text: 'echo hi', submit: true }, exec)
+  assert.deepEqual(writes, ['echo hi\r'])
+})
+
+test('Given a non-POSIX shell, When writing with submit, Then no control character is sent', async () => {
+  const writes = []
+  const row = { id: 'term-a', shell: { path: 'C:\\Program Files\\PowerShell\\7\\pwsh.exe', args: [], name: 'pwsh' } }
+  const controller = makeController({ list() { return [row] } })
+  await makeTool(controller, undefined, pumpRecorder(writes), undefined, () => undefined)
+    .execute({ action: 'write', terminal_id: 'term-a', text: 'echo hi', submit: true }, exec)
+  assert.deepEqual(writes, ['echo hi\r'])
+})
+
+test('Given submit is false, When typing into a POSIX shell, Then the payload stays verbatim', async () => {
+  const writes = []
+  const controller = makeController({ list() { return [posixRow] } })
+  await makeTool(controller, undefined, pumpRecorder(writes), undefined, () => undefined)
+    .execute({ action: 'write', terminal_id: 'term-a', text: 'echo' }, exec)
+  assert.deepEqual(writes, ['echo'])
+})
+
+test('Given the Controller write era, When writing with submit on a POSIX shell, Then the line reset also applies', async () => {
+  const row = { id: 'term-a', controllerId: 'attach-a', shell: { path: '/bin/bash', args: [], name: 'bash' } }
+  const controller = makeController({ list() { return [row] } })
+  await makeTool(controller, undefined, undefined, undefined, () => undefined)
+    .execute({ action: 'write', terminal_id: 'term-a', text: 'ls', submit: true }, exec)
+  assert.deepEqual(controller.calls[0], ['write', agent, 'term-a', 'attach-a', '\x15ls\r'])
+})
+
 test('Given all action results, When validated by Host output validator, Then each closed branch is accepted and incomplete output is rejected', async () => {
   const controller = makeController({ list() { return [{ id: 'term-a', title: 'bash', cwd: '/work', cols: 80, rows: 24, state: 'running', controllerId: 'attach-a' }] } })
   const tool = makeTool(controller)
@@ -199,8 +245,8 @@ function makeController(overrides = {}) {
   return controller
 }
 
-const makeTool = (controller, readScreen = async () => ({ text: 'screen', lines: 1, truncated: false, state: 'running', sequence: 3 }), pumpFactory, waitSkipRegistry) =>
-  createTerminalTool({ controller, readScreen, defineTool, pumpFactory, ...(waitSkipRegistry ? { waitSkipRegistry } : {}) })
+const makeTool = (controller, readScreen = async () => ({ text: 'screen', lines: 1, truncated: false, state: 'running', sequence: 3 }), pumpFactory, waitSkipRegistry, readBufferType) =>
+  createTerminalTool({ controller, readScreen, defineTool, pumpFactory, ...(waitSkipRegistry ? { waitSkipRegistry } : {}), ...(readBufferType ? { readBufferType } : {}) })
 
 test('Given open with default dimensions, When creating terminal, Then it uses DSH controller and returns id', async () => {
   const controller = makeController()

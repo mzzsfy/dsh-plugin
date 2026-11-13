@@ -2,7 +2,8 @@ import { createRequire } from 'node:module'
 import { readFile, realpath } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
 import { createTerminalTool } from './lib/tool.mjs'
-import { readControllerViewport } from './lib/private-screen.mjs'
+import { readControllerViewport, readActiveBufferType } from './lib/private-screen.mjs'
+import { createTerminalReply } from './lib/terminal-reply.mjs'
 import { createPumpFactory } from './lib/attach-pump.mjs'
 import { createWaitSkipRegistry } from './lib/wait-skip.mjs'
 import { withHostGate } from './route-gate.mjs'
@@ -121,10 +122,21 @@ function registerSharedTerminalRoutes(ctx, { waitSkipRegistry, tools, controller
     return
   }
   const pumpFactory = hasLegacyWrite ? undefined : createPumpFactory(controller)
+  const terminalReply = createTerminalReply(ctx.logger)
   const waitSkipHandler = createWaitSkipHandler(waitSkipRegistry)
   const pumpStateHandler = createPumpStateHandler(pumpFactory)
   ctx.effect(() => {
-    const stopTool = tools.register(createTerminalTool({ controller, readScreen: readControllerViewport, defineTool, pumpFactory, waitSkipRegistry }))
+    // 先装终端应答器:ConPTY 的尺寸查询必须由服务端唯一应答,不能经远端 xterm 回写
+    terminalReply.ensure(controller)
+    const stopTool = tools.register(createTerminalTool({
+      controller,
+      readScreen: readControllerViewport,
+      defineTool,
+      pumpFactory,
+      waitSkipRegistry,
+      ensureReply: () => terminalReply.ensure(controller),
+      readBufferType: readActiveBufferType,
+    }))
     // 形状漂移(有服务无 register)直接抛错暴露宿主 API 变更,不做静默降级
     const unregisterRoute = webServer.register({ kind: 'exact', path: WAIT_SKIP_PATH, handler: withHostGate(ctx, waitSkipHandler) })
     const unregisterPumpRoute = webServer.register({ kind: 'exact', path: PUMP_STATE_PATH, handler: withHostGate(ctx, pumpStateHandler) })
@@ -133,6 +145,7 @@ function registerSharedTerminalRoutes(ctx, { waitSkipRegistry, tools, controller
       unregisterRoute?.()
       unregisterPumpRoute?.()
       waitSkipRegistry.abortAll()
+      terminalReply.dispose()
       return pumpFactory?.dispose()
     }
   })
