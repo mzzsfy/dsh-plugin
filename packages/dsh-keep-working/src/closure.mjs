@@ -14,7 +14,7 @@ export const BLOCKED_PREFIX = 'TASK_BLOCKED'
 const BLOCKED_LINE = new RegExp(`^${BLOCKED_PREFIX}:\\s*\\S.*$`)
 
 /** 宿主写文件的工具名;新增写入面时在此登记。 */
-export const FILE_WRITE_TOOLS = new Set(['write', 'edit', 'apply_patch', 'str_replace_editor'])
+export const FILE_WRITE_TOOLS = new Set(['write', 'edit', 'str_replace_editor'])
 
 /** 取 assistant 消息里的可见文本,工具块不计入。 */
 export function assistantText(message) {

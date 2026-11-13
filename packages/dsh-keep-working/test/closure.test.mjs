@@ -44,8 +44,8 @@ const assistantToolOnly = (seq, turn) =>
     stream: [],
   })
 
-const toolCall = (seq, turn, name) =>
-  event(seq, 'tool/call', { turn, step: 1, callId: `c-${seq}`, name, arguments: '{}' })
+const toolCall = (seq, turn, name, args = '{}') =>
+  event(seq, 'tool/call', { turn, step: 1, callId: `c-${seq}`, name, arguments: args })
 
 const presented = (seq, turn) =>
   event(seq, 'deliverables/presented', { turn, callId: `c-${seq}`, files: [{ path: 'out.md' }] })
@@ -182,7 +182,7 @@ test('turnInitiator 跳过非真人来源取真人消息', () => {
 })
 
 test('文件写入工具集合覆盖宿主写入面', () => {
-  for (const name of ['write', 'edit', 'apply_patch', 'str_replace_editor']) {
+  for (const name of ['write', 'edit', 'str_replace_editor']) {
     assert.equal(FILE_WRITE_TOOLS.has(name), true, name)
   }
   assert.equal(FILE_WRITE_TOOLS.has('read'), false)

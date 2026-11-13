@@ -34,6 +34,8 @@ const queuedMessage = (seq, text = '排队消息') => ({
 })
 const inboxSpliced = (seq, target, inserted, start = 0, removedCount = 0) =>
   event(seq, 'agent/inbox/spliced', { target, start, removedCount, inserted })
+const presented = (seq, turn) =>
+  event(seq, 'deliverables/presented', { turn, callId: `p-${seq}`, files: [{ path: 'out.md' }] })
 
 const openTail = [
   turnStart(1, TURN),
@@ -46,6 +48,12 @@ const danglingTail = [
   turnStart(1, TURN),
   userMessage(2),
   assistant(3, TURN, '话说到一半'),
+]
+
+const closedDanglingTail = [
+  turnStart(1, TURN),
+  userMessage(2),
+  assistant(3, TURN, '结论\nTASK_DONE'),
 ]
 
 const closedTail = [
@@ -396,6 +404,209 @@ test('已结案的会话不恢复', async () => {
   assert.equal(h.sent.length, 0)
 })
 
+test('没闭合即使已输出 TASK_DONE:仍恢复中断', async () => {
+  const h = createHarness({ records: [record('s1', closedDanglingTail)] })
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.equal(result.resumed, 1)
+  assert.equal(h.sent.length, 1)
+  assert.match(h.sent[0].message.content[0].text, /结果未知/)
+})
+
+test('未闭合即使已有 present:仍恢复中断', async () => {
+  const events = [...danglingTail, presented(4, TURN)]
+  const h = createHarness({ records: [record('s1', events)] })
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.equal(result.resumed, 1)
+  assert.equal(h.sent.length, 1)
+  assert.match(h.sent[0].message.content[0].text, /结果未知/)
+})
+
+test('interrupted 即使已输出 TASK_DONE:仍恢复中断', async () => {
+  const tail = [
+    turnStart(1, TURN),
+    userMessage(2),
+    assistant(3, TURN, '结论\nTASK_DONE'),
+    turnEnd(4, TURN, { kind: 'interrupted' }),
+  ]
+  const h = createHarness({ records: [record('s1', tail)] })
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.equal(result.resumed, 1)
+  assert.equal(h.sent.length, 1)
+  assert.match(h.sent[0].message.content[0].text, /结果未知/)
+})
+
+test('宿主重启取消即使已输出 TASK_DONE:仍恢复中断', async () => {
+  const tail = [
+    turnStart(1, TURN),
+    userMessage(2),
+    assistant(3, TURN, '结论\nTASK_DONE'),
+    turnEnd(4, TURN, { kind: 'aborted', reason: { kind: 'disposed' } }),
+  ]
+  const h = createHarness({ records: [record('s1', tail)] })
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.equal(result.resumed, 1)
+  assert.equal(h.sent.length, 1)
+})
+
+test('最近 10 条消息里有 present 的会话不恢复', async () => {
+  const tail = [
+    turnStart(1, TURN),
+    userMessage(2),
+    assistant(3, TURN, '完成'),
+    presented(4, TURN),
+    turnEnd(5, TURN, { kind: 'max-tokens' }),
+  ]
+  const h = createHarness({ records: [record('s1', tail)] })
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.equal(result.resumed, 0)
+  assert.equal(h.sent.length, 0)
+})
+
+test('present 超出最近 10 条消息的会话仍恢复', async () => {
+  const tail = [
+    turnStart(1, TURN),
+    userMessage(2),
+    presented(3, TURN),
+    assistant(4, TURN, '进展 1'),
+    assistant(5, TURN, '进展 2'),
+    assistant(6, TURN, '进展 3'),
+    assistant(7, TURN, '进展 4'),
+    assistant(8, TURN, '进展 5'),
+    assistant(9, TURN, '进展 6'),
+    assistant(10, TURN, '进展 7'),
+    assistant(11, TURN, '进展 8'),
+    assistant(12, TURN, '进展 9'),
+    assistant(13, TURN, '进展 10'),
+    turnEnd(14, TURN, { kind: 'max-tokens' }),
+  ]
+  const h = createHarness({ records: [record('s1', tail)] })
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.equal(result.resumed, 1)
+  assert.equal(h.sent.length, 1)
+})
+
+test('上一回合的 done 不当作新回合的结案', async () => {
+  const events = [
+    turnStart(1, 1),
+    userMessage(2),
+    assistant(3, 1, '结论\nTASK_DONE'),
+    turnEnd(4, 1, { kind: 'completed' }),
+    turnStart(5, 2),
+    userMessage(6),
+  ]
+  const h = createHarness({ records: [record('s1', events)] })
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.equal(result.resumed, 1)
+  assert.equal(h.sent.length, 1)
+})
+
+test('写入且无可见回答的正常结束会话仍要 present', async () => {
+  const tail = [
+    turnStart(1, TURN),
+    userMessage(2),
+    event(3, 'tool/call', {
+      turn: TURN,
+      step: 1,
+      callId: 'c-3',
+      name: 'write',
+      arguments: JSON.stringify({ file_path: 'C:/tmp/restart-watchdog.ps1' }),
+    }),
+    turnEnd(4, TURN, { kind: 'completed' }),
+  ]
+  const h = createHarness({ records: [record('s1', tail)] })
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.equal(result.resumed, 1)
+  assert.equal(h.sent.length, 1)
+  assert.match(h.sent[0].message.content[0].text, /present|TASK_DONE/)
+})
+
+test('写入但有可见回答的会话重启不恢复', async () => {
+  const tail = [
+    turnStart(1, TURN),
+    userMessage(2),
+    event(3, 'tool/call', {
+      turn: TURN,
+      step: 1,
+      callId: 'c-3',
+      name: 'write',
+      arguments: JSON.stringify({ file_path: 'C:/tmp/restart-watchdog.ps1' }),
+    }),
+    assistant(4, TURN, '结论'),
+    turnEnd(5, TURN, { kind: 'completed' }),
+  ]
+  const h = createHarness({ records: [record('s1', tail)] })
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.equal(result.resumed, 0)
+  assert.equal(h.sent.length, 0)
+})
+
+test('有可见回答的正常结束会话不恢复', async () => {
+  const h = createHarness({ records: [record('s1', openTail)] })
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.equal(result.resumed, 0)
+  assert.equal(h.sent.length, 0)
+})
+
 test('正常结束但仍有排队消息的会话被恢复,恢复消息插队发送', async () => {
   for (const tail of [openTail, closedTail]) {
     const events = [...tail, inboxSpliced(5, 'next-turn', [queuedMessage(5)])]
@@ -410,6 +621,7 @@ test('正常结束但仍有排队消息的会话被恢复,恢复消息插队发�
     assert.equal(result.resumed, 1)
     assert.equal(h.sent.length, 1)
     assert.equal(h.sent[0].via, 'steer', '排队消息存在时必须插队,不能追加到 next-turn 队尾')
+    assert.equal(h.sent[0].message.content[0].text, '继续')
   }
 })
 
