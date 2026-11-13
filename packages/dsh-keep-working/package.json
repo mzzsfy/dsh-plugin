@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-keep-working",
   "description": "持续工作:回合未声明结案就静默结束时,自动补一条用户消息把 AI 拉回,直到 present 交付、TASK_DONE 或 TASK_BLOCKED: 原因;含重启恢复与 goal 重新武装",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "main": "src/index.js",
   "exports": {
