@@ -118,10 +118,13 @@ test('Given 英文环境 When 渲染最近输出速度 Then 文案随语言切�
   assert.match(text(tree), /Recent output speed250 tok\/s/)
 })
 
-test('Given 替换默认速度开关 When 渲染 Then 胶囊补丁只接管开启且有读数的场景', () => {
+test('Given 替换默认速度开关 When 渲染 Then 胶囊补丁只接管开启且有读数的场景并带最近前缀', () => {
   const onCapture = {}
   render({ capture: onCapture, prefs: { ...on, replaceSpeed: true }, speedTarget: {}, nodes: [stepNode(500, 2000)] })
-  assert.equal(onCapture.text, '250 tok/s')
+  assert.equal(onCapture.text, '最近250 tok/s')
+  const enCapture = {}
+  render({ capture: enCapture, prefs: { ...on, replaceSpeed: true }, speedTarget: {}, nodes: [stepNode(500, 2000)], lang: 'en' })
+  assert.equal(enCapture.text, 'Recent 250 tok/s')
   const offCapture = {}
   render({ capture: offCapture, prefs: { ...on, replaceSpeed: false }, speedTarget: {}, nodes: [stepNode(500, 2000)] })
   assert.equal(offCapture.text, null)

@@ -8,7 +8,7 @@ import { CLIENT_BODY, DECLARATION_NAMES } from './client-eval.mjs'
 const core = new Function(`${CLIENT_BODY}\nreturn { ${DECLARATION_NAMES.join(', ')} }`)()
 
 const {
-  STATS_LINE_STORAGE_KEY,
+  STATS_LINE_SETTINGS_NAMESPACE,
   MESSAGES_EN,
   MESSAGES_ZH,
   billedInputTokens,
@@ -40,16 +40,34 @@ const COST_RULES = [
 const COST_USAGE = { uncachedInputTokens: 500000, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 }
 const COST_NOW = new Date(2026, 2, 15, 10, 0)
 
-function fakeStorage(initial = {}) {
-  const map = new Map(Object.entries(initial))
+// 宿主 settings 投影桩:value 为 configForms.get(namespace).getSnapshot().value 形态
+function fakeForm(initial, { accept = true } = {}) {
+  let value = initial === undefined ? undefined : { statsLine: { ...DEFAULT_EXPECT, ...initial } }
+  const listeners = new Set()
+  const calls = []
   return {
-    getItem: (key) => (map.has(key) ? map.get(key) : null),
-    setItem: (key, value) => { map.set(key, String(value)) },
+    getSnapshot: () => ({ status: 'ready', value }),
+    subscribe: (listener) => {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    mutate: async (ops) => {
+      calls.push(structuredClone(ops))
+      if (!accept) return false
+      for (const op of ops) value = { ...value, statsLine: { ...value?.statsLine, [op.path[1]]: op.value } }
+      for (const listener of listeners) listener()
+      return true
+    },
+    calls,
+    setValue(next, { notify = true } = {}) {
+      value = next === undefined ? undefined : { statsLine: { ...next } }
+      if (notify) for (const listener of listeners) listener()
+    },
   }
 }
 
 test('stats 词典关键值逐字节,en 族逐字节', () => {
-  assert.equal(STATS_LINE_STORAGE_KEY, 'dsh-usage-dash:stats-line')
+  assert.equal(STATS_LINE_SETTINGS_NAMESPACE, 'usage-dash')
   assert.equal(MESSAGES_ZH['stats.tokens'], '输入 {input} tok · 输出 {output} tok')
   assert.equal(MESSAGES_ZH.cachePrecision, '精确缓存命中率')
   assert.equal(MESSAGES_ZH.cachePrecisionDesc, '将官方用量胶囊及弹窗中的命中率显示为两位小数。')
@@ -57,10 +75,12 @@ test('stats 词典关键值逐字节,en 族逐字节', () => {
   assert.equal(MESSAGES_ZH.recentSpeedDesc, '在官方「用时与速度」弹窗中追加最近 {n} 条回复消息的平均输出速度。')
   assert.equal(MESSAGES_ZH.replaceSpeed, '替换默认速度')
   assert.equal(MESSAGES_ZH.replaceSpeedDesc, '开启后用最近输出速度替换官方用时胶囊上的平均输出速度,关闭则保留官方读数。')
+  assert.equal(MESSAGES_ZH.replaceSpeedReading, '最近{speed}')
   assert.equal(MESSAGES_EN.recentSpeed, 'Recent output speed')
   assert.equal(MESSAGES_EN.recentSpeedDesc, 'Append the average output speed of the latest {n} replies to the official time-and-speed dialog.')
   assert.equal(MESSAGES_EN.replaceSpeed, 'Replace default speed')
   assert.equal(MESSAGES_EN.replaceSpeedDesc, 'Replace the average output speed on the official time pill with the recent output speed; off keeps the official reading.')
+  assert.equal(MESSAGES_EN.replaceSpeedReading, 'Recent {speed}')
   assert.equal(MESSAGES_ZH.tokenDetail, '会话 Token 明细')
   assert.equal(MESSAGES_ZH.tokenDetailDesc, '在官方 Token 用量弹窗末尾追加含缓存输入合计；存在缓存写入时追加未命中合计。')
   assert.equal(MESSAGES_ZH['stats.cost'], '费用 ≈ {cost}')
@@ -110,62 +130,102 @@ test('formatTokensPerSecond 钳负值且阈值上下分别取整', () => {
   assert.equal(formatTokensPerSecond(3.24), '3.2')
 })
 
-test('createStatsLineState 展示项默认四开、替换项默认关,非法 JSON 回落默认,显式值才生效', () => {
-  assert.deepEqual(createStatsLineState(fakeStorage()).get(), DEFAULT_EXPECT)
+test('createStatsLineState 展示项默认四开、替换项默认关,宿主投影非法值回落默认', () => {
   assert.deepEqual(createStatsLineState(null).get(), DEFAULT_EXPECT)
-  const broken = fakeStorage({ [STATS_LINE_STORAGE_KEY]: '{broken json' })
-  assert.deepEqual(createStatsLineState(broken).get(), DEFAULT_EXPECT)
-  const junk = fakeStorage({ [STATS_LINE_STORAGE_KEY]: JSON.stringify({ cachePrecision: 'yes', tokenDetail: 1 }) })
+  assert.deepEqual(createStatsLineState(fakeForm(undefined)).get(), DEFAULT_EXPECT)
+  const junk = fakeForm({ cachePrecision: 'yes', tokenDetail: 1, replaceSpeed: 'yes' })
   assert.deepEqual(createStatsLineState(junk).get(), DEFAULT_EXPECT)
-  const partialOff = fakeStorage({ [STATS_LINE_STORAGE_KEY]: JSON.stringify({ cachePrecision: false, tokenDetail: true }) })
+  const partialOff = fakeForm({ cachePrecision: false, tokenDetail: true })
   assert.deepEqual(createStatsLineState(partialOff).get(), { ...DEFAULT_EXPECT, cachePrecision: false })
-  const speedOff = fakeStorage({ [STATS_LINE_STORAGE_KEY]: JSON.stringify({ recentSpeed: false }) })
+  const speedOff = fakeForm({ recentSpeed: false })
   assert.deepEqual(createStatsLineState(speedOff).get(), { ...DEFAULT_EXPECT, recentSpeed: false })
-  const replaceOn = fakeStorage({ [STATS_LINE_STORAGE_KEY]: JSON.stringify({ replaceSpeed: true }) })
+  const replaceOn = fakeForm({ replaceSpeed: true })
   assert.deepEqual(createStatsLineState(replaceOn).get(), { ...DEFAULT_EXPECT, replaceSpeed: true })
-  const replaceJunk = fakeStorage({ [STATS_LINE_STORAGE_KEY]: JSON.stringify({ replaceSpeed: 'yes' }) })
-  assert.deepEqual(createStatsLineState(replaceJunk).get(), DEFAULT_EXPECT)
 })
 
-test('createStatsLineState set 合并生效并持久化且通知订阅者', () => {
-  const storage = fakeStorage()
-  const state = createStatsLineState(storage)
+test('createStatsLineState set 乐观生效、按 statsLine 路径写宿主并通知订阅者', async () => {
+  const form = fakeForm({})
+  const state = createStatsLineState(form)
   const seen = []
   state.subscribe(() => seen.push(state.get()))
   state.set({ cachePrecision: false })
   assert.deepEqual(state.get(), { ...DEFAULT_EXPECT, cachePrecision: false })
-  assert.deepEqual(JSON.parse(storage.getItem(STATS_LINE_STORAGE_KEY)), { ...DEFAULT_EXPECT, cachePrecision: false })
+  await Promise.resolve()
+  assert.deepEqual(form.calls, [[{ op: 'set', path: ['statsLine', 'cachePrecision'], value: false }]])
+  assert.deepEqual(form.getSnapshot().value.statsLine, { ...DEFAULT_EXPECT, cachePrecision: false })
   assert.equal(seen.length, 1)
 })
 
-test('createStatsLineState subscribe 退订后不再通知', () => {
-  const state = createStatsLineState(fakeStorage())
+test('createStatsLineState 一次多字段变更合并为单个 mutate', async () => {
+  const form = fakeForm({})
+  const state = createStatsLineState(form)
+  state.set({ recentSpeed: false, replaceSpeed: false })
+  await Promise.resolve()
+  assert.deepEqual(form.calls, [[
+    { op: 'set', path: ['statsLine', 'recentSpeed'], value: false },
+    { op: 'set', path: ['statsLine', 'replaceSpeed'], value: false },
+  ]])
+})
+
+test('createStatsLineState subscribe 退订后不再通知且释放宿主订阅', () => {
+  const form = fakeForm({})
+  const state = createStatsLineState(form)
   let count = 0
   const unsubscribe = state.subscribe(() => { count += 1 })
   state.set({ cachePrecision: false })
   unsubscribe()
   state.set({ tokenDetail: false })
   assert.equal(count, 1)
+  form.setValue({ ...DEFAULT_EXPECT, tokenDetail: false })
+  assert.equal(count, 1)
+})
+
+test('createStatsLineState 订阅宿主投影变化', () => {
+  const form = fakeForm({})
+  const state = createStatsLineState(form)
+  let notified = 0
+  state.subscribe(() => { notified += 1 })
+  form.setValue({ ...DEFAULT_EXPECT, replaceSpeed: true })
+  assert.equal(notified, 1)
+  assert.deepEqual(state.get(), { ...DEFAULT_EXPECT, replaceSpeed: true })
+})
+
+test('createStatsLineState 晚挂载订阅者立即拿到当前宿主投影', () => {
+  const form = fakeForm({})
+  const state = createStatsLineState(form)
+  state.subscribe(() => {})
+  form.setValue({ ...DEFAULT_EXPECT, replaceSpeed: true })
+  let seen = null
+  state.subscribe(() => { seen = state.get() })
+  assert.deepEqual(seen, { ...DEFAULT_EXPECT, replaceSpeed: true })
 })
 
 test('createStatsLineState reload 吸收外部写入', () => {
-  const storage = fakeStorage()
-  const state = createStatsLineState(storage)
+  const form = fakeForm({})
+  const state = createStatsLineState(form)
   let notified = 0
   state.subscribe(() => { notified += 1 })
-  storage.setItem(STATS_LINE_STORAGE_KEY, JSON.stringify({ cachePrecision: true, tokenDetail: true }))
+  form.setValue({ ...DEFAULT_EXPECT, cachePrecision: false }, { notify: false })
   state.reload()
-  assert.deepEqual(state.get(), DEFAULT_EXPECT)
+  assert.deepEqual(state.get(), { ...DEFAULT_EXPECT, cachePrecision: false })
   assert.equal(notified, 1)
 })
 
-test('createStatsLineState 写入失败仅丢持久化,内存仍生效', () => {
-  const state = createStatsLineState({
-    getItem: () => null,
-    setItem: () => { throw new Error('quota') },
-  })
-  state.set({ tokenDetail: false })
-  assert.deepEqual(state.get(), { ...DEFAULT_EXPECT, tokenDetail: false })
+test('createStatsLineState 宿主拒绝写入即回滚宿主快照,不残留乐观值', async () => {
+  const form = fakeForm({}, { accept: false })
+  const state = createStatsLineState(form)
+  state.set({ replaceSpeed: true })
+  assert.equal(state.get().replaceSpeed, true)
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(state.get().replaceSpeed, false)
+})
+
+test('client 偏好持久化契约:走 configForms,不读 localStorage', () => {
+  assert.ok(CLIENT_BODY.includes("inject: ['slots', 'locale', 'configForms']"), '注入 configForms 服务')
+  assert.ok(CLIENT_BODY.includes('ctx.configForms.get(STATS_LINE_SETTINGS_NAMESPACE)'), '从宿主 settings 投影构造偏好状态')
+  assert.ok(!CLIENT_BODY.includes('localStorage.getItem') && !CLIENT_BODY.includes('localStorage.setItem'), '不再读写浏览器 localStorage')
+  assert.ok(!CLIENT_BODY.includes('addEventListener(\'storage\''), '不再监听 storage 事件')
 })
 
 // —— S14 费用组(buildCostItem) ——

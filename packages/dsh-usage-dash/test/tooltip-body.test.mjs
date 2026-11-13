@@ -23,7 +23,7 @@ function renderTip(props) {
     useCallback: (fn) => fn(),
   }
   const window = { __ModuleLoader__: { load: (entry) => { factory = entry.factory } } }
-  const source = CLIENT_SOURCE.replace("inject: ['slots', 'locale'],", "__test: { TipBody }, inject: ['slots', 'locale'],")
+  const source = CLIENT_SOURCE.replace("inject: ['slots', 'locale', 'configForms'],", "__test: { TipBody }, inject: ['slots', 'locale', 'configForms'],")
   new Function('window', 'localStorage', source)(window, { getItem: () => null, setItem() {} })
   const { TipBody } = factory((name) => (name === 'react' ? React : {})).__test
   return TipBody(props)

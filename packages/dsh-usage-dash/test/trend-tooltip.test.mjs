@@ -28,9 +28,27 @@ function fixture({ money = false, costDisplay = true, currency = '¥', lang = 'z
     useEffect() {}, useLayoutEffect() {}, useMemo: fn => fn(), useCallback: fn => fn,
   }
   const window = { __ModuleLoader__: { load: entry => { factory = entry.factory } } }
-  const source = CLIENT_SOURCE.replace("inject: ['slots', 'locale'],", "__test: { TrendChart, TipBody }, inject: ['slots', 'locale'],")
-  new Function('window', 'localStorage', source)(window, { getItem: () => JSON.stringify({ costDisplay }), setItem() {} })
-  const { TrendChart, TipBody } = factory(name => name === 'react' ? React : {}).__test
+  const document = {
+    querySelector: () => ({}),
+    createElement: () => ({ setAttribute() {}, set textContent(_value) {} }),
+    head: { appendChild() {} },
+  }
+  const source = CLIENT_SOURCE.replace("inject: ['slots', 'locale', 'configForms'],", "__test: { TrendChart, TipBody }, inject: ['slots', 'locale', 'configForms'],")
+  new Function('window', 'localStorage', 'document', source)(window, null, document)
+  const mod = factory(name => name === 'react' ? React : {})
+  const { TrendChart, TipBody } = mod.__test
+  mod.apply({
+    effect: fn => fn(),
+    locale: { register() {} },
+    slots: { inject() {}, register() {} },
+    configForms: {
+      get: () => ({
+        getSnapshot: () => ({ value: { statsLine: { costDisplay } } }),
+        subscribe: () => () => {},
+        mutate: async () => true,
+      }),
+    },
+  })
   let tree
   const props = {
     title: 'trend', notes: [], slots: data, tipSlots: data, modelOrder: ['p/a', 'p/b', OTHER],

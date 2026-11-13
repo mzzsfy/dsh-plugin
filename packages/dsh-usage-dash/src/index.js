@@ -18,6 +18,23 @@ export const name = 'dsh-usage-dash'
 
 const SETTINGS_NAMESPACE = 'usage-dash'
 
+// 底栏 stats-line 偏好:客户端经 configForms 读写本命名空间,宿主为唯一持久化来源
+const STATS_LINE_DEFAULTS = {
+  cachePrecision: true,
+  tokenDetail: true,
+  costDisplay: true,
+  recentSpeed: true,
+  replaceSpeed: false,
+}
+
+const STATS_LINE_SCHEMA = schemastery.object({
+  cachePrecision: schemastery.boolean().default(STATS_LINE_DEFAULTS.cachePrecision),
+  tokenDetail: schemastery.boolean().default(STATS_LINE_DEFAULTS.tokenDetail),
+  costDisplay: schemastery.boolean().default(STATS_LINE_DEFAULTS.costDisplay),
+  recentSpeed: schemastery.boolean().default(STATS_LINE_DEFAULTS.recentSpeed),
+  replaceSpeed: schemastery.boolean().default(STATS_LINE_DEFAULTS.replaceSpeed),
+}).default(STATS_LINE_DEFAULTS)
+
 // 定价形状与 pricing.js 契约同源:kind 判别 required 恒成立,
 // 防 nullable 直通误入首个 union 成员
 const WEEKDAY_MIN = 0
@@ -55,6 +72,7 @@ const SETTINGS_SCHEMA = schemastery.object({
     .description(`分钟桶保留天数(上限 ${MINUTE_RETENTION_MAX_DAYS} 天),0 表示禁用分钟桶`),
   pricing: schemastery.object({ rules: schemastery.array(PRICING_RULE_SCHEMA) })
     .description('定价规则(wire 由 /api/usage-dash/pricing 读写)'),
+  statsLine: STATS_LINE_SCHEMA.description('底部信息栏增强开关'),
 })
 
 // 0.1.7 宿主以静态 Config 导出生成设置节表单(maintain 同构);legacy 宿主经
