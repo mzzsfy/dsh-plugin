@@ -61,6 +61,17 @@ window.__ModuleLoader__.load({
     const finiteOr = value => value == null || value === '' ? NaN : Number(value)
     // 多笔成本取最低价作为成本基准: 汇总盈亏按它算, 其余成本只作参考线(各自仍显示与现价的百分比)
     const costBaseOf = marks => { const prices = (marks || []).filter(mark => mark.kind === 'cost').map(mark => mark.price); return prices.length ? Math.min(...prices) : null }
+    // 持仓盈亏口径唯一实现: 自选列表、详情与悬浮盯盘共用, 只在显示处各自定精度。
+    // 没有现价时仍返回基准, 让调用方能显示"有成本但暂缺行情"的占位
+    const costPlOf = (marks, last) => {
+      const base = costBaseOf(marks)
+      if (base == null) return null
+      const price = finiteOr(last)
+      return Number.isFinite(price) ? { base, amount: price - base, pct: (price - base) / base * 100 } : { base, amount: null, pct: null }
+    }
+    // 缺现价时不给 0: 占位符而不是「+0.00%」, 否则停牌会被读成持平
+    const plTextOf = pl => pl?.pct == null ? '—' : `${signed(pl.pct.toFixed(2))}%`
+    const plAmountOf = (pl, scale) => pl?.amount == null ? '—' : signed(pl.amount.toFixed(scale ?? 2))
     // 价格标记按该证券的价位精度显示: 港股四位小数, 用 toString 会丢位数
     const priceTextOf = (value, scale) => value == null || value === '' || Number.isNaN(Number(value)) ? '—' : Number(value).toFixed(scale ?? 2)
     // 涨跌方向只在这里判一次: 面板与悬浮窗共用, 避免 0 被显示成涨或被当成跌
@@ -785,9 +796,8 @@ window.__ModuleLoader__.load({
                   const item = w.items[id], entry = data.quotes[id], q = entry?.quote
                   sequence.push(id)
                   const direction = toneClass(q?.changePct)
-                  // 列表只显示一个数: 多个成本取最低价作为「持仓成本」
-                  const costBase = costBaseOf(item.marks)
-                  const plPct = costBase != null && q?.last != null ? Number((Number(q.last) - costBase) / costBase * 100).toFixed(1) : null
+                  // 列表只显示一个数: 持仓盈亏统一按成本基准算, 精度在渲染处定
+                  const pl = costPlOf(item.marks, q?.last)
                   const amplitude = q?.high != null && q?.low != null && Number(q.previousClose) > 0 ? Number(((Number(q.high) - Number(q.low)) / Number(q.previousClose)) * 100).toFixed(1) : null
                   const dragging = view.dragId === id
                   const dropEdge = view.dropAt?.id === id ? view.dropAt.after ? ' ssb-drop-after' : ' ssb-drop-before' : ''
@@ -826,7 +836,7 @@ window.__ModuleLoader__.load({
                       h('span', { className: 'ssb-cell-range' }, `${priceTextOf(q?.high, item.priceScale)}/${priceTextOf(q?.low, item.priceScale)}`),
                       h('span', { className: 'ssb-cell-amount' }, formatAmount(q?.amount)),
                       h('span', { className: 'ssb-cell-amplitude' }, amplitude == null ? '—' : `${amplitude}%`),
-                      h('span', { className: `ssb-cell-pl${toneClass(plPct)}` }, plPct == null ? '—' : `${signed(plPct)}%`),
+                      h('span', { className: `ssb-cell-pl${toneClass(pl?.pct)}` }, pl?.pct == null ? '—' : `${signed(pl.pct.toFixed(1))}%`),
                       h(QuoteStatus, { entry, short: true })),
                     h('div', { className: 'ssb-row-sub' },
                       h('span', { className: 'ssb-kv' }, '开', priceTextOf(q?.open, item.priceScale)),
@@ -834,7 +844,7 @@ window.__ModuleLoader__.load({
                       h('span', { className: 'ssb-kv' }, '低', priceTextOf(q?.low, item.priceScale)),
                       h('span', { className: 'ssb-kv' }, '额', formatAmount(q?.amount)),
                       amplitude == null ? null : h('span', { className: 'ssb-kv' }, '振', `${amplitude}%`),
-                      plPct == null ? null : h('span', { className: `ssb-kv ssb-kv-pl${toneClass(plPct)}` }, '持仓', `${signed(plPct)}%`))))
+                      pl?.pct == null ? null : h('span', { className: `ssb-kv ssb-kv-pl${toneClass(pl.pct)}` }, '持仓', `${signed(pl.pct.toFixed(1))}%`))))
                 }
                 return tabOrder.map(rowOf)
               })())))
@@ -1335,7 +1345,7 @@ window.__ModuleLoader__.load({
       const marks = item.marks || []
       const costBase = costBaseOf(marks)
       const lastN = Number(q?.last)
-      const costPl = costBase != null && lastN ? { amount: Number((lastN - costBase).toFixed(item.priceScale ?? 2)), pct: Number(((lastN - costBase) / costBase * 100).toFixed(1)) } : null
+      const costPl = costPlOf(marks, q?.last)
       const applyMarks = next => quiet(() => runtime.mutate('marks', { securityId: item.id, marks: next }))
       // 增删都是整组替换: 协议面只有一个操作, 也不会出现半更新的中间态
       // 标记类型是成组分类切换, 用分段控件而不是两个按钮: 选中态不再靠"黑底按钮"承担
@@ -1393,7 +1403,8 @@ window.__ModuleLoader__.load({
           h('label', { className: 'ssb-inline-field' }, h('span', { className: 'ssb-field-label' }, '新标签'), h('input', { className: 'ssb-input ssb-input-group', value: view.tagDraft || '', maxLength: 12, onChange: e => runtime.updateView({ tagDraft: e.target.value, tagError: '' }) })),
           h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write }, '添加标签'),
           view.tagError ? h('small', { className: 'ssb-form-error', role: 'alert' }, view.tagError) : null)) : null
-      const costBlock = costPl ? h('div', { className: `ssb-number${toneClass(costPl.amount)}` }, h('span', null, `持仓盈亏 ${signed(costPl.amount)} · ${signed(costPl.pct)}%`), h('span', { className: 'ssb-muted ssb-small' }, `成本价 ${priceTextOf(costBase, item.priceScale)}`)) : null
+      // 缺行情时整个成本块不显示: 只给成本价而盈亏是「—」, 等于只说一半
+      const costBlock = costPl?.amount == null ? null : h('div', { className: `ssb-number${toneClass(costPl.pct)}` }, h('span', null, `持仓盈亏 ${signed(Number(costPl.amount.toFixed(item.priceScale ?? 2)))} · ${signed(Number(costPl.pct.toFixed(1)))}%`), h('span', { className: 'ssb-muted ssb-small' }, `成本价 ${priceTextOf(costBase, item.priceScale)}`))
       // 自选设置: 低频管理动作收进区块头部, 表单按「价格标记 / 分组与别名」两栏并排,
       // 不再让四段表单各自占一列、按钮各自落一行
       const watchActions = inWatchlist ? h(React.Fragment, null,
@@ -1676,18 +1687,23 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'ssb-float-list', onScroll },
         ...(picked.length ? picked.map(id => {
           const item = items[id], quote = entryOf(id)?.quote, change = quote?.changePct
+          const pl = costPlOf(item.marks, quote?.last)
           return h('button', { key: id, type: 'button', className: `ssb-float-row${id === securityId ? ' ssb-float-row-on' : ''}`, onClick: () => onPick(id), onPointerEnter: event => onTip(id, event), onPointerLeave: onLeave },
             h('span', { className: 'ssb-float-row-name' }, item.alias || item.officialName),
             h('span', { className: 'ssb-float-code' }, item.code),
             h('span', { className: `ssb-float-row-price ssb-number${toneClass(change)}` }, priceTextOf(quote?.last, item.priceScale)),
-            h('span', { className: `ssb-float-row-pct ssb-number${toneClass(change)}` }, change == null ? '—' : `${signed(Number(change).toFixed(2))}%`))
+            h('span', { className: `ssb-float-row-pct ssb-number${toneClass(change)}` }, change == null ? '—' : `${signed(Number(change).toFixed(2))}%`),
+            // 设了成本就给持仓盈亏: 与当日涨跌是两套读数, 所以自占一行小字, 不挤进涨跌列
+            pl ? h('span', { className: `ssb-float-row-pl ssb-number${toneClass(pl.pct) || ' ssb-muted'}` }, `盈亏 ${plTextOf(pl)}`) : null)
         }) : [h('p', { className: 'ssb-muted' }, '未选择标的，点 ☰ 勾选')]))
     }
     function FloatChart({ securityId, current, candles, preClose, error, last, pct }) {
+      const pl = costPlOf(current.marks, last)
       return h(React.Fragment, null,
         h('div', { className: `ssb-float-quote ssb-number${toneClass(pct)}` },
           h('span', { className: 'ssb-float-price' }, Number.isFinite(last) ? priceTextOf(last, current.priceScale) : '—'),
-          h('span', { className: 'ssb-float-pct' }, pct == null ? '—' : `${signed(pct.toFixed(2))}%`)),
+          h('span', { className: 'ssb-float-pct' }, pct == null ? '—' : `${signed(pct.toFixed(2))}%`),
+          pl ? h('span', { className: `ssb-float-pl ssb-number${toneClass(pl.pct) || ' ssb-muted'}`, title: `成本 ${priceTextOf(pl.base, current.priceScale)} · 每股 ${plAmountOf(pl, current.priceScale)}` }, `盈亏 ${plTextOf(pl)}`) : null),
         error ? h('p', { className: 'ssb-float-error' }, error) : h('div', { className: `ssb-float-chart${toneClass(pct)}` }, h(Sparkline, { key: securityId, candles, preClose, marks: current.marks, scale: current.priceScale })),
         // 标记价常驻一行: 图里画得出的是范围内的横线, 范围外的用这行交代, 不必悬停才知道
         (current.marks || []).length ? h('div', { className: 'ssb-float-marks' }, ...(current.marks || []).map(mark => h('span', { key: mark.id, className: mark.kind === 'cost' ? 'ssb-legend-cost' : 'ssb-legend-target' }, `${mark.kind === 'cost' ? '成本' : '卖价'} ${priceTextOf(mark.price, current.priceScale)}`))) : null)
@@ -2160,6 +2176,8 @@ window.__ModuleLoader__.load({
 .ssb-float-quote { display:flex; align-items:baseline; gap:8px; }
 .ssb-float-price { font-size:20px; line-height:1.3; font-family:var(--ds-font-family-code); font-variant-numeric:tabular-nums; }
 .ssb-float-pct { font-size:12px; }
+/* 持仓盈亏: 设了成本才出现, 靠右收在行情读数之后; 方向色沿用 .ssb-up/.ssb-down, 无方向才用次要文字色 */
+.ssb-float-pl { margin-left:auto; font-size:11px; }
 .ssb-float-spark { width:100%; height:88px; display:block; }
 /* 分时悬停: 光标线、标记线与读出浮层 */
 .ssb-float-spark-wrap { position:relative; }
@@ -2205,7 +2223,7 @@ window.__ModuleLoader__.load({
 .ssb-picker-head > span { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .ssb-picker-all { flex:0 0 auto; padding:1px 6px; font:inherit; font-size:11px; color:var(--ssb-accent); background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); cursor:pointer; }
 .ssb-picker-all:hover { border-color:var(--ssb-accent); }
-.ssb-float-row { display:flex; align-items:baseline; gap:8px; padding:4px 6px; font:inherit; text-align:left; color:inherit; background:transparent; border:0; border-radius:var(--ssb-radius-sm); cursor:pointer; }
+.ssb-float-row { display:flex; flex-wrap:wrap; row-gap:0; align-items:baseline; column-gap:8px; padding:4px 6px; font:inherit; text-align:left; color:inherit; background:transparent; border:0; border-radius:var(--ssb-radius-sm); cursor:pointer; }
 .ssb-float-row:hover { background:var(--dsw-alias-interactive-bg-hover); }
 .ssb-float-row-on { background:var(--ssb-accent-wash); }
 .ssb-float-row-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -2213,6 +2231,8 @@ window.__ModuleLoader__.load({
 .ssb-float-code { flex:none; font-size:11px; font-weight:400; color:var(--ssb-text-dim); font-variant-numeric:tabular-nums; }
 .ssb-float-row-price { font-size:12px; }
 .ssb-float-row-pct { width:58px; text-align:right; font-size:11px; }
+/* 持仓盈亏自成一行小字: 与当日涨跌是两套读数, 不挤同一列; 方向色与浮窗图模式共用涨跌类 */
+.ssb-float-row-pl { flex:0 0 100%; text-align:right; font-size:11px; line-height:16px; }
 .ssb-float-modes { display:flex; gap:2px; }
 .ssb-float-mode { padding:2px 6px; font:inherit; font-size:11px; color:var(--ssb-text-sub); background:transparent; border:1px solid transparent; border-radius:var(--ssb-radius-sm); cursor:pointer; }
 .ssb-float-mode.on { color:var(--ssb-text); border-color:var(--ssb-border); background:var(--ssb-bg-sub); }
@@ -2332,7 +2352,7 @@ window.__ModuleLoader__.load({
           return () => { for (const stop of disposers.reverse()) stop() }
         }, 'stock-assistant main panel')
       },
-      __testing: { createPageRuntime, StockPage, FloatingTicker, FloatHeader, FloatPicker, FloatList, FloatChart, FloatFoot, Sparkline, Select, dropdownPlacement, dragOrder, quiet, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, toneClass, priceTextOf, tagTabs, resolveTab, costBaseOf, markPct, pollPlan, QUIET_STATES, POLL_EVERY, floatPollDelay, floatIntervalOf, FLOAT_INTERVALS, FLOAT_FALLBACK_SECONDS, timestampOf, floatFreshness, priceTimeOf, clockText, staleAfter, markAlertOf, markAlertText, deliverMarkAlert, sparkIndexAt, candleTimeText, quoteTipLines, crosshairTipLines, crosshairTimeText, timeKeyOf, crosshairTipStyle, rowTipPositionOf, sparkRangeOf, sparkTicksOf, seriesPaintPlan, sanitizeCandles, themeSignature },
+      __testing: { createPageRuntime, StockPage, FloatingTicker, FloatHeader, FloatPicker, FloatList, FloatChart, FloatFoot, Sparkline, Select, dropdownPlacement, dragOrder, quiet, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, toneClass, priceTextOf, tagTabs, resolveTab, costBaseOf, costPlOf, markPct, pollPlan, QUIET_STATES, POLL_EVERY, floatPollDelay, floatIntervalOf, FLOAT_INTERVALS, FLOAT_FALLBACK_SECONDS, timestampOf, floatFreshness, priceTimeOf, clockText, staleAfter, markAlertOf, markAlertText, deliverMarkAlert, sparkIndexAt, candleTimeText, quoteTipLines, crosshairTipLines, crosshairTimeText, timeKeyOf, crosshairTipStyle, rowTipPositionOf, sparkRangeOf, sparkTicksOf, seriesPaintPlan, sanitizeCandles, themeSignature },
     }
   },
 })
