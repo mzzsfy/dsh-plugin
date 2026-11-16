@@ -67,5 +67,5 @@ export async function fixture(t) {
     new Function('window', 'document', 'WebSocket', source)(window, {}, BrowserSocket)
     return window.mod.factory(() => ({}))
   }
-  return { context, load, base, sockets, upgrades, routes, stats: () => ({ total, peak }) }
+  return { context, load, base, sockets, upgrades, routes, state: () => window.__dshCommonToolsBus, stats: () => ({ total, peak }) }
 }

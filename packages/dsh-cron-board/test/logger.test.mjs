@@ -35,6 +35,44 @@ test('logger:tail 只读尾部 N 行', async (t) => {
   assert.equal(text, 'l4\nl5\n')
 })
 
+test('logger:readTail 返回尾部窗口并标记是否截断(多取一行探测)', async (t) => {
+  // Given 一个 5 行日志
+  const { logger } = await makeLogger(t)
+  await logger.append('j1', 'r1', 'l1\nl2\nl3\nl4\nl5\n')
+  // When 窗口小于总行数
+  // Then 只回最后两行并标记截断
+  assert.deepEqual(await logger.readTail('j1', 'r1', 2), { text: 'l4\nl5\n', truncated: true })
+  // When 窗口覆盖全文
+  // Then 未截断,内容与全文一致
+  assert.deepEqual(await logger.readTail('j1', 'r1', 5), { text: 'l1\nl2\nl3\nl4\nl5\n', truncated: false })
+  // Then 不存在的日志为空且未截断
+  assert.deepEqual(await logger.readTail('none', 'none', 3), { text: '', truncated: false })
+})
+
+test('logger:>512KB 长行窗口截断标 truncated:true,无完整行时保留部分行', async (t) => {
+  // Given 首行超过字节窗口(600KB),后续两行完整短行
+  const { logger } = await makeLogger(t)
+  const huge = 'X'.repeat(600 * 1024)
+  await logger.append('j1', 'r1', huge + '\ntail-1\ntail-2\n')
+  // When 读尾部 2 行
+  const outcome = await logger.readTail('j1', 'r1', 2)
+  // Then 只回完整短行,长行半截不得混入,且必须标记截断
+  assert.deepEqual(outcome, { text: 'tail-1\ntail-2\n', truncated: true })
+  // When 整个文件只有一条超长行(窗口内无完整行)
+  await logger.append('j2', 'r1', 'Y'.repeat(600 * 1024))
+  // Then 不能返回空视图:回退到窗口内的部分行并标记截断
+  const solo = await logger.readTail('j2', 'r1', 2)
+  assert.equal(solo.truncated, true)
+  assert.ok(solo.text.length > 0, '无完整行时必须保留部分行,不能显示空日志')
+  assert.ok(solo.text.startsWith('Y'))
+  // When 文件超过窗口且窗口起点落在超长行内部
+  const lines = ['a'.repeat(512 * 1024), 'b1', 'b2']
+  await logger.append('j3', 'r1', lines.join('\n') + '\n')
+  // Then 超长半行被丢弃,尾部完整行保留
+  const boundary = await logger.readTail('j3', 'r1', 2)
+  assert.deepEqual(boundary, { text: 'b1\nb2\n', truncated: true })
+})
+
 test('logger:不存在的日志读为空字符串', async (t) => {
   // Given 无任何日志
   const { logger } = await makeLogger(t)

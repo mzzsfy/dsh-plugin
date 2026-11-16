@@ -3,13 +3,28 @@ import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime, { defineTool, renderToolsSdk, renderToolsSdkPy } from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
+import * as toolsSdk from '@deepseek-ai/dsh-tools'
 import * as projection from '../src/prompt-projection.mjs'
 
 function fixture() {
   const ctx = new Context()
   new SystemPrompt(ctx, {})
   new ToolRuntime(ctx, {})
+  // 0.2.2 生成提示时宿主需要执行器来描述当前工具;这里只断言投影后的 schema,
+  // 用最小执行器桩。0.2.1 无 setExecutor,assemble 不要求执行器。
+  if (typeof ctx.tools.setExecutor === 'function') {
+    ctx.tools.setExecutor({
+      sections: [],
+      describe: (definitions) => ({
+        schemas: definitions.map((definition) => ({
+          name: definition.name,
+          description: definition.description,
+          parameters: definition.parameters,
+        })),
+      }),
+    })
+  }
   const preset = {}
   const scoped = createScope(ctx, preset)
   const register = (target, name, description) => target.tools.register(defineTool({
@@ -69,25 +84,32 @@ test('shell 不可见时保留 pwsh', async () => {
   await scoped.dispose()
 })
 
-for (const [language, render] of [['typescript', renderToolsSdk], ['python', renderToolsSdkPy]]) {
-  for (const mode of ['ptc', 'both']) {
-    // Given PTC SDK；When 组装；Then 仅删除pwsh声明，其他工具类型不变。
-    test(`${language}/${mode} SDK 删除 pwsh 且保留其他输出类型`, async () => {
-      const { ctx, preset, scoped } = fixture()
-      const schemas = ctx.tools.schemas(preset).map((s) => ({ ...s, output: ctx.tools.get(s.name, preset).output.schema }))
-      ctx.on('system-prompt/assemble', async (assembly, context, next) => {
-        const result = await next()
-        return { ...result, tools: mode === 'ptc' ? [{ name: 'run_code' }] : [...result.tools, { name: 'run_code' }],
-          sections: [...result.sections, { name: 'tools:sdk', text: render(schemas), interpolate: false }] }
+const HAS_SDK_RENDERER = typeof toolsSdk.renderToolsSdk === 'function' && typeof toolsSdk.renderToolsSdkPy === 'function'
+const renderToolsSdk = toolsSdk.renderToolsSdk
+const renderToolsSdkPy = toolsSdk.renderToolsSdkPy
+
+// 0.2.1 宿主没有 SDK 渲染导出:能力门跳过,0.2.2 宿主照常跑完整矩阵
+if (HAS_SDK_RENDERER) {
+  for (const [language, render] of [['typescript', renderToolsSdk], ['python', renderToolsSdkPy]]) {
+    for (const mode of ['ptc', 'both']) {
+      // Given PTC SDK；When 组装；Then 仅删除pwsh声明，其他工具类型不变。
+      test(`${language}/${mode} SDK 删除 pwsh 且保留其他输出类型`, async () => {
+        const { ctx, preset, scoped } = fixture()
+        const schemas = ctx.tools.schemas(preset).map((s) => ({ ...s, output: ctx.tools.get(s.name, preset).output.schema }))
+        ctx.on('system-prompt/assemble', async (assembly, context, next) => {
+          const result = await next()
+          return { ...result, tools: mode === 'ptc' ? [{ name: 'run_code' }] : [...result.tools, { name: 'run_code' }],
+            sections: [...result.sections, { name: 'tools:sdk', text: render(schemas), interpolate: false }] }
+        })
+        ctx.reflect.provide('ptcRuntime', { language })
+        projection.mountShellPromptProjection(ctx)
+        const result = await ctx.systemPrompt.assemble({ scope: preset })
+        assert.deepEqual(result.tools.map((t) => t.name), mode === 'ptc' ? ['run_code'] : ['shell', 'run_code'])
+        assert.equal(result.sections.find((s) => s.name === 'tools:sdk').text, render(schemas.filter((s) => s.name !== 'pwsh')))
+        assert.equal(await ctx.tools.get('pwsh', preset).execute({}, {}), 'PowerShell')
+        await scoped.dispose()
       })
-      ctx.reflect.provide('ptcRuntime', { language })
-      projection.mountShellPromptProjection(ctx)
-      const result = await ctx.systemPrompt.assemble({ scope: preset })
-      assert.deepEqual(result.tools.map((t) => t.name), mode === 'ptc' ? ['run_code'] : ['shell', 'run_code'])
-      assert.equal(result.sections.find((s) => s.name === 'tools:sdk').text, render(schemas.filter((s) => s.name !== 'pwsh')))
-      assert.equal(await ctx.tools.get('pwsh', preset).execute({}, {}), 'PowerShell')
-      await scoped.dispose()
-    })
+    }
   }
 }
 

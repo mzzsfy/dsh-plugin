@@ -7,13 +7,20 @@ import { MAIN_ROW_ID, OFFICIAL_ROW_IDS } from '../src/guard-state.mjs'
 import { shellSelectApplyState, shellSelectExecutorFiber } from '../src/apply-state.mjs'
 
 function row({ id, disabled = false, running = false }) {
-  return {
+  const entry = {
     options: { id },
+    _disabled: disabled,
+    updates: [],
     get disabled() {
-      return disabled
+      return entry._disabled
     },
     fiber: running ? { uid: 'f' } : undefined,
+    async update(patch) {
+      entry.updates.push(patch)
+      entry._disabled = patch.disabled
+    },
   }
+  return entry
 }
 
 function stubCtx({ rows, importOfficial }) {
@@ -159,9 +166,9 @@ test('模块归一:两形态皆无的官方包按预载失败处理,停用自愈
   assert.ok(log.some(([level, msg]) => level === 'warn' && msg.includes('停用')))
 })
 
-// HOST-022(0.2.2 写事务重评 !!js 表达式):官方行翻回启用且主行执行器在场
-// (句柄在场),guard 卸执行器让位;句柄空缺(guard 代挂态)零动作。
-test('官方行翻回启用+执行器在场:dispose 句柄让位', async () => {
+// HOST-022(0.2.2 写事务重评 !!js 表达式):官方行翻回启用时先重禁;重禁
+// 失败也不让位——写事务过程中撤执行器会把'翻回'放大成 shell 真空。
+test('官方行翻回启用+执行器在场:重禁保持接管,不 dispose', async () => {
   const rows = [
     row({ id: MAIN_ROW_ID, disabled: false, running: true }),
     row({ id: 'tool-pwsh', disabled: true }),
@@ -174,9 +181,10 @@ test('官方行翻回启用+执行器在场:dispose 句柄让位', async () => {
   shellSelectExecutorFiber.current = { dispose: () => { disposed += 1; return Promise.resolve() } }
   try {
     await patchContext(rows[2], () => 'passed')
-    assert.equal(disposed, 1)
-    assert.equal(shellSelectExecutorFiber.current, undefined)
-    assert.ok(log.some(([level, msg]) => level === 'warn' && msg.includes('让位')))
+    assert.equal(disposed, 0)
+    assert.notEqual(shellSelectExecutorFiber.current, undefined)
+    assert.equal(rows[2]._disabled, true)
+    assert.ok(log.some(([level, msg]) => level === 'warn' && msg.includes('重新禁用')))
   } finally {
     shellSelectExecutorFiber.current = undefined
   }
@@ -215,11 +223,11 @@ test('句柄空缺(guard 代挂态):官方行翻回零动作', async () => {
   assert.equal(shellSelectExecutorFiber.current, undefined)
 })
 
-// H2 回归:代挂态下官方行翻回启用(0.2.2 写事务)。主行被禁后执行器 fiber 已
-// 退役,句柄可能残留(陈旧句柄);旧实现按句柄在场走让位分支并提前 return,
-// 吞掉"卸代挂让位",官方行 provide 撞残留代挂的 ctx.shell 被写入门控放大成
-// settings/rejected。让位必须清空 guard 的"已代挂"记账与 disposer。
-test('HOST-022 让位:代挂态下官方行翻回启用,清空记账并卸代挂(陈旧句柄不吞让位)', async () => {
+// H2 回归(策略更新):代挂态下官方行翻回启用(0.2.2 写事务)。此时撤代挂
+// 让官方行激活,会与写事务重建过程抢 ctx.shell;官方行激活失败后没有第二个
+// 服务方,终端真空只能重启。改为重禁保持代挂:写事务要么被宿主判失败,要么
+// 行被重新禁用,代挂始终有服务可用。
+test('HOST-022:代挂态下官方行翻回启用,重禁保持代挂不让位', async () => {
   const rows = deadWorld()
   const { ctx, mounts, listeners } = stubCtx({ rows })
   // 每个代挂 fiber 占用 shell 服务位:官方行 provide 时撞重复即失败(真实冲突形态)
@@ -248,19 +256,103 @@ test('HOST-022 让位:代挂态下官方行翻回启用,清空记账并卸代挂
     let providedAtInit
     const next = () => {
       providedAtInit = provided.has('shell')
-      if (providedAtInit) throw new Error('duplicate service: shell')
-      provided.add('shell')
       return 'passed'
     }
     assert.equal(await patchContext(rows[2], next), 'passed')
-    assert.equal(providedAtInit, false, '官方行 init 前必须已撤清代挂占位')
-    assert.equal(mounts.length, 0, 'guard 代挂记账必须清空(不许仍记已代挂)')
-    assert.equal(disposed, 1, '陈旧句柄同样要退役,不得吞掉卸代挂让位')
-    assert.equal(shellSelectExecutorFiber.current, undefined)
-    assert.equal(provided.has('shell'), true, '官方行 provide 成功')
+    assert.equal(providedAtInit, true, '代挂占位保持,官方行激活交给写事务判失败')
+    assert.equal(mounts.length, 2, 'guard 代挂记账保留')
+    assert.equal(disposed, 0, '不让位,执行器句柄不退役')
+    assert.equal(rows[2]._disabled, true, '官方行被重新禁用')
   } finally {
     shellSelectExecutorFiber.current = undefined
   }
+})
+
+// P2-37:代挂半失败时,已发起但未落定/落定在失败点之后的 fiber 也必须回收——
+// 否则半挂 fiber 永不进账,长期占着 ctx.shell 与工具注册,下轮 sweep 重复
+// provide 必抛,死态窗口更破碎。
+test('P2-37 代挂半失败:在途 fiber 全部 allSettled 后逐个 dispose', async () => {
+  // Given 死态 + 第二个官方插件的挂载抛错
+  const { ctx, log } = stubCtx({ rows: deadWorld() })
+  const disposed = []
+  let call = 0
+  ctx.plugin = (module) => {
+    call += 1
+    if (call === 1) {
+      return Promise.resolve({ dispose: () => { disposed.push(module.__name); return Promise.resolve() } })
+    }
+    throw new Error('duplicate service: shell')
+  }
+  await installGuard(ctx, {
+    importOfficial: makeImport(),
+    delay: async () => {},
+    timeouts: { mount: 50, load: 50 },
+    sweepIntervalMs: 3600 * 1000,
+  })
+  // Then 已挂成的第一个 fiber 被回收(不留半套官方链),错误进排障面
+  assert.deepEqual(disposed, ['@deepseek-ai/dsh-tool-pwsh'])
+  assert.ok(log.some(([level, msg]) => level === 'error' && msg.includes('代挂官方插件失败')))
+})
+
+test('P2-37 代挂半失败:在途挂载超时同样回收已挂成部分', async () => {
+  // Given 死态 + 第二个官方插件的挂载永不落定
+  const { ctx, log } = stubCtx({ rows: deadWorld() })
+  const disposed = []
+  let call = 0
+  ctx.plugin = (module) => {
+    call += 1
+    if (call === 1) {
+      return Promise.resolve({ dispose: () => { disposed.push(module.__name); return Promise.resolve() } })
+    }
+    return new Promise(() => {})
+  }
+  await installGuard(ctx, {
+    importOfficial: makeImport(),
+    delay: async () => {},
+    timeouts: { mount: 20, load: 50 },
+    sweepIntervalMs: 3600 * 1000,
+  })
+  // Then 超时后仍回收已挂成部分(有界等待,不无限挂在 allSettled 上)
+  assert.deepEqual(disposed, ['@deepseek-ai/dsh-tool-pwsh'])
+  assert.ok(log.some(([level, msg]) => level === 'error' && msg.includes('代挂官方插件')))
+})
+
+// S5:回收等待窗口之外的迟到落定也必须回收——旧实现只等 2×mountTimeout,
+// 更晚落定的半挂 fiber 永不 dispose,长期占着 ctx.shell 与工具注册,下轮
+// sweep 再代挂即撞重复服务。
+test('S5 代挂迟到落定(超出回收窗口):落定即回收,不留半挂 fiber', async () => {
+  const waitFor = async (probe, rounds = 200) => {
+    for (let round = 0; round < rounds; round += 1) {
+      if (probe()) return true
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    return probe()
+  }
+  const { ctx, log } = stubCtx({ rows: deadWorld() })
+  const disposed = []
+  let call = 0
+  let resolveLate
+  ctx.plugin = (module) => {
+    call += 1
+    if (call === 1) {
+      return Promise.resolve({ dispose: () => { disposed.push(module.__name); return Promise.resolve() } })
+    }
+    return new Promise((resolve) => { resolveLate = resolve })
+  }
+  await installGuard(ctx, {
+    importOfficial: makeImport(),
+    delay: async () => {},
+    timeouts: { mount: 20, load: 50 },
+    sweepIntervalMs: 3600 * 1000,
+  })
+  assert.equal(await waitFor(() => typeof resolveLate === 'function'), true, '第二个 fiber 已发起')
+  // 越过分装载窗口与回收窗口(2×mountTimeout)后再落定
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  assert.deepEqual(disposed, ['@deepseek-ai/dsh-tool-pwsh'], '窗口内已回收第一路')
+  resolveLate({ dispose: () => { disposed.push('@deepseek-ai/dsh-pwsh-sandbox'); return Promise.resolve() } })
+  assert.equal(await waitFor(() => disposed.length === 2), true, '迟到落定必须被回收')
+  assert.deepEqual(disposed.sort(), ['@deepseek-ai/dsh-pwsh-sandbox', '@deepseek-ai/dsh-tool-pwsh'].sort())
+  assert.ok(log.some(([level, msg]) => level === 'warn' && msg.includes('迟到落定')))
 })
 
 test('官方行求值抛错(disabledUnreliable):零动作安全向', async () => {

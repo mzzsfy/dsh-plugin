@@ -16,9 +16,11 @@ const {
   formatTokensCompact,
   formatDuration,
   formatTokensPerSecond,
-  buildCostItem,
+  buildSessionCostItem,
   createStatsLineState,
   createTranslator,
+  recentGroupOnOf,
+  recentGroupPatchOf,
 } = core
 
 const USAGE = { uncachedInputTokens: 1000, cacheReadTokens: 4000, cacheWriteTokens: 0, outputTokens: 500 }
@@ -92,12 +94,16 @@ test('stats 词典关键值逐字节,en 族逐字节', () => {
   assert.equal(MESSAGES_EN.costDisplay, 'Cost display')
   assert.equal(MESSAGES_ZH['duration.compactSeconds'], '{seconds}秒')
   assert.equal(MESSAGES_ZH['duration.compactMinutes'], '{minutes}分{seconds}秒')
-  assert.equal(MESSAGES_ZH['number.thousand'], '{value}K')
-  assert.equal(MESSAGES_ZH['number.million'], '{value}M')
   assert.equal(MESSAGES_EN['duration.compactSeconds'], '{seconds}s')
   assert.equal(MESSAGES_EN['duration.compactMinutes'], '{minutes}m{seconds}s')
-  assert.equal(MESSAGES_EN['number.thousand'], '{value}K')
-  assert.equal(MESSAGES_EN['number.million'], '{value}M')
+})
+
+test('最近请求总开关:任一子项开启即显示开启,关闭时连带清掉替换项', () => {
+  assert.equal(recentGroupOnOf({ recentSpeed: false, requestDetails: false }), false)
+  assert.equal(recentGroupOnOf({ recentSpeed: true, requestDetails: false }), true)
+  assert.equal(recentGroupOnOf({ recentSpeed: false, requestDetails: true }), true)
+  assert.deepEqual(recentGroupPatchOf(false), { recentSpeed: false, replaceSpeed: false, requestDetails: false })
+  assert.deepEqual(recentGroupPatchOf(true), { recentSpeed: true, requestDetails: true })
 })
 
 test('billedInputTokens 为三个互斥 prompt 桶之和', () => {
@@ -112,10 +118,10 @@ test('cacheHitPercentPrecise 恒两位小数且 99.99 封顶', () => {
   assert.equal(cacheHitPercentPrecise({ uncachedInputTokens: 4, cacheReadTokens: 999996, cacheWriteTokens: 0, outputTokens: 1 }), '99.99')
 })
 
-test('formatTokensCompact 官方 K/M 紧凑族', () => {
+test('formatTokensCompact 统一三位整数加一位小数', () => {
   assert.equal(formatTokensCompact(517, zhT), '517')
   assert.equal(formatTokensCompact(12200, zhT), '12.2K')
-  assert.equal(formatTokensCompact(517000, zhT), '517K')
+  assert.equal(formatTokensCompact(517000, zhT), '517.0K')
   assert.equal(formatTokensCompact(1200000, zhT), '1.2M')
   assert.equal(formatTokensCompact(0, zhT), '0')
 })
@@ -233,46 +239,53 @@ test('client 偏好持久化契约:走 configForms,不读 localStorage', () => {
   assert.ok(!CLIENT_BODY.includes('addEventListener(\'storage\''), '不再监听 storage 事件')
 })
 
-// —— S14 费用组(buildCostItem) ——
+// —— S14 费用组(buildSessionCostItem) ——
 
-test('buildCostItem 开关关恒为 null', () => {
-  assert.equal(buildCostItem(COST_USAGE, COST_RULES, PREFS_OFF, zhT, COST_NOW), null)
+const costTextOf = (usage, rules, prefs, t, now) => buildSessionCostItem(usage, null, rules, prefs, t, now)?.text ?? null
+
+test('buildSessionCostItem 开关关恒为 null', () => {
+  assert.equal(buildSessionCostItem(COST_USAGE, null, COST_RULES, PREFS_OFF, zhT, COST_NOW), null)
 })
 
-test('buildCostItem routes 缺席不猜全局价,显示占位符', () => {
+test('buildSessionCostItem routes 缺席不猜全局价,显示占位符', () => {
   // 无 routes 时不拿 '*/*' 冒充会话精确价;底栏改由宿主小时/模型投影计价
-  assert.equal(buildCostItem(COST_USAGE, COST_RULES, PREFS_COST_ON, zhT, COST_NOW), '—')
-  assert.equal(buildCostItem(COST_USAGE, COST_RULES, PREFS_COST_ON, enT, COST_NOW), '—')
+  assert.equal(costTextOf(COST_USAGE, COST_RULES, PREFS_COST_ON, zhT, COST_NOW), '—')
+  assert.equal(costTextOf(COST_USAGE, COST_RULES, PREFS_COST_ON, enT, COST_NOW), '—')
 })
 
-test('buildCostItem routes 按 provider/model 两段键命中精确规则', () => {
+test('buildSessionCostItem routes 按 provider/model 两段键命中精确规则', () => {
   const routed = { ...COST_USAGE, routes: [{ provider: 'p', model: 'm' }] }
   const wildcardFirst = [COST_RULES[1], COST_RULES[0]]
   // 500000 × 2 / 每百万 = 1,精确规则货币 ¥
-  assert.equal(buildCostItem(routed, wildcardFirst, PREFS_COST_ON, zhT, COST_NOW), '费用 ≈ ¥1.00')
+  assert.equal(costTextOf(routed, wildcardFirst, PREFS_COST_ON, zhT, COST_NOW), '费用 ≈ ¥1.00')
 })
 
-test('buildCostItem 时间条件按传入时刻评估:窗口外均不生效', () => {
+test('buildSessionCostItem 时间条件按传入时刻评估:窗口外均不生效', () => {
   // 双闭下 00:00~00:00 单点仅命中零点整,COST_NOW 10:00 不命中;08:00~09:00 与固定时刻不交
   const singlePoint = [{ ...COST_RULES[1], conditions: [{ kind: 'dailyWindow', from: '00:00', to: '00:00' }] }]
   const daytime = [{ ...COST_RULES[1], conditions: [{ kind: 'dailyWindow', from: '08:00', to: '09:00' }] }]
-  assert.equal(buildCostItem(COST_USAGE, singlePoint, PREFS_COST_ON, zhT, COST_NOW), '—')
-  assert.equal(buildCostItem(COST_USAGE, daytime, PREFS_COST_ON, zhT, COST_NOW), '—')
+  assert.equal(costTextOf(COST_USAGE, singlePoint, PREFS_COST_ON, zhT, COST_NOW), '—')
+  assert.equal(costTextOf(COST_USAGE, daytime, PREFS_COST_ON, zhT, COST_NOW), '—')
 })
 
-test('buildCostItem 价格未加载为 null,规则已载无命中为占位符', () => {
-  assert.equal(buildCostItem(COST_USAGE, null, PREFS_COST_ON, zhT, COST_NOW), null)
-  assert.equal(buildCostItem(COST_USAGE, [], PREFS_COST_ON, zhT, COST_NOW), '—')
-  assert.equal(buildCostItem(COST_USAGE, [{ model: 'other/x', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] }], PREFS_COST_ON, zhT, COST_NOW), '—')
+test('buildSessionCostItem 价格未加载或规则为空均为 null,规则已载无命中为占位符', () => {
+  assert.equal(buildSessionCostItem(COST_USAGE, null, null, PREFS_COST_ON, zhT, COST_NOW), null)
+  // 规则为空视为未配置:不显示占位符,避免加载期闪一条横线
+  assert.equal(buildSessionCostItem(COST_USAGE, null, [], PREFS_COST_ON, zhT, COST_NOW), null)
+  assert.equal(costTextOf(COST_USAGE, [{ model: 'other/x', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] }], PREFS_COST_ON, zhT, COST_NOW), '—')
 })
 
-test('buildCostItem usage 缺席为 null', () => {
-  assert.equal(buildCostItem(undefined, COST_RULES, PREFS_COST_ON, zhT, COST_NOW), null)
+test('buildSessionCostItem usage 缺席为 null', () => {
+  assert.equal(buildSessionCostItem(undefined, null, COST_RULES, PREFS_COST_ON, zhT, COST_NOW), null)
 })
 
 test('dock 注册 append 契约:order 排官方 pill(activity 0/usage 1)之后,条目只消费投影与窗口节点', () => {
   assert.ok(CLIENT_BODY.includes("id: 'stats', order: 2, priority: STATS_SLOT_PRIORITY"))
-  assert.ok(CLIENT_BODY.includes('StatsLineAppended({ useProjection, useChat, t = defaultT })'))
+  assert.ok(CLIENT_BODY.includes('StatsLineAppended({ useProjection, useChat, useSessions, sessionId, t = defaultT })'))
+  // 子代理小时投影不在列表行 summary 里,展开面板经 sessions 服务按会话拉取(与官方子代理面板同一取数面)
+  assert.ok(CLIENT_BODY.includes("ctx.get('sessions')"))
+  assert.ok(CLIENT_BODY.includes('subagentHoursOf(byId, sessionId, projections)'))
+  assert.ok(!CLIENT_BODY.includes('/api/usage-dash/subagent'))
   // 最近速度读自家会话投影,不消费官方 sessionStats,也不自建 HTTP 端点
   assert.ok(CLIENT_BODY.includes("RECENT_SPEED_PROJECTION = 'usageDashRecentSpeed'"))
   assert.ok(!CLIENT_BODY.includes('/api/usage-dash/recent-speed'))

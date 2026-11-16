@@ -147,8 +147,8 @@ export function installDelegate(options = {}) {
         ? fixtureContent(parsedBody?.messages, { echoUserMessage: true, protocol, scenario })
         : FIXED_CONTENT
       if (request.url.includes('/responses')) return void writeResponsesStream(response, model, startOptions.tokens, scenario, content), true
-      if (request.url.includes('/messages')) return void writeAnthropicStream(response, model, startOptions.tokens, scenario, toolCallOf(scenario, parsedBody), content), true
-      return void writeOpenaiStream(response, model, startOptions.tokens, scenario, toolCallOf(scenario, parsedBody), content), true
+      if (request.url.includes('/messages')) return void writeAnthropicStream(response, model, startOptions.tokens, scenario, toolCallOf(scenario), content), true
+      return void writeOpenaiStream(response, model, startOptions.tokens, scenario, toolCallOf(scenario), content), true
     },
   }
 }

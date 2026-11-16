@@ -1,12 +1,11 @@
 // TaskAggregate v2 纯业务(数据与工具契约 + 生命周期与恢复):状态迁移、workItem、报告、停止/恢复、取消。
 // 不触宿主;时间由 now() 注入;所有失败返回 { ok:false, code, message }。
 import { ERROR_CODES as E, fail, pass, actionKeyOf } from './command.mjs'
+import { convergeRunUsage } from './usage.mjs'
 
-const BUSINESS_STATES = ['draft', 'ready', 'implementing', 'awaiting_acceptance', 'completed', 'blocked', 'cancelled']
 const PRIORITIES = ['high', 'normal', 'low']
 const PHASES = ['implement', 'fix', 'accept', 'integrate']
 const PHASE_ROLE = { implement: 'executor', fix: 'executor', accept: 'reviewer', integrate: 'executor|reviewer' }
-const CONTROL_STATES = ['active', 'stopping', 'paused', 'reconciling']
 const CRITERION_ID = /^[A-Za-z0-9_-]+$/
 
 function bump(aggregate) {
@@ -21,7 +20,7 @@ function withControl(aggregate, controlPatch, epochBump = false) {
 
 export function createTask({ taskId, title, projectWorkspaceId, definition, priority = 'normal', now }) {
   if (!taskId || !title || !projectWorkspaceId) return fail(E.INVALID_ARGUMENT, 'taskId/title/projectWorkspaceId 必填')
-  if (!BUSINESS_STATES || !PRIORITIES.includes(priority)) return fail(E.INVALID_ARGUMENT, `priority 非法: ${priority}`)
+  if (!PRIORITIES.includes(priority)) return fail(E.INVALID_ARGUMENT, `priority 非法: ${priority}`)
   const def = normalizeDefinition(definition)
   if (!def.ok) return def
   const ts = now()
@@ -37,13 +36,12 @@ export function createTask({ taskId, title, projectWorkspaceId, definition, prio
     authorization: null,
     businessState: 'draft',
     block: null,
-    control: { state: 'active', executionEpoch: 0, allowedGlobalGeneration: 0, stopDetail: null, resumeIntentId: null, pendingCancel: null },
+    control: { state: 'active', executionEpoch: 0, allowedGlobalGeneration: 0, stopDetail: null, resumeIntentId: null },
     workItems: {},
     runs: {},
     sessions: {},
     reports: {},
     resumeIntents: {},
-    appliedActions: {},
     usageLedger: {},
     createdAt: ts,
     updatedAt: ts,
@@ -63,6 +61,12 @@ function normalizeDefinition({ goal, scope = '', acceptanceCriteria = [], depend
 
 // workItem.define:同 ID 同内容幂等返回;同 ID 不同内容 REVISION_CONFLICT;子依赖无环
 export function defineWorkItem(aggregate, { workItemId, title, scope = '', dependencyWorkItemIds = [], requiredCriterionIds = [] }) {
+  if (!Array.isArray(dependencyWorkItemIds) || !dependencyWorkItemIds.every((id) => typeof id === 'string' && id.trim())) {
+    return fail(E.INVALID_ARGUMENT, 'dependencyWorkItemIds 须为工作项 ID 字符串数组')
+  }
+  if (!Array.isArray(requiredCriterionIds) || !requiredCriterionIds.every((id) => typeof id === 'string' && id.trim())) {
+    return fail(E.INVALID_ARGUMENT, 'requiredCriterionIds 须为验收标准 ID 字符串数组')
+  }
   const existing = aggregate.workItems[workItemId]
   const normalized = {
     title, scope,
@@ -78,6 +82,9 @@ export function defineWorkItem(aggregate, { workItemId, title, scope = '', depen
       : fail(E.REVISION_CONFLICT, `workItem 已存在且内容不同: ${workItemId},替代请用 workItem.replace`)
   }
   if (dependencyWorkItemIds.includes(workItemId)) return fail(E.INVALID_ARGUMENT, 'workItem 自依赖')
+  // 允许前向声明(依赖项可稍后定义,F05 契约);已撤回的既有项不可再被依赖
+  const withdrawnDeps = normalized.dependencyWorkItemIds.filter((id) => aggregate.workItems[id]?.replacedBy)
+  if (withdrawnDeps.length > 0) return fail(E.INVALID_ARGUMENT, `依赖工作项已撤回: ${withdrawnDeps.join(', ')}`)
   if (hasCycle(normalized.dependencyWorkItemIds, workItemId, aggregate)) return fail(E.DEPENDENCY_BLOCKED, 'workItem 依赖成环')
   const missing = requiredCriterionIds.filter((id) => !aggregate.definition.acceptanceCriteria.some((c) => c.criterionId === id))
   if (missing.length > 0) return fail(E.INVALID_ARGUMENT, `requiredCriterionIds 引用不存在的验收标准: ${missing.join(', ')}`)
@@ -101,12 +108,16 @@ function hasCycle(dependencyIds, workItemId, aggregate) {
   return false
 }
 
-// task.authorize:绑定当前 definitionRevision;blocked(授权失效)回 ready,旧验收标历史,不虚增定义版本
+// task.authorize:绑定当前 definitionRevision;blocked(授权失效)回 ready,旧验收标历史,不虚增定义版本。
+// 定义未变且已有授权时幂等返回:重复授权(超时重试)不得把已通过的验收标为历史。
 export function authorizeTask(aggregate, { sourceMessageRef, now: at }) {
+  // 幂等优先于终态判断:授权命令的重试可能晚于任务结案,不得因状态前进而报错
+  if (aggregate.authorization && aggregate.authorization.definitionRevision === aggregate.definitionRevision) {
+    return pass({ aggregate, replayed: true })
+  }
   if (aggregate.businessState === 'cancelled' || aggregate.businessState === 'completed') {
     return fail(E.INVALID_ARGUMENT, `终态任务不可授权: ${aggregate.businessState}`)
   }
-  if (aggregate.control.pendingCancel) return fail(E.TASK_PAUSED, '任务处于取消流程,不可授权')
   let next = bump(aggregate)
   next = withControl(next, {})
   const historical = markReportsHistorical(aggregate)
@@ -154,15 +165,99 @@ export function reviseDefinition(aggregate, { definition }) {
 // 未核清的 Run 状态:interrupted 与 settled/rejected 同属终态,不占执行槽
 export const ACTIVE_RUN_STATES = new Set(['prepared', 'submitted', 'running', 'unknown'])
 
+// 失联阈值:在飞 Run 超过该时长无任何事件即视为已断(prepared/unknown 也不例外),
+// 否则一次从未创建成功的会话就会永久占住执行槽与停止核对。
+export const RUN_STALE_MS = 15 * 60 * 1000
+
+function staleSince(run) {
+  return run.lastEventAt ?? run.recordedAt ?? run.startedAt
+}
+
+export function isStaleRun(run, { now, staleMs = RUN_STALE_MS } = {}) {
+  if (!ACTIVE_RUN_STATES.has(run?.state)) return false
+  const since = staleSince(run)
+  if (!Number.isFinite(since) || !Number.isFinite(now)) return false
+  return now - since > staleMs
+}
+
+// 时间基准:核心不读墙钟,由调用方(或聚合自带时钟)注入
+function clockOf(aggregate, now) {
+  if (Number.isFinite(now)) return now
+  return typeof aggregate.now === 'function' ? aggregate.now() : undefined
+}
+
+// 终态 Run 的结束时刻:启动过就以收敛时刻为结束,从未启动则为 null(显式键,
+// undefined 会在 JSON 落盘时整键消失,读面无法区分"未开始"与"字段缺失")
+function endedAtOf(run, at) {
+  if (!run.startedAt) return null
+  return Number.isFinite(at) ? at : null
+}
+
+// 失联在飞 Run 收敛为 interrupted;队列事实不可观测,标 stopObserved=unreachable
+export function expireStaleRuns(aggregate, options = {}) {
+  const now = clockOf(aggregate, options.now)
+  const stale = Object.entries(aggregate.runs).filter(([, run]) => isStaleRun(run, { now, staleMs: options.staleMs }))
+  if (stale.length === 0) return pass({ aggregate, expired: [] })
+  let next = bump(aggregate)
+  next = { ...next, runs: { ...aggregate.runs } }
+  for (const [runId, run] of stale) next.runs[runId] = { ...run, state: 'interrupted', stopObserved: 'unreachable', endedAt: endedAtOf(run, now) }
+  // 终态收敛即结算已观察用量:失联不代表没花掉
+  for (const [runId] of stale) next = settleRunUsage(next, runId)
+  return pass({ aggregate: next, expired: stale.map(([runId]) => runId) })
+}
+
 export function hasActiveRuns(aggregate) {
   return Object.values(aggregate.runs).some((r) => ACTIVE_RUN_STATES.has(r.state))
 }
 
-// 执行许可十条(生命周期"全局与局部停止代次" + 依赖准入);宿主能力就绪由适配层另行检查
+// 会话不可达(删除/从未创建)或跟随器放弃:该会话的在飞 Run 立即按已断收敛,不等失联阈值。
+// 与 expireStaleRuns 共用收敛口径,区别只在判据是"会话没了"而非"时间到了"。
+export function abandonSessionRuns(aggregate, sessionId) {
+  const targets = Object.entries(aggregate.runs).filter(([, run]) => run.sessionId === sessionId && ACTIVE_RUN_STATES.has(run.state))
+  if (targets.length === 0) return pass({ aggregate, expired: [] })
+  const at = clockOf(aggregate)
+  let next = bump(aggregate)
+  next = { ...next, runs: { ...aggregate.runs } }
+  for (const [runId, run] of targets) next.runs[runId] = { ...run, state: 'interrupted', stopObserved: 'unreachable', endedAt: endedAtOf(run, at) }
+  for (const [runId] of targets) next = settleRunUsage(next, runId)
+  return pass({ aggregate: next, expired: targets.map(([runId]) => runId) })
+}
+
+// 当前实施产物代次:该工作项执行者 Run 数;验收 Run 记录派发时刻的代次,不一致即陈旧验收
+export function artifactRevisionOf(aggregate, workItemId) {
+  return Object.values(aggregate.runs).filter((run) => run.workItemId === workItemId && run.actorRole === 'executor').length
+}
+
+// 当前实施产物已被独立验收驳回:该代次存在非历史 issues 报告。必须产生新实施产物后才能再验收,
+// 否则对同一份被驳回产物重复验收会绕过"驳回→修复"的推进规则。
+export function currentArtifactRejected(aggregate, workItemId) {
+  const artifactRevision = artifactRevisionOf(aggregate, workItemId)
+  return Object.values(aggregate.reports).some((report) => report.workItemId === workItemId
+    && !report.historical
+    && report.definitionRevision === aggregate.definitionRevision
+    && report.artifactRevision === artifactRevision
+    && report.verdict === 'issues')
+}
+
+// 有效验收:派发准入、工作项状态派生与结案共用同一判据。
+// 条件:当前定义、非历史、验收 Run、独立会话、覆盖当前实施产物代次。
+export function effectiveAcceptance(aggregate, report) {
+  if (!report || report.verdict !== 'pass' || report.historical) return false
+  if (report.definitionRevision !== aggregate.definitionRevision) return false
+  const run = aggregate.runs[report.runId]
+  if (!run || run.actorRole !== 'reviewer') return false
+  if (report.artifactRevision !== artifactRevisionOf(aggregate, report.workItemId)) return false
+  return !Object.values(aggregate.runs).some((execution) => execution.sessionId === run.sessionId && execution.actorRole === 'executor')
+}
+
+export function acceptedReportFor(aggregate, workItemId) {
+  return Object.values(aggregate.reports).find((report) => report.workItemId === workItemId && effectiveAcceptance(aggregate, report))
+}
+
+// 执行许可九条(生命周期"全局与局部停止代次" + 依赖准入);宿主能力就绪由适配层另行检查
 export function checkExecutionPermission(aggregate, globalControl, { workItemId, phase, actorRole }) {
   if (!PHASES.includes(phase)) return fail(E.INVALID_ARGUMENT, `phase 非法: ${phase}`)
   if (!(aggregate.control.state === 'active')) return fail(E.TASK_PAUSED, `控制状态 ${aggregate.control.state} 不允许派发`)
-  if (aggregate.control.pendingCancel) return fail(E.TASK_PAUSED, '任务处于取消流程')
   if (!aggregate.authorization || aggregate.authorization.definitionRevision !== aggregate.definitionRevision) {
     return fail(E.AUTHORIZATION_REQUIRED, '当前定义无有效授权')
   }
@@ -170,7 +265,8 @@ export function checkExecutionPermission(aggregate, globalControl, { workItemId,
     return fail(E.TASK_PAUSED, '全局停止中且无当前代次单项放行')
   }
   if (!aggregate.workItems[workItemId]) return fail(E.NOT_FOUND, `workItem 不存在: ${workItemId}`)
-  // 依赖准入:缺失/已替换/未验收的依赖一律拒绝派发——依赖声明是调度承诺,
+  if (aggregate.workItems[workItemId].replacedBy) return fail(E.INVALID_ARGUMENT, `工作项已撤回: ${workItemId}`)
+  // 依赖准入:缺失/已替换/未有效验收的依赖一律拒绝派发——依赖声明是调度承诺,
   // 与查询面 deriveWorkItemState 的 blocked 展示同一语义,不产生"显示 blocked 却获准"的分叉
   const unmet = aggregate.workItems[workItemId].dependencyWorkItemIds.filter((id) => {
     const dep = aggregate.workItems[id]
@@ -180,6 +276,14 @@ export function checkExecutionPermission(aggregate, globalControl, { workItemId,
   if (unmet.length > 0) return fail(E.DEPENDENCY_BLOCKED, `依赖未就绪: ${unmet.join(', ')}(缺失/已替换/未验收)`)
   const roles = PHASE_ROLE[phase].split('|')
   if (!roles.includes(actorRole)) return fail(E.INVALID_ARGUMENT, `phase ${phase} 不允许角色 ${actorRole}`)
+  // 已有效验收的工作项不得重复实施:再次实施会推进产物代次,把已有验收整体作废
+  if (phase === 'implement' && acceptedReportFor(aggregate, workItemId)) {
+    return fail(E.INVALID_ARGUMENT, '工作项已有当前产物的有效验收,无需重复实施')
+  }
+  // 被驳回的同一份产物不得重复验收:必须先修复产生新的实施产物代次
+  if (phase === 'accept' && currentArtifactRejected(aggregate, workItemId)) {
+    return fail(E.INVALID_ARGUMENT, '当前实施产物已被验收驳回,须先修复后再验收')
+  }
   if (!DISPATCHABLE_BUSINESS.has(aggregate.businessState)) return fail(E.INVALID_ARGUMENT, `业务状态 ${aggregate.businessState} 不可派发`)
   const slotKey = actionKeyOf([aggregate.taskId, workItemId, phase, actorRole])
   const slotTaken = Object.values(aggregate.runs).some((r) => r.executionSlot === slotKey && ACTIVE_RUN_STATES.has(r.state))
@@ -187,12 +291,9 @@ export function checkExecutionPermission(aggregate, globalControl, { workItemId,
   return pass({ slotKey })
 }
 
-// 依赖项已验收:存在非历史 pass 报告;历史报告(authorize 重置/定义修订)不算数
-function dependencyAccepted(aggregate, workItemId) {
-  return Object.values(aggregate.reports).some((report) => {
-    if (report.historical || report.workItemId !== workItemId) return false
-    return report.verdict === 'pass'
-  })
+// 依赖项已有效验收(与结案同一判据):历史报告、旧产物代次的 pass 都不算数
+export function dependencyAccepted(aggregate, workItemId) {
+  return acceptedReportFor(aggregate, workItemId) !== undefined
 }
 
 const DISPATCHABLE_BUSINESS = new Set(['ready', 'implementing', 'awaiting_acceptance'])
@@ -219,6 +320,8 @@ export function recordRun(aggregate, { runId, workItemId, phase, actorRole, sess
     requestedModel: null,
     state: 'prepared',
     executionTreeSettled: false,
+    recordedAt: ts,
+    lastEventAt: null,
     startedAt: null,
     endedAt: null,
     tokenTotal: null,
@@ -228,9 +331,6 @@ export function recordRun(aggregate, { runId, workItemId, phase, actorRole, sess
   next.runs = { ...aggregate.runs, [runId]: run }
   if (phase === 'implement' || phase === 'fix' || phase === 'integrate') {
     if (next.businessState === 'ready') next.businessState = 'implementing'
-  }
-  if (aggregate.control.state === 'active' && aggregate.control.allowedGlobalGeneration < globalControl.globalStopGeneration && globalControl.globalStopped) {
-    next = withControl(next, { allowedGlobalGeneration: globalControl.globalStopGeneration })
   }
   return pass({ aggregate: next, run })
 }
@@ -282,7 +382,6 @@ export function submitReport(aggregate, { reportId, runId, sessionId, eventSeq, 
       ...(summary !== undefined ? { summary } : {}),
       ...(eventSeq !== undefined ? { sourceMessageRef: { sessionId, eventSeq } } : {}),
       definitionRevision: run.definitionRevision,
-      artifactRef: run.artifactRef ?? null,
       artifactRevision: run.artifactRevision ?? 0,
       verdict, coveredCriterionIds, issues, evidence,
       historical,
@@ -295,6 +394,7 @@ export function submitReport(aggregate, { reportId, runId, sessionId, eventSeq, 
       [run.workItemId]: { ...workItem, failedAcceptanceCount, failureSources: [...workItem.failureSources, ...(isReviewer && verdict === 'issues' ? [reportId] : [])] },
     }
     next.runs = { ...next.runs, [runId]: { ...run, state: 'settled', endedAt: next.updatedAt, executionTreeSettled: true } }
+    next = settleRunUsage(next, runId)
     if (run.phase === 'implement' || run.phase === 'fix' || run.phase === 'integrate') {
       if (verdict === 'ready_for_review' && next.businessState === 'implementing') next.businessState = 'awaiting_acceptance'
     }
@@ -309,26 +409,40 @@ function actorRoleIs(run, role) {
   return run.actorRole === role
 }
 
+// Run 终态收敛处的用量归并:把跟随期观察到的调用并入 usageLedger 与 tokenTotal。
+// 归并失败不阻断业务终态(Ledger 自相矛盾时保留诊断),否则报告会永远提交不上。
+function settleRunUsage(aggregate, runId) {
+  const converged = convergeRunUsage(aggregate, runId)
+  if (converged.ok) return converged.result.aggregate
+  return {
+    ...aggregate,
+    runs: { ...aggregate.runs, [runId]: { ...aggregate.runs[runId], usageDiagnostic: { code: converged.code, message: converged.message } } },
+  }
+}
+
 // task.close:调度员结案;须有当前定义下独立 pass
 export function closeTask(aggregate, { passReportId, conclusion }) {
-  if (aggregate.control.pendingCancel) return fail(E.TASK_PAUSED, '任务处于取消流程')
-  if (hasActiveRuns(aggregate)) return fail(E.EXECUTION_STILL_ACTIVE, '存在在途执行,不可结案')
-  const report = aggregate.reports[passReportId]
+  // 失联 Run 不再占执行槽:结案前先按已断收敛(与本函数同一事务返回,由调用方落盘)
+  const settled = expireStaleRuns(aggregate).result?.aggregate ?? aggregate
+  if (hasActiveRuns(settled)) return fail(E.EXECUTION_STILL_ACTIVE, '存在在途执行,不可结案')
+  const report = settled.reports[passReportId]
   if (!report || report.historical) return fail(E.INVALID_ARGUMENT, '结案须引用当前有效的独立 pass 报告')
   if (report.verdict !== 'pass') return fail(E.INVALID_ARGUMENT, '结案须引用 pass 报告')
-  if (report.definitionRevision !== aggregate.definitionRevision) return fail(E.INVALID_ARGUMENT, 'pass 报告不覆盖当前定义')
-  const effectivePass = candidate => {
-    const run = aggregate.runs[candidate.runId]
-    const artifactRevision = Object.values(aggregate.runs).filter(execution => execution.workItemId === candidate.workItemId && execution.actorRole === 'executor').length
-    return candidate.verdict === 'pass' && !candidate.historical && candidate.definitionRevision === aggregate.definitionRevision
-      && run?.actorRole === 'reviewer' && candidate.artifactRevision === artifactRevision
-      && !Object.values(aggregate.runs).some(execution => execution.sessionId === run.sessionId && execution.actorRole === 'executor')
-  }
-  if (!effectivePass(report)) return fail(E.INVALID_ARGUMENT, 'pass 报告不覆盖当前实施产物')
-  if (Object.keys(aggregate.workItems).some(workItemId => !Object.values(aggregate.reports).some(candidate => candidate.workItemId === workItemId && effectivePass(candidate)))) return fail(E.INVALID_ARGUMENT, '所有工作项须有当前产物的独立验收通过报告')
-  const next = bump(aggregate)
+  if (!effectiveAcceptance(settled, report)) return fail(E.INVALID_ARGUMENT, 'pass 报告不覆盖当前实施产物')
+  // 已撤回项由替代项承接验收责任,不再要求自身有 pass;未撤回项必须全部通过
+  const openWorkItems = Object.values(settled.workItems).filter((workItem) => !workItem.replacedBy)
+  if (openWorkItems.some((workItem) => !acceptedReportFor(settled, workItem.workItemId))) return fail(E.INVALID_ARGUMENT, '所有未撤回工作项须有当前产物的独立验收通过报告')
+  const next = bump(settled)
   next.businessState = 'completed'
-  next.control = { ...next.control, state: 'paused', closeConclusion: conclusion ?? null }
+  // 结案即终态:作废待恢复意图并收敛控制面,避免 completed 被 resume 流程重新激活
+  next.resumeIntents = voidIntents(settled.resumeIntents)
+  next.control = {
+    ...next.control,
+    state: 'paused',
+    stopDetail: null,
+    resumeIntentId: null,
+    closeConclusion: conclusion ?? null,
+  }
   return pass({ aggregate: next })
 }
 
@@ -357,32 +471,57 @@ function voidIntents(intents) {
   return next
 }
 
-// 停止确认:全部执行体确认终止 → paused;pendingCancel 存在则原子结为 cancelled+paused
+// 停止确认:全部执行体确认终止 → paused;在飞 Run 收敛为 interrupted 并结算已观察用量
 export function confirmStopped(aggregate) {
   if (aggregate.control.state !== 'stopping') return fail(E.INVALID_ARGUMENT, `控制状态 ${aggregate.control.state} 无停止待确认`)
   let next = bump(aggregate)
   next = withControl(next, { state: 'paused', stopDetail: null })
-  if (next.control.pendingCancel) {
-    next.businessState = 'cancelled'
-    next.control = { ...next.control, pendingCancel: null }
-    next.resumeIntents = voidIntents(next.resumeIntents)
-  }
-  next.runs = settleActiveRuns(next.runs, 'interrupted')
+  const activeRunIds = activeRunIdsOf(aggregate)
+  next.runs = settleActiveRuns(next.runs, 'interrupted', 'confirmed', clockOf(aggregate))
+  for (const runId of activeRunIds) next = settleRunUsage(next, runId)
   return pass({ aggregate: next })
 }
 
-function settleActiveRuns(runs, state) {
+// 强制停止/放弃:宿主会话不可达(删除或从未创建)且常规核对无出口时的显式动作。
+// 在飞 Run 一律 interrupted + stopObserved=unreachable,队列事实不再声称已核对。
+export function forceStopTask(aggregate, { reason = 'force_stop' } = {}) {
+  if (['completed', 'cancelled'].includes(aggregate.businessState)) return fail(E.INVALID_ARGUMENT, '终态任务无需停止')
+  let next = bump(aggregate)
+  next = withControl(next, { state: 'paused', stopDetail: null, resumeIntentId: null }, true)
+  next.resumeIntents = voidIntents(aggregate.resumeIntents)
+  const activeRunIds = activeRunIdsOf(aggregate)
+  next.runs = settleActiveRuns(next.runs, 'interrupted', 'unreachable', clockOf(aggregate))
+  for (const runId of activeRunIds) next = settleRunUsage(next, runId)
+  next.lastStopReason = reason
+  return pass({ aggregate: next })
+}
+
+function activeRunIdsOf(aggregate) {
+  return Object.keys(aggregate.runs).filter((runId) => ACTIVE_RUN_STATES.has(aggregate.runs[runId].state))
+}
+
+function settleActiveRuns(runs, state, stopObserved, at) {
   const next = { ...runs }
   for (const [id, run] of Object.entries(runs)) {
-    if (ACTIVE_RUN_STATES.has(run.state)) next[id] = { ...run, state, endedAt: run.startedAt ? undefined : null }
+    if (ACTIVE_RUN_STATES.has(run.state)) next[id] = { ...run, state, stopObserved, endedAt: endedAtOf(run, at) }
   }
   return next
 }
 
-// resume.request:登记意图,不直接放行;pendingCancel 期间拒绝
+// resume.request:登记意图,不直接放行;终态任务不得再进入恢复流程
 export function requestResume(aggregate, { resumeIntentId, sourceMessageRef, expectedExecutionEpoch, globalStopGeneration }) {
-  if (aggregate.control.pendingCancel) return fail(E.TASK_PAUSED, '取消流程中拒绝恢复请求')
+  if (['completed', 'cancelled'].includes(aggregate.businessState)) return fail(E.INVALID_ARGUMENT, `终态任务不可恢复: ${aggregate.businessState}`)
   if (expectedExecutionEpoch !== aggregate.control.executionEpoch) return fail(E.STALE_EPOCH, '恢复意图基于旧执行代次')
+  // 同 ID 同来源幂等;同 ID 不同来源/代次必须冲突,禁止静默覆盖已登记的恢复依据
+  const existing = aggregate.resumeIntents?.[resumeIntentId]
+  if (existing) {
+    const same = existing.expectedExecutionEpoch === expectedExecutionEpoch
+      && existing.globalStopGeneration === globalStopGeneration
+      && JSON.stringify(existing.sourceMessageRef) === JSON.stringify(sourceMessageRef)
+    return same
+      ? pass({ aggregate, replayed: true })
+      : fail(E.IDEMPOTENCY_CONFLICT, `恢复意图已存在且内容不同: ${resumeIntentId}`)
+  }
   let next = bump(aggregate)
   next.resumeIntents = {
     ...aggregate.resumeIntents,
@@ -395,8 +534,10 @@ export function requestResume(aggregate, { resumeIntentId, sourceMessageRef, exp
   return pass({ aggregate: next })
 }
 
-// resume.confirm:核对通过 → active;新 epoch、当前全局代次单项许可,原子写入
+// resume.confirm:核对通过 → active;新 epoch、当前全局代次单项许可,原子写入。
+// 终态任务即使残留意图也不得恢复,防止结案后被旧意图重新激活。
 export function confirmResume(aggregate, { resumeIntentId, globalStopGeneration }) {
+  if (['completed', 'cancelled'].includes(aggregate.businessState)) return fail(E.INVALID_ARGUMENT, `终态任务不可恢复: ${aggregate.businessState}`)
   const intent = aggregate.resumeIntents[resumeIntentId]
   if (!intent || intent.status !== 'pending') return fail(E.INVALID_ARGUMENT, '恢复意图不存在或已失效')
   if (aggregate.control.state !== 'reconciling' && aggregate.control.state !== 'paused') {
@@ -418,28 +559,18 @@ export function confirmResume(aggregate, { resumeIntentId, globalStopGeneration 
   return pass({ aggregate: next })
 }
 
-// task.cancel:执行树未停先 pendingCancel+stopping;确认时原子 cancelled+paused
-export function requestCancel(aggregate, { sourceMessageRef }) {
-  if (aggregate.businessState === 'cancelled') return fail(E.INVALID_ARGUMENT, '任务已取消')
-  if (aggregate.businessState === 'completed') return fail(E.INVALID_ARGUMENT, '任务已结案')
-  let next = bump(aggregate)
-  if (hasActiveRuns(aggregate)) {
-    next = withControl(next, { state: 'stopping', stopDetail: 'requesting', pendingCancel: { sourceMessageRef }, resumeIntentId: null }, true)
-    next.resumeIntents = voidIntents(aggregate.resumeIntents)
-  } else {
-    next.businessState = 'cancelled'
-    next = withControl(next, { state: 'paused', pendingCancel: null })
-    next.resumeIntents = voidIntents(aggregate.resumeIntents)
-  }
-  return pass({ aggregate: next })
-}
-
 // workItem.replace:单次聚合 update 内撤销旧项并创建新 ID;旧执行树须已核清;
 // failedAcceptanceCount 继承(不借换 ID 清零),旧 pass 只属旧 ID
 export function replaceWorkItem(aggregate, { oldWorkItemId, newWorkItemId, title, scope = '', dependencyWorkItemIds = [], requiredCriterionIds = [], reason }) {
   const old = aggregate.workItems[oldWorkItemId]
   if (!old) return fail(E.NOT_FOUND, `workItem 不存在: ${oldWorkItemId}`)
   if (aggregate.workItems[newWorkItemId]) return fail(E.INVALID_ARGUMENT, `新 workItem ID 已存在: ${newWorkItemId}`)
+  // 替代发生在既有图上:依赖必须已存在且未撤回,不允许把替代项挂到缺失/撤回项下
+  if (!Array.isArray(dependencyWorkItemIds) || !dependencyWorkItemIds.every((id) => typeof id === 'string' && id.trim())) {
+    return fail(E.INVALID_ARGUMENT, 'dependencyWorkItemIds 须为工作项 ID 字符串数组')
+  }
+  const missingDeps = dependencyWorkItemIds.filter((id) => aggregate.workItems[id] === undefined)
+  if (missingDeps.length > 0) return fail(E.INVALID_ARGUMENT, `依赖工作项不存在: ${missingDeps.join(', ')}`)
   const inFlight = Object.values(aggregate.runs).some((r) => r.workItemId === oldWorkItemId && ACTIVE_RUN_STATES.has(r.state))
   if (inFlight) return fail(E.EXECUTION_STILL_ACTIVE, '旧执行树存在未核清 Run,不可替代')
   if (!reason) return fail(E.INVALID_ARGUMENT, '替代必须给出解释')
@@ -458,16 +589,5 @@ export function replaceWorkItem(aggregate, { oldWorkItemId, newWorkItemId, title
       replacementReason: reason,
     },
   }
-  return pass({ aggregate: next })
-}
-
-// 依赖解除:仅 blocked(依赖缺失)回 blockedFrom 业务状态;不解除控制暂停
-export function resolveDependencyBlock(aggregate) {
-  if (aggregate.businessState !== 'blocked' || aggregate.block?.reason !== 'dependency_missing') {
-    return fail(E.INVALID_ARGUMENT, '任务不处于依赖受阻')
-  }
-  const next = bump(aggregate)
-  next.businessState = aggregate.block.blockedFrom
-  next.block = null
   return pass({ aggregate: next })
 }

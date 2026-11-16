@@ -58,6 +58,14 @@ test('S03 未返回的证券记为缺失而不是零价,字段不足判坏载荷
   )
 })
 
+test('P2-53 停牌空串行跳过并记 NO_DATA, 不拖垮同批其它证券', async () => {
+  const body = `var hq_str_sh600519="${CN_ROW.replace(/^000001/, '600519')}";var hq_str_sh600520="";`
+  const result = await sina.quotes({ securities: [security('XSHG', '600519'), security('XSHG', '600520')], providerInstanceId: 'sn' }, ctxWith(body))
+  assert.equal(result.items.length, 1, '健康证券照常返回')
+  assert.equal(result.items[0].securityId, 'XSHG:equity:600519')
+  assert.deepEqual(result.errors.map(e => [e.securityId, e.code]), [['XSHG:equity:600520', 'NO_DATA']])
+})
+
 test('S04 前缀随市场派生:美股小写、港股保留五位代码', async () => {
   let requested = ''
   const ctx = { fetch: async url => { requested = url; return { ok: true, arrayBuffer: async () => new TextEncoder().encode('') } }, now: () => 0, signal: new AbortController().signal }

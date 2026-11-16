@@ -49,6 +49,7 @@ function loadClient({ binding, remoteSession } = {}) {
       register: (options, component) => registered.push({ options, component }),
     },
     get remote() { return remote },
+    inject: (deps, register) => { if (deps.includes('remote.session') && remote.session) register(ctx) },
   }
   mod.apply(ctx)
   return { registered, injectedNames }
@@ -269,6 +270,7 @@ function loadComponent() {
       register: (options, component) => registered.push({ options, component }),
     },
     get remote() { return { session: { page: () => Promise.resolve({ records: [] }) } } },
+    inject: (deps, register) => { if (deps.includes('remote.session') && ctx.remote.session) register(ctx) },
   }
   mod.apply(ctx)
   const entry = registered.find((item) => item.options.id === 'context-manager-steer')
@@ -474,6 +476,7 @@ function mountScanHarness({ faceRows, updateQueue, setDraft, pendingBubble = fal
       register: (options, component) => registered.push({ options, component }),
     },
     get remote() { return { session: {} } },
+    inject: (deps, register) => { if (deps.includes('remote.session') && ctx.remote.session) register(ctx) },
   }
   mod.apply(ctx)
   const entry = registered.find((item) => item.options.id === 'context-manager-steer')

@@ -53,8 +53,46 @@ test('插件页卡片为官方 PluginCard 形制:li 卡壳 + 头部折叠 + 令�
   assert.doesNotMatch(source, /'cb-settings'/, '旧裸 div 平铺形态已移除')
 })
 
-test('client.js 无顶层词法声明(经典 script 书挡内安全)', () => {
-  // IIFE 书挡内允许任意声明;守卫确认整文件被书挡包裹
+test('删除环境变量与清空日志检查响应 ok,LogsTab 随任务集合复位选中', () => {
+  // deleteEnv:失败提示 + reload 对账,成功提示
+  const envStart = source.indexOf('const deleteEnv = async')
+  assert.ok(envStart > 0, '缺少 deleteEnv')
+  const envBody = source.slice(envStart, source.indexOf('const doExport', envStart))
+  assert.match(envBody, /const outcome = await request\('DELETE'/)
+  assert.match(envBody, /if \(!outcome\.ok\)/)
+  assert.match(envBody, /删除失败:/)
+  assert.match(envBody, /reload\(\)/)
+  // clearLog:失败提示且不关闭日志视图,成功后关闭并 reload
+  const clearStart = source.indexOf('const clearLog = async')
+  assert.ok(clearStart > 0, '缺少 clearLog')
+  const clearBody = source.slice(clearStart, source.indexOf('return h(', clearStart))
+  assert.match(clearBody, /if \(!outcome\.ok\)/)
+  assert.match(clearBody, /清空日志失败:/)
+  assert.match(clearBody, /setLogView\(null\)/)
+  // LogsTab:任务删除/首次加载后当前 jobId 不在集合中时复位到首个任务并清日志视图
+  const logsStart = source.indexOf('function LogsTab')
+  assert.ok(logsStart > 0, '缺少 LogsTab')
+  const logsBody = source.slice(logsStart, source.indexOf('function CronBoardPanel', logsStart))
+  assert.match(logsBody, /jobs\.some\(\(job\) => job\.id === jobId\)/)
+  assert.match(logsBody, /setJobId\(jobs\[0\]\.id\)/)
+  assert.match(logsBody, /setLogView\(null\)/)
+})
+
+test('写方法(含无体 POST/DELETE)必须携带 JSON content-type,否则装配层闸门 400', () => {
+  assert.match(source, /headers: method === 'GET' \? undefined : \{ 'content-type': 'application\/json' \}/,
+    '写请求必须无条件带 content-type(GET 除外)')
+})
+
+test('删除任务必须检查响应 ok:失败提示原因并 reload 对账,不得宣称已删除', () => {  const start = source.indexOf('const deleteJob = async')
+  assert.ok(start > 0, '缺少 deleteJob')
+  const body = source.slice(start, source.indexOf('const visible', start))
+  assert.match(body, /const outcome = await request\('DELETE'/)
+  assert.match(body, /if \(!outcome\.ok\)/)
+  assert.match(body, /删除失败:/)
+  assert.match(body, /reload\(\)/)
+})
+
+test('client.js 无顶层词法声明(经典 script 书挡内安全)', () => {  // IIFE 书挡内允许任意声明;守卫确认整文件被书挡包裹
   const trimmed = source.trim()
   assert.ok(trimmed.startsWith('(() => {'), '必须以 IIFE 书挡开头')
   assert.ok(trimmed.endsWith('})()'), '必须以 IIFE 书挡结尾')
@@ -89,7 +127,7 @@ test('会话任务模型选择契约:目录拉取 + 两级选择 + 记录展示'
   assert.match(source, /跟随模型默认/, 'effort 首选项必须是跟随模型默认')
   assert.match(source, /reasoningEffort: e\.target\.value/, 'effort 选择必须回写表单')
   // 提交链:modelKey 经 parseModelKey 还原对象,空串还原 undefined 即不携带字段
-  assert.match(source, /payload\.session\.model = parseModelKey\(form\.session\.modelKey\)/, '提交必须经 key 还原模型对象')
+  assert.match(source, /model: parseModelKey\(session\.modelKey\)/, '提交必须经 key 还原模型对象')
   // 记录面:运行行展示 model 标签
   assert.match(source, /run\.model/, '运行记录行必须展示模型标签')
 })

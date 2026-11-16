@@ -25,7 +25,7 @@ AI `terminal` 工具与用户通过 DSH 官方 Sidebar `terminal` tab 操作同�
 
 ### wait 手动打断（0.4.0 起）
 
-wait 等待期间，工具卡片以等待子串替代「执行中」摘要（提示正在等什么）并显示「跳过等待」按钮；点击经宿主路由 `/api/shared-terminal/wait/skip`（POST JSON `{sessionId, terminalId}`）中断该终端当前全部 pending wait，wait 以 `skipped` 终态携带当前屏幕快照返回，AI 继续后续步骤——不打断回合。判定次序：回合取消 > 终端退出 > 文本命中 > 手动跳过 > 超时。路由首行回问宿主 `connection.requestRejection`（无 cookie 401），并保留 Origin 同源比对，不自建认证层。
+wait 等待期间，工具卡片以等待子串替代「执行中」摘要（提示正在等什么）并显示「跳过等待」按钮；点击经宿主路由 `/api/shared-terminal/wait/skip`（POST JSON `{sessionId, terminalId}`）中断该终端当前全部 pending wait，wait 以 `skipped` 终态携带当前屏幕快照返回，AI 继续后续步骤——不打断回合。判定次序：回合取消 > 终端退出 > 文本命中 > 手动跳过 > 超时。路由统一走 `withRouteGate`：首行回问宿主 `connection.requestRejection`（无 cookie 401），并校验 Origin 同源与 JSON content-type，不自建认证层；正常响应保持 keep-alive。
 
 ## 只读终端自愈
 
@@ -37,11 +37,13 @@ wait 等待期间，工具卡片以等待子串替代「执行中」摘要（提
 
 宿主的 `terminal` tab 类型注册为 `multiple`，`openTabIn` 每次调用都生成新的随机 `contentId` 并新建 tab。工具结果卡片会在刷新、切会话、重新挂载时重新渲染并导航，按 `openTabIn` 处理就会不断叠出多个共同指向同一终端的面板——每个面板各挂一份 xterm 与终端订阅，页面越用越卡。0.4.3 起按 `terminalId` 固定 `contentId`（`dsh-resource://dsh-shared-terminal/panel/<terminalId>`）走 `openResourceIn`，宿主按 `findContentTab` 复用同一面板，插件面板一终端一址；用户自己用官方「新建终端」打开的面板不再被改写，导航另按 `sessionId:terminalId` 去重（原按 callId，刷新即失效）。
 
+面板复用依赖客户端两处宿主服务耦合（服务端那一处见「终端查询应答」）：建面板前经公开接口 `webTerminals.bind(sessionId, contentId, terminalId)` 预写 `contentId`→终端绑定，宿主据此在刷新/换挂载时复用既有终端而不重建 PTY（`bind` 自 0.2.2-rc.2 提供，更早代际只剩导航参数一条来源）；并包装 `webTerminals.view`，在首帧 `contentId` 为空时用 layout 里的 `contentId` 与终端身份补齐（宿主导航记录由 `openContent` 回执写入，晚于首帧，空值会把 xterm 按「新终端」建死）。包装登记在 fiber effect 内：禁用/卸载时只在仍持有本次包装时把宿主实现还回去并清掉待发补查定时器，HMR 换代不会因残留标记装不上新逻辑，也不留捕获旧代 `ctx` 的闭包。
+
 ## 终端查询应答（0.4.7 起）
 
 Windows 的 ConPTY 在终端尺寸变化后向终端侧发 `ESC[6n`（DSR 光标查询）并**阻塞**等待应答；500ms 未收到就重发，一次 resize 实测重试到 3 次。宿主把这段查询当普通输出广播，浏览器 xterm 会在 `onData` 里自动回 `ESC[1;1R`，而宿主客户端把它与键盘输入走同一条通道写回 PTY。ConPTY 只消费一个应答，多余或迟到的应答成为 shell 键盘输入：提示符后出现 `;1R;1R;1R` 残片，命令首词被吞（`RRRecho …` → command not found）；没有 UI 面板时则无人应答，bash 连首次提示符都不绘制。
 
-插件在服务端接管这条链路：包装宿主 `BrowserTerminal#output`，按出现位置摘出 `ESC[6n`、`ESC[?6n`、`ESC[c`，同批同类只应答一次，按 xterm-headless 当前光标回写。远端 follower 看不到查询，也就不会再产生应答；ConPTY 在 500ms 内得到应答，不再重试。这是本包唯一的宿主内部改动，边界与 `read` 相同：结构漂移时安装失败、工具照常工作（回到宿主原行为），不抛错、不阻塞启动。响应器依赖 `output`/`handle.write`/`screen.buffer.active` 三处私有形状；允许表内旧代际若字段不同，同样走安装失败回落路径。
+插件在服务端接管这条链路：包装宿主 `BrowserTerminal#output`，按出现位置摘出 `ESC[6n`、`ESC[?6n`、`ESC[c`，同批同类只应答一次，按 xterm-headless 当前光标回写。远端 follower 看不到查询，也就不会再产生应答；ConPTY 在 500ms 内得到应答，不再重试。这是本包唯一的**服务端**宿主内部改动，边界与 `read` 相同：结构漂移时安装失败、工具照常工作（回到宿主原行为），不抛错、不阻塞启动。响应器依赖 `output`/`handle.write`/`screen.buffer.active` 三处私有形状；允许表内旧代际若字段不同，同样走安装失败回落路径。客户端另有二处宿主耦合（包装 `webTerminals.view` 补首帧身份、建面板前调 `webTerminals.bind` 预写绑定），均随 fiber 卸载还原，见「终端面板复用」。
 
 `write` 另做输入卫生：`submit=true` 且 shell 是 POSIX 系列、当前为 normal buffer 时，payload 前置 `Ctrl+U`（`0x15`），清掉已落入输入行的残片；alternate buffer（TUI）与 cmd/pwsh 不加。
 
@@ -49,7 +51,7 @@ Windows 的 ConPTY 在终端尺寸变化后向终端侧发 `ESC[6n`（DSR 光标
 
 命令由 shell 执行；本工具不做命令安全校验。Controller 使用 **system-user execution permissions**，不受 Agent sandbox/approval 策略约束。命令可能修改系统用户有权限访问的文件。回合取消会拒绝尚未完成的插件泵写入并丢弃该附着尚未消费的输入；已经交给 Controller/provider 的 `write/close` 无法撤销。同代并发写随取消一起中止时，其他尚未确认的写报结果未知且不自动重发，以免重复执行已经投递的输入。卸载与关闭永久销毁对应泵，旧引用不可继续写入或自动重抢；关闭失败也不复用旧附着，仍允许再次尝试关闭。
 
-仅支持实测版本 DSH **0.2.0-rc.1、0.2.0-rc.2、0.2.1-alpha.2、0.2.1-rc.2、0.2.1-rc.3、0.2.1-rc.4、0.2.1-rc.5、0.2.2-alpha.3、0.2.2-rc.1、0.2.2-rc.2 与 0.2.2-rc.3**（精确允许表；其他版本启动时干净禁用并告警）。`read` 使用这些版本共同的 `@deepseek-ai/dsh-api-terminal-controller` 私有 owner lookup、BrowserTerminal operation queue 和 xterm-headless active buffer。新建终端的工作目录：0.2.0-rc.2 为创建时的宿主默认工作区目录；0.2.1 起为 Session 当前目录（Controller 工作目录服务）。插件不重建 PTY、不读取 serializer 输出；唯一的宿主内部改动是服务端接管终端查询应答（见上）；附着策略随宿主代际：0.2.0 系与 0.2.1-alpha.2 蹭 UI 附着写入（不调用 `follow` 抢 attachment），0.2.1-rc.2 起自持 attach 泵（见下）。
+功能面仅接受实测版本 DSH **0.2.0-rc.1、0.2.0-rc.2、0.2.1-alpha.2、0.2.1-rc.2、0.2.1-rc.3、0.2.1-rc.4、0.2.1-rc.5、0.2.2-alpha.3、0.2.2-rc.1、0.2.2-rc.2 与 0.2.2-rc.3**（精确允许表；其他版本启动时干净禁用并告警）。装载面 `dsh.hostMin = "0.2.0-rc.2"`：0.2.0-rc.1 因 `@deepseek-ai/dsh-tools` 与三个 sidebar peer 均要求 `>=0.2.0-rc.2`，会被宿主装载闸门跳过，仅留在功能白名单内。`read` 使用这些版本共同的 `@deepseek-ai/dsh-api-terminal-controller` 私有 owner lookup、BrowserTerminal operation queue 和 xterm-headless active buffer。新建终端的工作目录：0.2.0-rc.2 为创建时的宿主默认工作区目录；0.2.1 起为 Session 当前目录（Controller 工作目录服务）。插件不重建 PTY、不读取 serializer 输出；宿主耦合共三处：服务端接管终端查询应答（唯一的服务端内部改动，见上），客户端包装 `webTerminals.view` 与调 `webTerminals.bind`（卸载即还原，见「终端面板复用」）；附着策略随宿主代际：0.2.0 系与 0.2.1-alpha.2 蹭 UI 附着写入（不调用 `follow` 抢 attachment），0.2.1-rc.2 起自持 attach 泵（见下）。
 
 装载与功能是两层：peerDependencies 声明装载面（允许宿主装载后走停用路径），允许表声明功能面。dsh **0.2.1-rc.2** 实测：Controller 移除 `write`/`resize` 公开方法，输入改经 `attach` 命令帧通道——本包自持 attach 泵适配该模型：工具 `write` 时插件成为控制者（0.2.1-rc.2 输入排他），**最后一笔写入 ack 后空闲冷却 10s 才释放附着**。释放仍必要：无人附着时宿主向 UI 广播状态使其恢复可写并按容器重算终端几何——若泵永久附着，UI 长期只读，官方布局重算被跳过，插件写入推高的 PTY 行数会把终端底部推出可视区且滚动失效。冷却期亦必要：写完立即释放会让每次写入都经历 attach/detach,宿主 gateway `cancellableStream` 的 abort 竞态偶发吞掉 UI 输出流的终止信号(实机复现:渲染冻结在旧屏、phase 停留 connected,须换代重连恢复);高频连续写场景下"写完即释放"的停摆概率显著,冷却把 attach/detach 频率从每写一次收敛到每轮命令一次。用户点官方「接管输入」随时拿回控制权；用户接管后泵的下一次写入会重新附着抢回（最后写入者胜出，双方交替互斥）。0.2.1-rc.2 上切走浏览器页面等价于放弃输入控制权，AI 写入不再依赖 UI 附着。
 
@@ -82,6 +84,6 @@ npm test -- /path/to/isolated-dsh-host
 
 ## dsh 版本兼容
 
-按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。本包声明 `dsh.hostMin = "0.2.0-rc.1"`:低于该代际的宿主 API 面未验证,compat 装载层自动排除。逐格证据见本包 `兼容性测试.md`,轮次汇总见 `docs/兼容性测试/逐包测试进度.md`(本地维护,不入库)。
+按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。本包声明 `dsh.hostMin = "0.2.0-rc.2"`:低于该代际的宿主 API 面未验证,compat 装载层自动排除;0.2.0-rc.1 同时被 dsh-tools/sidebar peer 门槛拦截。逐格证据见本包 `兼容性测试.md`,轮次汇总见 `docs/兼容性测试/逐包测试进度.md`(本地维护,不入库)。
 
 dsh `0.2.1-rc.2` 起官方 Controller 移除 `write`/`resize` 公开方法,终端输入改经 `attach` 命令帧通道(gateway 侧 uplink):本包自持 attach 泵适配——工具 `write` 经 `controller.terminal(agent,id).attach()` 建立插件侧附着,命令帧 sequence 按附着世代严格递增(空闲冷却释放与重抢后随新附着重置);read-only(用户接管)与 detached(附着流断)触发自动重抢一次,重抢仍失败返回 `TERMINAL_ERROR` 并提示重试;版本白名单已纳入 `0.2.1-rc.2`、`0.2.1-rc.3`、`0.2.1-rc.4`、`0.2.1-rc.5`、`0.2.2-alpha.3`、`0.2.2-rc.1`、`0.2.2-rc.2` 与 `0.2.2-rc.3`(dshReleases `compatible`)。逐格断言、精确版本允许表与 D01-D15 维度适用表见本包 `兼容性测试.md`。

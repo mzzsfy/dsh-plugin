@@ -9,6 +9,12 @@ const repo = join(dirname(fileURLToPath(import.meta.url)), '..')
 const shotsRoot = join(repo, 'assets/screenshots')
 const outPath = join(repo, 'docs/商店展示效果.html')
 
+// 包清单以 packages/ 目录为准:DESC/ICON_MAP 漏项直接失败,防止新增包静默缺席展示面
+const packages = readdirSync(join(repo, 'packages'), { withFileTypes: true })
+  .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
+  .map((entry) => entry.name)
+const manifestOf = (dir) => JSON.parse(readFileSync(join(repo, 'packages', dir, 'package.json'), 'utf8'))
+
 // 每包一句话展示;与根 README 一览表的功能列对应,单文档为浏览形态故精简
 const DESC = {
   'dsh-usage-panel': '账号余额与额度面板:七类 provider 定时查询、趋势图、阈值通知',
@@ -17,7 +23,6 @@ const DESC = {
   'dsh-think-expand': '流式思考自动展开:始终显示最新思考',
   'dsh-turn-notify': '回合事件通知:声音/弹窗/页内/webhook/IM 多通道',
   'dsh-session-manager': '会话生命周期:超期自动归档、归档面板、误归档防抖',
-  'dsh-rs-workflow': '若水工作流:模板一键释放为 Agent 预设组合',
   'dsh-llm-pi-gateway': 'PiAiAdapter 会话标记增强(纯 host)',
   'dsh-settings-nav-icons': '设置导航与市场卡片语义图标',
   'dsh-auto-trust-all': '动态信任所有到达 Host(纯 host)',
@@ -56,12 +61,16 @@ const SHOT_LABEL = {
 
 let iconCards = ''
 const iconCount = Object.keys(ICON_MAP).length
+for (const dir of packages) {
+  if (!ICON_MAP[dir]) throw new Error(`ICON_MAP 缺 ${dir}:先在 scripts/generate-icons.mjs 声明图标`)
+}
 for (const [pkg, glyph] of Object.entries(ICON_MAP)) {
   const svg = readFileSync(join(repo, 'assets/icons', `${pkg}.svg`), 'utf8').replace('<svg ', '<svg width="48" height="48" ')
   iconCards += `<div class=icon-card><div class=icon-box>${svg}</div><div class=icon-name>${pkg.replace('dsh-', '')}</div><div class=icon-glyph>${glyph}</div></div>`
 }
 
 let shotSections = ''
+let shotPackages = 0
 for (const dir of readdirSync(shotsRoot).sort()) {
   // 隐藏目录(.thumbnails 等)与隐藏文件不入展示面
   if (dir.startsWith('.')) continue
@@ -69,7 +78,8 @@ for (const dir of readdirSync(shotsRoot).sort()) {
   if (!statSync(dirPath).isDirectory()) continue
   const files = readdirSync(dirPath).filter((f) => !f.startsWith('.') && f.endsWith('.png'))
   if (files.length === 0) continue
-  const desc = DESC[dir] ?? ''
+  shotPackages += 1
+  const desc = DESC[dir] ?? manifestOf(dir).description ?? ''
   shotSections += `<h2>${dir}</h2><p class=desc>${desc}</p><div class=shots>`
   for (const file of files) {
     const b64 = readFileSync(join(dirPath, file), 'base64')
@@ -96,7 +106,7 @@ const style = [
 
 const html = `<!doctype html><html lang="zh"><meta charset="utf-8"><title>dsh-plugin 商店展示效果</title><style>${style}</style>` +
   '<h1>dsh-plugin 商店展示效果</h1>' +
-  `<div class=note>图标随上游收录 PR 提交至 awesome-dsh-plugin(icon 走 assets/icons/png 180px 光栅),展示于 dshmarket 与官方 Discover;截图展示于 awesome-dsh-plugin.com 与 dshmarket 详情页。全部 ${iconCount} 包图标与各界面截图均来自隔离环境实测。</div>` +
+  `<div class=note>图标随上游收录 PR 提交至 awesome-dsh-plugin(icon 走 assets/icons/png 180px 光栅),展示于 dshmarket 与官方 Discover;截图展示于 awesome-dsh-plugin.com 与 dshmarket 详情页。全部 ${iconCount} 包图标齐备;界面截图覆盖 ${shotPackages} 个包(assets/screenshots 实测留档),其余包暂无截图。</div>` +
   `<h2 style="margin-top:32px">商店图标(${iconCount} 包)</h2><p class=desc>glyph 名取自插件设置页图标声明;插件无导航入口、内置表也没有合适寓意时用本仓库专属图形(loop / pulse)</p>` +
   `<div class=grid>${iconCards}</div>${shotSections}` +
   `<p style="margin-top:48px;color:#999;font-size:12px">生成于 ${new Date().toISOString().slice(0, 10)} · 截图 assets/screenshots/ · 重新生成:node scripts/build-showcase.mjs</p></html>`

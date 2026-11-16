@@ -6,7 +6,11 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
 
+import { CLIENT_BODY } from './client-eval.mjs'
+
 const { apply } = await import('../src/index.js')
+// client 半区出厂默认值:与宿主 SETTINGS_SCHEMA.statsLine 默认逐项对拍(双实现同源)
+const { STATS_LINE_DEFAULT_PREFS } = new Function(`${CLIENT_BODY}\nreturn { STATS_LINE_DEFAULT_PREFS }`)()
 
 const PATH_PRICING = '/api/usage-dash/pricing'
 const DEFAULT_MINUTE_RETENTION_DAYS = 7
@@ -67,6 +71,7 @@ function makeLegacySettings(store = {}) {
     update: async (_ns, patch) => {
       const pricing = patch.pricing
       if (pricing) store.pricing = { ...(store.pricing ?? {}), ...pricing }
+      if (patch.cycle) store.cycle = { ...(store.cycle ?? {}), ...patch.cycle }
       if (patch.minuteRetentionDays !== undefined) store.minuteRetentionDays = patch.minuteRetentionDays
       revision += 1
     },
@@ -149,6 +154,8 @@ test('Config 导出契约:根级 volatile 包装,validate 产整节单 ref,默�
     replaceSpeed: false,
     requestDetails: false,
   })
+  // client.js 的出厂默认值必须与宿主 schema 默认值逐项一致
+  assert.deepEqual(STATS_LINE_DEFAULT_PREFS, section.statsLine, 'client/宿主出厂默认值不一致')
 })
 
 test('0.1.7 形态:settings 激活即门面生效,GET 读 configRef,POST 经 configEditor.edit 整节替换', async () => {
@@ -263,3 +270,94 @@ test('legacy 形态:settings 激活即门面生效,replace 经命名空间 updat
   assert.equal(savedParsed.value.revision, 1)
 })
 
+
+// —— features 与宿主投影:四个开关默认全关,开关只在 features 一节,投影到预算与哨兵 ——
+test('0.1.7 形态:features 默认全关,写入落在 features 一节,预算节不落 enabled', async () => {
+  const rc = makeRc17({ configStore: { budget: { daily: { limit: 100, action: 'warn' }, monthly: { limit: 0, action: 'warn' } } } })
+  apply(rc.ctx, rc.configRef)
+  rc.activateSettings()
+  // Then 默认全关
+  const initial = JSON.parse((await invoke(rc.routes, '/api/usage-dash/features', { method: 'GET' })).body)
+  assert.deepEqual(initial.value.features, { whatif: false, guard: false, sentinel: false, dock: false })
+  // Then 额度照常存着,但预算节里没有 enabled:开关只在 features
+  assert.deepEqual(rc.configStore.budget, { daily: { limit: 100, action: 'warn' }, monthly: { limit: 0, action: 'warn' } })
+  // When 打开护栏
+  const saved = await invokeJson(rc.routes, '/api/usage-dash/features', {
+    payload: { features: { whatif: false, guard: true, sentinel: false, dock: false } },
+  })
+  assert.equal(saved.statusCode, 200)
+  assert.equal(JSON.parse(saved.body).value.features.guard, true)
+  // Then 开关写进 features 一节,预算配置一字不动
+  assert.deepEqual(rc.configStore.features, { whatif: false, guard: true, sentinel: false, dock: false })
+  assert.deepEqual(rc.configStore.budget, { daily: { limit: 100, action: 'warn' }, monthly: { limit: 0, action: 'warn' } })
+})
+
+test('0.1.7 形态:开关写回落在 features 一节,不动预算与哨兵阈值', async () => {
+  const rc = makeRc17({ configStore: { budget: { daily: { limit: 50, action: 'block' } }, sentinel: { burnMultiplier: 4 } } })
+  apply(rc.ctx, rc.configRef)
+  rc.activateSettings()
+  await invokeJson(rc.routes, '/api/usage-dash/features', {
+    payload: { features: { whatif: true, guard: false, sentinel: false, dock: true } },
+  })
+  assert.deepEqual(rc.configStore.features, { whatif: true, guard: false, sentinel: false, dock: true })
+  assert.deepEqual(rc.configStore.budget, { daily: { limit: 50, action: 'block' } }, '预算配置不被开关写入碰到')
+  assert.deepEqual(rc.configStore.sentinel, { burnMultiplier: 4 }, '哨兵阈值不被开关写入碰到')
+})
+
+// —— 计费周期门面:两代 settings 面都要能读写,未激活时 POST 拒绝 ——
+test('0.1.7 形态:计费周期写入落在 cycle 一节,GET 回包窗口跟随', async () => {
+  const rc = makeRc17()
+  apply(rc.ctx, rc.configRef)
+  rc.activateSettings()
+  const before = await invoke(rc.routes, '/api/usage-dash/cycle', { method: 'GET' })
+  assert.equal(before.statusCode, 200)
+  assert.equal(JSON.parse(before.body).value.config.kind, 'calendar')
+  const saved = await invokeJson(rc.routes, '/api/usage-dash/cycle', { payload: { cycle: { kind: 'monthly', startDay: 15 } } })
+  const parsed = JSON.parse(saved.body)
+  assert.equal(parsed.ok, true)
+  assert.deepEqual(rc.configStore.cycle, { kind: 'monthly', startDay: 15, days: 30 })
+  assert.equal(parsed.value.window.from.slice(8), '15')
+})
+
+test('legacy 形态:计费周期写入经命名空间 update,GET 回读生效', async () => {
+  const routes = new Map()
+  const store = {}
+  const settingsService = makeLegacySettings(store)
+  const pendingInjects = []
+  const ctx = {
+    on() {},
+    logger: { warn() {} },
+    get(name) {
+      if (name === 'settings') return settingsService
+      if (name === 'storageDomain') return makeDomain()
+      return undefined
+    },
+    effect(fn) { fn() },
+    inject(_deps, fn) { pendingInjects.push(fn) },
+    webServer: {
+      register(route) {
+        routes.set(route.path, route)
+        return () => routes.delete(route.path)
+      },
+    },
+  }
+  apply(ctx, {})
+  for (const fn of pendingInjects.splice(0)) {
+    fn({ settings: settingsService, interval: () => {}, effect(f) { f() } })
+  }
+  const saved = await invokeJson(routes, '/api/usage-dash/cycle', { payload: { cycle: { kind: 'rolling', days: 45 } } })
+  assert.equal(JSON.parse(saved.body).ok, true)
+  assert.deepEqual(store.cycle, { kind: 'rolling', startDay: 1, days: 45 })
+  const read = await invoke(routes, '/api/usage-dash/cycle', { method: 'GET' })
+  assert.equal(JSON.parse(read.body).value.config.kind, 'rolling')
+})
+
+test('0.1.7 形态:configEditor 缺失时计费周期 POST 拒绝而 GET 可用', async () => {
+  const rc = makeRc17({ configEditorAvailable: false })
+  apply(rc.ctx, rc.configRef)
+  rc.activateSettings()
+  const res = await invokeJson(rc.routes, '/api/usage-dash/cycle', { payload: { cycle: { kind: 'calendar' } } })
+  assert.equal(JSON.parse(res.body).ok, false)
+  const read = await invoke(rc.routes, '/api/usage-dash/cycle', { method: 'GET' })
+  assert.equal(read.statusCode, 200)
+})

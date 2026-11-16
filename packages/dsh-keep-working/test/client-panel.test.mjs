@@ -23,6 +23,7 @@ const CONFIG = {
   classify: true,
   continueText: '继续。上一步结果未知,确认后继续。',
   continueTextInterrupted: '继续。上一步结果未知,确认后继续。',
+  restartText: '继续,dsh已重启',
   continueTextSilent: '继续。上一轮没有可见输出,直接说明结果或继续执行。',
   continueTextMaxTokens: '继续。上一轮被输出上限截断,分段接着输出。',
   closureText: '未检测到结案信号',
@@ -46,10 +47,10 @@ function walk(node, out = { texts: [], inputs: [], textareas: [], switches: 0 })
   return out
 }
 
-const loadPanel = () => {
+const loadPanel = (config = CONFIG) => {
   const def = loads[0]
   const states = [
-    [CONFIG, () => {}],
+    [config, () => {}],
     [null, () => {}],
     ['', () => {}],
     [false, () => {}],
@@ -82,6 +83,16 @@ test('布尔项为开关形态', () => {
   assert.ok(tree.switches >= 5, `开关数量不足: ${tree.switches}`)
 })
 
+test('结案强制开关可见', () => {
+  const Panel = loadPanel()
+  const tree = walk(Panel())
+  assert.ok(tree.texts.includes('强制结案标记'), '缺少结案强制开关')
+  const checkbox = tree.inputs.find((props) => props['aria-label'] === '强制结案标记')
+  assert.equal(checkbox?.checked, true, 'CONFIG 未显式关闭时默认展示为开启')
+  const off = walk(loadPanel({ ...CONFIG, enforceClosure: false })())
+  assert.equal(off.inputs.find((props) => props['aria-label'] === '强制结案标记')?.checked, false, '关闭后必须显示为关')
+})
+
 test('数值项按秒换算展示', () => {
   const Panel = loadPanel()
   const tree = walk(Panel())
@@ -96,6 +107,7 @@ test('文案项全部渲染', () => {
   const Panel = loadPanel()
   const tree = walk(Panel())
   const texts = tree.textareas
-  assert.equal(texts.length, 5)
+  assert.equal(texts.length, 6)
   assert.ok(texts.some((props) => props.value === CONFIG.closureText))
+  assert.ok(texts.some((props) => props.value === CONFIG.restartText), '重启恢复文案必须是独立一项')
 })

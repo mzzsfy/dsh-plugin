@@ -91,12 +91,21 @@ function findRow(registry, rows) {
   return -1
 }
 
+// 首扫/打开会话守卫:存在非末条展开行(归属未知,可能为用户手动或上一代插件)
+// 时不自动展开末行,首帧不制造第二条展开。rows 为任意行形态,headable 判定可识别行。
+export function hasForeignExpandedRow(rows, headable) {
+  let last = -1
+  rows.forEach((row, index) => { if (headable(row)) last = index })
+  return rows.some((row, index) => index !== last && headable(row) && row.expanded)
+}
+
 // 打开会话/刷新:展开最后一条可识别思考行,其余保持收起。
 // 仅依据内建字段(data-state / aria-expanded)判定,不依赖正文挂载;
 // 存在运行行(流式接管)或其他展开行(用户手动意图)时不干预。
 export function planFinal(rows) {
   const actions = []
   if (rows.some((row) => row.headable && row.state === STATE_RUNNING)) return { actions }
+  if (hasForeignExpandedRow(rows, (row) => row.headable)) return { actions }
   let last = -1
   for (let index = rows.length - 1; index >= 0; index -= 1) {
     if (rows[index].headable) {
@@ -105,9 +114,6 @@ export function planFinal(rows) {
     }
   }
   if (last < 0) return { actions }
-  for (let index = 0; index < rows.length; index += 1) {
-    if (index !== last && rows[index].headable && rows[index].expanded) return { actions }
-  }
   if (!rows[last].expanded) actions.push({ index: last, kind: 'expand' })
   return { actions }
 }
@@ -208,7 +214,7 @@ export function plan(registry, rows, options = {}) {
   // (测试桩/异常形态)不记录,保持原语义。已知权衡:宽松已读按登记时文本快照
   // 前缀命中,后续回合以该全文为前缀的展开行会被压制自动展开(概率低,cap
   // 裁剪有界),换取收起意图跨重建存活。
-  if (!target.expanded && target.uid !== undefined && registry.expanded.has(target.uid)) {
+  if (!target.expanded && target.uid !== undefined && registry.expanded.has(target.uid) && !target.plugged) {
     if (target.bodyText !== '') putSeen(registry.read, undefined, target.bodyText)
     return { actions }
   }
@@ -290,10 +296,12 @@ export function planTools(registry, rows, options = {}) {
   }
 
   // 手动识别:已展开且无插件闩锁 → manual(永不干预);正文未挂载不识别。
-  // 仅在插件已展开过行(current 在场)后识别:首轮既存展开行视为中性,
-  // 与思考机"无 running 行不干预"同构,防首扫把用户历史展开误判挡住目标行
-  if (options.suppressManual !== true && registry.current !== null) {
+  // 常规扫描不依赖 current 是否在场:用户手动行先于 current 判定登记,避免被
+  // 末行目标收编后收起;首扫由 suppressManual 保持既存展开行中性。
+  if (options.suppressManual !== true) {
     for (const row of rows) {
+      // 无 current 时缺 uid 的行无法与同文本目标区分,不登记为手动,避免误挡目标
+      if (registry.current === null && row.uid === undefined) continue
       if (!row.expandable || !row.expanded || row.bodyText === '' || row.plugged) continue
       if (seenKey(registry.marks, row.uid, row.bodyText) !== null) continue
       if (isCurrentRow(row.uid, row.bodyText)) continue
@@ -369,7 +377,11 @@ export function planTools(registry, rows, options = {}) {
     actions.push({ index: targetIndex, kind: 'expand' })
     if (target.uid !== undefined) capSet(registry.expanded.add(target.uid))
   }
-  if (target.bodyText !== '') registerCurrent(registry, target.uid, target.bodyText)
+  // 与思考机同一首扫守卫:既存展开行(suppressManual)属中性,不得登记为插件
+  // current/expanded,否则下一拍常规扫描被 isCurrent 挡住,手动意图识别永久失效
+  if (target.bodyText !== '' && !(target.expanded && options.suppressManual === true)) {
+    registerCurrent(registry, target.uid, target.bodyText)
+  }
   return { actions }
 }
 

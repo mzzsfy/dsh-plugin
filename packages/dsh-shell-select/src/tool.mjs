@@ -180,7 +180,36 @@ function pwshDescription() {
 }
 
 /**
- * 注册 shell + pwsh 双工具,返回卸载 disposer(重注册 = 先卸后挂)。
+ * 注册一批工具定义:逐步注册并记账,任一步失败回收已注册项后再抛
+ * (数组字面量一步注册时第二个失败会丢第一个的 disposer,层里留下半套工具)。
+ * @param {object} ctx cordis context(需 tools 服务在场)
+ * @param {object[]} definitions defineTool 产物
+ * @returns {() => void} 卸载全部已注册项的幂等 disposer
+ */
+export function registerToolDefinitions(ctx, definitions) {
+  const disposers = []
+  try {
+    for (const definition of definitions) disposers.push(ctx.tools.register(definition))
+  } catch (error) {
+    for (const dispose of disposers.splice(0).reverse()) {
+      try {
+        dispose()
+      } catch (cleanupError) {
+        ctx.logger?.warn?.(`shell-select: 工具注册失败回滚残留 ${cleanupError?.message ?? cleanupError}`)
+      }
+    }
+    throw error
+  }
+  let disposed = false
+  return () => {
+    if (disposed) return
+    disposed = true
+    for (const disposer of disposers) disposer()
+  }
+}
+
+/**
+ * 注册 shell + pwsh 双工具,返回注册句柄(定义快照 + 卸载 disposer)。
  * pwsh 工具钉死 pwsh 客户端(config 删 pwsh 条目时 requireEntry 明确拒绝)。
  * @param {object} ctx cordis context(需 tools/shellEnv 服务在场)
  * @param {{executor: object}} faces 执行器实例
@@ -189,7 +218,6 @@ export function registerShellTool(ctx, { executor }) {
   const backgroundEnabled = true
   const escalationModes = ESCALATION_TARGETS
   let HarnessErrorClass = undefined
-  let disposed = false
   let HarnessErrorReady = loadHarnessError(ctx).then((resolved) => {
     HarnessErrorClass = resolved
     return resolved
@@ -394,13 +422,12 @@ export function registerShellTool(ctx, { executor }) {
   }
 
   const faces = { executor }
-  const disposers = [
-    ctx.tools.register(makeDefinition('shell', undefined)(faces)),
-    ctx.tools.register(makeDefinition('pwsh', 'pwsh')(faces)),
+  // 定义先全部构造(描述求值/参数模板错误在注册前暴露,零残留),再逐步注册
+  const definitions = [
+    makeDefinition('shell', undefined)(faces),
+    makeDefinition('pwsh', 'pwsh')(faces),
   ]
-  return () => {
-    if (disposed) return
-    disposed = true
-    for (const disposer of disposers) disposer()
-  }
+  // 保持「返回 disposer 函数」的既有契约,定义快照挂在函数属性上供 executor
+  // 在新注册失败时原样恢复
+  return Object.assign(registerToolDefinitions(ctx, definitions), { definitions })
 }

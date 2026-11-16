@@ -15,6 +15,7 @@
 
 // 官方受控行 id 与行 id 解析前缀(guard-state 同源共享)
 import { OFFICIAL_ROW_IDS, ROW_ID_PREFIXES } from './guard-state.mjs'
+import { recordTakeover } from './apply-state.mjs'
 
 // 退场轮询步长与轮数上限,乘积为等待上界(guard 同源常量)
 export const EXIT_POLL_INTERVAL_MS = 20
@@ -107,16 +108,19 @@ export function takeoverDecision(states) {
  * 「init 在途时 options 翻转但收尾 init 仍拉起 fiber」的空 diff 形态)。
  * 逐行独立执行,单行失败不中止其余行;调用方据失败清单决定回滚。
  * 纯内存态不持久:重启后官方行回归行树声明态,由下一轮 apply 收敛。
+ * 三参恒显式 `({disabled:true}, create=false, force=true)`:宿主
+ * `Entry.update(options, create = false, force = false)` 的 create 为真时
+ * `this.options = options`,官方行 options 被整份替换成 {disabled:true}
+ * (丢 id/name/config),官方链彻底空转且无法按树键求值。
  * @param {object[]} entries 官方 loader entry 清单
- * @param {{quiet?: boolean, force?: boolean}} [options]
  * @returns {Promise<{disabled: object[], failed: object[]}>}
  */
-export async function runtimeDisableRows(entries, { quiet = false, force = true } = {}) {
+export async function runtimeDisableRows(entries) {
   const disabled = []
   const failed = []
   for (const entry of entries) {
     try {
-      await entry.update({ disabled: true }, quiet, force)
+      await entry.update({ disabled: true }, false, true)
       disabled.push(entry)
     } catch {
       failed.push(entry)
@@ -126,19 +130,71 @@ export async function runtimeDisableRows(entries, { quiet = false, force = true 
 }
 
 /**
- * 回滚:重新启用已禁的官方行(update {disabled:false}),官方链复活。
- * 仅在接管序列失败路径调用;quiet 减噪(失败路径已另行告警),逐行独立,
- * 失败不抛(重启后行树声明态自然归位)。
- * @param {object[]} entries
+ * 禁用前的行状态快照:宿主 `Entry.update` 可能把 options 写进 disabled 之后再
+ * 抛错(写事务收尾失败/表达式求值异常),该行因此落在 failed 清单里却已是禁用
+ * 态——只回滚 disabled 清单会把它永久留在禁用侧,tool-pwsh / pwsh-sandbox 的
+ * shell 提供者就此缺席到重启。回滚必须按快照覆盖全部目标行,而不是假设"原本
+ * 启用"或只认成功清单。
+ * @param {object[]} entries 即将被禁用的官方行
+ * @returns {Array<{entry: object, disabled: boolean}>} 逐行快照(getter 抛错按未禁)
  */
-export async function rollbackDisabledRows(entries) {
-  for (const entry of entries) {
+export function snapshotRowStates(entries) {
+  return entries.map((entry) => {
+    let disabled = false
     try {
-      await entry.update({ disabled: false }, true, true)
+      disabled = entry.disabled === true
     } catch {
-      // 回滚失败不抛:重启收敛
+      // 求值不可信的行不进入禁用清单(决策层已让位),快照按未禁处理
+      disabled = false
     }
+    return { entry, disabled }
+  })
+}
+
+/** 单行写 disabled:三参恒显式(create 为真会整份替换 options,见下),失败留排障面。 */
+async function writeRowDisabled(entry, disabled, { logger } = {}) {
+  try {
+    await entry.update({ disabled }, false, true)
+    return true
+  } catch (error) {
+    const detail = String(error?.message ?? error)
+    recordTakeover({ event: 'rollback-failed', id: entry?.options?.id, error: detail })
+    logger?.error?.(`shell-select: 官方行回滚启用失败(${entry?.options?.id ?? '?'}): ${detail};重启后由行树声明态收敛`)
+    return false
   }
+}
+
+/**
+ * 按快照恢复行 disabled 原值(失败路径统一入口)。快照值就是禁用前读到的服务
+ * 语义状态,不含"原本应当启用"的假设。
+ * @param {Array<{entry: object, disabled: boolean}>} snapshot {@link snapshotRowStates} 产物
+ * @param {{logger?: {error?: Function}}} [options]
+ * @returns {Promise<object[]>} 恢复失败的行清单(非空 = 官方链未复原)
+ */
+export async function restoreRowStates(snapshot, options) {
+  const failed = []
+  for (const { entry, disabled } of snapshot) {
+    if (!(await writeRowDisabled(entry, disabled, options))) failed.push(entry)
+  }
+  return failed
+}
+
+/**
+ * 回滚:重新启用已禁的官方行(update {disabled:false}),官方链复活。
+ * 仅在接管序列失败路径调用;quiet 减噪(失败路径已另行告警),逐行独立。
+ * 三参恒显式 `({disabled:false}, create=false, force=true)`(与禁用/重禁用同形):
+ * 宿主 `Entry.update(options, create = false, force = false)` 的 create 为真时
+ * `this.options = options`,官方行 options 会被整份替换成 {disabled:false}(丢
+ * id/name/config),行彻底空转且 guard 按树键仍判"已启用"不代挂——安全网变成
+ * 毁行器,故禁止传 create。
+ * 失败不抛但逐行记录 rollback-failed + logger.error:回滚失败是 shell 真空
+ * 风险,排障面不得显示成已复原。
+ * @param {object[]} entries
+ * @param {{logger?: {error?: Function}}} [options]
+ * @returns {Promise<object[]>} 回滚失败的行清单(非空 = 官方链未复原)
+ */
+export async function rollbackDisabledRows(entries, options) {
+  return restoreRowStates(entries.map((entry) => ({ entry, disabled: false })), options)
 }
 
 const defaultDelay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))

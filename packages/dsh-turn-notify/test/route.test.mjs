@@ -5,10 +5,50 @@ import { busStub, resetBusStub } from './_mocks.common-tools.mjs'
 
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import { Agent, createServer, request } from 'node:http'
 
 import { apply } from '../src/index.js'
 
 const MIN_TURN_MS = 5 * 1000
+const JSON_HEADERS = { 'content-type': 'application/json' }
+// 浏览器 client 全部经 api() 以 application/json 发送;写请求默认带 JSON 头,
+// 使业务用例不受共享闸门的 content-type 门影响(守卫差异由专门用例显式覆盖)
+const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+
+// 真实 socket 工位:handler 直接挂 Node HTTP server,验证响应能穿过 keep-alive
+// 请求流送达,而不是只在 stub req/res 上断言状态码。
+async function withHttpServer(handler, fn) {
+  const server = createServer((req, res) => {
+    Promise.resolve(handler(req, res)).catch(() => {
+      if (!res.headersSent) res.writeHead(500)
+      res.end()
+    })
+  })
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  try {
+    return await fn(server.address().port)
+  } finally {
+    server.closeAllConnections?.()
+    await new Promise((resolve) => server.close(resolve))
+  }
+}
+
+// keep-alive 探针:显式指定 socket 复用,响应读完即返回,用于验证同连接后续请求;
+// socket 对象随结果返回,新建连接掩盖不了"413 后连接被废弃"
+function keepAliveCall(agent, options, body) {
+  return new Promise((resolve) => {
+    const req = request({ ...options, agent }, (res) => {
+      const chunks = []
+      res.on('data', (chunk) => chunks.push(chunk))
+      res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8'), socket: req.socket }))
+    })
+    req.on('error', (error) => resolve({ error: error.code || String(error) }))
+    req.end(body)
+  })
+}
 
 function makeRes() {
   return {
@@ -23,7 +63,7 @@ function makeReq(method, payload, headers) {
   const req = new EventEmitter()
   req.method = method
   req.url = '/api/turn-notify/config'
-  req.headers = { host: '127.0.0.1:3080', ...(headers || {}) }
+  req.headers = { host: '127.0.0.1:3080', ...(WRITE_METHODS.has(method) ? JSON_HEADERS : {}), ...(headers || {}) }
   const data = payload === undefined ? null : Buffer.from(JSON.stringify(payload))
   process.nextTick(() => {
     if (data !== null) req.emit('data', data)
@@ -32,8 +72,6 @@ function makeReq(method, payload, headers) {
   })
   return req
 }
-
-const JSON_HEADERS = { 'content-type': 'application/json' }
 
 // settings 最小实现:get/update 挂服务级(对齐 SettingsProvider),update 按两层
 // 对象合并,覆盖 enabled 部分开关语义;近似点:get 返回原始节,真实实现返回
@@ -154,7 +192,7 @@ test('config POST 负路径:跨源 403,非 JSON 400,畸形体 400,空补丁 200'
   assert.equal(empty.status, 200)
 })
 
-test('config POST 超限体 400', async () => {
+test('config POST 超限体 413', async () => {
   const { ctx, routes } = makeCtx()
   apply(ctx)
   const handler = routes.get('/api/turn-notify/config')
@@ -162,7 +200,7 @@ test('config POST 超限体 400', async () => {
   req.method = 'POST'
   req.url = '/api/turn-notify/config'
   req.headers = { host: '127.0.0.1:3080', 'content-type': 'application/json' }
-  req.destroy = () => { req.destroyed = true }
+  req.pause = () => {}
   process.nextTick(() => {
     req.emit('data', Buffer.alloc(64 * 1024 + 1))
     req.readableEnded = true
@@ -170,7 +208,53 @@ test('config POST 超限体 400', async () => {
   })
   const res = makeRes()
   await handler(req, res)
-  assert.equal(res.status, 400)
+  assert.equal(res.status, 413)
+})
+
+test('Given 真实 socket When config POST 超限 Then 413 可达而非断连', async () => {
+  const { ctx, routes } = makeCtx()
+  apply(ctx)
+  const handler = routes.get('/api/turn-notify/config')
+  await withHttpServer(handler, async (port) => {
+    const res = await fetch('http://127.0.0.1:' + port + '/api/turn-notify/config', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ webhookUrl: 'x'.repeat(64 * 1024 + 1) }),
+    })
+    assert.equal(res.status, 413, '超限响应必须真的送达客户端,而不是 UND_ERR_SOCKET')
+    assert.match((await res.json()).error, /超过上限/)
+  })
+})
+
+test('Given 同一条 keep-alive 连接 When config POST 小超额 Then 排空后 413 且后续 GET 仍复用该 socket', async () => {
+  const { ctx, routes } = makeCtx()
+  apply(ctx)
+  const handler = routes.get('/api/turn-notify/config')
+  await withHttpServer(handler, async (port) => {
+    const agent = new Agent({ keepAlive: true, maxSockets: 1 })
+    try {
+      // 512KB 是上限 64KB 的小超额(keep-alive 阈值为 1MB),排空完成后连接可复用
+      const body = Buffer.alloc(512 * 1024)
+      const first = await keepAliveCall(agent, {
+        host: '127.0.0.1',
+        port,
+        method: 'POST',
+        path: '/api/turn-notify/config',
+        headers: { 'content-type': 'application/json', 'content-length': String(body.length) },
+      }, body)
+      assert.equal(first.error, undefined, '超限响应必须送达,实际 ' + first.error)
+      assert.equal(first.status, 413)
+      assert.match(JSON.parse(first.body).error, /超过上限/)
+      // 回归:超限体不排空时宿主在响应后废弃 socket,这里第二个请求即 ECONNRESET
+      const second = await keepAliveCall(agent, { host: '127.0.0.1', port, method: 'GET', path: '/api/turn-notify/config' })
+      assert.equal(second.error, undefined, '413 后同连接请求不得被复位,实际 ' + second.error)
+      assert.equal(second.status, 200)
+      assert.equal(JSON.parse(second.body).minTurnDurationMs, MIN_TURN_MS)
+      assert.equal(second.socket, first.socket, '后续请求必须复用同一 socket,新连接掩盖 RST')
+    } finally {
+      agent.destroy()
+    }
+  })
 })
 
 test('config 路由 405:PUT 被拒', async () => {
@@ -237,6 +321,27 @@ test('config POST 持久化 kindRoutes 并回显面板状态,部分补丁不触�
   const final = makeRes()
   await handler(makeReq('GET'), final)
   assert.deepEqual(final.body.kindRoutes, { completed: ['webhook'], approval: ['im', 'sound', 'system'], ask: [] })
+})
+
+test('config POST kindRoutes 写侧严格:未知通道/分类/非对象一律 400 且不落库', async () => {
+  const { ctx, routes } = makeCtx({ settingsStore: { kindRoutes: { completed: ['webhook'] } } })
+  apply(ctx)
+  const handler = routes.get('/api/turn-notify/config')
+  const cases = [
+    { kindRoutes: 'webhook' },
+    { kindRoutes: [] },
+    { kindRoutes: { bogus: ['sound'] } },
+    { kindRoutes: { completed: 'webhook' } },
+    { kindRoutes: { completed: ['webhok'] } },
+  ]
+  for (const body of cases) {
+    const res = makeRes()
+    await handler(makeReq('POST', body, JSON_HEADERS), res)
+    assert.equal(res.status, 400, JSON.stringify(body) + ' 必须拒绝而不是静默剔除')
+  }
+  const readback = makeRes()
+  await handler(makeReq('GET'), readback)
+  assert.deepEqual(readback.body.kindRoutes, { completed: ['webhook'] }, '被拒补丁不得改动既有路由')
 })
 
 test('config POST 仅 imTargets 的部分补丁:不触碰其他配置项,响应含完整面板状态', async () => {
@@ -365,10 +470,18 @@ test('全部写路由守卫:upload 与 sound 删除跨源 403,mapping 非 JSON 4
   await routes.get('/api/turn-notify/upload')(
     makeReq('POST', undefined, { origin: 'https://evil.example' }), upload)
   assert.equal(upload.status, 403)
+  const uploadWrongType = makeRes()
+  await routes.get('/api/turn-notify/upload')(
+    makeReq('POST', undefined, { 'content-type': 'audio/wav' }), uploadWrongType)
+  assert.equal(uploadWrongType.status, 400, '上传写路由同样受共享 JSON content-type 门约束')
   const sound = makeRes()
   await routes.get('/api/turn-notify/sound')(
     makeReq('DELETE', undefined, { origin: 'https://evil.example' }), sound)
   assert.equal(sound.status, 403)
+  const soundWrongType = makeRes()
+  await routes.get('/api/turn-notify/sound')(
+    makeReq('DELETE', undefined, { 'content-type': 'text/plain' }), soundWrongType)
+  assert.equal(soundWrongType.status, 400, 'DELETE 写路由同样受共享 JSON content-type 门约束')
   const mapping = makeRes()
   await routes.get('/api/turn-notify/mapping')(
     makeReq('POST', { category: 'completed', id: '' }, { 'content-type': 'text/plain' }), mapping)
@@ -414,6 +527,23 @@ test('test-webhook 已配置时送达并返回真实结果', async () => {
     assert.equal(calls[0].url, 'https://hook.example')
     assert.ok(String(calls[0].body.text).startsWith('[dsh]'), 'webhook payload 缺少 text')
   } finally { globalThis.fetch = original }
+})
+
+test('test-webhook 错误详情脱敏 URL userinfo:账号与密码不出现在响应', async () => {
+  const { ctx, routes } = makeCtx()
+  apply(ctx)
+  const credentialUrl = 'http://user:SECRET@127.0.0.1:1/hook'
+  const saved = makeRes()
+  await routes.get('/api/turn-notify/config')(makeReq('POST', { webhookUrl: credentialUrl }, JSON_HEADERS), saved)
+  assert.equal(saved.status, 200, '含 userinfo 的合法 http(s) URL 可保存')
+  // 不注入 fetchImpl:Node 原生错误消息原样携带完整 URL,验证响应边界已脱敏
+  const res = makeRes()
+  await routes.get('/api/turn-notify/test-webhook')(makeReq('POST'), res)
+  assert.equal(res.status, 200)
+  assert.equal(res.body.ok, false)
+  assert.equal(JSON.stringify(res.body).includes('SECRET'), false, '密码不得进入响应')
+  assert.equal(JSON.stringify(res.body).includes('user:'), false, '账号不得进入响应')
+  assert.ok(res.body.detail.includes('http://***@127.0.0.1:1/hook'), '仅返回脱敏后的 URL: ' + res.body.detail)
 })
 
 // --- 0.1.7 settings 面双形适配(maintain a913c2c 同构) ---

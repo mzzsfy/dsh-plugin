@@ -4,13 +4,13 @@ import { setupCommonTools, createChangeNotifier } from '@mzzsfy/dsh-common-tools
 // 音效持久化在 ~/.dsh/dsh-turn-notify/sounds/,投影不落盘。
 
 import { execFile } from 'node:child_process'
-import { createHash } from 'node:crypto'
-import { mkdir, readFile, readdir, stat, unlink, writeFile } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
+import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 
-import { withHostGate } from './route-gate.mjs'
+import { withRouteGate } from './route-gate.mjs'
 import {
   APPROVAL_ASKED_KIND,
   AUDIO_EXTS,
@@ -37,6 +37,7 @@ import {
   normalizeImTargets,
   pruneTimestamps,
   readRawBody,
+  redactUrlUserinfo,
   resolvedConfig,
   sendWebhook,
   sendHostNotify,
@@ -154,8 +155,8 @@ function deepMerge(under, over) {
   return out
 }
 
-function sendJson(res, status, payload) {
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
+function sendJson(res, status, payload, headers) {
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...headers })
   res.end(JSON.stringify(payload))
 }
 
@@ -166,45 +167,24 @@ function sendError(res, error) {
   const code = error && error.code
   const isFsError = typeof code === 'string' && FS_ERROR_CODE.test(code)
   const message = isFsError ? '服务端文件操作失败: ' + code : (error && error.message ? error.message : String(error))
-  sendJson(res, isFsError ? 500 : 400, { error: message })
+  // 协议层错误自带 statusCode(如读体超限 413),必须原样透出,不得折成 400;
+  // 明显超限的请求体不再排空,响应标注 Connection: close 由宿主关闭连接
+  const status = Number.isInteger(error && error.statusCode) ? error.statusCode : (isFsError ? 500 : 400)
+  sendJson(res, status, { error: message }, error && error.closeConnection ? { connection: 'close' } : undefined)
 }
 
-// 路由样板收敛:方法守卫与可选跨源/JSON 守卫统一在此,业务异常统一归一,handler 只留业务体
-const route = (method, guards, handler) => async (req, res) => {
+// 路由样板收敛:方法守卫与业务异常归一在此;宿主闸门、跨源同源与写请求 JSON
+// content-type 一律由共享 withRouteGate 承担,handler 只留业务体
+const route = (method, handler) => async (req, res) => {
   if (req.method !== method) {
     sendJson(res, 405, { error: 'method not allowed' })
     return
   }
-  if (guards.crossOrigin && rejectCrossOrigin(req, res)) return
-  if (guards.json && rejectNonJson(req, res)) return
   try {
     await handler(req, res)
   } catch (error) {
     sendError(res, error)
   }
-}
-
-// 同源守卫:浏览器写请求恒带 Origin,与 Host 不符即拒;无 Origin 的非浏览器客户端放行。
-// 配合 JSON 内容类型校验,阻断跨站简单请求 drive-by 改写配置。
-function rejectCrossOrigin(req, res) {
-  const origin = req.headers ? req.headers.origin : undefined
-  if (!origin) return false
-  let sameOrigin = false
-  try {
-    sameOrigin = new URL(origin).host === req.headers.host
-  } catch {
-    sameOrigin = false
-  }
-  if (sameOrigin) return false
-  sendJson(res, 403, { error: '跨源请求被拒绝' })
-  return true
-}
-
-function rejectNonJson(req, res) {
-  const contentType = req.headers ? String(req.headers['content-type'] || '') : ''
-  if (contentType.indexOf('application/json') >= 0) return false
-  sendJson(res, 400, { error: 'content-type 须为 application/json' })
-  return true
 }
 
 const soundId = (content) => 'snd-' + createHash('sha256').update(content).digest('hex').slice(0, 16)
@@ -229,13 +209,24 @@ async function readSoundIndex() {
   }
 }
 
-// 索引写入:id 到展示名的一比一对象,调用方保证处于互斥段
-const writeSoundIndex = (index) => writeFile(soundIndexPath, JSON.stringify(index))
+// 索引写入:先写同目录临时文件再 rename 原子替换。直接写目标时崩溃/并发会留下
+// 半截 JSON,读取侧只能回空对象,全部自定义展示名静默丢失;临时名带进程与随机段,
+// 跨实例并发写不互抢临时文件。调用方保证处于互斥段
+const writeSoundIndex = async (index) => {
+  const tempPath = soundIndexPath + '.' + process.pid + '.' + randomUUID() + '.tmp'
+  try {
+    await writeFile(tempPath, JSON.stringify(index))
+    await rename(tempPath, soundIndexPath)
+  } catch (error) {
+    await unlink(tempPath).catch(() => {})
+    throw error
+  }
+}
 
 /** @param {import('@deepseek-ai/cordis').Context} ctx */
 export function apply(ctx, config) {
   // 宿主闸门:插件 exact 路由先于宿主 /api prefix 命中,须自行回问认证
-  const gatedRoute = (method, guards, handler) => withHostGate(ctx, route(method, guards, handler))
+  const gatedRoute = (method, handler) => withRouteGate(ctx, route(method, handler))
   const tools = setupCommonTools(ctx)
   const changes = createChangeNotifier(() => tools.publish())
   ctx.effect(() => () => changes.dispose(), '通知变更合并')
@@ -260,14 +251,23 @@ export function apply(ctx, config) {
   const titledSessions = new Set()
   // 回合尾部统计在结束时无条件清账,通知仅使用捕获的快照。
   const assistantTails = new Map()
+  // 会话头索引:根会话归结需要多级 parentSession 链;事件流与 live 会话服务是来源
+  const sessionHeaders = new Map()
+  // 根会话缓存:祖先可能在孙代理发事件前被 disposed;首次观察即缓存根 id,
+  // 父头缺失时据此归结,禁止把中间子代理 id 当根(归档过滤与客户端归属同源)
+  const sessionRoots = new Map()
   // 浏览器在场信号:本插件空间的 WS 订阅连接计数,用于宿主通知去重。
   // 连接生命周期即在场,断连 close 即时出账;出账后经认可窗口收敛,窗口内事件
   // 仍视为浏览器呈现,超窗宿主补位(宁可重复不可漏)
   let inFlightBrowserPolls = 0
   let lastBrowserSeenAt = 0
+  let presenceCount = 0
   const disposePresence = tools.onPresence((count) => {
+    // 长连接期间只有连接与断开两次回调:断开也必须刷新认可窗口起点,
+    // 否则上次活动停在连接时刻,断连瞬间即被误判离线
+    if (count > 0 || presenceCount > 0) lastBrowserSeenAt = Date.now()
+    presenceCount = count
     inFlightBrowserPolls = count
-    if (count > 0) lastBrowserSeenAt = Date.now()
   })
   let seq = 0
   // 音效库写互斥:展示名索引读改写与落盘非原子,串行化防并发交错
@@ -280,6 +280,69 @@ export function apply(ctx, config) {
 
   // dshIm 在场判定:可选依赖运行期探测,各路由统一由此取语义
   const imReady = () => ctx.get('dshIm') !== undefined
+
+  // 会话头读取:事件流优先,live 会话服务兜底;未知返回 undefined(按未知处理)
+  const headerOf = (sessionId) => {
+    const known = sessionHeaders.get(sessionId)
+    if (known !== undefined) return known
+    try {
+      const live = ctx.get('sessions')?.get?.(sessionId)
+      if (live !== undefined && live !== null && live.header !== undefined) {
+        sessionHeaders.set(sessionId, live.header)
+        return live.header
+      }
+    } catch { /* 会话服务缺失或未就绪:按未知处理 */ }
+    return undefined
+  }
+
+  // 根会话归结:子代理沿 parentSession 上溯;首次观察缓存根 id,祖先头已被 disposed
+  // 删除时用缓存补齐。父头缺失且无缓存则返回 null(未知),不得把中间 id 当根。
+  function rootSessionIdOf(session) {
+    const startId = String(session.id ?? '')
+    const cached = sessionRoots.get(startId)
+    if (cached !== undefined) return cached
+    let current = startId
+    let header = session.header || {}
+    const seen = new Set()
+    const path = []
+    while (isSubagent(header)) {
+      const parent = typeof header.parentSession === 'string' ? header.parentSession : null
+      if (parent === null || seen.has(current)) return null
+      seen.add(current)
+      path.push(current)
+      const parentRoot = sessionRoots.get(parent)
+      if (parentRoot !== undefined) {
+        for (const id of path) sessionRoots.set(id, parentRoot)
+        return parentRoot
+      }
+      current = parent
+      const parentHeader = headerOf(current)
+      if (parentHeader === undefined) return null
+      header = parentHeader
+    }
+    for (const id of path) sessionRoots.set(id, current)
+    sessionRoots.set(startId, current)
+    return current
+  }
+
+  // 事件到达即刷新该会话根缓存:父链可能补全或变更,不能沿用旧的自身缓存
+  function rememberSessionRoot(sessionId, header) {
+    sessionRoots.delete(sessionId)
+    return rootSessionIdOf({ id: sessionId, header })
+  }
+
+  // 权威归档集合:宿主 workspaceRegistry 是唯一真源;服务缺失/未就绪按未知返回 null,
+  // 不把未知当空集参与判定(方向性 fail-open:宁多发不可漏,过滤只依据权威集合)
+  function archivedSessionIds() {
+    try {
+      const registry = ctx.get('workspaceRegistry')
+      if (registry === undefined || registry === null) return null
+      const ids = registry.archivedSessionIds
+      return Array.isArray(ids) ? new Set(ids.map(String)) : null
+    } catch {
+      return null
+    }
+  }
 
   // 测试事件构造:test-webhook 与 test-im 共用同一形态,防两处样例走样;
   // sessionId 恒 null:测试点火通知不绑定会话,点击只唤醒不跳转
@@ -299,6 +362,11 @@ export function apply(ctx, config) {
 
   // durationMs 与 wakeTurn / awaitingChildren 由调用方在清理状态前读取后传入,防先删后读
   function notifyUnit({ category, kind, reasonKind, session, durationMs = null, wakeTurn = false, awaitingChildren = false, tail = assistantTails.get(String(session.id ?? '')) ?? null }) {
+    // 归档会话不进入通知链路:归属判断落根会话(子代理通知随根会话归档)
+    // 根 id 同时随 unit 下发,客户端高亮/提醒无需依赖本地快照是否收录全部子会话
+    const rootSessionId = rootSessionIdOf(session)
+    const archived = archivedSessionIds()
+    if (archived !== null && rootSessionId !== null && archived.has(rootSessionId)) return
     const settings = readSettings(ctx, config)
     const header = session.header || {}
     const sessionId = String(session.id ?? '')
@@ -322,6 +390,7 @@ export function apply(ctx, config) {
       summary,
       ts: Date.now(),
     })
+    unit.rootSessionId = rootSessionId
     unit.routes = routes
     projection.push(unit)
     changes.refresh()
@@ -381,6 +450,8 @@ export function apply(ctx, config) {
     const sessionId = String(session.id ?? '')
     const now = Date.now()
     const header = session.header || {}
+    sessionHeaders.set(sessionId, header)
+    rememberSessionRoot(sessionId, header)
     const parentSession = typeof header.parentSession === 'string' ? header.parentSession : null
     // 异常时序残留的惰性回收:超唤醒窗口的子代理回执、超上限的回合起始与活动子代理顺带清扫;
     // 本回合的 start 先捕获,防 prune 误删当前超长回合的起始记录
@@ -474,6 +545,45 @@ export function apply(ctx, config) {
     notifyUnit({ category, kind, reasonKind, session, ...(endedTurn ?? {}) })
   })
 
+  // 会话销毁:该会话的全部观察账本释放,防异常终止残留;子代理注册同时解链。
+  // 被销毁会话自身若是子代理,须先取其父注册条目再删:异常终止不发 turn/end,
+  // 父回合的未收尾委托若不结算会让父 completed 被压到超时回收。
+  ctx.on('session/disposed', (session) => {
+    const sessionId = String(session.id ?? '')
+    const childEntry = childActive.get(sessionId)
+    childActive.delete(sessionId)
+    if (childEntry !== undefined && childEntry.turnSeq !== undefined && openTurns.get(childEntry.parent)?.seq === childEntry.turnSeq) {
+      turnChildSettled.set(childEntry.parent, (turnChildSettled.get(childEntry.parent) ?? 0) + 1)
+    }
+    sessionEvents.delete(sessionId)
+    titledSessions.delete(sessionId)
+    assistantTails.delete(sessionId)
+    openTurns.delete(sessionId)
+    turnDelegation.delete(sessionId)
+    turnChildSettled.delete(sessionId)
+    wakeTurns.delete(sessionId)
+    childDoneAt.delete(sessionId)
+    sessionHeaders.delete(sessionId)
+    for (const [childId, entry] of childActive) {
+      if (entry.parent === sessionId) childActive.delete(childId)
+    }
+  })
+
+  // 插件卸载:全部观察账本随插件代际释放
+  ctx.effect(() => () => {
+    sessionEvents.clear()
+    titledSessions.clear()
+    assistantTails.clear()
+    openTurns.clear()
+    turnDelegation.clear()
+    turnChildSettled.clear()
+    wakeTurns.clear()
+    childDoneAt.clear()
+    childActive.clear()
+    sessionHeaders.clear()
+    sessionRoots.clear()
+  }, 'turn-notify session state')
+
   ctx.inject(['settings'], (settingsCtx) => {
     // 方法面守卫:settings 服务缺 register 面(0.1.7 已移除)即走新形态分支;
     // 0.1.7 关闭原生自动设置页,设置面由本包自带分区承担(maintain 同构)
@@ -506,7 +616,7 @@ export function apply(ctx, config) {
     const disposeRoute = ctx.webServer.register({
       kind: 'exact',
       path: '/api/turn-notify/projection',
-      handler: gatedRoute('GET', {}, async (req, res) => {
+      handler: gatedRoute('GET', async (req, res) => {
         const settings = readSettings(ctx, config)
         sendJson(res, 200, { units: projection.list(), soundMapping: settings.soundMapping, version: projection.version() })
       }),
@@ -522,7 +632,7 @@ export function apply(ctx, config) {
     ctx.webServer.register({
       kind: 'exact',
       path: '/api/turn-notify/sounds',
-      handler: gatedRoute('GET', {}, async (req, res) => {
+      handler: gatedRoute('GET', async (req, res) => {
         sendJson(res, 200, { sounds: await listSounds(), builtin: true })
       }),
     }), 'turn-notify sounds route')
@@ -531,11 +641,11 @@ export function apply(ctx, config) {
     ctx.webServer.register({
       kind: 'exact',
       path: '/api/turn-notify/upload',
-      handler: gatedRoute('POST', { crossOrigin: true }, async (req, res) => {
+      handler: gatedRoute('POST', async (req, res) => {
         const url = new URL(req.url, 'http://localhost')
         const filename = url.searchParams.get('name') || ''
         // 互斥段外仅读请求体;配额统计到落盘整段串行,防并发上传各自按旧总量绕过上限
-        const body = await readRawBody(req, UPLOAD_FILE_MAX_BYTES)
+        const body = await readRawBody(req, UPLOAD_FILE_MAX_BYTES, { res })
         const id = soundId(body)
         await serializedSoundWrite(async () => {
           const sounds = await listSounds()
@@ -565,7 +675,7 @@ export function apply(ctx, config) {
     ctx.webServer.register({
       kind: 'exact',
       path: '/api/turn-notify/sound',
-      handler: withHostGate(ctx, async (req, res) => {
+      handler: withRouteGate(ctx, async (req, res) => {
         try {
           await dispatchSound(req, res)
         } catch (error) {
@@ -574,7 +684,7 @@ export function apply(ctx, config) {
       }),
     }), 'turn-notify sound route')
 
-  // sound 路由三方法分发:GET 读取 / PUT 重命名 / DELETE 删除,守卫差异在分支内声明
+  // sound 路由三方法分发:GET 读取 / PUT 重命名 / DELETE 删除;写方法守卫由 withRouteGate 统一承担
   async function dispatchSound(req, res) {
     const url = new URL(req.url, 'http://localhost')
     const id = url.searchParams.get('id') || ''
@@ -592,8 +702,7 @@ export function apply(ctx, config) {
     }
     // 重命名:文件名恒为内容哈希 id,改名只写展示名索引,映射引用的 id 不随之变化
     if (req.method === 'PUT') {
-      if (rejectCrossOrigin(req, res) || rejectNonJson(req, res)) return
-      const body = JSON.parse((await readRawBody(req, REQUEST_BODY_MAX_BYTES)).toString('utf8'))
+      const body = JSON.parse((await readRawBody(req, REQUEST_BODY_MAX_BYTES, { res })).toString('utf8'))
       const renameId = body && typeof body.id === 'string' ? body.id : ''
       // 互斥段覆盖索引读到写回,防并发重命名互相覆盖
       await serializedSoundWrite(async () => {
@@ -623,7 +732,6 @@ export function apply(ctx, config) {
       sendJson(res, 405, { error: 'method not allowed' })
       return
     }
-    if (rejectCrossOrigin(req, res)) return
     // 与 PUT 同互斥:文件删除与索引条目清理同段完成,防并发读改写交错
     await serializedSoundWrite(async () => {
       const sound = (await listSounds()).find((item) => item.id === id)
@@ -659,8 +767,8 @@ export function apply(ctx, config) {
     ctx.webServer.register({
       kind: 'exact',
       path: '/api/turn-notify/mapping',
-      handler: gatedRoute('POST', { crossOrigin: true, json: true }, async (req, res) => {
-        const body = JSON.parse((await readRawBody(req, REQUEST_BODY_MAX_BYTES)).toString('utf8'))
+      handler: gatedRoute('POST', async (req, res) => {
+        const body = JSON.parse((await readRawBody(req, REQUEST_BODY_MAX_BYTES, { res })).toString('utf8'))
         const category = body && typeof body.category === 'string' ? body.category : ''
         const id = body && typeof body.id === 'string' ? body.id : ''
         if (CATEGORIES.indexOf(category) < 0) {
@@ -691,8 +799,8 @@ export function apply(ctx, config) {
     ctx.webServer.register({
       kind: 'exact',
       path: '/api/turn-notify/config',
-      // GET/POST 双方法且守卫差异在 POST 分支,不经单方法 route() 包装
-      handler: withHostGate(ctx, async (req, res) => {
+      // GET/POST 双方法,不经单方法 route() 包装;POST 的同源与 JSON 门由 withRouteGate 承担
+      handler: withRouteGate(ctx, async (req, res) => {
         // imAvailable 不进 core 纯函数,config 响应处合流;实时判定,无装载时序假设
         if (req.method === 'GET') {
           sendJson(res, 200, { ...publicConfig(readSettings(ctx, config)), imAvailable: imReady() })
@@ -702,9 +810,8 @@ export function apply(ctx, config) {
           sendJson(res, 405, { error: 'method not allowed' })
           return
         }
-        if (rejectCrossOrigin(req, res) || rejectNonJson(req, res)) return
         try {
-          const verdict = validateConfigPatch(JSON.parse((await readRawBody(req, REQUEST_BODY_MAX_BYTES)).toString('utf8')))
+          const verdict = validateConfigPatch(JSON.parse((await readRawBody(req, REQUEST_BODY_MAX_BYTES, { res })).toString('utf8')))
           if (!verdict.ok) {
             sendJson(res, 400, { error: verdict.reason })
             return
@@ -723,21 +830,23 @@ export function apply(ctx, config) {
     ctx.webServer.register({
       kind: 'exact',
       path: '/api/turn-notify/test-webhook',
-      handler: gatedRoute('POST', { crossOrigin: true }, async (req, res) => {
-        // 等待投递完成,真实结果随响应返回,测试按钮不再谎报
-        const result = await sendWebhook({ url: readSettings(ctx, config).webhookUrl, payload: buildWebhookPayload(buildTestUnit()) })
-        sendJson(res, 200, result)
+      handler: gatedRoute('POST', async (req, res) => {
+        // 等待投递完成,真实结果随响应返回,测试按钮不再谎报;
+        // 错误详情可能回显 webhook URL 的 userinfo,响应前再兜底脱敏一次
+        const endpoint = readSettings(ctx, config).webhookUrl
+        const result = await sendWebhook({ url: endpoint, payload: buildWebhookPayload(buildTestUnit()) })
+        sendJson(res, 200, { ...result, detail: redactUrlUserinfo(result.detail, endpoint.trim()) })
       }),
     }), 'turn-notify test-webhook route')
 
   // 只唤起本机 macOS 桌面 App;会话导航由已点击通知的 renderer 按 ID 完成。
   // 固定协议与参数,不接受请求体中的命令/路径,也不导航到浏览器的 HTTP 地址;
-  // 认证由宿主层承担,跨源防护与既有写路由同为 Origin/Host 同源比对。
+  // 宿主闸门、跨源同源与 JSON content-type 由共享 withRouteGate 统一承担。
   ctx.effect(() =>
     ctx.webServer.register({
       kind: 'exact',
       path: '/api/turn-notify/focus-desktop',
-      handler: gatedRoute('POST', { crossOrigin: true }, async (req, res) => {
+      handler: gatedRoute('POST', async (req, res) => {
         if (process.platform !== 'darwin') {
           sendJson(res, 409, { ok: false, detail: '仅支持 macOS 桌面版' })
           return
@@ -759,7 +868,7 @@ export function apply(ctx, config) {
       kind: 'exact',
       path: '/api/turn-notify/test-host',
       // 等待 spawn 结束,真实结果随响应返回,测试按钮不谎报
-      handler: gatedRoute('POST', { crossOrigin: true }, async (req, res) => {
+      handler: gatedRoute('POST', async (req, res) => {
         if (hostTestInFlight) {
           sendJson(res, 429, { error: '宿主通知测试进行中,请稍候' })
           return
@@ -778,7 +887,7 @@ export function apply(ctx, config) {
     ctx.webServer.register({
       kind: 'exact',
       path: '/api/turn-notify/im-targets',
-      handler: gatedRoute('GET', {}, async (req, res) => {
+      handler: gatedRoute('GET', async (req, res) => {
         const dshIm = ctx.get('dshIm')
         if (dshIm === undefined) {
           sendJson(res, 503, { error: 'dsh-im 未安装' })
@@ -804,7 +913,7 @@ export function apply(ctx, config) {
     ctx.webServer.register({
       kind: 'exact',
       path: '/api/turn-notify/test-im',
-      handler: gatedRoute('POST', { crossOrigin: true }, async (req, res) => {
+      handler: gatedRoute('POST', async (req, res) => {
         const dshIm = ctx.get('dshIm')
         if (dshIm === undefined) {
           sendJson(res, 200, { ok: false, detail: 'dsh-im 未安装' })

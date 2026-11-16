@@ -1,4 +1,5 @@
 // 工具行:把业务工具注册进 tools 服务。角色凭证取会话预设 id(受管登记),不接受模型自填。
+// 控制运行时在使用点 ctx.get 取:控制室卸载/重载后不会用到已关闭的存储域。
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createAgentTools } from './agent-tools.mjs'
 import { ADMIN_PRESET_ID } from './presets.mjs'
@@ -13,15 +14,23 @@ const TOOL_DESCRIPTION = `公司管理唯一工作台工具。tool 取以下操�
 - boss_simulator_query_tasks: taskId；查询 runs/reports/状态，报告由 durable 事件采集，不能直接写报告。
 - boss_simulator_close_task: taskId,passReportId,conclusion；仅引用当前有效独立验收 pass。
 - boss_simulator_request_resume: taskId,resumeIntentId,sourceMessageRef,expectedExecutionEpoch?；全局停止代次由服务端读取。
-- boss_simulator_confirm_resume: taskId,resumeIntentId；宿主核对旧会话停止后才能放行。`
+- boss_simulator_confirm_resume: taskId,resumeIntentId；宿主核对旧会话停止后才能放行。
+- boss_simulator_delete_task: taskId,confirm:"delete"；放弃任务(删除记录)。在飞 Run 未核清时先停止或由用户在面板强制停止。`
 
-export function registerToolRow(ctx, deps) {
-  const tools = createAgentTools(deps)
+export function registerToolRow(ctx) {
+  // 注册门槛:控制室未启动即不注册工具(干净禁用),不是注册后在执行期报错
+  if (!controlRuntimeOf(ctx)) return () => {}
+  const tools = createAgentTools(() => {
+    const runtime = controlRuntimeOf(ctx)
+    // 控制室已卸载:工具行不触碰旧运行时,明确报告未启动
+    if (!runtime) throw new Error('公司管理控制室未启动')
+    return runtime
+  })
   const disposer = ctx.tools.register(defineTool({
     name: TOOL_NAME,
     description: TOOL_DESCRIPTION,
     parameters: {
-      tool: { type: 'string', required: true, description: '操作名：boss_simulator_create_task/define_workitem/authorize_task/dispatch_run/query_tasks/close_task/request_resume/confirm_resume，均带 boss_simulator_ 前缀' },
+      tool: { type: 'string', required: true, description: '操作名：boss_simulator_create_task/define_workitem/authorize_task/dispatch_run/query_tasks/close_task/request_resume/confirm_resume/delete_task，均带 boss_simulator_ 前缀' },
       args: { type: 'object', additionalProperties: true, description: '业务工具参数' },
     },
     output: {
@@ -44,6 +53,11 @@ export function registerToolRow(ctx, deps) {
     return presetOf(execution) === ADMIN_PRESET_ID ? undefined : '公司管理工具仅限管理员工作台会话'
   })
   return () => { disposer(); restrict() }
+}
+
+export function controlRuntimeOf(ctx) {
+  const provided = typeof ctx?.get === 'function' ? ctx.get('bossSimulatorControl') : undefined
+  return provided?.store ? provided : null
 }
 
 // 子会话判定:origin 权威;无 origin 的旧记录按 parentSession + delegationDepth。

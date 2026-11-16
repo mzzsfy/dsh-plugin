@@ -62,6 +62,32 @@ test('源码契约:已删除行保持原 grid 结构不受紧凑归档行影响'
   assert.ok(!deletedSrc.includes('sm-row--archive'), '已删除行误用归档紧凑布局')
 })
 
+// Given 包样式表, When 逐条核对视觉标尺, Then L1 分区标题单一定义、圆角只走 token、
+// 间距落在 2/4/6/8/10/12/16/20/24 标尺上(设计规范:禁止自造圆角与奇数间距)
+test('源码契约:样式标尺锁定(L1 分区标题单定义 / 圆角 token / 间距 4px 栅格)', () => {
+  const titleRules = CLIENT_SRC.match(/\.sm-title \{/g) || []
+  assert.equal(titleRules.length, 1, 'L1 分区标题规则重复定义(前条为死规则)')
+  assert.ok(/\.sm-title \{ font-size:18px; line-height:26px; font-weight:600; \}/.test(CLIENT_SRC),
+    'L1 分区标题未取设计规范 18px/600')
+  assert.ok(/\.sm-desc \{ font-size:13px; line-height:20px; color:var\(--sm-text-sub\); \}/.test(CLIENT_SRC),
+    '分区说明未取 13px/20px text-sub')
+  // 圆角只允许宿主 radius token / 999px 胶囊 / 50% 圆形
+  const radii = [...CLIENT_SRC.matchAll(/border-radius:([^;]+);/g)].map((match) => match[1].trim())
+  assert.ok(radii.length > 0, '缺圆角声明')
+  for (const radius of radii) {
+    assert.ok(/^var\(--sm-radius-(sm|md|lg)\)$/.test(radius) || radius === '999px' || radius === '50%',
+      '自造圆角值: ' + radius)
+  }
+  // 间距取 4px 栅格允许值(含 10px 的信息密度档),禁止 7px / 9px 一类奇数增量
+  const spacings = [
+    ...[...CLIENT_SRC.matchAll(/(?:padding|margin|gap):([^;]+);/g)].map((match) => match[1]),
+  ].flatMap((value) => value.match(/\d+px/g) || [])
+  const allowed = new Set(['0px', '2px', '4px', '6px', '8px', '10px', '12px', '14px', '16px', '20px', '24px', '48px'])
+  for (const spacing of spacings) {
+    assert.ok(allowed.has(spacing), '奇数间距/非标尺值: ' + spacing)
+  }
+})
+
 test('归档大小汇总:已知总量、缺失、不可得与未加载分桶', () => {
   const start = CLIENT_SRC.indexOf('function sizeSummaryOf(')
   assert.notEqual(start, -1, '缺 sizeSummaryOf 汇总函数')
@@ -84,14 +110,14 @@ test('归档大小汇总:已知总量、缺失、不可得与未加载分桶', (
   }), { totalBytes: 1024, known: 1, missing: 1, unsupported: 2, pending: 1 })
 })
 
-test('源码契约:面板头显示归档总大小与缺失数', () => {
-  assert.ok(CLIENT_SRC.includes('sizeSummaryOf(rows, sizes)'), '面板头未计算归档大小汇总')
-  const headerStart = CLIENT_SRC.indexOf("className: 'sm-head__count'")
-  assert.notEqual(headerStart, -1, '缺面板头计数锚点')
-  const headerEnd = CLIENT_SRC.indexOf("view === 'recent'", headerStart)
-  assert.notEqual(headerEnd, -1, '缺面板头结束锚点')
+test('源码契约:次级信息行显示归档总大小与缺失数', () => {
+  assert.ok(CLIENT_SRC.includes('sizeSummaryOf(rows, sizes)'), '未计算归档大小汇总')
+  const headerStart = CLIENT_SRC.indexOf("className: 'sm-meta__count'")
+  assert.notEqual(headerStart, -1, '缺次级信息行计数锚点')
+  const headerEnd = CLIENT_SRC.indexOf('// 主列表(最近归档)', headerStart)
+  assert.notEqual(headerEnd, -1, '缺次级信息行结束锚点')
   const headerSrc = CLIENT_SRC.slice(headerStart, headerEnd)
-  assert.ok(headerSrc.includes('sm-head__missing'), '缺失数未使用独立样式')
+  assert.ok(headerSrc.includes('sm-meta__missing'), '缺失数未使用独立样式')
   assert.ok(headerSrc.includes('sizeSummary.pending === 0 && sizeSummary.known > 0'), '未等大小加载完成再显示总大小')
   assert.ok(headerSrc.includes('sizeSummary.pending === 0 && sizeSummary.missing > 0'), '缺失数未等大小加载完成')
   assert.ok(headerSrc.includes('sizeSummary.pending === 0 && sizeSummary.unsupported > 0'), '不可得数未等大小加载完成')

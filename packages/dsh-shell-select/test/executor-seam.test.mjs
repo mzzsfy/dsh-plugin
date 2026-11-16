@@ -6,7 +6,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import ShellSelectExecutor from '../src/executor.mjs'
-import { resolveConfig } from '../src/config.mjs'
 
 function stubReader(text) {
   return { readFrom: () => ({ text, lossy: false, nextOffset: text.length }) }
@@ -29,13 +28,7 @@ function stubSpawn(stdoutText = '', stderrText = '', exitCode = 0) {
 }
 
 function stubCtx({ sandboxMode = 'danger-full-access', spawn = stubSpawn() } = {}) {
-  const registered = { tools: [], sections: [], promptSections: [], routes: [] }
-  const settingsImpl = {
-    installSection: (ctx, ns, schema, base, hooks) => {
-      registered.sections.push({ ns, schema, base, hooks })
-      settingsImpl._source = () => resolveConfig(base ?? {})
-    },
-  }
+  const registered = { tools: [], promptSections: [], routes: [] }
   const ctx = {
     reflect: { provide: () => {} },
     on: () => () => {},
@@ -69,7 +62,6 @@ function stubCtx({ sandboxMode = 'danger-full-access', spawn = stubSpawn() } = {
       getSectionOrder: (key) => `order:${key}`,
     },
     shellEnv: { collect: () => ({ DSH_TEST: '1' }) },
-    settings: settingsImpl,
     effect: (fn) => fn(),
   }
   return { ctx, registered }

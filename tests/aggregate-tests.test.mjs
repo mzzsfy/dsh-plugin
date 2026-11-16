@@ -191,10 +191,10 @@ test('discoverUnits_真实仓库_带桩包命令透传运行参数且文件仍�
 })
 
 test('discoverUnits_真实仓库_裸script包命令与默认形态逐字节同旧', () => {
-  const rs = discoverUnits(repo).find(u => u.name === 'dsh-rs-workflow')
-  assert.ok(rs, 'rs-workflow 单元应在列')
-  assert.deepEqual(rs.command[1], '--test')
-  assert.ok(!rs.command.some(arg => arg === '--experimental-test-module-mocks'))
+  const unit = discoverUnits(repo).find(u => u.name === 'dsh-auto-trust-all')
+  assert.ok(unit, 'auto-trust-all 单元应在列')
+  assert.deepEqual(unit.command[1], '--test')
+  assert.ok(!unit.command.some(arg => arg === '--experimental-test-module-mocks'))
 })
 
 test('discoverUnits_清单缺失或畸形_回退默认命令不崩红', t => {
@@ -255,6 +255,14 @@ test('discoverUnits_非包改动清单_全量回退', () => {
   assert.deepEqual(scoped, full)
 })
 
+test('discoverUnits_packages直属文件改动_回退全量而非只跑少数单元', () => {
+  // 现症:README.md 被解析成包名 README.md,包单元全被过滤,只剩 4 个固定单元
+  const full = discoverUnits(repo).map(u => u.name)
+  const scoped = discoverUnits(repo, ['packages/README.md']).map(u => u.name)
+  assert.deepEqual(scoped, full)
+  assert.ok(full.length > 4)
+})
+
 test('discoverUnits_null改动清单_全量回退不崩溃', () => {
   // fail-open 契约(:74-80):changedFilesList 返回 null(首推全零 SHA/浅克隆 diff 失败)
   // 时 discoverUnits 必须回退全量,而非对 null 迭代 TypeError 崩红(现症:整轮聚合 exit 1)
@@ -301,6 +309,13 @@ test('parseChangedPackages_含非包路径_判全量', () => {
   assert.equal(parseChangedPackages(['packages/dsh-toast/src/index.js', 'scripts/smoke-load.mjs']), null)
   assert.equal(parseChangedPackages(['README.md']), null)
   assert.equal(parseChangedPackages(['.github/workflows/test.yml']), null)
+})
+
+test('parseChangedPackages_packages直属文件或缺包内路径_判全量', () => {
+  // packages/README.md 的 segments[1] 是文件名而非包目录;缺第三段无法证明包边界
+  assert.equal(parseChangedPackages(['packages/README.md']), null)
+  assert.equal(parseChangedPackages(['packages/dsh-toast']), null)
+  assert.equal(parseChangedPackages(['packages/README.md', 'packages/dsh-toast/src/index.js']), null)
 })
 
 test('parseChangedPackages_无改动_判全量', () => {

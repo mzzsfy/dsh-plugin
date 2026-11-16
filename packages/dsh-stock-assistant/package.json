@@ -32,21 +32,22 @@
   "dependencies": {
     "@mzzsfy/dsh-common-tools": "^0.5.0",
     "lightweight-charts": "^5.2.1",
+    "undici": "^8.12.3",
     "zod": "^4.6.6"
   },
   "scripts": {
-    "test": "node --test \"test/*.test.mjs\"",
-    "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
+    "test": "node --test \"test/*.test.mjs\""
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.19.0"
   },
   "files": [
     "src",
     "vendor",
     "cordis.patch.yml",
     "README.md",
-    "兼容性测试.md"
+    "兼容性测试.md",
+    "CHANGELOG.md"
   ],
   "license": "MIT",
   "repository": {
@@ -55,6 +56,7 @@
   },
   "devDependencies": {
     "esbuild": "^0.28.2",
+    "playwright": "1.63.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },

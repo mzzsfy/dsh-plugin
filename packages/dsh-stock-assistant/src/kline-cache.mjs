@@ -1,9 +1,11 @@
 // K线缓存: 只存内存(TTL 与 routingRevision 双失效)。键里的冒号是命名空间, 不落盘就没有文件名约束
 const HOUR = 60 * 60 * 1000
 const DAY = 24 * HOUR
-// TTL 唯一事实源(design.md 数据结构节): trend 0=不缓存, 其余按周期
-const TTL_BY_PERIOD = { trend: 0, '1d': HOUR, '1w': DAY, '1M': DAY }
-const keyOf = ({ providerInstanceId, market, period, code }) => `kline:${providerInstanceId}:${market}:${period}:${code}`
+// TTL 唯一事实源(design.md 数据结构节): 按周期定寿命。分时不走这张表, 它有自己的当日缓存(trend-cache.mjs)
+const TTL_BY_PERIOD = { '1d': HOUR, '1w': DAY, '1M': DAY }
+const DEFAULT_LIMIT = 250
+// limit 是请求契约的一部分: 250 与 1000 根的结果不同, 不隔离会互相命中错数据
+const keyOf = ({ providerInstanceId, market, period, code, limit = DEFAULT_LIMIT }) => `kline:${providerInstanceId}:${market}:${period}:${code}:${limit}`
 
 export function createKlineCache({ cacheTable, now }) {
   const key = keyParts => keyOf(keyParts)
@@ -23,8 +25,5 @@ export function createKlineCache({ cacheTable, now }) {
     const value = { kind: 'kline', source: result.providerInstanceId, fetchedAt: now(), payload: { ...result, routingRevision } }
     await cacheTable.put(key(keyParts), value).catch(() => {})
   }
-  async function invalidate(keyParts) {
-    await cacheTable.delete(key(keyParts)).catch(() => {})
-  }
-  return { get, put, invalidate }
+  return { get, put }
 }

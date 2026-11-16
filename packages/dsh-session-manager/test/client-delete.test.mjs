@@ -44,3 +44,21 @@ test('源码契约:已删除区说明覆盖两种找回路径', () => {
   assert.ok(CLIENT_SRC.includes('到系统回收站将会话文件夹还原到原位置'), '缺 OS 回收站还原指引')
   assert.ok(CLIENT_SRC.includes('回收区暂存的会话直接点「重新挂载」即可找回'), '缺回收区直接重挂载指引')
 })
+
+// Given 删除与重挂载是服务端长事务(回收站命令 60s + 级联逐子会话), When 前端发请求,
+// Then 走独立长超时,不共用普通请求的 8s(否则服务端仍在执行而面板谎报失败)
+test('源码契约:删除与重挂载使用独立长超时,超时文案说明仍在执行', () => {
+  const timeoutMatch = CLIENT_SRC.match(/const API_TIMEOUT_MS = (\d+) \* 1000/)
+  const longMatch = CLIENT_SRC.match(/const LONG_ACTION_TIMEOUT_MS = (\d+) \* 60 \* 1000/)
+  assert.ok(timeoutMatch, '缺普通请求超时常量')
+  assert.ok(longMatch, '缺长事务超时常量')
+  assert.ok(Number(longMatch[1]) * 60 > Number(timeoutMatch[1]), '长事务超时必须显著大于普通请求超时')
+  assert.ok(/const LONG_ACTION_TIMEOUT_HINT = '[^']*仍在执行[^']*'/.test(CLIENT_SRC), '超时文案未说明服务端仍在执行')
+  // 两个长事务入口都要显式传 timeoutMs(源内 2 处:删除 + 重挂载)
+  const explicit = CLIENT_SRC.match(/timeoutMs: LONG_ACTION_TIMEOUT_MS/g) || []
+  assert.equal(explicit.length, 2, '删除/重挂载未各自显式使用长超时')
+  assert.ok(/api\(DELETE_URL, \{ method: 'POST', body: JSON\.stringify\(\{ sessionId: row\.id \}\), timeoutMs: LONG_ACTION_TIMEOUT_MS \}\)/.test(CLIENT_SRC),
+    '删除请求未接长超时')
+  assert.ok(/api\(REMOUNT_URL, \{ method: 'POST', body: JSON\.stringify\(\{ sessionId: row\.sessionId \}\), timeoutMs: LONG_ACTION_TIMEOUT_MS \}\)/.test(CLIENT_SRC),
+    '重挂载请求未接长超时')
+})

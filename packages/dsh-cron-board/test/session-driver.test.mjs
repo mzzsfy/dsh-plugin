@@ -97,8 +97,8 @@ function makeDriver(stubs) {
   return createSessionDriver({
     getSessionController: () => stubs.sessionController,
     getWorkspaceRegistry: stubs.getWorkspaceRegistry,
-    agents: stubs.agents,
-    sessionQuery: stubs.sessionQuery,
+    getAgents: () => stubs.agents,
+    getSessionQuery: () => stubs.sessionQuery,
   })
 }
 
@@ -125,6 +125,22 @@ for (const bound of [false, true]) {
   })
 }
 
+test('session-driver:删除/停止谓词为真时不建会话、不投递 prompt', async () => {
+  // Given 投递前任务已被删除(执行链 stopJob 的拒绝谓词)
+  const stubs = makeStubs()
+  const driver = makeDriver(stubs)
+  // When 运行传入取消谓词:建会话前仍允许,建完后、prompt 前变为取消
+  const result = await driver.run({
+    job: BASE_JOB,
+    env: {},
+    isCancelled: () => stubs.created.length > 0,
+  })
+  // Then 只建了会话,不投递 prompt,运行记为 cancelled
+  assert.equal(result.status, 'cancelled')
+  assert.equal(stubs.created.length, 1)
+  assert.equal(stubs.prompts.length, 0)
+})
+
 test('session-driver:宿主无控制器时记 fail 并上报缺失告警', async () => {
   // Given 宿主未挂载 sessionController(旧宿主 / web-app 卸载期)
   const reported = []
@@ -150,8 +166,8 @@ test('C6 Given host hands each read a distinct service proxy, When two instances
   const makeProxyDriver = () => createSessionDriver({
     getSessionController: () => ({ ...stubs.sessionController }),
     getWorkspaceRegistry: stubs.getWorkspaceRegistry,
-    agents: stubs.agents,
-    sessionQuery: stubs.sessionQuery,
+    getAgents: () => stubs.agents,
+    getSessionQuery: () => stubs.sessionQuery,
   })
   const a = makeProxyDriver(), b = makeProxyDriver()
   const first = a.run({ job: PINNED_S1, env: {} })
@@ -236,6 +252,33 @@ test('session-driver:pinned 会话丢失自愈:新建并回写', async () => {
   assert.equal(outcome.status, 'success')
   assert.equal(outcome.pinnedNewId, outcome.sessionId)
   assert.ok(String(outcome.message).includes('原会话丢失已重建'))
+  assert.equal(stubs.created.length, 1)
+})
+
+test('P2-17: agents/sessionQuery 均缺失时 pinned 判定不抛错(按丢失自愈)', async () => {
+  // Given 旧宿主/挂载时序下会话注册表与持久层查询都不在场
+  const stubs = makeStubs()
+  const driver = createSessionDriver({ getSessionController: () => stubs.sessionController })
+  // When pinned 任务触发
+  const outcome = await driver.run({ job: PINNED_GONE, env: {} })
+  // Then 不抛 TypeError,走「原会话丢失已重建」路径而非每次记 fail
+  assert.equal(outcome.status, 'success')
+  assert.equal(outcome.pinnedNewId, outcome.sessionId)
+  assert.ok(String(outcome.message).includes('原会话丢失已重建'))
+  assert.equal(stubs.created.length, 1)
+})
+
+test('P2-17: agents 缺 get 方法时同样降级为查不到', async () => {
+  const stubs = makeStubs()
+  const driver = createSessionDriver({
+    getSessionController: () => stubs.sessionController,
+    getAgents: () => ({}),
+    getSessionQuery: () => ({}),
+  })
+  // When 服务在但方法面缺失(代际差异)
+  const outcome = await driver.run({ job: PINNED_GONE, env: {} })
+  // Then 判定为会话丢失并重建,不抛错
+  assert.equal(outcome.status, 'success')
   assert.equal(stubs.created.length, 1)
 })
 

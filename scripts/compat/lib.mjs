@@ -45,7 +45,9 @@ export function cmdName(name) {
   return process.platform === 'win32' ? `${name}.cmd` : name
 }
 
-export function runCmd(name, args, { cwd } = {}) {
+// shouldAbort:长任务(如 pnpm install)的 STOP 消费口,轮询为真即杀子进程树并以 STOPPED 拒绝,
+// 让 keeper 能在分钟级安装中按时退出走 finally,而不是等外部 15s 超时强杀
+export function runCmd(name, args, { cwd, shouldAbort, abortPollMs = 200 } = {}) {
   return new Promise((resolve, reject) => {
     // Windows 下 npm/pnpm 是 .cmd 入口,必须经 shell(参数均不含空白,拼接安全)
     const isWin = process.platform === 'win32'
@@ -54,12 +56,36 @@ export function runCmd(name, args, { cwd } = {}) {
       : spawn(cmdName(name), args, { cwd, shell: false, windowsHide: true })
     let stdout = ''
     let stderr = ''
+    let aborted = false
+    let timer = null
+    const killTree = () => {
+      if (isWin) spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true })
+      else { try { child.kill('SIGKILL') } catch { /* 已退 */ } }
+    }
+    if (typeof shouldAbort === 'function') {
+      timer = setInterval(() => {
+        let stop = false
+        try { stop = shouldAbort() === true } catch { stop = false }
+        if (!stop || aborted) return
+        aborted = true
+        killTree()
+      }, abortPollMs)
+      timer.unref()
+    }
+    const settle = (fn) => {
+      if (timer !== null) clearInterval(timer)
+      fn()
+    }
     child.stdout.on('data', (chunk) => { stdout += chunk })
     child.stderr.on('data', (chunk) => { stderr += chunk })
-    child.on('error', reject)
+    child.on('error', (error) => settle(() => reject(error)))
     child.on('close', (code) => {
-      if (code === 0) resolve({ stdout, stderr })
-      else reject(new Error(`${name} ${args.join(' ')} 退出码 ${code}\n${stderr.slice(-2000)}`))
+      if (aborted) {
+        settle(() => reject(Object.assign(new Error(`${name} ${args.join(' ')} 被 STOP 中止`), { code: 'STOPPED' })))
+        return
+      }
+      if (code === 0) settle(() => resolve({ stdout, stderr }))
+      else settle(() => reject(new Error(`${name} ${args.join(' ')} 退出码 ${code}\n${stderr.slice(-2000)}`)))
     })
   })
 }

@@ -13,6 +13,32 @@ test('执行器激活后挂模型工具投影', () => {
   assert.equal(registered.listeners?.filter((row) => row.name === 'system-prompt/assemble').length, 1)
 })
 
+// P2:一次瞬时注册失败(第二工具注册抛错)不得留下半套工具;旧工具必须恢复,
+// 下一次 refresh 仍能成功——旧实现数组字面量丢第一个 disposer,泄漏的 shell
+// 让后续每次注册都撞重名,refreshFailed 永久化且 pwsh 消失。
+test('P2 瞬时注册失败:回滚半套、旧工具恢复,pwsh 不丢且下次 refresh 成功', () => {
+  const failures = [4] // 构造函数占 1/2;refresh 的 shell=3、pwsh=4 失败
+  const { ctx, registered } = stubCtx({ registerFailures: failures })
+  const executor = new ShellSelectExecutor(ctx, baseConfig())
+  const names = () => registered.tools.map((tool) => tool.name).sort()
+  assert.deepEqual(names(), ['pwsh', 'shell'])
+
+  const next = {
+    ...baseConfig(),
+    shells: [...baseConfig().shells, { id: 'new', name: 'New', kind: 'bash', path: NODE_EXE }],
+    default: 'new',
+  }
+  assert.throws(() => executor.refresh(next), /transient register failure/)
+  assert.deepEqual(names(), ['pwsh', 'shell'], '失败后旧工具必须原样恢复,不得只剩半套')
+  assert.equal(executor.config.default, 'pwsh', '失败刷新必须回退配置源,在役工具与服务一致')
+
+  failures.length = 0
+  executor.refresh(next)
+  assert.deepEqual(names(), ['pwsh', 'shell'], '重试成功后仍各一份')
+  assert.match(registered.tools.find((tool) => tool.name === 'shell').description, /- new /)
+  assert.equal(executor.config.default, 'new')
+})
+
 // --- 桩具 ---
 
 function stubReader(text) {
@@ -63,7 +89,7 @@ function fakeChildSubprocess({ fallbackMs = 250, exitCode = 0 } = {}) {
   return { spawn, calls, terminated: () => terminated }
 }
 
-function stubCtx({ withSettings = true, sandboxMode = 'danger-full-access', spawn = stubSpawn() } = {}) {
+function stubCtx({ withSettings = true, sandboxMode = 'danger-full-access', spawn = stubSpawn(), registerFailures = [] } = {}) {
   const registered = { tools: [], sections: [], promptSections: [], routes: [], policies: [] }
   const settingsImpl = {
     configure: (presentation, fiber) => {
@@ -72,6 +98,7 @@ function stubCtx({ withSettings = true, sandboxMode = 'danger-full-access', spaw
   }
   const disposers = []
   const childEffects = []
+  let registerCalls = 0
   const ctx = {
     // cordis Service 基类构造期要求 reflect.provide(登记服务实例),桩空转
     reflect: { provide: () => {} },
@@ -115,9 +142,12 @@ function stubCtx({ withSettings = true, sandboxMode = 'danger-full-access', spaw
     },
     tools: {
       register: (definition) => {
+        registerCalls += 1
+        if (registerFailures.includes(registerCalls)) throw new Error(`transient register failure #${registerCalls}`)
         registered.tools.push(definition)
         return () => {
-          registered.tools.pop()
+          const index = registered.tools.indexOf(definition)
+          if (index >= 0) registered.tools.splice(index, 1)
         }
       },
     },
@@ -134,7 +164,7 @@ function stubCtx({ withSettings = true, sandboxMode = 'danger-full-access', spaw
     },
     _childEffects: childEffects,
   }
-  return { ctx, registered, disposers }
+  return { ctx, registered, disposers, registerStats: () => ({ calls: registerCalls }) }
 }
 
 // 跨平台显式 path:node 自身在所有平台存在,注入后 entryFor/listShells 不依赖真实 shell
@@ -175,21 +205,27 @@ test('构造:注册 shell+pwsh 双工具与 systemPrompt 段,路由不再由主�
   assert.equal(routePaths.length, 0)
 })
 
-test('settings 在场:注册 auto:false 页面策略挂本行 fiber(自带设置页,官方同构)', () => {
+test('P2-36 执行器不登记 settings 页面策略:策略归主行 apply(子 fiber 上宿主 describe 永不命中)', () => {
+  // Given settings 在场;When 构造执行器;Then 零 configure——策略登记在主行
+  // ctx.fiber 上(dsh-settings describe 按 loader 行 fiber 查 autoGenerate),
+  // 挂在执行器子 fiber 上原生节照旧出现且其写口不刷新执行面。
   const { ctx, registered } = stubCtx()
   const fiber = { id: 'fiber-1' }
   ctx.fiber = fiber
   new ShellSelectExecutor(ctx, baseConfig())
-  assert.equal(registered.policies.length, 1)
-  assert.deepEqual(registered.policies[0].presentation, { auto: false })
-  assert.equal(registered.policies[0].fiber, fiber)
-})
-
-test('settings 缺席:策略静默跳过,双工具照常注册(业务插件无 settings 也可运行)', () => {
-  const { ctx, registered } = stubCtx({ withSettings: false })
-  new ShellSelectExecutor(ctx, baseConfig())
   assert.equal(registered.policies.length, 0)
   assert.equal(registered.tools.length, 2)
+})
+
+test('P3 config 快照:读路径零重算(同一对象),refresh 才换源', () => {
+  const { executor } = build()
+  // 旧实现 config getter 每次全量 resolveConfig:逐调用热路径反复跑 schema
+  assert.equal(executor.config, executor.config)
+  const before = executor.config
+  executor.refresh({ shells: baseConfig().shells, default: 'git-bash' })
+  assert.notEqual(executor.config, before)
+  assert.equal(executor.config.default, 'git-bash')
+  assert.equal(executor.config, executor.config, '换源后同样缓存')
 })
 
 test('pwsh 工具钉死 pwsh 客户端:default 漂移不改变落点(旧会话语义保真)', async () => {

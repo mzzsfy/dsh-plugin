@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 
 import { createTask, defineWorkItem, authorizeTask } from '../lib/core/task.mjs'
 import { recordRun } from '../lib/core/task.mjs'
-import { mergeRunUsage, taskUsageSummary } from '../lib/core/usage.mjs'
+import { convergeRunUsage, mergeRunUsage, taskUsageSummary } from '../lib/core/usage.mjs'
 
 function seededAggregate() {
   const now = () => 1
@@ -59,4 +59,16 @@ test('明确零调用 coverage=complete 且总量 0', () => {
   const agg = mergeRunUsage(withRun(seededAggregate()), { runId: 'r1', completeUsage: true }).result.aggregate
   assert.equal(agg.runs.r1.usageCoverage, 'complete')
   assert.equal(agg.runs.r1.tokenTotal, 0)
+})
+
+// ── R13 终态收敛的"确有证据零调用":completeUsage 才落 complete ──────────────
+test('convergeRunUsage:完整收敛标记把零观察项记作 complete,缺省只到 unknown', () => {
+  const agg = withRun(seededAggregate())
+  const plain = convergeRunUsage(agg, 'r1')
+  assert.equal(plain.ok, true)
+  assert.equal(plain.result.aggregate.runs.r1.usageCoverage, 'unknown', '无观察项且无零调用证据:不得声称完整')
+  const complete = convergeRunUsage(agg, 'r1', { completeUsage: true })
+  assert.equal(complete.ok, true)
+  assert.equal(complete.result.aggregate.runs.r1.usageCoverage, 'complete', 'prompt 未受理即拒 = 零调用有证据')
+  assert.equal(complete.result.aggregate.runs.r1.tokenTotal, 0)
 })

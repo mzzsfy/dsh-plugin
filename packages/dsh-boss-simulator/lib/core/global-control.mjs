@@ -37,6 +37,30 @@ export function stopAll(control, { commandId, payloadHash, sourceRef }) {
   return outcome
 }
 
+// stop.resume:解除全局停止,恢复新任务与未单独暂停任务的派发许可。
+// 停止代次只由停止操作推进,解除不新增代次;下次停止仍会以更高代次使旧单项放行失效。
+export function resumeAll(control, { commandId, payloadHash, sourceRef }) {
+  const outcome = applyEnvelope(control, { commandId, payloadHash }, () => {
+    const operationId = `resume-${commandId}`
+    const generation = control.globalStopGeneration
+    const next = {
+      ...control,
+      globalStopped: false,
+      globalStopGeneration: generation,
+      stopOperations: {
+        ...control.stopOperations,
+        [operationId]: {
+          operationId, commandId, scope: 'all', action: 'resume', requestedAt: control.now(), sourceRef,
+          generation, requestErrors: [], observed: null,
+        },
+      },
+      commandReceipts: { ...control.commandReceipts, [commandId]: { payloadHash, result: { operationId, globalStopGeneration: generation, globalStopped: false } } },
+    }
+    return { state: next, result: { operationId, globalStopGeneration: generation, globalStopped: false } }
+  })
+  return outcome
+}
+
 // 单任务放行登记(control 侧无状态,放行事实在 Task.control.allowedGlobalGeneration;
 // 此处登记 stopOperations 便于查询 operation)
 export function recordStopOperation(control, { commandId, taskId, payloadHash, sourceRef }) {
@@ -56,14 +80,4 @@ export function recordStopOperation(control, { commandId, taskId, payloadHash, s
     }
     return { state: next, result }
   })
-}
-
-// 内存闩锁:持久化失败时保持关闭,重启不自动派发(进程内状态,不落盘)
-export function createStopLatch() {
-  let tripped = false
-  return {
-    trip() { tripped = true },
-    release() { tripped = false },
-    get tripped() { return tripped },
-  }
 }

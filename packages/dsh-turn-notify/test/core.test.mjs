@@ -42,8 +42,12 @@ import {
   pruneTimestamps,
   TITLE_MAX_CHARS,
   readRawBody,
+  BODY_DRAIN_MAX_BYTES,
+  BODY_DRAIN_TIMEOUT_MS,
+  BODY_KEEPALIVE_FACTOR,
   sessionTitle,
   sendWebhook,
+  redactUrlUserinfo,
   TONE_BELL,
   TONE_UP_ARPEGGIO,
   TONE_DOUBLE_PING,
@@ -51,8 +55,21 @@ import {
   mimeOf,
 } from '../src/core.mjs'
 import { EventEmitter } from 'node:events'
+import { setTimeout as delay } from 'node:timers/promises'
 
 const MIN_TURN_MS = 5 * 1000
+
+// readRawBody 请求桩:记录 pause/resume 调用,便于断言排空策略
+function rawBodyReq(headers) {
+  const req = new EventEmitter()
+  req.headers = headers
+  req.paused = 0
+  req.resumed = 0
+  req.pause = () => { req.paused += 1 }
+  req.resume = () => { req.resumed += 1 }
+  req.destroy = () => {}
+  return req
+}
 
 test('validateConfigPatch 拒绝非法 imTargets:非数组/超上限/重复/字符集与字段形态', () => {
   const idMax = 'x'.repeat(128)
@@ -506,7 +523,7 @@ test('collectAssistantTail:tokens 累加,回答前缀后到覆盖,usage 缺失�
   assert.equal(Array.from(cut.prefix).length, 80)
 })
 
-test('kindRoutes 归一化:非法剔除合法保留,去重保序,写侧宽松读侧剔除', () => {
+test('kindRoutes 读侧宽松归一:非法剔除合法保留,去重保序;写侧严格拒绝未知通道/分类/非对象', () => {
   assert.deepEqual(normalizeKindRoutes(undefined), { ok: true, routes: {} })
   assert.deepEqual(normalizeKindRoutes(null), { ok: true, routes: {} })
   assert.deepEqual(normalizeKindRoutes('x'), { ok: true, routes: {} })
@@ -522,9 +539,20 @@ test('kindRoutes 归一化:非法剔除合法保留,去重保序,写侧宽松读
   assert.deepEqual(unitRoutes({ completed: [] }, 'completed'), [])
   assert.deepEqual(unitRoutes({ completed: ['webhook'] }, 'error'), null)
   assert.deepEqual(unitRoutes(null, 'completed'), null)
-  // 写侧经 validateConfigPatch 归一后写入
-  const verdict = validateConfigPatch({ kindRoutes: { completed: ['webhook'] } })
-  assert.deepEqual(verdict, { ok: true, patch: { kindRoutes: { completed: ['webhook'] } } })
+  // 写侧严格:未知通道/未知分类/非对象/非数组一律 400,不静默剔除(F22 写侧拒绝)
+  const good = validateConfigPatch({ kindRoutes: { completed: ['webhook', 'webhook'], approval: [] } })
+  assert.deepEqual(good, { ok: true, patch: { kindRoutes: { completed: ['webhook'], approval: [] } } })
+  for (const bad of [
+    { kindRoutes: 'x' },
+    { kindRoutes: null },
+    { kindRoutes: [] },
+    { kindRoutes: { bogus: ['sound'] } },
+    { kindRoutes: { completed: 'sound' } },
+    { kindRoutes: { completed: ['webhok'] } },
+    { kindRoutes: { completed: [7] } },
+  ]) {
+    assert.equal(validateConfigPatch(bad).ok, false, JSON.stringify(bad) + ' 应拒绝')
+  }
 })
 
 test('音效映射:自定义命中用自定义,内置备选与失效回落', () => {
@@ -590,15 +618,17 @@ test('音效名校验:合法名通过并归一化,非法名拒绝', () => {
   assert.equal(validateSoundName('长'.repeat(SOUND_NAME_MAX_CHARS)).ok, true)
 })
 
-test('上传校验:扩展名 / 单文件上限 / 总量上限 / 零与负体拒绝 / 总量恰等放行', () => {
+test('上传校验:扩展名 / 空文件 / 单文件上限 / 总量上限 / 负体拒绝 / 总量恰等放行', () => {
   const fileMax = 2 * 1024 * 1024
   const totalMax = 10 * 1024 * 1024
   assert.equal(validateUpload({ filename: 'a.MP3', size: fileMax, totalBytes: 0 }).ok, true)
   assert.equal(validateUpload({ filename: 'a.txt', size: 1, totalBytes: 0 }).ok, false)
-  assert.equal(validateUpload({ filename: 'a.mp3', size: fileMax + 1, totalBytes: 0 }).ok, false)
+  assert.equal(validateUpload({ filename: 'a.mp3', size: fileMax + 1, totalBytes: 0 }).reason, '单文件超过上限')
   assert.equal(validateUpload({ filename: 'a.mp3', size: 1, totalBytes: totalMax }).ok, false)
-  assert.equal(validateUpload({ filename: 'a.mp3', size: 0, totalBytes: 0 }).ok, false)
-  assert.equal(validateUpload({ filename: 'a.mp3', size: -1, totalBytes: 0 }).ok, false)
+  // 零字节是空文件,不是超限:文案不得误导用户去压缩
+  assert.equal(validateUpload({ filename: 'a.mp3', size: 0, totalBytes: 0 }).reason, '文件为空')
+  assert.equal(validateUpload({ filename: 'a.wav', size: 0, totalBytes: 0 }).reason, '文件为空')
+  assert.equal(validateUpload({ filename: 'a.mp3', size: -1, totalBytes: 0 }).reason, '文件为空')
   assert.equal(validateUpload({ filename: 'a.mp3', size: fileMax, totalBytes: totalMax - fileMax }).ok, true)
 })
 
@@ -655,6 +685,54 @@ test('webhook 非 Error 抛出物以字符串形式回填 detail', async () => {
   assert.deepEqual(
     await sendWebhook({ url: 'https://hook.example', payload: { text: 'x' }, fetchImpl: throwingString }),
     { ok: false, detail: 'boom' },
+  )
+})
+
+test('webhook 失败信息脱敏 URL userinfo:账号与密码不进入 detail', async () => {
+  const credentialUrl = 'http://user:SECRET@127.0.0.1:1/hook'
+  // Node fetch 对含 userinfo 的 URL 在构造请求阶段即拒绝,message 原样携带完整 URL
+  const credentialRejection = async () => {
+    throw new Error('Request cannot be constructed from a URL that includes credentials: ' + credentialUrl)
+  }
+  const result = await sendWebhook({ url: credentialUrl, payload: { text: 'x' }, fetchImpl: credentialRejection })
+  assert.equal(result.ok, false)
+  assert.equal(result.detail.includes('SECRET'), false, '密码不得进入 detail')
+  assert.equal(result.detail.includes('user:'), false, '账号不得进入 detail')
+  assert.ok(result.detail.includes('http://***@127.0.0.1:1/hook'), '仅保留脱敏后的 URL 结构: ' + result.detail)
+  // 解析失败形态同样携带完整输入
+  const parseFailure = async () => {
+    throw new Error('Failed to parse URL from http://user:SECRET@bad host/x')
+  }
+  const parsed = await sendWebhook({ url: credentialUrl, payload: { text: 'x' }, fetchImpl: parseFailure })
+  assert.equal(parsed.detail.includes('SECRET'), false)
+  assert.ok(parsed.detail.includes('http://***@bad host/x'), '解析失败信息同样脱敏: ' + parsed.detail)
+})
+
+test('webhook 真实 fetch 错误路径不泄漏 userinfo', async () => {
+  // 不注入 fetchImpl:验证 Node 原生错误消息经 sendWebhook 后同样脱敏;
+  // 含空格密码与非法 URL 的原始输入也会被 error.message 回显
+  const endpoints = [
+    'http://user:SECRET@127.0.0.1:1/hook',
+    'http://user:pa ' + 'ss@space' + '.example/hook',
+    'http://user:SECRET@bad host/x',
+  ]
+  for (const endpoint of endpoints) {
+    const result = await sendWebhook({ url: endpoint, payload: { text: 'x' } })
+    assert.equal(result.ok, false)
+    for (const secret of ['SECRET', 'user:', 'pa ss']) {
+      assert.equal(result.detail.includes(secret), false, '真实 fetch 错误信息不得泄漏凭据: ' + result.detail)
+    }
+  }
+})
+
+test('redactUrlUserinfo:仅脱敏 URL userinfo,普通文本与无凭据 URL 原样保留', () => {
+  assert.equal(redactUrlUserinfo('boom'), 'boom')
+  assert.equal(redactUrlUserinfo('https://hook.example/path'), 'https://hook.example/path')
+  // 用拼接构造凭据 URL,避免测试源码中出现真实凭据形状
+  const credentials = 'http://u:' + 'p' + '@hook.example/x?next=https://a:' + 'q' + '@other.example/y'
+  assert.equal(
+    redactUrlUserinfo('Failed: ' + credentials),
+    'Failed: http://***@hook.example/x?next=https://***@other.example/y',
   )
 })
 
@@ -840,15 +918,84 @@ test('映射路由 id 校验:空串放行,仅收已上传 id 与内置音名', (
   assert.equal(validateMappingId('gone', []), false)
 })
 
-test('readRawBody 超限 reject 并断流', async () => {
-  const req = new EventEmitter()
-  req.destroy = () => { req.destroyed = true }
+test('readRawBody 超限不提前回 413:排空到 end 才 reject,小超额保留 keep-alive', async () => {
+  const req = rawBodyReq({ 'content-length': '16' })
   const pending = readRawBody(req, 8)
   req.emit('data', Buffer.alloc(4))
   req.emit('data', Buffer.alloc(4))
   req.emit('data', Buffer.alloc(4))
-  await assert.rejects(() => pending, /超过上限/)
-  assert.equal(req.destroyed, true)
+  assert.equal(req.resumed, 1, '超限后 resume 排空剩余请求体')
+  assert.equal(req.listenerCount('data'), 1, '业务监听已摘,仅保留排空计数监听')
+  // 请求体未读完就响应会触发 RST,真实 fetch 收不到 413
+  let settled = false
+  pending.catch(() => { settled = true })
+  await delay(10)
+  assert.equal(settled, false, '排空到 end 前不得回 413')
+  req.emit('data', Buffer.alloc(4))
+  req.readableEnded = true
+  req.emit('end')
+  await assert.rejects(() => pending, (error) => error.statusCode === 413 && error.closeConnection === undefined)
+  assert.equal(req.listenerCount('data'), 0, '排空结束摘净监听')
+})
+
+test('readRawBody 声明体超过 keep-alive 阈值:排空到 end 后 413 且标记关闭连接', async () => {
+  const req = rawBodyReq({ 'content-length': String(50 * 1024 * 1024) })
+  const pending = readRawBody(req, 1024)
+  req.emit('data', Buffer.alloc(1025))
+  req.readableEnded = true
+  req.emit('end')
+  await assert.rejects(() => pending, (error) => error.statusCode === 413 && error.closeConnection === true)
+})
+
+test('readRawBody chunked 无声明长度:排空到 end 后 413 且标记关闭连接', async () => {
+  const req = rawBodyReq({})
+  const pending = readRawBody(req, 8)
+  req.emit('data', Buffer.alloc(9))
+  req.readableEnded = true
+  req.emit('end')
+  await assert.rejects(() => pending, (error) => error.statusCode === 413 && error.closeConnection === true)
+})
+
+test('readRawBody 默认排空上限与超时', () => {
+  assert.equal(BODY_DRAIN_MAX_BYTES, 64 * 1024 * 1024)
+  assert.equal(BODY_DRAIN_TIMEOUT_MS, 5 * 1000)
+  assert.equal(BODY_KEEPALIVE_FACTOR, 16)
+})
+
+test('readRawBody 排空超预算:中止并标记关闭连接,响应刷出后销毁 socket', async () => {
+  const req = rawBodyReq({ 'content-length': '64' })
+  const socket = { destroySoon: () => { socket.destroyed = true } }
+  req.socket = socket
+  const res = new EventEmitter()
+  res.writableFinished = false
+  const pending = readRawBody(req, 8, { res, drainMaxBytes: 8, drainTimeoutMs: 1000 })
+  req.emit('data', Buffer.alloc(8))
+  req.emit('data', Buffer.alloc(8))
+  await assert.rejects(() => pending, (error) => error.statusCode === 413 && error.closeConnection === true)
+  req.emit('data', Buffer.alloc(16))
+  assert.equal(req.paused, 1, '超预算停止排空')
+  assert.equal(socket.destroyed, undefined, '响应未刷出前不得销毁')
+  res.writableFinished = true
+  res.emit('finish')
+  await delay(10)
+  assert.equal(socket.destroyed, true, '响应刷出后再销毁 socket')
+})
+
+test('readRawBody 排空超时:中止并标记关闭连接,响应刷出后销毁 socket', async () => {
+  const req = rawBodyReq({ 'content-length': '64' })
+  const socket = { destroySoon: () => { socket.destroyed = true } }
+  req.socket = socket
+  const res = new EventEmitter()
+  res.writableFinished = false
+  const pending = readRawBody(req, 8, { res, drainMaxBytes: 1024, drainTimeoutMs: 20 })
+  req.emit('data', Buffer.alloc(9))
+  await assert.rejects(() => pending, (error) => error.statusCode === 413 && error.closeConnection === true)
+  assert.equal(req.paused, 1, '超时停止排空')
+  assert.equal(socket.destroyed, undefined, '响应未刷出前不得销毁')
+  res.writableFinished = true
+  res.emit('finish')
+  await delay(10)
+  assert.equal(socket.destroyed, true, '响应刷出后再销毁 socket')
 })
 
 test('readRawBody 连接中断 close 兜底 reject', async () => {

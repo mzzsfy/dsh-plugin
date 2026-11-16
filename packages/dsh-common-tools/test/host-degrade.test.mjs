@@ -10,11 +10,14 @@ import {pathToFileURL} from 'node:url'
  * 消费方在 apply 里硬 import 本模块,降级失败会直接拖垮整棵插件树的激活。
  */
 const hostSource = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8')
+// host 静态 import 共享协议常量:隔离目录要带上同目录依赖,否则测的是链接失败而非 ws 缺失
+const protocolSource = readFileSync(new URL('../src/protocol.mjs', import.meta.url), 'utf8')
 
 test('Given ws 半装(有清单无入口) When 加载 host Then 降级为 noop 且各门面可调用', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'common-tools-degrade-'))
   t.after(() => rmSync(dir, {recursive: true, force: true}))
   writeFileSync(join(dir, 'host.js'), hostSource)
+  writeFileSync(join(dir, 'protocol.mjs'), protocolSource)
   mkdirSync(join(dir, 'node_modules', 'ws'), {recursive: true})
   writeFileSync(join(dir, 'node_modules', 'ws', 'package.json'), JSON.stringify({name: 'ws', version: '0.0.0'}))
   const warnings = []

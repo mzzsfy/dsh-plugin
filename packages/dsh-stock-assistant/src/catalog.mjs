@@ -1,18 +1,26 @@
 import { securitySchema } from './schemas.mjs'
-import { fail, sessionStateOf } from './market-model.mjs'
+import { fail, marketDate, marketStateOf } from './market-model.mjs'
 const DAY = 24 * 60 * 60 * 1000
 const SEARCH_TTL = 60 * 1000
 const SEARCH_CACHE_LIMIT = 64
 const SEARCH_FLIGHT_LIMIT = 32
 const CANDIDATE_TTL = 5 * 60 * 1000
 const CANDIDATE_LIMIT = 200
+// 同步失败后自动重试的间隔: 失败原因(缺路由/来源不可达)不会在一秒内自愈, 每次浏览都重试等于打上游;
+// 用户仍可从设置页或浏览页手动重试
+const AUTO_SYNC_RETRY_MS = 30 * 1000
+const SYNC_ATTEMPT_LIMIT = 64
+// 目录一天、日历一周过期: 过期数据仍可展示, 但浏览/后台预热要重新同步, 不能一直吃旧快照
+const CATALOG_TTL = DAY, CALENDAR_TTL = 7 * DAY
+// 市场状态只随分钟粒度的时段边界变化; 5 秒短缓存挡掉采集热路径的重复全量扫描
+const MARKET_STATE_TTL = 5 * 1000
+const MARKET_STATE_CACHE_LIMIT = 64
 // 有界写入: Map 迭代序即插入序, 超限淘汰最早条目, 保证长跑内存不随查询次数增长
 export function setBounded(map, key, value, limit) {
   map.set(key, value)
   while (map.size > limit) map.delete(map.keys().next().value)
   return map
 }
-const localDate = ms => new Date(ms + 8 * 60 * 60 * 1000).toISOString().slice(0, 10)
 // 实例id→其适配器 markets 集合(搜索市场面唯一事实源)
 function adapterMarketsOf(config, registry) {
   const map = new Map()
@@ -23,8 +31,9 @@ function adapterMarketsOf(config, registry) {
   return map
 }
 
+const shiftDate = (date, days) => new Date(Date.parse(`${date}T00:00:00Z`) + days * DAY).toISOString().slice(0, 10)
 export function createCatalog({ state, getControl = state.get, router, executor, registry, now = Date.now, changed = () => {} }) {
-  const flights = new Map(), candidates = new Map(), searchCache = new Map(), searchFlights = new Map()
+  const flights = new Map(), candidates = new Map(), searchCache = new Map(), searchFlights = new Map(), marketStateCache = new Map(), syncAttempts = new Map()
   let stopped = false
   const controllers = new Set()
   function records(kind) {
@@ -51,11 +60,21 @@ export function createCatalog({ state, getControl = state.get, router, executor,
   return {
     search,
     async browse({ market, offset, limit }) {
-      // 缓存缺失不再报错甩给用户: 返回 syncing 态并触发后台同步(sync 内部 flights 去重), 同步后为空是合法状态
-      if (!records('catalog').some(c => c.payload.market === market)) {
-        this.sync(market, ['catalog']).catch(() => {})
-        return { syncing: true, total: 0, items: [] }
+      // 缓存缺失不再报错甩给用户: 返回 syncing 态并触发后台同步(sync 内部 flights 去重), 同步后为空是合法状态。
+      // 失败要带出口: 只回 syncing 会让"首次同步中"永远挂着, 用户既不知道失败也没有重试入口。
+      const cached = records('catalog').filter(c => c.payload.market === market)
+      if (!cached.length) {
+        const revision = getControl().routingRevision
+        const attempt = syncAttempts.get(`catalog:${market}`)
+        // 只认当前路由版本下的失败: 换过路由还回旧版本的错误, 会把已经修好的市场显示成失败
+        const failed = attempt?.ok === false && attempt.revision === revision
+        const due = !failed || now() - attempt.at >= AUTO_SYNC_RETRY_MS
+        if (due) this.sync(market, ['catalog']).catch(() => {})
+        return { syncing: true, syncError: failed ? attempt.error : null, syncAttemptAt: failed ? attempt.at : null, total: 0, items: [] }
       }
+      // 已有目录但过期: 先展示旧数据, 同时后台刷新, 下一次浏览/轮询就能拿到新目录
+      const newest = Math.max(...cached.map(c => c.fetchedAt))
+      if (now() - newest > CATALOG_TTL) this.sync(market, ['catalog']).catch(() => {})
       const securities = all().filter(s => s.exchange === market).sort((a, b) => a.code.localeCompare(b.code))
       const start = Math.max(0, Math.trunc(Number(offset) || 0)), size = Math.min(200, Math.max(1, Math.trunc(Number(limit) || 50)))
       return { total: securities.length, items: securities.slice(start, start + size) }
@@ -66,7 +85,7 @@ export function createCatalog({ state, getControl = state.get, router, executor,
       const candidate = candidates.get(id)
       return candidate && candidate.until > now() && candidate.revision === getControl().routingRevision ? candidate.security : null
     },
-    status: () => records('catalog').map(c => ({ source: c.source, fetchedAt: c.fetchedAt, complete: c.payload.complete, stale: now() - c.fetchedAt > (c.kind === 'calendar' ? 7 * DAY : DAY) })),
+    status: () => records('catalog').map(c => ({ source: c.source, fetchedAt: c.fetchedAt, complete: c.payload.complete, stale: now() - c.fetchedAt > (c.kind === 'calendar' ? CALENDAR_TTL : CATALOG_TTL) })),
     async remote(q, signal) {
       const config = structuredClone(getControl()), revision = config.routingRevision, key = `${revision}:${q.trim().toLowerCase()}`
       // 结果缓存与在途合并: 联想接口按查询词去重, 退格重输同一词零远端开销
@@ -114,14 +133,15 @@ export function createCatalog({ state, getControl = state.get, router, executor,
       try { return await job } finally { if (searchFlights.get(key)?.job === job) searchFlights.delete(key) }
     },
     // 内存占用可观测: 长跑核对缓存不越界
-    stats: () => ({ searchCache: searchCache.size, candidates: candidates.size, searchFlights: searchFlights.size, syncFlights: flights.size }),
+    stats: () => ({ searchCache: searchCache.size, candidates: candidates.size, searchFlights: searchFlights.size, syncFlights: flights.size, syncAttempts: syncAttempts.size }),
     async ensure() {
       for (const route of getControl().routes.filter(r => ['catalog', 'calendar'].includes(r.capability))) {
         if (getControl().providers.find(p => p.id === route.primaryInstanceId)?.budget.requestsPerMinute === null) continue
         const caches = records(route.capability).filter(c => c.payload.market === route.market)
         const cache = caches[0]
-        const today = localDate(now())
-        const missing = !cache || now() - cache.fetchedAt > (route.capability === 'calendar' ? 7 * DAY : DAY) || route.capability === 'calendar' && !cache.payload.items.some(day => day.date === today)
+        const today = marketDate(route.market, now())
+        const ttl = route.capability === 'calendar' ? CALENDAR_TTL : CATALOG_TTL
+        const missing = !cache || now() - cache.fetchedAt > ttl || route.capability === 'calendar' && !cache.payload.items.some(day => day.date === today)
         if (missing) await this.sync(route.market, [route.capability])
       }
     },
@@ -134,14 +154,20 @@ export function createCatalog({ state, getControl = state.get, router, executor,
         for (const capability of capabilities) {
           try {
             const selected = router.select(capability, market)
-            const request = { market, routingRevision: config.routingRevision, startDate: localDate(now() - 7 * DAY), endDate: localDate(now() + 45 * DAY) }
+            const today = marketDate(market, now())
+            const request = { market, routingRevision: config.routingRevision, startDate: shiftDate(today, -7), endDate: shiftDate(today, 45) }
             const batch = await executor.run(selected.instance, capability, request, { signal: controller.signal })
             if (stopped || config.routingRevision !== getControl().routingRevision) fail('ROUTE_CONFLICT', '来源已变化，旧目录已丢弃', 409)
             if (!Array.isArray(batch.items) || capability === 'catalog' && batch.items.some(s => !securitySchema.safeParse(s).success || s.exchange !== market) || capability === 'calendar' && batch.items.some(d => !/^\d{4}-\d{2}-\d{2}$/.test(d.date) || typeof d.isOpen !== 'boolean')) fail('BAD_PAYLOAD', '目录来源返回不受支持的证券身份', 502)
             const items = batch.items
             await state.cache.put(`${capability}:${selected.instance.id}:${market}`, { kind: capability, source: selected.instance.id, fetchedAt: now(), payload: { routingRevision: config.routingRevision, market, complete: batch.complete ?? true, items } })
+            if (capability === 'calendar') marketStateCache.clear()
+            setBounded(syncAttempts, `${capability}:${market}`, { ok: true, at: now(), revision: config.routingRevision }, SYNC_ATTEMPT_LIMIT)
             status.push({ capability, ok: true, count: items.length }); changed()
-          } catch (e) { status.push({ capability, ok: false, error: { code: e.code, message: e.message } }) }
+          } catch (e) {
+            setBounded(syncAttempts, `${capability}:${market}`, { ok: false, at: now(), revision: config.routingRevision, error: { code: e.code, message: e.message } }, SYNC_ATTEMPT_LIMIT)
+            status.push({ capability, ok: false, error: { code: e.code, message: e.message } })
+          }
         }
         return status
       })()
@@ -150,18 +176,17 @@ export function createCatalog({ state, getControl = state.get, router, executor,
       return job
     },
     marketState(market) {
-      const date = localDate(now()), day = records('calendar').filter(c => c.payload.market === market).flatMap(c => c.payload.items).find(d => d.date === date)
-      // 没同步过日历就按市场自身的时段判断, 别让八市场统一显示「未知」; 有日历数据时以日历(含节假日)为准
-      if (!day || typeof day.isOpen !== 'boolean') return { state: sessionStateOf(market, now()) }
-      const local = new Date(now() + 8 * 60 * 60 * 1000), minutes = local.getUTCHours() * 60 + local.getUTCMinutes()
-      const at = minute => Date.parse(`${date}T00:00:00+08:00`) + minute * 60 * 1000
-      if (!day.isOpen) return { state: 'closed', nextAt: at(24 * 60 + 9 * 60 + 15) }
-      if (minutes < 9 * 60 + 15) return { state: 'preopen', nextAt: at(9 * 60 + 15) }
-      if (minutes < 9 * 60 + 25) return { state: 'auction' }
-      if (minutes < 9 * 60 + 30) return { state: 'preopen', nextAt: at(9 * 60 + 30) }
-      if (minutes < 11 * 60 + 30 || minutes >= 13 * 60 && minutes < 15 * 60) return { state: 'trading' }
-      if (minutes < 13 * 60) return { state: 'break', nextAt: at(13 * 60) }
-      return { state: 'closed', nextAt: at(24 * 60 + 9 * 60 + 15) }
+      const at = now(), date = marketDate(market, at), revision = getControl().routingRevision
+      const key = `${market}:${date}:${revision}`
+      const cached = marketStateCache.get(key)
+      if (cached && at - cached.at < MARKET_STATE_TTL) return { ...cached.value }
+      // 没同步过日历就按市场自身时段判断(仍给 nextAt, 休市不再按秒轮询); 有日历时以日历(含节假日)为准
+      const days = new Map()
+      for (const cache of records('calendar')) if (cache.payload.market === market) for (const day of cache.payload.items) days.set(day.date, day.isOpen)
+      const value = marketStateOf(market, at, days)
+      marketStateCache.set(key, { at, value })
+      while (marketStateCache.size > MARKET_STATE_CACHE_LIMIT) marketStateCache.delete(marketStateCache.keys().next().value)
+      return { ...value }
     },
     async dispose() { stopped = true; for (const c of controllers) c.abort(); candidates.clear(); await Promise.allSettled([...flights.values()]) },
   }

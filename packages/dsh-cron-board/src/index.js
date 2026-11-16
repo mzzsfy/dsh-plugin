@@ -9,7 +9,7 @@ import { join } from 'node:path'
 
 import schemastery from '@deepseek-ai/schemastery'
 
-import { withHostGate } from './route-gate.mjs'
+import { withRouteGate } from './route-gate.mjs'
 
 import { createApi } from './api.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_TICK_MS, MIN_TICK_MS, SESSION_UNAVAILABLE_REASON } from './config.mjs'
@@ -33,15 +33,17 @@ const API_PREFIX = '/api/cron-board'
 
 const SETTINGS_NS = 'cron-board'
 const TIMER_UNAVAILABLE_REASON = '宿主定时服务不可用,自动调度已停用'
-const DEFAULT_LOG_KEEP_PER_JOB = 200
+// 每任务保留份数缺省值:设置 schema 默认取此常量(不在 schema 内重复写字面量)
+export const DEFAULT_LOG_KEEP_PER_JOB = 200
 
 // 设置 schema(schemastery 声明式):tick 周期 / 全局并发 / 日志与运行元数据保留份数 / 会话投递变量掩码 / 侧边栏移入偏好
 const SETTINGS_SCHEMA = schemastery.object({
-  tickSeconds: schemastery.number().min(MIN_TICK_MS / 1000).step(1).default(DEFAULT_TICK_MS / 1000),
-  maxConcurrent: schemastery.number().min(1).step(1).default(DEFAULT_MAX_CONCURRENT),
-  logKeepPerJob: schemastery.number().min(1).step(1).default(200),
+  tickSeconds: schemastery.number().min(MIN_TICK_MS / 1000).step(1).default(DEFAULT_TICK_MS / 1000).description('调度轮询周期(秒,变更后自动按新周期重建定时器)'),
+  maxConcurrent: schemastery.number().min(1).step(1).default(DEFAULT_MAX_CONCURRENT).description('全局同时运行的执行单元上限'),
+  logKeepPerJob: schemastery.number().min(1).step(1).default(DEFAULT_LOG_KEEP_PER_JOB).description('每任务保留的运行日志份数(超出按文件修改时间裁剪)'),
   maskEnvInPrompt: schemastery.boolean().default(false).description('会话任务投递文本中环境变量打码'),
   sidebarTab: schemastery.boolean().default(false).description('看板移入 better-sidebar 侧边栏(需已安装;关闭时始终使用主界面)'),
+  showAutomationTasks: schemastery.boolean().default(false).description('看板显示宿主自动化任务(只读聚合)并隐藏侧栏重复入口;需宿主提供自动化任务服务'),
 })
 
 // 0.1.7 宿主以静态 Config 导出生成设置节表单(maintain 同构);legacy 宿主经
@@ -64,6 +66,24 @@ export function resolveDataDir(env = process.env) {
   if (override && override.trim() !== '') return override.trim()
   // 缺省从宿主 home 派生(DSH_HOME 即 .dsh 根,rs-workflow 同构)
   return join(env.DSH_HOME || join(homedir(), '.dsh'), 'cron-board')
+}
+
+// 装配惰性单例:成功后复用同一实例;失败(磁盘不可写等瞬时故障)即复位,
+// 下一个请求重新装配——否则一次失败的 rejected promise 会让后续每个请求直接 500。
+export function createRuntimeCache(build) {
+  let promise = null
+  return {
+    get() {
+      if (promise !== null) return promise
+      promise = (async () => build())().catch((error) => {
+        promise = null
+        throw error
+      })
+      // 失败由调用方处理;此处仅防未处理拒绝告警(装配链有两处 fire-and-forget 调用点)
+      promise.catch(() => {})
+      return promise
+    },
+  }
 }
 
 export function apply(ctx, config) {
@@ -91,56 +111,67 @@ export function apply(ctx, config) {
     if (ctx.logger && ctx.logger.warn) ctx.logger.warn('[cron-board] ' + SESSION_UNAVAILABLE_REASON)
   }
   // 装配惰性单例:首个请求 / timer 激活触发初始化,各组件只建一次
-  let runtimePromise = null
   // 生命周期解绑引用:惰性装配完成前给安全空实现,装配后指向真实 scheduler
   const schedulerRef = { current: { dispose() {} } }
-  const getRuntime = () => {
-    if (runtimePromise === null) {
-      runtimePromise = (async () => {
-        const store = await createStore({ dir: dataDir })
-        const logger = createLogger({ rootDir: join(dataDir, 'logs') })
-        const sessionDriver = createSessionDriver({
-          getSessionController,
-          // 分组解析为可选增强:registry 缺失(旧宿主)时 driver 干净降级为 cwd-only
-          getWorkspaceRegistry: () => ctx.get('workspaceRegistry'),
-          // 执行预设目录为可选增强:服务缺失时任务不带 preset,由宿主解析默认
-          getAgentPresets: () => ctx.get('agentPresets'),
-          agents: ctx.get('agents'),
-          sessionQuery: ctx.get('sessionQuery'),
-        })
-        const executor = createExecutor({
-          store,
-          logger,
-          sessionRunner: sessionDriver,
-          readMaxConcurrent,
-          readLogKeep: () => readNumber('logKeepPerJob', DEFAULT_LOG_KEEP_PER_JOB),
-          readMaskEnvInPrompt: () => readBoolean('maskEnvInPrompt', false),
-          logSystem: (line) => (ctx.logger && ctx.logger.warn ? ctx.logger.warn(line) : undefined),
-          onChange: notifyChange,
-        })
-        const scheduler = createScheduler({ store, executor, readTickMs, onChange: notifyChange })
-        schedulerRef.current = scheduler
-        await scheduler.recover()
-        const api = createApi({
-          store,
-          logger,
-          executor,
-          scheduler,
-          periodic,
-          reportSessionMissing,
-          readSidebarTab: () => readBoolean('sidebarTab', false),
-          updateUiSettings,
-          getAgentPresets: () => ctx.get('agentPresets'),
-          getSessionController,
-          logSystem: (line) => (ctx.logger && ctx.logger.warn ? ctx.logger.warn(line) : undefined),
-          notifyChange,
-        })
-        return { api, scheduler }
-      })()
-      runtimePromise.catch(() => {})
+  const buildRuntime = async () => {
+    const store = await createStore({ dir: dataDir })
+    const logger = createLogger({ rootDir: join(dataDir, 'logs') })
+    const sessionDriver = createSessionDriver({
+      getSessionController,
+      // 分组解析为可选增强:registry 缺失(旧宿主)时 driver 干净降级为 cwd-only
+      getWorkspaceRegistry: () => ctx.get('workspaceRegistry'),
+      // 执行预设目录为可选增强:服务缺失时任务不带 preset,由宿主解析默认
+      getAgentPresets: () => ctx.get('agentPresets'),
+      // 会话注册表与持久层查询同样使用点实时解析:服务晚到/重载后即恢复,
+      // 不在装配期一次性捕获(否则 pinned 判定与忙判定永久降级到捕获时的形态)
+      getAgents: () => ctx.get('agents'),
+      getSessionQuery: () => ctx.get('sessionQuery'),
+    })
+    const executor = createExecutor({
+      store,
+      logger,
+      sessionRunner: sessionDriver,
+      readMaxConcurrent,
+      readLogKeep: () => readNumber('logKeepPerJob', DEFAULT_LOG_KEEP_PER_JOB),
+      readMaskEnvInPrompt: () => readBoolean('maskEnvInPrompt', false),
+      logSystem: (line) => (ctx.logger && ctx.logger.warn ? ctx.logger.warn(line) : undefined),
+      onChange: notifyChange,
+    })
+    const scheduler = createScheduler({
+      store,
+      executor,
+      readTickMs,
+      onChange: notifyChange,
+      logSystem: (line) => (ctx.logger && ctx.logger.warn ? ctx.logger.warn(line) : undefined),
+    })
+    try {
+      schedulerRef.current = scheduler
+      await scheduler.recover()
+      const api = createApi({
+        store,
+        logger,
+        executor,
+        scheduler,
+        periodic,
+        reportSessionMissing,
+        readSidebarTab: () => readBoolean('sidebarTab', false),
+        readShowAutomationTasks: () => readBoolean('showAutomationTasks', false),
+        updateUiSettings,
+        getAgentPresets: () => ctx.get('agentPresets'),
+        getSessionController,
+        logSystem: (line) => (ctx.logger && ctx.logger.warn ? ctx.logger.warn(line) : undefined),
+        notifyChange,
+      })
+      return { api, scheduler }
+    } catch (error) {
+      // 半失败装配:解绑引用并回收已建执行链,重试不累积未收尾实例
+      schedulerRef.current = { dispose() {} }
+      await scheduler.dispose().catch(() => {})
+      throw error
     }
-    return runtimePromise
   }
+  const runtimeCache = createRuntimeCache(buildRuntime)
+  const getRuntime = () => runtimeCache.get()
 
   const periodic = { running: false, reason: null }
   let armTick = null
@@ -222,6 +253,15 @@ export function apply(ctx, config) {
     }
   })
 
+  // 0.1.7 节写经 loader/volatile-update 原地热更(apply 不重入):tickSeconds 变更必须重建 interval,
+  // 否则新周期只落在配置里、调度仍按旧周期走;legacy 形态由 settings scope.watch 承担同职责
+  ctx.effect(() => {
+    const off = ctx.on?.('loader/volatile-update', () => {
+      if (armTick && periodic.running) armTick()
+    })
+    return () => off?.()
+  }, 'cron-board volatile tick rebuild')
+
   ctx.inject(['settings'], (sctx) => {
     // 方法面守卫:settings 服务缺 register 面(0.1.7 已移除)即走新形态分支
     if (typeof sctx.settings.register !== 'function') {
@@ -243,7 +283,7 @@ export function apply(ctx, config) {
       const disposeRoute = ctx.webServer.register({
         kind: 'prefix',
         path: API_PREFIX,
-        handler: withHostGate(ctx, async (req, res) => {
+        handler: withRouteGate(ctx, async (req, res) => {
           try {
             const runtime = await getRuntime()
             await runtime.api.handle(req, res)

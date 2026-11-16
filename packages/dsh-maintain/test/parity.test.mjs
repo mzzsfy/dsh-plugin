@@ -41,6 +41,7 @@ function extractNumberConst(name) {
 
 const clientShouldReload = extractLogic('shouldReloadAfterRestart')
 const clientIsValidRegistryBase = extractLogic('isValidRegistryBase')
+const clientInstallDisabled = extractLogic('installDisabled')
 // 弹窗文案分支:直接注 core VERDICT 常量,证明文案语义与 host 判定同源
 const clientBuildInstallChangeLine = extractLogic('buildInstallChangeLine', {
   VERDICT_OUTDATED,
@@ -163,7 +164,12 @@ test('parity: client API 路径常量与 host 路由清单逐条一致', () => {
     CHANNEL: 'CHANNEL_URL',
     POLL_INTERVAL: 'POLL_INTERVAL_URL',
     REGISTRY_BASE: 'REGISTRY_BASE_URL',
+    SAFE_MODE_WHITELIST: 'SAFE_MODE_WHITELIST_URL',
+    PLUGINS: 'PLUGINS_URL',
     UPGRADE: 'UPGRADE_URL',
+    RECEIPT_ACK: 'RECEIPT_ACK_URL',
+    PREFLIGHT: 'PREFLIGHT_URL',
+    SAFE_MODE_RESTORE: 'SAFE_MODE_RESTORE_URL',
     RESTART: 'RESTART_URL',
     RELEASE_NOTES: 'RELEASE_NOTES_URL',
   }
@@ -174,10 +180,11 @@ test('parity: client API 路径常量与 host 路由清单逐条一致', () => {
 })
 
 // 窗口关系对拍:重启等待总时长必须大于退出延迟,否则宿主还在延迟退出窗口内客户端已报超时
-test('parity: 重启等待总时长大于宿主退出延迟', () => {
+test('parity: 重启等待总时长大于宿主退出延迟,且最多 1 分钟', () => {
   const restartTimeoutMs = extractNumberConst('RESTART_TIMEOUT_MS')
   assert.ok(restartTimeoutMs > RESTART_DELAY_MS,
     'RESTART_TIMEOUT_MS 必须大于 RESTART_DELAY_MS')
+  assert.equal(restartTimeoutMs, 60 * 1000, '重启等待总时长必须为 1 分钟')
 })
 
 test('parity: 升级观察上限覆盖受管安装超时上限(防抢跑转状态未知)', () => {
@@ -211,7 +218,72 @@ test('源码契约: 升级入口可用,确认弹窗链路完整', () => {
   assert.ok(CLIENT_SOURCE.includes("'确认安装'"), '确认弹窗必须存在且可达')
 })
 
-test('源码契约: 升级请求携带精确 targetVersion 与单次 autoRestart 意图', () => {
-  assert.ok(CLIENT_SOURCE.includes('post(UPGRADE_URL, { targetVersion, autoRestart })'), '升级请求必须携带 targetVersion 与单次 autoRestart')
+test('源码契约: 升级请求携带精确 targetVersion、单次 autoRestart、安全模式与插件同步意图', () => {
+  assert.ok(CLIENT_SOURCE.includes('post(UPGRADE_URL, { targetVersion, autoRestart, safeMode, upgradePlugins })'), '升级请求必须携带 targetVersion/autoRestart/safeMode/upgradePlugins')
   assert.ok(!CLIENT_SOURCE.includes('upgrade-template'), 'client 半区不得残留命令模板入口')
+})
+
+// 通道最新版未知时提交必 400(host 缺省目标按 dist-tags 解析,拿不到精确版本即拒绝):
+// 安装入口与确认弹窗的「开始安装」都必须一并禁用,不留"点了必失败"的路径
+test('源码契约: 安装入口在通道最新版未知时禁用', () => {
+  const idle = { channelLatest: null, upgrade: { running: false, last: null } }
+  const idleBusy = { upgrade: false }
+  assert.equal(clientInstallDisabled(idle, idleBusy, false), true, '通道目标未知必须禁用安装')
+  assert.equal(clientInstallDisabled({ ...idle, channelLatest: undefined }, idleBusy, false), true, '缺字段等价未知')
+  assert.equal(clientInstallDisabled({ ...idle, channelLatest: '' }, idleBusy, false), true, '空串等价未知')
+  // 目标就绪且无瞬态门:放行(含重装/回退场景,verdict 不参与门控)
+  assert.equal(clientInstallDisabled({ ...idle, channelLatest: '9.9.9' }, idleBusy, false), false)
+  assert.equal(clientInstallDisabled({ ...idle, channelLatest: '9.9.9', verdict: VERDICT_UNKNOWN }, idleBusy, false), false)
+  // 远端 tag 非法 semver:host 入口必 400,安装按钮必须禁用(通道明确标记非法)
+  assert.equal(clientInstallDisabled({ ...idle, channelLatest: 'not-a-version', channelLatestValid: false }, idleBusy, false), true)
+  assert.equal(clientInstallDisabled({ ...idle, channelLatest: '9.9.9', channelLatestValid: true }, idleBusy, false), false)
+  // 瞬态门:安装中/重启中/宿主侧升级进行中
+  assert.equal(clientInstallDisabled({ ...idle, channelLatest: '9.9.9' }, { upgrade: true }, false), true)
+  assert.equal(clientInstallDisabled({ ...idle, channelLatest: '9.9.9' }, idleBusy, true), true)
+  assert.equal(clientInstallDisabled({ ...idle, channelLatest: '9.9.9', upgrade: { running: true, last: null } }, idleBusy, false), true)
+  // busy 缺省(弹窗未接 busy 时)不得抛错
+  assert.equal(clientInstallDisabled({ ...idle, channelLatest: '9.9.9' }, undefined, false), false)
+  // 版本卡「安装」共用 installDisabled;确认弹窗在它之上叠加预检门 canStartInstall
+  assert.equal(CLIENT_SOURCE.split('disabled: installDisabled(status, props.busy, props.restarting)').length - 1, 1,
+    '版本卡安装按钮必须使用 installDisabled')
+  assert.ok(CLIENT_SOURCE.includes('!canStartInstall(status, props.busy, props.restarting, preflight, safeMode)'),
+    '确认弹窗开始安装必须叠加预检门')
+  assert.ok(!CLIENT_SOURCE.includes("disabled: props.busy.upgrade || props.restarting || (status.upgrade"), '不得回退到无 channelLatest 守卫的旧表达式')
+})
+
+// 追踪通道 select:持久化通道不在 tags 中时以标注项保留并选中,不得显示成另一个通道
+test('源码契约: 通道 select 选中持久化通道(含不在 tags 的标注项)', () => {
+  const selectStart = CLIENT_SOURCE.indexOf("h('select', {")
+  assert.ok(selectStart > 0, '缺少通道 select')
+  const select = CLIENT_SOURCE.slice(selectStart, CLIENT_SOURCE.indexOf('h(\'span\', { className: \'dm-meta\' }, status.channel', selectStart))
+  assert.match(select, /value: status\.channel/, '选中值必须是持久化通道')
+  assert.ok(!select.includes('tagNames[0]'), '不得回退到 tagNames[0](会显示非保存通道)')
+  assert.match(select, /不在通道表中，请重新选择|不在通道表中,请重新选择/, '标注项文案必须保留')
+})
+
+// 升级进行中重启 409:观察器必须存活,stop 只能在 POST 受理成功之后
+test('源码契约: 重启请求先受理再停升级观察器(409 时保持跟踪)', () => {
+  const start = CLIENT_SOURCE.indexOf('function onRestart()')
+  assert.ok(start > 0, '缺少 onRestart')
+  const body = CLIENT_SOURCE.slice(start, CLIENT_SOURCE.indexOf('if (status === null)', start))
+  const postIndex = body.indexOf('post(RESTART_URL')
+  const stopIndex = body.indexOf('stopUpgradeWatch()')
+  assert.ok(postIndex >= 0 && stopIndex > postIndex, 'stopUpgradeWatch 必须在重启受理成功之后调用')
+})
+
+// 设置是不常用功能,固定在面板最底部;位置回退到重启卡之前即回归
+test('源码契约: 设置卡位于重启卡之后', () => {
+  const opsIndex = CLIENT_SOURCE.indexOf('h(OpsCard, {')
+  const settingsIndex = CLIENT_SOURCE.indexOf('h(SettingsCard, {')
+  assert.ok(opsIndex > 0 && settingsIndex > opsIndex, '设置卡必须位于重启卡之后')
+})
+
+// 设置分区标题按 L1 规范 18px/600,说明行 13px;退回 14px 即视觉尺度断层回归
+test('源码契约: 分区标题为 18px/600(L1 设置类)', () => {
+  const match = CLIENT_SOURCE.match(/^ {2}'\.dm-head__title \{([^}]*)\}',$/m)
+  assert.ok(match, 'client.js 缺少 .dm-head__title 规则')
+  assert.match(match[1], /font-size:18px/, '分区标题必须 18px')
+  const weight = match[1].match(/font-weight:(\d+)/)
+  assert.equal(weight && weight[1], '600', '分区标题权重必须 600')
+  assert.ok(!/font-size:1[0-6]px/.test(match[1]), '分区标题不得回退到小字号')
 })

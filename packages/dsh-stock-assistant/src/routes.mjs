@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { StockError, fail } from './market-model.mjs'
-import { rejectUnadmitted } from './route-gate.mjs'
+import { withRouteGate } from './route-gate.mjs'
 const PREFIX = '/api/stock-assistant'
 const operationSchema = z.object({ operationId: z.uuid(), expectedRevision: z.number().int().nonnegative() })
 async function body(req) {
@@ -35,34 +35,34 @@ export function registerRoutes(webServer, app, ctx) {
   const controllers = new Set(), disposers = []
   let stopped = false
   try {
-    for (const [name, [method, action]] of Object.entries(handlers)) disposers.push(webServer.register({ kind: 'exact', path: `${PREFIX}/${name}`, async handler(req, res) {
-      if (rejectUnadmitted(ctx, req, res)) return
-      if (stopped) return json(res, 503, { ok: false, error: { code: 'STOPPED', message: '工具已停止' } })
-      if (req.method !== method) { res.setHeader('Allow', method); return json(res, 405, { ok: false, error: { code: 'METHOD_NOT_ALLOWED', message: '请求方法不支持' } }) }
-      const controller = new AbortController(); controllers.add(controller)
-      const onClose = () => { if (!res.writableEnded) controller.abort() }
-      res.on('close', onClose)
-      const timeout = name === 'provider-check' ? 60 * 1000 : name === 'catalog-sync' ? 120 * 1000 : 10 * 1000
-      let timer
-      try {
-        const input = method === 'GET' ? Object.fromEntries(new URL(req.url, 'http://local').searchParams) : await body(req)
-        if (method === 'POST' && (input === null || typeof input !== 'object' || Array.isArray(input))) fail('INVALID_REQUEST', '请求内容必须为JSON对象')
-        if (method === 'POST' && req.headers.origin) {
-          let same = false
-          try { same = new URL(req.headers.origin).host === req.headers.host } catch {}
-          if (!same) fail('CROSS_ORIGIN', '不接受跨源写请求', 403)
-        }
-        const data = await Promise.race([
-          Promise.resolve(action(input, controller.signal)),
-          new Promise((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(new StockError('TIMEOUT', '操作超时，请稍后重试', 504)) }, timeout) }),
-          new Promise((_, reject) => controller.signal.addEventListener('abort', () => reject(new StockError('CANCELLED', '操作已取消', stopped ? 503 : 504)), { once: true })),
-        ])
-        json(res, 200, { ok: true, data })
-      } catch (e) {
-        const error = e instanceof StockError ? e : new StockError('INVALID_REQUEST', e instanceof z.ZodError ? '请求参数格式错误' : '股票工具请求失败', e instanceof z.ZodError ? 400 : 500)
-        json(res, error.status, { ok: false, error: { code: error.code, message: error.message, retryable: error.retryable, retryAfterMs: error.retryAfterMs }, ...(error.revision === undefined ? {} : { revision: error.revision }), ...(e.snapshot ? { snapshot: e.snapshot } : {}) })
-      } finally { clearTimeout(timer); controllers.delete(controller); res.removeListener('close', onClose) }
-    } }))
+    for (const [name, [method, action]] of Object.entries(handlers)) {
+      // 写方法与读方法统一走共享闸门: 宿主闸门恒过; 写方法再叠同源与 JSON content-type。
+      // GET 无写副作用, 只回问宿主闸门。
+      const handle = async (req, res) => {
+        if (stopped) return json(res, 503, { ok: false, error: { code: 'STOPPED', message: '工具已停止' } })
+        if (req.method !== method) { res.setHeader('Allow', method); return json(res, 405, { ok: false, error: { code: 'METHOD_NOT_ALLOWED', message: '请求方法不支持' } }) }
+        const controller = new AbortController(); controllers.add(controller)
+        const onClose = () => { if (!res.writableEnded) controller.abort() }
+        res.on('close', onClose)
+        const timeout = name === 'provider-check' ? 60 * 1000 : name === 'catalog-sync' ? 120 * 1000 : 10 * 1000
+        let timer
+        try {
+          const input = method === 'GET' ? Object.fromEntries(new URL(req.url, 'http://local').searchParams) : await body(req)
+          if (method === 'POST' && (input === null || typeof input !== 'object' || Array.isArray(input))) fail('INVALID_REQUEST', '请求内容必须为JSON对象')
+          const data = await Promise.race([
+            Promise.resolve(action(input, controller.signal)),
+            // 超时错误随 abort reason 一起下发: 即使 abort 监听先被同步派发, 也拿到 TIMEOUT 而不是 CANCELLED
+            new Promise((_, reject) => { timer = setTimeout(() => { const error = new StockError('TIMEOUT', '操作超时，请稍后重试', 504); controller.abort(error); reject(error) }, timeout) }),
+            new Promise((_, reject) => controller.signal.addEventListener('abort', () => reject(controller.signal.reason instanceof StockError ? controller.signal.reason : new StockError('CANCELLED', '操作已取消', stopped ? 503 : 504)), { once: true })),
+          ])
+          json(res, 200, { ok: true, data })
+        } catch (e) {
+          const error = e instanceof StockError ? e : new StockError('INVALID_REQUEST', e instanceof z.ZodError ? '请求参数格式错误' : '股票工具请求失败', e instanceof z.ZodError ? 400 : 500)
+          json(res, error.status, { ok: false, error: { code: error.code, message: error.message, retryable: error.retryable, retryAfterMs: error.retryAfterMs }, ...(error.details === undefined ? {} : { details: error.details }), ...(error.revision === undefined ? {} : { revision: error.revision }), ...(e.snapshot ? { snapshot: e.snapshot } : {}) })
+        } finally { clearTimeout(timer); controllers.delete(controller); res.removeListener('close', onClose) }
+      }
+      disposers.push(webServer.register({ kind: 'exact', path: `${PREFIX}/${name}`, handler: withRouteGate(ctx, handle) }))
+    }
   } catch (e) { for (const dispose of disposers.reverse()) dispose(); throw e }
   return () => { stopped = true; for (const dispose of disposers.reverse()) dispose(); for (const c of controllers) c.abort(); controllers.clear() }
 }

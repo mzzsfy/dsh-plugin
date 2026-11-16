@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module'
+import { PROTOCOL, SUPPORTED_PROTOCOLS } from './protocol.mjs'
 
 // ws 解析失败只停总线,不拖垮宿主启动:消费方在 apply 里硬 import 本模块,
 // 任何顶层静态依赖缺失都会让整棵插件树的激活一起失败
@@ -14,10 +15,8 @@ try {
 const REGISTRY_KEY = '__dshCommonTools'
 const BUS_ROUTE = '/api/bus/ws'
 // 与 package.json 同锁(仓库测试守):注册表按此版本决定哪份 host 半区持有传输
-const PKG_VERSION = '0.5.1'
-// 帧协议版本:client 在连接首帧上报,host 回支持集;集合无交集即停用总线
-const PROTOCOL = 1
-const SUPPORTED_PROTOCOLS = [PROTOCOL]
+const PKG_VERSION = '0.5.2'
+// 帧协议常量集中定义于 protocol.mjs,client 半区字面量由仓库测试与之互锁
 const MAX_BYTES = 1024 * 1024
 const HEARTBEAT_MS = 30 * 1000
 
@@ -32,11 +31,39 @@ function invoke(listener, value) {
   } catch (error) { console.warn('[dsh-common-tools] 回调失败:', error) }
 }
 
+// 根 payload 可序列化判定:帧对象由本模块构造,根 payload 是唯一业务键,其余
+// 键值不受调用方控制;JSON.stringify 丢弃 undefined/函数/Symbol 值后根 payload
+// 键不出现,故复用生成文本判定即可,不解析整帧(发布热路径)。不变量:根 payload
+// 在文本中以 `"payload":` 出现当且仅当它被真正序列化。
+function assertSerializablePayload(value, text) {
+  if (Object.hasOwn(value, 'payload') && !text.includes('"payload":')) {
+    throw new TypeError('common-tools: payload 必须可序列化为 JSON')
+  }
+}
+
 function encode(value) {
   const text = JSON.stringify(value)
-  if (Object.hasOwn(value, 'payload') && !Object.hasOwn(JSON.parse(text), 'payload')) throw new TypeError('common-tools: payload 必须可序列化为 JSON')
+  assertSerializablePayload(value, text)
   if (Buffer.byteLength(text) > MAX_BYTES) throw new Error('common-tools: 消息超过大小上限')
   return text
+}
+
+// Origin↔Host 同源比较与全仓 route-gate 一致:大小写不敏感;无 Origin 的非浏览器
+// 调用可发布,Origin 非法或 Host 缺失一律 fail-closed
+function canPublishFrom(origin, host) {
+  if (origin === undefined) return true
+  try {
+    return typeof host === 'string' && new URL(origin).host.toLowerCase() === host.toLowerCase()
+  } catch {
+    return false
+  }
+}
+
+// 闸门返回值收敛为状态码:只认整数 400-599,其余(null/0/对象/Promise/NaN)按 403 收敛;
+// undefined 表示放行。与全仓 route-gate 同口径,原始返回值不得拼进状态行
+function rejectionStatus(rejection) {
+  if (rejection === undefined) return undefined
+  return Number.isInteger(rejection) && rejection >= 400 && rejection <= 599 ? rejection : 403
 }
 
 const CHANGE_INTERVAL_MS = 1000
@@ -48,7 +75,12 @@ export function createChangeNotifier(publish) {
     const delay = nextAt - Date.now()
     if (delay > 0) { timer = setTimeout(() => { timer = null; refresh() }, delay); return }
     nextAt = Date.now() + CHANGE_INTERVAL_MS
-    publish()
+    try {
+      publish()
+    } catch (error) {
+      // 定时器回调没有调用方兜底:不就地隔离会变成 uncaughtException,拖垮宿主进程
+      console.warn('[dsh-common-tools] 变更通知失败:', error)
+    }
   }
   return { refresh, dispose() { active = false; clearTimeout(timer); timer = null } }
 }
@@ -72,6 +104,7 @@ function install(ctx, version) {
   const token = Symbol(pluginName)
   const stops = new Set()
   reg.callers.set(token, pluginName)
+  let created = false
   const newer = (a, b) => {
     const left = a.split('.').map(Number), right = b.split('.').map(Number)
     for (let i = 0; i < left.length; i++) {
@@ -80,25 +113,49 @@ function install(ctx, version) {
     return false
   }
   if (reg.active === null || newer(version, reg.active.ver)) {
-    reg.active?.teardown()
-    reg.active = createTransport(ctx, version, reg.state)
+    const previous = reg.active
+    previous?.teardown()
+    try {
+      reg.active = createTransport(ctx, version, reg.state)
+      created = true
+    } catch (error) {
+      // 旧传输已拆、新传输未立:注册表不能留死传输,失败调用者的 token 也不得残留;
+      // 否则后续同版本消费者会复用死传输,publish 静默成功但零连接
+      reg.active = null
+      reg.callers.delete(token)
+      console.warn('[dsh-common-tools] 总线传输接管失败, 本次调用降级为 noop:', error?.message ?? error)
+      return { publish() {}, subscribe: () => () => {}, onPresence: () => () => {} }
+    }
   }
   const own = off => {
     const stop = () => { if (stops.delete(stop)) off() }
     stops.add(stop)
     return stop
   }
-  ctx.effect(() => () => {
+  try {
+    ctx.effect(() => () => {
+      reg.callers.delete(token)
+      for (const stop of [...stops]) stop()
+      if (reg.callers.size === 0) {
+        reg.active?.teardown()
+        reg.active = null
+        reg.state = { listeners: new Map(), presence: new Map() }
+      }
+    }, 'common-tools WS 生命周期')
+  } catch (error) {
+    // 生命周期挂载失败时本次调用没有可用门面:撤掉 token;若传输由本次创建且无人共享,
+    // 一并拆除,避免路由和 WebSocketServer 残留
     reg.callers.delete(token)
-    for (const stop of [...stops]) stop()
-    if (reg.callers.size === 0) {
-      reg.active.teardown()
+    if (created && reg.callers.size === 0) {
+      reg.active?.teardown()
       reg.active = null
       reg.state = { listeners: new Map(), presence: new Map() }
     }
-  }, 'common-tools WS 生命周期')
+    throw error
+  }
   const active = () => {
     if (!reg.callers.has(token)) throw new Error('common-tools: 插件已卸载')
+    if (reg.active === null) throw new Error('common-tools: 总线传输不可用')
     return reg.active
   }
   return {
@@ -166,10 +223,7 @@ function createTransport(ctx, ver, state) {
     notify(connection.plugins)
   }
   const accept = (socket, req) => {
-    let canPublish = req.headers.origin === undefined
-    if (!canPublish) {
-      try { canPublish = new URL(req.headers.origin).host === req.headers.host } catch { canPublish = false }
-    }
+    const canPublish = canPublishFrom(req.headers.origin, req.headers.host)
     const connection = { socket, plugins: new Set(), alive: true, canPublish }
     connections.add(connection)
     socket.on('error', () => { socket.terminate(); remove(connection) })
@@ -205,20 +259,29 @@ function createTransport(ctx, ver, state) {
       socket.close(1008, 'invalid frame')
     })
   }
-  const dispose = webServer.registerUpgrade({
-    path: BUS_ROUTE,
-    handler(req, socket, head) {
-      // upgrade 不经宿主 /api 闸门(只按 exact pathname 分发),自己回问一次;
-      // 先例 dsh-api-gateway 的 admitConnection,这里只需判定,不接管 socket
-      const rejection = admit(req)
-      if (rejection !== undefined) {
-        socket.write(`HTTP/1.1 ${rejection} ${rejection === 401 ? 'Unauthorized' : 'Forbidden'}\r\n\r\n`)
-        socket.destroy()
-        return
-      }
-      server.handleUpgrade(req, socket, head, websocket => accept(websocket, req))
-    },
-  })
+  let dispose
+  try {
+    dispose = webServer.registerUpgrade({
+      path: BUS_ROUTE,
+      handler(req, socket, head) {
+        // upgrade 不经宿主 /api 闸门(只按 exact pathname 分发),自己回问一次;
+        // 先例 dsh-api-gateway 的 admitConnection,这里只需判定,不接管 socket
+        // 原始返回值只作放行判定,状态行一律用收敛后的码,不得拼接原始值
+        const rejection = admit(req)
+        if (rejection !== undefined) {
+          const status = rejectionStatus(rejection)
+          socket.write(`HTTP/1.1 ${status} ${status === 401 ? 'Unauthorized' : 'Forbidden'}\r\n\r\n`)
+          socket.destroy()
+          return
+        }
+        server.handleUpgrade(req, socket, head, websocket => accept(websocket, req))
+      },
+    })
+  } catch (error) {
+    // 路由注册失败时不留半建 WebSocketServer
+    server.close()
+    throw error
+  }
   const heartbeat = setInterval(() => {
     for (const connection of connections) {
       if (!connection.alive) { connection.socket.terminate(); remove(connection); continue }
@@ -227,6 +290,7 @@ function createTransport(ctx, ver, state) {
     }
   }, HEARTBEAT_MS)
   heartbeat.unref()
+  let closed = false
   return {
     ver,
     count,
@@ -237,7 +301,10 @@ function createTransport(ctx, ver, state) {
       }
     },
     teardown() {
-      dispose()
+      // 幂等:注册表回滚、重复卸载与测试直调都可能重复到达
+      if (closed) return
+      closed = true
+      dispose?.()
       clearInterval(heartbeat)
       for (const connection of [...connections]) { connection.socket.terminate(); remove(connection) }
       server.close()
@@ -247,4 +314,4 @@ function createTransport(ctx, ver, state) {
 
 export const VERSION = PKG_VERSION
 export const PROTOCOLS = SUPPORTED_PROTOCOLS
-export const __test = { install }
+export const __test = { install, canPublishFrom, rejectionStatus }

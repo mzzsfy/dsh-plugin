@@ -29,8 +29,7 @@
     }
   },
   "scripts": {
-    "test": "node --test \"test/*.test.mjs\"",
-    "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
+    "test": "node --test \"test/*.test.mjs\""
   },
   "publishConfig": {
     "access": "public",
@@ -44,20 +43,15 @@
   "engines": {
     "node": ">=22"
   },
-  "dependencies": {
-    "@earendil-works/pi-ai": "^0.85.1"
-  },
   "peerDependencies": {
     "@deepseek-ai/schemastery": "^3.18.1"
-  },
-  "devDependencies": {
-    "@deepseek-ai/cordis": "4.0.2",
-    "@deepseek-ai/schemastery": "3.18.2"
   },
   "files": [
     "src",
     "test",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "兼容性测试.md",
+    "装饰器方案-BDD.md"
   ]
 }

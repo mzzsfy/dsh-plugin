@@ -30,7 +30,7 @@ class BrokenStorage {
 // 以注入的 stub 加载真实 src/client.js,返回捕获的模块对象、页内通知捕获表与 window 桩。
 // shortTimers:闪烁常量替换为毫秒级,配合真实定时器验证硬顶与重入(node:test mock.timers
 // 拦截不到 new Function 沙箱里的 timer,不能用于本 loader)
-function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOverride, shortTimers, timerImpl = setTimeout, clearTimerImpl = clearTimeout, intervalImpl = setInterval, clearIntervalImpl = clearInterval, dateImpl = Date, reactImpl, indexedDB, abortSignalImpl = AbortSignal, notificationImpl, currentSessionId = null }) {
+function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOverride, shortTimers, timerImpl = setTimeout, clearTimerImpl = clearTimeout, intervalImpl = setInterval, clearIntervalImpl = clearInterval, dateImpl = Date, reactImpl, indexedDB, abortSignalImpl = AbortSignal, notificationImpl, currentSessionId = null, sessionsById = null }) {
   const raw = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8').replace('__test: { poll,', '__test: { startTitleBlink, playAudible, poll,')
   assert.ok(raw.includes('__test: { startTitleBlink, playAudible, poll,'), '测试钩子注入锚点失效:src/client.js 的 __test 行格式已变,核对替换锚点')
   const source = shortTimers
@@ -108,7 +108,7 @@ function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOv
   const sessionListeners = new Set(), opened = []
   let current = currentSessionId
   const services = {
-    sessions: { list: { getSnapshot: () => ({ byId: current === null ? {} : { [current]: { id: current, retainedBy: { mainView: 1 } } } }),
+    sessions: { list: { getSnapshot: () => (sessionsById !== null ? { byId: sessionsById } : { byId: current === null ? {} : { [current]: { id: current, retainedBy: { mainView: 1 } } } }),
       subscribe(fn) { sessionListeners.add(fn); return () => sessionListeners.delete(fn) } } },
     uiWorkspace: { openSession: id => opened.push(id) },
   }
@@ -1098,6 +1098,62 @@ test('F22 Given 审批提醒登记 When 仅投影刷新不含单元 Then 登记�
   assert.equal(shown.length, initialShown, '全程未到期不补发')
 })
 
+test('P2-47 Given A窗登记审批提醒 When B窗写跨窗已处理信号 Then A窗撤销登记不再补发', async () => {
+  const units = [
+    { id: 'u-cross', category: 'approval', text: '[dsh] 等待审批: 会话甲', sessionId: 'root', session: '会话甲' },
+  ]
+  const { mod, shown, window: winStub } = loadClient({
+    storage: new FakeStorage(),
+    payload: { units, soundMapping: {}, version: 1 },
+    document: { title: 'dsh' },
+  })
+  mod.__test.start()
+  await mod.__test.poll()
+  await mod.__test.poll()
+  assert.equal(mod.__test.pendingReminders.has('u-cross'), true, 'A窗已登记二次提醒')
+  const listeners = winStub.listeners.storage || []
+  assert.ok(listeners.length > 0, '跨窗已处理监听必须随激活注册')
+  for (const listener of [...listeners]) listener({ key: 'turn-notify:session-handled:root', newValue: String(Date.now()) })
+  assert.equal(mod.__test.pendingReminders.has('u-cross'), false, '他窗已处理事实必须撤销本地待发提醒')
+  assert.equal(shown.length, 1, '撤销后不补发')
+})
+
+test('P2-47 Given 本窗处理会话 When 登记二次提醒 Then 写跨窗已处理时间戳信号', async () => {
+  const units = [
+    { id: 'u-signal', category: 'ask', text: '[dsh] AI 提问: 会话甲', sessionId: 'root', session: '会话甲' },
+  ]
+  const { mod, window: winStub } = loadClient({
+    storage: new FakeStorage(),
+    payload: { units, soundMapping: {}, version: 1 },
+    document: { title: 'dsh' },
+  })
+  mod.__test.start()
+  await mod.__test.poll()
+  await mod.__test.poll()
+  assert.equal(mod.__test.pendingReminders.has('u-signal'), true)
+  mod.__test.markSessionHandled('root')
+  assert.equal(mod.__test.pendingReminders.has('u-signal'), false)
+  const signal = winStub.localStorage.getItem('turn-notify:session-handled:root')
+  assert.ok(signal !== null && Number.isFinite(Number(signal)), '已处理信号须为可触发 storage 事件的时间戳值')
+})
+
+test('P2-47 Given 他窗写入完成标记 When storage 事件到达 Then 对应通知的提醒撤销', async () => {
+  const units = [
+    { id: 'u-done-signal', category: 'approval', text: '[dsh] 等待审批: 会话甲', sessionId: 'root', session: '会话甲' },
+  ]
+  const { mod, window: winStub } = loadClient({
+    storage: new FakeStorage(),
+    payload: { units, soundMapping: {}, version: 1 },
+    document: { title: 'dsh' },
+  })
+  mod.__test.start()
+  await mod.__test.poll()
+  await mod.__test.poll()
+  assert.equal(mod.__test.pendingReminders.has('u-done-signal'), true)
+  for (const listener of [...(winStub.listeners.storage || [])]) listener({ key: 'turn-notify:done:u-done-signal', newValue: '1' })
+  assert.equal(mod.__test.pendingReminders.has('u-done-signal'), false, '完成标记跨窗到达即撤销对应提醒')
+})
+
 test('Given 短标题先于长前缀行匹配 When 挂类 Then 短标题精确命中自身行', async () => {  // 长标题行在前,短标题是长标题的子串:短标题通知必须挂到全等行,不得被子串误吸
   const dom = makeSidebarDom([
     { sessionId: 'long', leafText: '修复通知插件长轮询问题' },
@@ -1257,6 +1313,10 @@ test('Given 偏好面板 When 选择样式与预览 Then 保存本机偏好并�
   button(render(), '提醒方式').props.onClick()
   const select = nodes(render()).find(node => node.props['aria-label'] === '页内提示样式')
   assert.equal(select.props.value, 'toast')
+  const options = nodes(select).filter(node => node && node.type === 'option')
+  assert.deepEqual(options.map(node => [node.props.value, node.children[0]]), [
+    ['toast', '标准浮条'], ['panel', '主题卡片'], ['minimal', '极简细条'], ['accent', '状态强调'], ['progress', '倒计时'],
+  ], '下拉必须与库内的形态值域同序同标签,值域漂移时此处会红')
   const requestsBefore = fetched.length
   select.props.onChange({ target: { value: 'panel' } })
   assert.equal(fetched.length, requestsBefore, '样式只存本机,不发 HTTP 请求')
@@ -1296,6 +1356,30 @@ test('Given 未配置或非法样式 When 通知送达 Then 使用标准浮条',
   }
 })
 
+test('Given 五种样式 When 通知送达与预览 Then 逐值透传且非法值居中回落', async () => {
+  for (const appearance of ['toast', 'panel', 'minimal', 'accent', 'progress']) {
+    const storage = new FakeStorage({ 'turn-notify:toast-appearance': appearance })
+    const { mod, shown } = loadClient({ storage, payload: { units: [{ id: 'style-' + appearance, category: 'completed', text: '通知' }], version: 1 } })
+    await mod.__test.poll()
+    await mod.__test.poll()
+    assert.equal(shown.at(-1).opts.appearance, appearance)
+    mod.__test.previewPageNotification()
+    assert.equal(shown.at(-1).opts.appearance, appearance, appearance + ' 预览同样采用当前偏好')
+  }
+})
+
+test('Given 六类事件 When 页内通知送达 Then 状态色按分类映射', async () => {
+  const expected = { completed: 'ok', error: 'error', interrupted: 'warn', 'max-tokens': 'warn', approval: 'warn', ask: 'info' }
+  const { CATEGORIES } = await import('../src/core.mjs')
+  assert.deepEqual(Object.keys(expected).sort(), [...CATEGORIES].sort(), '映射表必须与核心分类清单同键,新增分类要同步给状态色')
+  for (const [category, kind] of Object.entries(expected)) {
+    const storage = new FakeStorage()
+    const { mod, shown } = loadClient({ storage, payload: { units: [{ id: 'kind-' + category, category, text: '通知' }], version: 1 } })
+    await mod.__test.poll()
+    await mod.__test.poll()
+    assert.equal(shown.at(-1).opts.kind, kind, category + ' 的状态色')
+  }
+})
 test('Given 本机选择主题卡片 When 通知与刷新后预览 Then 共用持久偏好且摘要换行与直达保留', async () => {
   const storage = new FakeStorage({ 'turn-notify:toast-appearance': 'panel' })
   const { mod, shown, reload } = loadClient({ storage, payload: {
@@ -1305,10 +1389,12 @@ test('Given 本机选择主题卡片 When 通知与刷新后预览 Then 共用�
   await mod.__test.poll()
   assert.equal(shown[0].text, '任务完成\n耗时 12 秒')
   assert.equal(shown[0].opts.appearance, 'panel')
+  assert.equal(shown[0].opts.kind, 'ok', '完成事件走成功色')
   assert.equal(shown[0].opts.holdMs, 6 * 1000)
   assert.equal(typeof shown[0].opts.onClick, 'function')
   reload().__test.previewPageNotification()
   assert.equal(shown.at(-1).opts.appearance, 'panel')
+  assert.equal(shown.at(-1).opts.kind, 'ok', '预览按完成态着色')
   storage.setItem('turn-notify:toast-appearance', 'toast')
   mod.__test.previewPageNotification()
   assert.equal(shown.at(-1).opts.appearance, 'toast', '已加载窗口每次呈现读取最新偏好')
@@ -1331,6 +1417,7 @@ test('Given 审批已送达后更换样式 When 二次提醒 Then 采用最新�
   reminder.callback()
   assert.equal(shown.at(-1).text, '[再次提醒] 等待审批')
   assert.equal(shown.at(-1).opts.appearance, 'panel')
+  assert.equal(shown.at(-1).opts.kind, 'warn', '审批走警示色')
 })
 
 test('页内提示通道独立开关:关闭后投影事件不再弹页内提示', async () => {

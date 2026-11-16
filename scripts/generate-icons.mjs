@@ -26,7 +26,6 @@ export const ICON_MAP = {
   'dsh-keep-working': 'loop',
   'dsh-llm-pi-gateway': 'globe',
   'dsh-maintain': 'wrench',
-  'dsh-rs-workflow': 'flow',
   'dsh-session-manager': 'archive',
   'dsh-settings-nav-icons': 'tune',
   'dsh-shared-terminal': 'cards',

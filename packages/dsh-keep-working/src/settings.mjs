@@ -10,6 +10,7 @@ export const NAMESPACE = 'keep-working'
 /** 面板暴露的字段,其余字段留给 cordis 配置。 */
 export const PANEL_FIELDS = [
   'paused',
+  'enforceClosure',
   'graceMs',
   'cooldownMs',
   'maxConsecutive',
@@ -19,6 +20,7 @@ export const PANEL_FIELDS = [
   'classify',
   'continueText',
   'continueTextInterrupted',
+  'restartText',
   'continueTextSilent',
   'continueTextMaxTokens',
   'closureText',

@@ -13,11 +13,21 @@ export const POLL_INTERVAL_SEC = 10 * 60
 export function createBackoff({ baseSec }) {
   let failures = 0
   let nextRetryAt = null
+  let lastSeenSec = null
+  const observe = (nowSec) => {
+    // 回拨只平移退避截止点,保留 failures 历史;1 秒抖动也不得把已累计的
+    // 指数退避清零,大幅回拨则按同样的剩余时长在新时钟上恢复。
+    if (lastSeenSec !== null && nowSec < lastSeenSec && nextRetryAt !== null) {
+      nextRetryAt += nowSec - lastSeenSec
+    }
+    lastSeenSec = nowSec
+  }
   return {
     get nextRetryAt() {
       return nextRetryAt
     },
     onFailure(nowSec) {
+      observe(nowSec)
       failures += 1
       const delaySec = baseSec * Math.pow(2, Math.min(failures - 1, Math.log2(BACKOFF_CAP_MULTIPLE)))
       nextRetryAt = nowSec + delaySec
@@ -27,6 +37,7 @@ export function createBackoff({ baseSec }) {
       nextRetryAt = null
     },
     isBlocked(nowSec) {
+      observe(nowSec)
       return nextRetryAt !== null && nowSec < nextRetryAt
     },
   }
@@ -41,14 +52,17 @@ export function lastQuerySecOf(last) {
 }
 
 // 时间驱动到点判定:lastQuerySec 为 null(从未查询或旧数据缺时刻)即到点。
+// nowSec 小于 lastQuerySec 说明系统时钟回拨,不能按负差值等待一个完整回拨幅度;
+// 将回拨视为到点,先恢复轮询,待成功查询后按新钟重新计时。
 export function isDue({ lastQuerySec, nowSec, intervalSec }) {
   if (lastQuerySec === null) return true
+  if (nowSec < lastQuerySec) return true
   return nowSec - lastQuerySec >= intervalSec
 }
 
 // 受限并发执行:worker 池共享游标逐项取号(取号同步完成,无交错),单任务
-// 失败/慢速只占用一个 worker 位,不拖满整轮;每任务结果经 task 感知,失败由
-// 调用方在 task 内消化(本函数恒 resolve)
+// 失败/慢速只占用一个 worker 位,不拖满整轮;单任务 reject 会经 Promise.all
+// 向上传播(调用方须在 task 内消化预期失败,runQuery 即如此)
 export async function runLimited(items, limit, task) {
   let cursor = 0
   const worker = async () => {

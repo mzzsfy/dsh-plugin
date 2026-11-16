@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -13,10 +13,14 @@ import { createLogger } from '../src/logger.mjs'
 import { createExecutor } from '../src/executor.mjs'
 import { createApi } from '../src/api.mjs'
 import { nextRunAtOf } from '../src/cron.mjs'
+import { DEFAULT_LOG_TAIL_LINES } from '../src/config.mjs'
+import { withRouteGate } from '../src/route-gate.mjs'
 
-async function makeApi(t, overrides = {}) {
+async function makeApi(t, { executorOptions, prepare, ...overrides } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'cron-board-api-'))
-  const store = await createStore({ dir: join(dir, 'data') })
+  const dataDir = join(dir, 'data')
+  if (prepare) await prepare(dataDir)
+  const store = await createStore({ dir: dataDir })
   // 清理前等写链排空:终态只保证内存可见,收尾写(任务卡回填、日志裁剪)提交晚于 flush,
   // rmdir 与其赛跑会 ENOTEMPTY;retries 吸收(镜像 executor/scheduler 测试同款参数)
   t.after(async () => {
@@ -24,7 +28,7 @@ async function makeApi(t, overrides = {}) {
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   })
   const logger = createLogger({ rootDir: join(dir, 'logs') })
-  const executor = createExecutor({ store, logger, readMaxConcurrent: () => 2 })
+  const executor = createExecutor({ store, logger, readMaxConcurrent: () => 2, ...executorOptions })
   // 会话服务默认给镜像宿主的最小方法面(create/prompt/modelCatalog),需要缺失态时逐用例覆盖
   const sessionController = {
     create: async () => ({ sessionId: 's-api' }),
@@ -32,7 +36,7 @@ async function makeApi(t, overrides = {}) {
     modelCatalog: async () => ({ groups: [], failures: [] }),
   }
   const api = createApi({ store, logger, executor, getAgentPresets: () => null, getSessionController: () => sessionController, ...overrides })
-  return { store, api }
+  return { store, api, logger }
 }
 function makeReq(method, body) {
   const req = new EventEmitter()
@@ -81,28 +85,34 @@ async function callRaw(api, { method, path, headers = {}, body }) {
   return res
 }
 
-test('写路由守卫:跨源 Origin 403,非 JSON 415,同源 JSON 放行', async (t) => {
+test('写路由守卫:装配层 withRouteGate 对写方法统一执行同源与 JSON 门', async (t) => {
   const { store, api } = await makeApi(t)
+  // 生产路径由 index.js 以 withRouteGate 包裹 api.handle;此处复现同一装配
+  const gated = { handle: withRouteGate({ get: () => undefined }, (req, res) => api.handle(req, res)) }
   // Given 一条合法建任务请求
   const body = JSON.stringify({ name: 'n', command: 'echo 1', kind: 'shell', schedule: '* * * * *' })
   // When 跨源 Origin
-  const cross = await callRaw(api, { method: 'POST', path: '/api/cron-board/jobs', headers: { origin: 'http://evil.example', 'content-type': 'application/json' }, body })
+  const cross = await callRaw(gated, { method: 'POST', path: '/api/cron-board/jobs', headers: { origin: 'http://evil.example', 'content-type': 'application/json' }, body })
   // Then 403 且不落库
   assert.equal(cross.status, 403)
   assert.equal(store.jobs.list().length, 0)
   // When 同源但 text/plain(drive-by 表单载荷)
-  const plain = await callRaw(api, { method: 'POST', path: '/api/cron-board/jobs', headers: { origin: 'http://localhost:3000', 'content-type': 'text/plain' }, body })
-  // Then 415 且不落库
-  assert.equal(plain.status, 415)
+  const plain = await callRaw(gated, { method: 'POST', path: '/api/cron-board/jobs', headers: { origin: 'http://localhost:3000', 'content-type': 'text/plain' }, body })
+  // Then 400 且不落库(共享闸门统一状态码)
+  assert.equal(plain.status, 400)
   assert.equal(store.jobs.list().length, 0)
   // When 同源 application/json
-  const ok = await callRaw(api, { method: 'POST', path: '/api/cron-board/jobs', headers: { origin: 'http://localhost:3000', 'content-type': 'application/json; charset=utf-8' }, body })
+  const ok = await callRaw(gated, { method: 'POST', path: '/api/cron-board/jobs', headers: { origin: 'http://localhost:3000', 'content-type': 'application/json; charset=utf-8' }, body })
   // Then 正常受理
   assert.equal(ok.status, 200)
   assert.equal(store.jobs.list().length, 1)
-  // When 无 Origin 的本地 CLI 调用(无 content-type)
-  const cli = await callRaw(api, { method: 'POST', path: '/api/cron-board/jobs', body })
-  // Then 放行(与全仓口径一致)
+  // When 无 Origin 的本地 CLI 调用但未带 content-type
+  const cliNoType = await callRaw(gated, { method: 'POST', path: '/api/cron-board/jobs', body })
+  // Then 写方法一律要求 JSON(无 Origin 也要给类型)
+  assert.equal(cliNoType.status, 400)
+  // When 无 Origin 且显式 application/json
+  const cli = await callRaw(gated, { method: 'POST', path: '/api/cron-board/jobs', headers: { 'content-type': 'application/json' }, body })
+  // Then 放行
   assert.equal(cli.status, 200)
 })
 
@@ -182,6 +192,86 @@ test('envs 路由:导出默认仅启用行,备注折叠为行尾注释', async (
   assert.equal(res.payload.text, 'ON=1 #note\n')
 })
 
+test('envs 路由:导出/导入无损往返(多值、值内 #、备注转义)', async (t) => {
+  const { store, api } = await makeApi(t)
+  // Given 三类容易在文本格式中丢失的值:多行、值内 ` #`、首尾空白与含 # 的备注
+  await store.envs.create({ name: 'MULTI', value: 'a\nb\nc', remarks: '', enabled: true, multi: true })
+  await store.envs.create({ name: 'HASH', value: 'x # keep', remarks: 'note', enabled: true })
+  await store.envs.create({ name: 'SPACE', value: '  padded  ', remarks: 'r # x', enabled: true })
+  // When 导出再导入(覆盖)
+  const exported = await call(api, 'GET', '/api/cron-board/envs/export')
+  const preview = await call(api, 'POST', '/api/cron-board/envs/import', { text: exported.payload.text })
+  assert.equal(preview.payload.invalid, 0)
+  const imported = await call(api, 'POST', '/api/cron-board/envs/import', { text: exported.payload.text, apply: true, overwrite: true })
+  assert.equal(imported.status, 200)
+  // Then 值、备注、multi 全部还原
+  const rows = store.envs.list()
+  const byName = (name) => rows.find((row) => row.name === name)
+  assert.equal(byName('MULTI').value, 'a\nb\nc')
+  assert.equal(byName('MULTI').multi, true)
+  assert.equal(byName('HASH').value, 'x # keep')
+  assert.equal(byName('HASH').remarks, 'note')
+  assert.equal(byName('SPACE').value, '  padded  ')
+  assert.equal(byName('SPACE').remarks, 'r # x')
+})
+
+test('E4: 单行 multi 导出带 [multi] 标志,覆盖导入后多值语义不丢', async (t) => {
+  const { store, api } = await makeApi(t)
+  // Given 单行值的多值行:值里没有换行,文本形态本身无法推断 multi
+  await store.envs.create({ name: 'SINGLE', value: 'a,b', remarks: '备注', enabled: true, multi: true })
+  await store.envs.create({ name: 'PLAIN', value: 'a,b', remarks: '', enabled: true })
+  // When 导出
+  const exported = await call(api, 'GET', '/api/cron-board/envs/export')
+  const lines = exported.payload.text.split('\n').filter(Boolean)
+  // Then 多值行强制加引号并带标志,普通行保持裸值(标志不污染普通值)
+  assert.deepEqual(lines, ['SINGLE="a,b" [multi] #备注', 'PLAIN=a,b'])
+  // When 覆盖导入
+  const imported = await call(api, 'POST', '/api/cron-board/envs/import', { text: exported.payload.text, apply: true, overwrite: true })
+  assert.equal(imported.status, 200)
+  // Then multi 与值/备注全部还原(旧实现丢了 multi,UI 退化为单行)
+  const rows = store.envs.list()
+  const single = rows.find((row) => row.name === 'SINGLE')
+  assert.equal(single.multi, true)
+  assert.equal(single.value, 'a,b')
+  assert.equal(single.remarks, '备注')
+  assert.equal(rows.find((row) => row.name === 'PLAIN').multi, false)
+})
+
+test('E4: 无标志的旧导出文本仍按值形态推断 multi(文本格式向下兼容)', async (t) => {
+  const { api } = await makeApi(t)
+  // Given 旧版导出文本:多行值只有引号转义,没有 [multi] 标志
+  const text = 'OLD="a\\nb"\nONE="x"\n'
+  const preview = await call(api, 'POST', '/api/cron-board/envs/import', { text })
+  // Then 带换行的值判 multi,单行值判普通(不得因新格式把旧文本读坏)
+  assert.deepEqual(preview.payload.parsed.map((row) => [row.name, row.value, row.multi]), [
+    ['OLD', 'a\nb', true],
+    ['ONE', 'x', false],
+  ])
+  // And 值里的同名字样不是标志(无引号值不做标志解析)
+  const literal = await call(api, 'POST', '/api/cron-board/envs/import', { text: 'K=a [multi] b\nQ="x [multi]"\n' })
+  assert.deepEqual(literal.payload.parsed.map((row) => [row.name, row.value, row.multi]), [
+    ['K', 'a [multi] b', false],
+    ['Q', 'x [multi]', false],
+  ])
+})
+
+test('envs 路由:集合损坏时只读列表返回 broken/warning 而不是静默空表', async (t) => {
+  // Given envs.json 是合法 JSON 对象(旧实现会显示空列表且无提示)
+  const { api } = await makeApi(t, {
+    prepare: async (dataDir) => {
+      await mkdir(dataDir, { recursive: true })
+      await writeFile(join(dataDir, 'envs.json'), '{"name":"旧数据"}', 'utf8')
+    },
+  })
+  // When 读环境变量列表
+  const res = await call(api, 'GET', '/api/cron-board/envs')
+  // Then 空表但带 broken/warning
+  assert.equal(res.status, 200)
+  assert.deepEqual(res.payload.items, [])
+  assert.deepEqual(res.payload.broken, ['envs'])
+  assert.match(res.payload.warning, /损坏/)
+})
+
 test('envs 路由:multi 新建折叠 values 数组为换行存储(client 契约)', async (t) => {
   // Given 客户端 multi 提交形态:name+values 数组
   const { store, api } = await makeApi(t)
@@ -246,6 +336,30 @@ test('jobs 路由:非法 cron 表达式被拒', async (t) => {
   assert.match(res.payload.error, /cron/)
 })
 
+test('jobs 路由:无未来触发点的表达式 POST/PATCH 一律 400', async (t) => {
+  const { store, api } = await makeApi(t)
+  // Given 一个合法但永不触发的表达式
+  const impossible = '0 0 30 2 *'
+  // When POST
+  const created = await call(api, 'POST', '/api/cron-board/jobs', { name: '永不', kind: 'shell', command: 'x', schedule: impossible })
+  // Then 400,不落库
+  assert.equal(created.status, 400)
+  assert.match(created.payload.error, /未来触发点/)
+  assert.equal(store.jobs.list().length, 0)
+  // When PATCH 已存在任务改成永不触发
+  const job = await store.jobs.create({ name: '正常', kind: 'shell', command: 'x', schedule: '* * * * *', enabled: true, timeoutMs: 1000 })
+  const patched = await call(api, 'PATCH', '/api/cron-board/jobs/' + job.id, { schedule: impossible })
+  // Then 400 且原 schedule 不变
+  assert.equal(patched.status, 400)
+  assert.match(patched.payload.error, /未来触发点/)
+  assert.equal(store.jobs.get(job.id).schedule, '* * * * *')
+  // Then 旧数据已存在无触发点任务时,停用/改名等维护性 PATCH 仍可操作(不锁死)
+  const legacy = await store.jobs.create({ name: '旧永不', kind: 'shell', command: 'x', schedule: impossible, enabled: true, timeoutMs: 1000, nextRunAt: null })
+  const disabled = await call(api, 'PATCH', '/api/cron-board/jobs/' + legacy.id, { enabled: false })
+  assert.equal(disabled.status, 200)
+  assert.equal(store.jobs.get(legacy.id).enabled, false)
+})
+
 test('jobs 路由:编辑保存按当前 schedule 重算 nextRunAt', async (t) => {
   const { api } = await makeApi(t)
   // Given 任务按工作日 09:55 排期
@@ -300,6 +414,33 @@ test('jobs 路由:手动运行端到端——RunRecord 产生、日志可读、�
   assert.equal(record.trigger, 'manual')
   const logRes = await call(api, 'GET', '/api/cron-board/runs/' + runIds[0] + '/log')
   assert.match(logRes.payload.text, /e2e-marker/)
+})
+
+test('jobs 路由:DELETE 遇到无法终止的在途会话返回 409,任务保留且不误删(C3)', async (t) => {
+  // Given 一个在途会话运行没有取消句柄,settle deadline 缩到 50ms
+  let markStarted
+  const runnerStarted = new Promise((resolve) => { markStarted = resolve })
+  const { store, api } = await makeApi(t, {
+    executorOptions: {
+      settleTimeoutMs: 50,
+      sessionRunner: { run: () => { markStarted(); return { promise: new Promise(() => {}) } } },
+    },
+  })
+  const job = await store.jobs.create({
+    name: '在途', kind: 'session', prompt: 'x', schedule: '* * * * *',
+    enabled: true, session: { mode: 'fresh' },
+  })
+  // When 发起运行并删除(等 runner 真正开始:running 落库早于 runner 启动,不能作为在飞判据)
+  const runRes = await call(api, 'POST', '/api/cron-board/jobs/' + job.id + '/run')
+  assert.equal(runRes.status, 200)
+  await runnerStarted
+  await waitFor(() => store.runs.list(job.id).some((row) => row.status === 'running'))
+  const del = await call(api, 'DELETE', '/api/cron-board/jobs/' + job.id)
+  // Then 删除被明确拒绝,任务与运行记录仍在(后续不会静默投递)
+  assert.equal(del.status, 409)
+  assert.match(del.payload.error, /在途运行未能终止/)
+  assert.ok(store.jobs.get(job.id), '任务不得被删除')
+  assert.equal(store.runs.list(job.id)[0].status, 'running')
 })
 
 test('jobs 路由:同名多值展开为多条 RunRecord 与多次运行', async (t) => {
@@ -364,7 +505,7 @@ test('status 路由:报告调度器与 timer 可用性', async (t) => {
   assert.equal(res.payload.timerRunning, true)
   assert.deepEqual(res.payload.scheduler, { active: 1, queued: 2 })
   assert.equal(res.payload.nextAt, 1750000000000)
-  assert.deepEqual(res.payload.ui, { sidebarTab: false })
+  assert.deepEqual(res.payload.ui, { sidebarTab: false, showAutomationTasks: false })
 })
 
 test('status 路由:ui.sidebarTab 透出用户侧边栏移入偏好', async (t) => {
@@ -380,9 +521,15 @@ test('ui-settings 路由:布尔补丁经 updateUiSettings 写入并回读', asyn
   // Given 写入桩记录补丁,读取桩翻转返回(模拟 settings.update 后生效);
   // 写入桩 async 返回 true 镜像持久化成功契约(宿主 update 为异步面)
   let stored = false
+  let storedAutomation = false
   const { api } = await makeApi(t, {
-    updateUiSettings: async (patch) => { if (typeof patch.sidebarTab === 'boolean') { stored = patch.sidebarTab; return true } return false },
+    updateUiSettings: async (patch) => {
+      if (typeof patch.sidebarTab === 'boolean') stored = patch.sidebarTab
+      if (typeof patch.showAutomationTasks === 'boolean') storedAutomation = patch.showAutomationTasks
+      return true
+    },
     readSidebarTab: () => stored,
+    readShowAutomationTasks: () => storedAutomation,
   })
   // When POST 开关开
   const res = await call(api, 'POST', '/api/cron-board/ui-settings', { sidebarTab: true })
@@ -391,6 +538,40 @@ test('ui-settings 路由:布尔补丁经 updateUiSettings 写入并回读', asyn
   assert.equal(res.payload.ok, true)
   assert.equal(res.payload.ui.sidebarTab, true)
   assert.equal(stored, true)
+})
+
+test('ui-settings 路由:showAutomationTasks 布尔补丁独立持久化,不回滚 sidebarTab', async (t) => {
+  // Given 两项偏好各自独立,只有 showAutomationTasks 被切换
+  let storedSidebar = true
+  let storedAutomation = false
+  const { api } = await makeApi(t, {
+    updateUiSettings: async (patch) => {
+      if (typeof patch.sidebarTab === 'boolean') storedSidebar = patch.sidebarTab
+      if (typeof patch.showAutomationTasks === 'boolean') storedAutomation = patch.showAutomationTasks
+      return true
+    },
+    readSidebarTab: () => storedSidebar,
+    readShowAutomationTasks: () => storedAutomation,
+  })
+  // When POST 只写 showAutomationTasks
+  const res = await call(api, 'POST', '/api/cron-board/ui-settings', { showAutomationTasks: true })
+  // Then 回读两项均正确,sidebarTab 保持原值
+  assert.equal(res.status, 200)
+  assert.equal(res.payload.ok, true)
+  assert.equal(res.payload.ui.showAutomationTasks, true)
+  assert.equal(res.payload.ui.sidebarTab, true)
+  assert.equal(storedSidebar, true)
+  assert.equal(storedAutomation, true)
+})
+
+test('status 路由:ui.showAutomationTasks 透出自动化任务只读聚合偏好', async (t) => {
+  // Given readShowAutomationTasks 桩返回开
+  const { api } = await makeApi(t, { readShowAutomationTasks: () => true })
+  // When GET /status
+  const res = await call(api, 'GET', '/api/cron-board/status')
+  // Then ui.showAutomationTasks=true(client 据此加加载宿主目录)
+  assert.equal(res.payload.ui.showAutomationTasks, true)
+  assert.equal(res.payload.ui.sidebarTab, false)
 })
 
 test('ui-settings 路由:无效字段 400,服务缺失降级 ok=false', async (t) => {
@@ -682,8 +863,7 @@ test('status 路由:暴露宿主时区偏移 serverTzOffset', async (t) => {
   assert.equal(typeof res.payload.serverTzOffset, 'number')
 })
 
-test('runs 路由:无参数查全量,带 jobId 查单任务', async (t) => {
-  // Given 两个任务各有一条运行记录
+test('runs 路由:无参数查全量,带 jobId 查单任务', async (t) => {  // Given 两个任务各有一条运行记录
   const { store, api } = await makeApi(t)
   const j1 = await store.jobs.create({ name: 'j1', kind: 'shell', command: 'x', schedule: '* * * * *', enabled: true, timeoutMs: 1000 })
   const j2 = await store.jobs.create({ name: 'j2', kind: 'shell', command: 'x', schedule: '* * * * *', enabled: true, timeoutMs: 1000 })
@@ -700,6 +880,159 @@ test('runs 路由:无参数查全量,带 jobId 查单任务', async (t) => {
   // Then 仅该任务记录
   assert.equal(mine.payload.items.length, 1)
   assert.equal(mine.payload.items[0].jobId, j1.id)
+})
+
+test('jobs 路由:PATCH 只认显式字段,他处变更不被旧快照回滚', async (t) => {
+  // Given 编辑期间任务被别处停用(自动禁用/开关/状态回填)
+  const { store, api } = await makeApi(t)
+  const created = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: '原名', kind: 'shell', command: 'echo x', schedule: '0 9 * * *', enabled: true, concurrency: 3,
+  })
+  const jobId = created.payload.id
+  await store.jobs.update(jobId, { enabled: false, nextRunAt: 1750000000000 })
+  // When 编辑器只提交 dirty 字段(不带 enabled/concurrency/command)
+  const patched = await call(api, 'PATCH', '/api/cron-board/jobs/' + jobId, { name: '改名' })
+  // Then 改名生效,停用与并发上限保持别处写入的现状
+  assert.equal(patched.status, 200)
+  assert.equal(patched.payload.name, '改名')
+  assert.equal(patched.payload.enabled, false)
+  assert.equal(patched.payload.concurrency, 3)
+  // 未携带 schedule 的局部更新不得推进 nextRunAt(否则临近的待触发运行被推走)
+  assert.equal(store.jobs.get(jobId).nextRunAt, 1750000000000)
+})
+
+test('jobs 路由:PATCH 携带过期 updatedAt 冲突 409 且不落库', async (t) => {
+  // Given 客户端打开编辑器时拿到的行版本
+  const { store, api } = await makeApi(t)
+  const created = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: '并发', kind: 'shell', command: 'echo x', schedule: '0 9 * * *', enabled: true,
+  })
+  const jobId = created.payload.id
+  const staleAt = created.payload.updatedAt
+  // When 他处已改(时间戳需可区分,避免同毫秒写入使锁失效)
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  await store.jobs.update(jobId, { enabled: false })
+  assert.notEqual(store.jobs.get(jobId).updatedAt, staleAt, '他处写入必须推进 updatedAt')
+  const conflict = await call(api, 'PATCH', '/api/cron-board/jobs/' + jobId, { name: '覆盖', updatedAt: staleAt })
+  // Then 409 且未落库
+  assert.equal(conflict.status, 409)
+  assert.match(conflict.payload.error, /已被其他操作修改/)
+  assert.equal(store.jobs.get(jobId).name, '并发')
+  // When 携带当前版本重试
+  const fresh = await call(api, 'PATCH', '/api/cron-board/jobs/' + jobId, {
+    name: '覆盖', updatedAt: store.jobs.get(jobId).updatedAt,
+  })
+  // Then 受理
+  assert.equal(fresh.status, 200)
+  assert.equal(fresh.payload.name, '覆盖')
+})
+
+test('jobs 路由:并发两个 PATCH 携带同一基线,仅一个成功另一个 409(CAS)', async (t) => {
+  // Given 客户端 A/B 同时打开编辑器拿到同一 updatedAt
+  const { store, api } = await makeApi(t)
+  const created = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: '并发', kind: 'shell', command: 'echo x', schedule: '0 9 * * *', enabled: true,
+  })
+  const jobId = created.payload.id
+  const baseline = created.payload.updatedAt
+  // When 两个 PATCH 同时到达(比较与写入若分离会双 200 后写覆盖先写)
+  const [first, second] = await Promise.all([
+    call(api, 'PATCH', '/api/cron-board/jobs/' + jobId, { name: 'A', updatedAt: baseline }),
+    call(api, 'PATCH', '/api/cron-board/jobs/' + jobId, { name: 'B', updatedAt: baseline }),
+  ])
+  // Then 恰一个 200、一个 409,库内名字属于成功方
+  assert.deepEqual([first.status, second.status].sort(), [200, 409])
+  const winner = first.status === 200 ? 'A' : 'B'
+  assert.equal(store.jobs.get(jobId).name, winner)
+})
+
+test('jobs 路由:运行回填(nextRunAt/lastStatus)后旧基线编辑仍受理', async (t) => {
+  // Given 编辑器打开后调度器推进了 nextRunAt/状态回填
+  const { store, api } = await makeApi(t)
+  const created = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: '回填', kind: 'shell', command: 'echo x', schedule: '0 9 * * *', enabled: true,
+  })
+  const jobId = created.payload.id
+  const baseline = created.payload.updatedAt
+  await store.jobs.updateRuntime(jobId, { nextRunAt: 1750000000000, lastRunAt: 1750000000000, lastStatus: 'success' })
+  // When 保存改名仍使用打开时的 updatedAt
+  const patched = await call(api, 'PATCH', '/api/cron-board/jobs/' + jobId, { name: '改名', updatedAt: baseline })
+  // Then 不被运行态变化误判 409
+  assert.equal(patched.status, 200)
+  assert.equal(patched.payload.name, '改名')
+  // Then 运行期字段未被旧快照覆盖
+  assert.equal(store.jobs.get(jobId).nextRunAt, 1750000000000)
+  assert.equal(store.jobs.get(jobId).lastStatus, 'success')
+})
+
+test('jobs 路由:concurrency 显式 null 清空键(表达不限并发)', async (t) => {
+  const { store, api } = await makeApi(t)
+  const created = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: '清并发', kind: 'shell', command: 'x', schedule: '* * * * *', concurrency: 3,
+  })
+  assert.equal(created.payload.concurrency, 3)
+  // When 客户端把并发输入清空(提交 null)
+  const cleared = await call(api, 'PATCH', '/api/cron-board/jobs/' + created.payload.id, { concurrency: null })
+  // Then 键真删(不是残留 undefined 的幽灵键)
+  assert.equal(cleared.status, 200)
+  assert.equal('concurrency' in cleared.payload, false)
+  assert.equal('concurrency' in store.jobs.get(created.payload.id), false)
+})
+
+test('envs 路由:导入走单次集合写,不再逐行 create/remove(半导入不可回滚)', async (t) => {
+  // Given 已有集合与逐行写计数器
+  const { store, api } = await makeApi(t)
+  await store.envs.create({ name: 'OLD', value: 'x', remarks: '', enabled: true })
+  let rowWrites = 0
+  const rawCreate = store.envs.create.bind(store.envs)
+  const rawRemove = store.envs.remove.bind(store.envs)
+  store.envs.create = (...args) => { rowWrites += 1; return rawCreate(...args) }
+  store.envs.remove = (...args) => { rowWrites += 1; return rawRemove(...args) }
+  const text = Array.from({ length: 5 }, (_, index) => 'K' + index + '=' + index).join('\n') + '\n'
+  // When 覆盖导入 5 行
+  const committed = await call(api, 'POST', '/api/cron-board/envs/import', { text, apply: true, overwrite: true })
+  store.envs.create = rawCreate
+  store.envs.remove = rawRemove
+  // Then 一次集合写完成清空 + 全部追加
+  assert.equal(committed.status, 200)
+  assert.equal(committed.payload.imported, 5)
+  assert.equal(rowWrites, 0, '导入不得逐行写(原先 N 行 2N 次写)')
+  assert.deepEqual(store.envs.list().map((row) => row.name), ['K0', 'K1', 'K2', 'K3', 'K4'])
+})
+
+test('runs 路由:日志默认只回尾部窗口,truncated 标记与 tail=all 全文', async (t) => {
+  const { store, api, logger } = await makeApi(t)
+  const job = await store.jobs.create({ name: 'log', kind: 'shell', command: 'x', schedule: '* * * * *', enabled: true, timeoutMs: 1000 })
+  const record = await store.runs.create({ jobId: job.id, trigger: 'manual', status: 'success' })
+  const total = DEFAULT_LOG_TAIL_LINES + 5
+  const lines = Array.from({ length: total }, (_, index) => 'L' + index)
+  const lineCount = (text) => text.split('\n').filter(Boolean).length
+  // Given 一份超过缺省窗口的日志
+  await logger.append(job.id, record.runId, lines.join('\n') + '\n')
+  // When 缺省 GET(不带 tail)
+  const def = await call(api, 'GET', '/api/cron-board/runs/' + record.runId + '/log')
+  // Then 只回最后 DEFAULT_LOG_TAIL_LINES 行,并标记截断与窗口行数
+  assert.equal(def.status, 200)
+  assert.equal(lineCount(def.payload.text), DEFAULT_LOG_TAIL_LINES)
+  assert.ok(def.payload.text.startsWith('L5\n'), '缺省窗口必须从截断后的首行开始')
+  assert.equal(def.payload.truncated, true)
+  assert.equal(def.payload.tailLines, DEFAULT_LOG_TAIL_LINES)
+  // When 显式窗口
+  const small = await call(api, 'GET', '/api/cron-board/runs/' + record.runId + '/log?tail=5')
+  assert.equal(lineCount(small.payload.text), 5)
+  assert.equal(small.payload.truncated, true)
+  // When 显式全文(导出用)
+  const full = await call(api, 'GET', '/api/cron-board/runs/' + record.runId + '/log?tail=all')
+  assert.equal(lineCount(full.payload.text), total)
+  assert.equal(full.payload.truncated, false)
+  assert.equal(full.payload.tailLines, null)
+  // When 短日志走缺省窗口
+  const short = await store.runs.create({ jobId: job.id, trigger: 'manual', status: 'success' })
+  await logger.append(job.id, short.runId, 'only\n')
+  const shortRes = await call(api, 'GET', '/api/cron-board/runs/' + short.runId + '/log')
+  // Then 未截断
+  assert.equal(shortRes.payload.text, 'only\n')
+  assert.equal(shortRes.payload.truncated, false)
 })
 
 // 轮询等待:超时抛错(测试内时间敏感操作统一出口)
@@ -721,3 +1054,131 @@ function waitFor(pick, timeoutMs = 10 * 1000) {
     tick()
   })
 }
+
+// 收敛守卫:悬挂型缺陷必须在测试里变成红,不能靠测试超时兜底
+function settlesWithin(promise, ms = 2000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('处理链未在 ' + ms + 'ms 内收敛(悬挂)')), ms)
+    promise.then(
+      () => { clearTimeout(timer); resolve() },
+      (error) => { clearTimeout(timer); reject(error) },
+    )
+  })
+}
+
+test('M3-1: 请求体读到一半客户端断开(aborted/close)以 400 收敛,不悬挂且监听清空', async (t) => {
+  const { store, api } = await makeApi(t)
+  // Given 一个只读了一半请求体就断开的请求(客户端 socket 已消失,不会再有任何事件)
+  const disconnected = async (emitBreak) => {
+    const res = { status: null }
+    res.writeHead = (status) => { res.status = status }
+    res.end = (text) => { res.raw = text }
+    const req = new EventEmitter()
+    req.method = 'POST'
+    req.complete = false
+    req.headers = { host: 'localhost:3000', 'content-type': 'application/json', 'content-length': String(4 * 1024) }
+    req.url = 'http://localhost/api/cron-board/jobs'
+    const handling = api.handle(req, res)
+    process.nextTick(() => {
+      req.emit('data', Buffer.from('{"name":"half'))
+      emitBreak(req)
+    })
+    await settlesWithin(handling)
+    return { req, res }
+  }
+  // When 只发 aborted(连接被中断;运行时未把该中断升级成 req error 的情形)
+  const aborted = await disconnected((req) => req.emit('aborted'))
+  // Then 400 且归因为读取中断,不是非法 JSON,也不得悬挂
+  assert.equal(aborted.res.status, 400)
+  assert.deepEqual(JSON.parse(aborted.res.raw), { error: '请求体读取中断' })
+  // And 监听清空
+  assert.equal(aborted.req.listenerCount('data'), 0)
+  assert.equal(aborted.req.listenerCount('end'), 0)
+  assert.equal(aborted.req.listenerCount('error'), 0)
+  assert.equal(aborted.req.listenerCount('aborted'), 0)
+  assert.equal(aborted.req.listenerCount('close'), 0)
+  // When 只发 close(complete=false,请求体未读完)
+  const closed = await disconnected((req) => req.emit('close'))
+  // Then 同样是 400 收敛
+  assert.equal(closed.res.status, 400)
+  assert.deepEqual(JSON.parse(closed.res.raw), { error: '请求体读取中断' })
+  assert.equal(store.jobs.list().length, 0)
+})
+
+// 预占窗口夹具:把 runs.create 挂起,直到测试显式放行(复现 DELETE 与 dispatch 并发)
+function suspendRunCreate(store) {
+  const rawCreate = store.runs.create.bind(store.runs)
+  let release
+  let markEntered
+  const entered = new Promise((resolve) => { markEntered = resolve })
+  const gate = new Promise((resolve) => { release = resolve })
+  store.runs.create = async (data) => {
+    markEntered()
+    await gate
+    return rawCreate(data)
+  }
+  return {
+    entered,
+    release,
+    restore: () => { store.runs.create = rawCreate },
+  }
+}
+
+test('E2: 删除窗口内手动运行以 409 拒绝,运行记录不落库(无孤儿 run)', async (t) => {
+  // Given 一个任务,预占记录被挂在 create 的 await 内
+  const { store, api } = await makeApi(t)
+  const job = await store.jobs.create({
+    name: '窗口', kind: 'shell', command: 'x', schedule: '* * * * *', enabled: true, timeoutMs: 1000,
+  })
+  const suspended = suspendRunCreate(store)
+  // When 运行请求先进入预占窗口,删除在同一窗口内完成
+  const dispatching = call(api, 'POST', '/api/cron-board/jobs/' + job.id + '/run')
+  await suspended.entered
+  const del = await call(api, 'DELETE', '/api/cron-board/jobs/' + job.id)
+  suspended.release()
+  const runRes = await dispatching
+  suspended.restore()
+  // Then 删除成功;运行请求明确 409(旧实现回 200 + runId,留下 jobId 已不存在的 queued→cancelled 行)
+  assert.equal(del.status, 200)
+  assert.equal(runRes.status, 409)
+  assert.match(runRes.payload.error, /删除中|不存在/)
+  assert.deepEqual(store.runs.list(job.id), [])
+})
+
+test('E3: 删除持久化失败后解除「删除中」拒绝态,任务仍可运行', async (t) => {
+  const { store, api } = await makeApi(t)
+  const job = await store.jobs.create({
+    name: '写失败', kind: 'shell', command: `${process.execPath} -e ""`,
+    schedule: '* * * * *', enabled: true, timeoutMs: 10 * 1000,
+  })
+  // Given 删除持久化失败(集合损坏/磁盘满同形态)
+  const rawRemove = store.jobs.remove.bind(store.jobs)
+  store.jobs.remove = async () => { throw new Error('数据文件已损坏已备份,已暂停写入以防数据丢失') }
+  const del = await call(api, 'DELETE', '/api/cron-board/jobs/' + job.id)
+  store.jobs.remove = rawRemove
+  // Then 删除失败且任务保留
+  assert.equal(del.status, 400)
+  assert.ok(store.jobs.get(job.id), '任务不得在地面失败时消失')
+  // Then 拒绝态已释放:紧接着运行照常受理并执行(旧实现恒 400「任务删除中」直到重启)
+  const runRes = await call(api, 'POST', '/api/cron-board/jobs/' + job.id + '/run')
+  assert.equal(runRes.status, 200)
+  await waitFor(() => store.runs.list(job.id).some((row) => row.status === 'success'))
+})
+
+test('E3: 日志目录清理失败不翻案删除成败(任务行已删即回 ok)', async (t) => {
+  // Given 一个删除成功后清日志必失败的 logger(任务行移除与日志清理是两个面)
+  const brokenLogger = {
+    append: async () => {},
+    clear: async () => {},
+    prune: async () => {},
+    removeJob: async () => { throw new Error('EBUSY: 目录被占用') },
+  }
+  const { store, api } = await makeApi(t, { logger: brokenLogger })
+  const job = await store.jobs.create({ name: '日志残留', kind: 'shell', command: 'x', schedule: '* * * * *', enabled: true, timeoutMs: 1000 })
+  // When 删除
+  const del = await call(api, 'DELETE', '/api/cron-board/jobs/' + job.id)
+  // Then 任务已删除即回 ok:再删只会 400「任务不存在」,不能把收尾失败翻成删除失败
+  assert.equal(del.status, 200)
+  assert.deepEqual(del.payload, { ok: true })
+  assert.equal(store.jobs.get(job.id), undefined)
+})

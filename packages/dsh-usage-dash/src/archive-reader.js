@@ -26,6 +26,20 @@ function isHostRefusal(error) {
   return HOST_REFUSAL_PATTERN.test(error instanceof Error ? error.message : String(error))
 }
 
+// 直读档案没有宿主句柄的 inheritedEventCount 元数据;fork/子会话的继承
+// 边界由事件流中的 session/end-seed(inherited=true) 标记,标记 seq 即 cut。
+// 找不到标记按 0 处理,保持旧档案与普通会话的全量重放。
+function directInheritedEventCount(log) {
+  let count = 0
+  for (const event of log.events) {
+    if (event?.type === 'session/end-seed' && event.data?.inherited === true
+      && typeof event.seq === 'number' && Number.isSafeInteger(event.seq) && event.seq >= 0) {
+      count = event.seq
+    }
+  }
+  return count
+}
+
 // 合并宿主枚举与磁盘直扫的会话集:宿主 header 已知时携带派生标记,
 // 直读补齐项(旧宿主不枚举的新代文件名)标记未知,由 readLog 阶段判定
 function mergeSessionIds(known) {
@@ -84,7 +98,11 @@ class HandleArchiveReader {
       if (isHostRefusal(error)) {
         try {
           const log = readSessionLogDirect(id)
-          return { inheritedEventCount: 0, events: log.events, derived: isDerivedSessionHeader(log.header) }
+          return {
+            inheritedEventCount: directInheritedEventCount(log),
+            events: log.events,
+            derived: isDerivedSessionHeader(log.header),
+          }
         } catch {
           throw error
         }
@@ -124,7 +142,11 @@ class InspectArchiveReader {
       if (isHostRefusal(error)) {
         try {
           const log = readSessionLogDirect(id)
-          return { inheritedEventCount: 0, events: log.events, derived: isDerivedSessionHeader(log.header) }
+          return {
+            inheritedEventCount: directInheritedEventCount(log),
+            events: log.events,
+            derived: isDerivedSessionHeader(log.header),
+          }
         } catch {
           throw error
         }

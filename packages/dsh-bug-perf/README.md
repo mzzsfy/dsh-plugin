@@ -10,18 +10,18 @@
 |------|--------|----------|------|
 | session/follow 重建合并 | `restartCoalesce` | discussion #11272:每次 assistant rebaseline 都全量重建 `session/follow` | 包装 `RemoteStream.prototype.restart`,同一 stream 在窗口内的多次重启只保留一次尾随执行;`restart()` 无参数,最新一次可代表期间全部重建请求 |
 | 终端输出看门狗 | `terminalWatchdog` | discussion #11271:并发 `terminal/attach` 流释放后 UI 输出冻结 | 监控 `webTerminals` 视图;本端曾持有写权、输出停滞超过阈值且仍持有 attach 流时调用 `view.connect()` 重连,冷却期内不重复 |
-| 终端输出合并 | `terminalCoalesce` | 宿主对每个 PTY chunk 广播一帧、客户端逐帧 ack 并逐帧提交渲染,吞吐被单帧成本锁死(实测 `seq 1 20000` 仅约 182 行/秒,且内容越多越慢) | 宿主半区包装 `BrowserTerminal#output`:有订阅者时把连续小块按窗口(默认 8ms)合并成一次广播,累积到 32KB 立即刷出;无订阅者直通;进程退出与卸载前排空;逐帧 ack 的根因仍在宿主 |
+| 终端输出合并 | `terminalCoalesce` | 宿主对每个 PTY chunk 广播一帧、客户端逐帧 ack 并逐帧提交渲染,吞吐被单帧成本锁死(实测 `seq 1 20000` 仅约 182 行/秒,且内容越多越慢) | 宿主半区包装 `BrowserTerminal#output`:有订阅者时把连续小块按窗口(默认 8ms)合并成一次广播,累积到 32KB 立即刷出;无订阅者直通;开关在每次派发读取,运行中关闭立即排空并直通、重新开启无需重装;启动时关闭也会先装好现有终端,无终端时低频探测补装;进程退出与卸载前排空;逐帧 ack 的根因仍在宿主 |
 | 会话流保活 | `socketKeepAlive` | 公网/反代链路下,宿主短周期心跳把仍可用的连接判为失联 | 在 `/api/remote.mux` 连接空闲(客户端自己没有上行帧)时发送一条随机 streamId 的 `item` 帧;宿主对任意入帧刷新存活标记,未知 streamId 的 item 被忽略;仅覆盖补丁安装之后新建的连接,发过保活帧的连接被协议级关闭码关闭时累计,累计两次即熔断、健康存活后清零 |
 | 任务状态流上限 | `jobStreamLimit` | 会话行与其它消费方(会话头、文件夹运行标记、子会话树等)各订阅一条常驻 `job/list` 流(实测 361 条 job 流),job 变化时宿主逐条推全量帧,主线程出现数百毫秒长任务,页面越用越卡 | 默认窗口只放行未归档会话前 `base` 条;当前视图的会话与点击过的会话不占窗口(否则窗口被名册占满后打开会话看不到任务状态);归档会话与超出窗口的会话只在点击时订阅;总数到 `max` 后淘汰最先加入的一条 |
 | 会话停滞自愈 | `stuckSession` | 连接重建期间会话停在 loading 且长时间无任何进展 | 会话流无有效消息行且直接子节点是加载提示时进入停滞计时;计时期间节点数、有效行数或最后一行文本长度任一变化都视为进展并重新计时,页面不可见或定时器被挂起时作废本轮计时;持续无进展超过阈值才调用宿主 `connection.reconnect()` 主动重建连接(中止当前 generation 并立即重试,不刷新页面、不丢草稿),重建后重新计时;连续多次无效才显示提示条与刷新入口 |
-| 会话列表瘦身 | `listSlim` | `session/list` 为每个会话下发完整投影快照(上下文请求头、回合大纲等),会话多时单次响应数十 MB、服务端重建要数十秒,每次打开页面都重来一遍 | 宿主半区包装 `sessionController.list`:只下发列表行消费的投影字段(`title` / `sessionListMetadata` / `inbox` / `modelSelection` / `tokenUsage`),结果缓存;会话增删即时失效,TTL 兜底标题漂移;被裁字段经会话详情接口完整返回;非 owner Remote 主体不读写缓存、每次透传原方法;关闭时包装保留、透传原方法;响应形状不符时原样透传 |
+| 会话列表瘦身 | `listSlim` | `session/list` 为每个会话下发完整投影快照(上下文请求头、回合大纲等),会话多时单次响应数十 MB、服务端重建要数十秒,每次打开页面都重来一遍 | 宿主半区包装 `sessionController.list`:只下发白名单里的 9 个投影字段(`title` / `sessionListMetadata` / `inbox` / `modelSelection` / `tokenUsage` / `subagentCatalog` / `subagentTiming` / `subagent` / `forkLineage`,见 `KEEP_PROJECTIONS`),结果缓存;会话增删即时失效,TTL 兜底标题漂移;被裁字段经会话详情接口完整返回;非 owner Remote 主体不读写缓存、每次透传原方法;关闭时包装保留、透传原方法;响应形状不符时原样透传 |
 | 历史窗口收敛 | `sessionWindow` | 宿主首屏与重连窗口固定为 500 条消息 / 至少 2 轮(`HISTORY_PAGE_OPTIONS`),工具密集的会话一轮就有上千事件:实测首屏可达 17MB(含 context-manager 的 fork 预取,当时 2000 条/页、现 100 条/页)、上万事件,客户端一次渲染 55 个条目、4176 个节点,打开与重连出现 1.3–2.1s 长任务 | 宿主半区包装 `sessionController.follow` / `page` / `events`,把 `maxMessages`、`turnWindow.minMessages`、`minTurns` 都按配置收敛(只降不升),并保证 `minMessages ≤ maxMessages`;首屏规模实际由 `minMessages` 决定,`maxMessages` 只兜上限;请求身份字段不动,关闭、形状不符或读取配置抛错时透传原请求 |
 
 这些补丁的根因仍在宿主内部(`cancellableStream` 丢弃同 tick 的 `next()` 值、terminal-controller 队列交错、终端输出逐帧 ack 与逐帧渲染、assistant rebaseline 状态机、会话流心跳判死与重建成本叠加、列表投影无按需裁剪),本插件只消除用户可观察到的后果,不改变根因。
 
 ## 配置
 
-每个功能一个独立开关;阈值同时可在设置页调整。设置卡片以官方插件详情页为外壳,注册到 `plugins.bundle.config` 与 `settings.plugin.item` 槽,卡片内容自绘;未保存的修改有提示,保存成功就地回显,不新增独立设置页或导航项。
+每个功能一个独立开关;阈值同时可在设置页调整。设置卡片以官方插件详情页为外壳,注册到插件管理页的 bundle 配置槽 `plugins.bundle.config`(键为包名;`settings.plugin.item` 不在当前宿主槽位契约里,不注册),卡片内容自绘;未保存的修改有提示,保存成功就地回显,不新增独立设置页或导航项。
 
 ```yaml
 - id: bug-perf
@@ -74,6 +74,8 @@
 | `terminalWatchdog.checkMs` | `2000` | 检查周期(毫秒);下限 250,上限 60000 |
 | `terminalWatchdog.stallMs` | `8000` | 输出静默多久判定停滞;下限 1000,上限 600000 |
 | `terminalWatchdog.cooldownMs` | `60000` | 同一视图两次自愈的最小间隔;下限 1000,上限 3600000 |
+| `terminalCoalesce.enabled` | `true` | 关闭后已安装的包装保留但每次输出直通,重新开启无需重装;启动时关闭也会先装好现有终端,无终端时低频探测补装 |
+| `terminalCoalesce.windowMs` | `8` | 合并窗口(毫秒);窗口越大帧数越少,代价是输出延迟;下限 4,上限 500 |
 | `socketKeepAlive.enabled` | `true` | 关闭后不包装 `WebSocket`,不发送任何保活帧 |
 | `socketKeepAlive.intervalMs` | `1500` | 空闲多久发一条保活帧;下限 500,上限 60000 |
 | `jobStreamLimit.enabled` | `true` | 关闭后不限制 `job/list` 订阅数 |
@@ -90,10 +92,10 @@
 | `sessionWindow.maxMessages` | `200` | 单次历史页的消息预算上限;请求预算更小时保持调用方值,不再放大;下限 20,上限 500 |
 | `sessionWindow.minMessages` | `30` | 轮边界下限的覆盖值;首屏规模实际由它决定,调小直接减少首屏消息条数与渲染量;请求值更小时保持调用方值;下限 5,上限 200 |
 | `sessionWindow.minTurns` | `2` | 宿主轮边界下限的覆盖值:只向下调整,配置大于 2 不生效;仅在轮边界主导切窗时减少带回的轮数;下限 1,上限 50 |
-| `diag.enabled` | `false` | 开启后按采样次数把性能摘要写入宿主临时文件;关闭并刷新后内存采样仍运行,但无 diag 上报请求与落盘 |
+| `diag.enabled` | `false` | 开启后按采样次数把性能摘要写入宿主数据文件;关闭并刷新后内存采样仍运行,但无 diag 上报请求与落盘 |
 | `diag.reportEvery` | `12` | 每多少次采样上报一次(每次采样间隔固定);下限 1,上限 720 |
 
-客户端补丁的配置在页面加载时读取一次,修改保存后刷新页面生效;宿主半区提供 `GET/POST /api/dsh-bug-perf/config`:GET 返回归一化配置,POST 先归一化再写回当前 profile 的行配置(经 `configEditor`)。`listSlim` 与 `sessionWindow` 在宿主半区执行,开关与阈值由对应服务方法每次调用时读取行配置,设置保存即热更。配置路由不设自有认证,认证经路由首行 connection.requestRejection 复用宿主闸门(无 cookie 401)。
+客户端补丁的配置在页面加载时读取一次,修改保存后刷新页面生效;宿主半区提供 `GET/POST /api/dsh-bug-perf/config`:GET 返回归一化配置,POST 先按节深合并(只改一个字段不会重置同节其它字段)再归一化写回当前 profile 的行配置(经 `configEditor`)。`listSlim`、`sessionWindow` 与 `terminalCoalesce` 在宿主半区执行,开关与阈值由对应服务方法每次调用时读取行配置,设置保存即热更;`terminalCoalesce` 对已有终端会预先装好包装,无终端时由低频探测在首个终端出现时补装。配置路由不设自有认证,认证经路由首行 connection.requestRejection 复用宿主闸门(无 cookie 401)。
 
 迁移说明:旧版 `dsh-session-manager` 的 `listSlimEnabled` 不再读取;开关现在是本插件配置表单中的 `listSlim.enabled`,默认 `true`(之前关闭过该功能的用户升级后会重新开启)。`dsh-session-manager` 0.10.0 及更早版本仍带丢失调用方上下文的列表包装,必须与本次发布同批升级到 0.11.0;只升级本插件不能消除旧包装的鉴权绕过。
 
@@ -115,10 +117,11 @@
 - 归档集合变化由 `workspaces.list` 推送后合并到一次微任务回收已归档会话的自动放行流,点击放行与当前视图的流保留;某个订阅在判定当时被拒后由调用方重新挂载或用户点击再订阅,补丁不代调用方重试。
 - 当前视图的会话靠 `uiSession.isMain` 判定,每次订阅尝试都重新取;官方会话头在会话进入主视图之后才订阅,所以窗口饱和不影响打开会话的任务入口;宿主缺这个服务或方法时该行按普通行处理。
 - 宿主把保活帧当协议错误(以 1002/1003/1007/1008/1009/1011 关闭):在发过保活帧的连接上累计两次后补丁自行禁用、恢复原始构造器,并把原因写回 `window.__dshBugPerf.features.socketKeepAlive`;连接健康存活 10 个间隔后累计清零。普通断线(1000/1001/1006)与未发过保活帧的连接不计入。
-- 宿主没有 `webServer` 服务:不注册配置/采样路由,也不提供设置保存;列表瘦身仍按 `sessionController` 独立装载,客户端补丁按内联默认配置运行。
+- 宿主没有 `webServer` 服务:本行声明 `inject: ['webServer']` 为硬依赖,插件行不会激活,配置/采样路由、设置保存、列表瘦身与历史窗口收敛都不会装载,客户端补丁也不会运行;web profile 必有该服务,这不是降级路径。
 - `diag` 上报遇到 fetch 缺失、抛错或宿主路由失败:静默丢弃本次上报;内存采样继续运行,不影响页面。
 - 路由注册失败/路由表冻结:记录日志,不影响宿主。
 - 安装点包在 try/catch 内:客户端安装失败只进入 `window.__dshBugPerf.features`;宿主半区装载失败走宿主 `[dsh-bug-perf]` warn。运行期错误走浏览器 console 的 `[dsh-bug-perf]` 日志,不阻断页面渲染。
+- 客户端补丁都有还原句柄:apply 把各补丁的 `dispose` 收进一个 `ctx.effect`,插件卸载/HMR 重建时逆序还原(定时器、`PerformanceObserver`、`error` 监听、`RemoteStream.prototype.restart`、`webTerminals.view`、`jobs.watchRows`、停滞提示条与两类样式);同页重放时还会先摘掉上一代(`window[Symbol.for('@mzzsfy/dsh-bug-perf/dispose')]`),因此不会按代数叠加定时器与监听。据此 `already installed` 只出现在同代重复安装,不再是跨代残留的表现。
 
 ## 排查问题
 
@@ -144,6 +147,7 @@
 | `features.jobStreamLimit.state` | 任务流准入计数 | `windowUsed` 占默认窗口的条数(占窗口且当前不是主视图,实时派生);`active` 常驻流总数;`current` / `clicked` 定向放行新建条数;`rejected` / `rejectedArchived` 被拒次数;`evicted` 到上限淘汰条数;`reclaimed` 归档回收条数;`archived` 归档集合大小(只在归档快照变化时刷新);`keys` 当前持有流的会话键(准入顺序) |
 | `diag.enabled` | 当前实际上报状态 | 默认 `false`;配置开启并刷新后为 `true` |
 | `diag.samples` | 内存采样序列 | 每项 `{t, heapMB, nodes, sockets, liveSockets, activeStreams, messages, sent}` |
+| `diag.sockets` | 连接统计 | 环形缓冲只保留最近 64 条;`closed` 标记连接已关闭 |
 | `diag.longTasks` | 主线程长任务 | 近期 `{t, ms}`;与 `blockedMs` 一起看 |
 | `diag.blockedMs` / `diag.blockedAt` | 事件循环阻塞时长/时刻 | `blockedMs` 为最近一次超过阈值的探测延迟;仅作诊断,`stuckSession` 不再以阻塞作为停滞或重连依据 |
 | `diag.errors` | 最近捕获的错误消息 | 只有 `message`(截断),没有完整堆栈;重复项比单条更有意义 |
@@ -165,7 +169,7 @@ console.table(window.__dshBugPerf.diag.samples.slice(-30))
 copy(JSON.stringify(window.__dshBugPerf.diag.samples))
 ```
 
-`diag.samples` 最多保留固定数量,长时间页面不会无限增长;需要更早的历史,在复现前先打开上报并保存临时文件。
+`diag.samples` 最多保留固定数量,长时间页面不会无限增长;需要更早的历史,在复现前先打开上报并保存数据文件。
 
 ### 3. 采样通道
 
@@ -184,21 +188,24 @@ copy(JSON.stringify(window.__dshBugPerf.diag.samples))
 
 保存后刷新页面生效;配置热改不会重启已存在的上报定时器,与其它客户端开关一致。
 
-开启后,每 `reportEvery` 次采样发一次 `GET /api/dsh-bug-perf/diag?d=<json>`;每次采样间隔固定,`reportEvery` 以采样次数计,不是秒数。上报落地为宿主临时目录的单行 JSONL;按实现宿主重启不会主动清理该文件,后续上报继续追加(重启持久化与轮转未单独实测):
+开启后,每 `reportEvery` 次采样发一次 `POST /api/dsh-bug-perf/diag`(JSON 请求体);每次采样间隔固定,`reportEvery` 以采样次数计,不是秒数。上报落地为宿主数据目录下的单行 JSONL,按宿主 home 隔离,同一台机器上的多个宿主/测试实例各写各的文件;宿主重启不会主动清理该文件,后续上报继续追加(轮转行为由 L1 用例覆盖,宿主重启持久化未单独实测):
 
 | 平台 | 默认路径 |
 |------|----------|
-| Windows | `%TEMP%\dsh-bug-perf-diag.jsonl` |
-| Linux/macOS | `$TMPDIR/dsh-bug-perf-diag.jsonl`;未设置 `TMPDIR` 时用系统临时目录 |
+| 所有平台 | `<DSH_HOME 或 ~/.dsh>/dsh-bug-perf/diag-<port 或 pid>.jsonl` |
 
-文件超过 2 MB 时轮转为 `dsh-bug-perf-diag.jsonl.1`,只保留这一份旧文件;轮转后当前文件从空开始。轮转与宿主重启持久化按实现语义描述,尚未单独实测。读取最近几条:
+路径覆盖(测试与多实例隔离同样适用):`DSH_BUG_PERF_DIAG_FILE` 指定完整文件路径,优先级最高;`DSH_BUG_PERF_DIAG_DIR` 指定目录并使用其中的 `diag.jsonl`;两者都缺省时从 `DSH_HOME`(未设置用 `~/.dsh`)派生,文件名按宿主监听端口(未监听时用进程 id)区分。
+
+文件超过 2 MB 时轮转为同名的 `.1` 文件,只保留这一份旧文件;轮转成功后当前文件从空开始。轮转失败(文件被占用、权限不足等)不会跳过当前样本,只保留旧文件并继续追加。读取最近几条:
 
 ```powershell
-Get-Content "$env:TEMP\dsh-bug-perf-diag.jsonl" -Tail 3
+Get-ChildItem "$env:DSH_HOME\dsh-bug-perf\diag-*.jsonl"
+Get-Content (Get-ChildItem "$env:DSH_HOME\dsh-bug-perf\diag-*.jsonl" | Select-Object -Last 1) -Tail 3
+# DSH_HOME 未设置时用 $env:USERPROFILE\.dsh\dsh-bug-perf\
 ```
 
 ```bash
-tail -n 3 "${TMPDIR:-/tmp}/dsh-bug-perf-diag.jsonl"
+tail -n 3 "${DSH_HOME:-$HOME/.dsh}"/dsh-bug-perf/diag-*.jsonl
 ```
 
 单行 JSON 的字段:
@@ -213,7 +220,7 @@ tail -n 3 "${TMPDIR:-/tmp}/dsh-bug-perf-diag.jsonl"
 | `longTasks` | 最近几条长任务 `{t, ms}` |
 | `errors` | 最近几条错误消息 |
 
-数据只写本机临时文件,不上传外部服务;默认不采集到磁盘。开启后文件可能包含页面路径与错误文本,对外分享前先脱敏。
+数据只写本机磁盘,不上传外部服务;默认不采集到磁盘。开启后文件可能包含页面路径与错误文本,对外分享前先脱敏。
 
 ### 4. 判定表
 
@@ -260,10 +267,10 @@ tail -n 3 "${TMPDIR:-/tmp}/dsh-bug-perf-diag.jsonl"
 
 ### 7. 隐私与安全
 
-- `diag` 路由没有本包自有的认证层;任何能访问宿主端口的客户端都能向临时文件追加一行,这是默认关闭的原因之一。
+- `diag` 是写磁盘的副作用路由,与 `config` 一样不自建认证层:首个处理行回问宿主闸门 `connection.requestRejection`(无 cookie 401、不可信 Host 403),写请求再叠同源 `Origin`↔`Host` 与 JSON content-type;非 POST 先挡跨源(GET 跨源 403、同源 405)且不触达磁盘;服务缺失时放行。通过闸门的同源 POST 可以向数据文件追加一行,这是默认关闭的原因之一。
 - 写入量受轮转上限约束,但单个文件仍可被写入到上限;不要在不可信网络暴露宿主端口。
-- 上报只走本机临时文件,不向外部服务上传;文件内容含页面路径与错误消息,分享前先检查。
-- payload 放在 GET query 中,可能被反代或访问日志记录;不要把敏感内容写进页面路径或错误消息。
+- 上报只走本机数据文件,不向外部服务上传;文件内容含页面路径与错误消息,分享前先检查。
+- payload 放在 POST JSON 请求体中,不进入 URL 与访问日志;不要把敏感内容写进页面路径或错误消息。
 - 关闭 `diag.enabled` 并刷新后只停止上报,内存采样继续运行并保留在 `window.__dshBugPerf.diag`,供现场排查使用;停滞判定不依赖采样。
 
 ## 已知限制
@@ -285,7 +292,7 @@ tail -n 3 "${TMPDIR:-/tmp}/dsh-bug-perf-diag.jsonl"
 - 窗口由 turn 边界主导:宿主切窗条件是"消息数达到 `minMessages` 且跨过 `minTurns` 个轮起点",两者都是下限,配置大于宿主默认值不会放大窗口。所以首屏规模由 `minMessages` 决定,`maxMessages` 只在消息特别密时才起作用;目标会话 46,314 事件的实测首屏 559 事件 / 841KB,降到 `minMessages: 30` 后为 358 事件 / 372KB。
 - 包装是宿主进程级的,对宿主内所有调用方生效:`dsh-boss-simulator` 的 session-adapter 用 `maxMessages: 100` 翻页,配置低于 100 时它的往返次数会上升(它不带预算的 `follow` 不受影响);`dsh-context-manager` 为 fork 锚点发 `maxMessages: 100` 的 follow,配置低于 100 时其翻页往返次数会上升(近轮不受影响)。
 - 依赖官方内部结构(`RemoteStream`、`webTerminals.view/views/connect`、会话流协议帧格式与 `/api/remote.mux` 路径、`[data-chat-flow]` 容器与加载提示文本、`sessionController.list` 与列表投影形状、`sessionController.follow/page/events` 的请求字段与原型方法位置、`ctx.invocation.peer.principal` 主体判定),宿主升级后需按 `兼容性测试.md` 的 L3 重新验证。
-- `diag` 默认关闭;开启后每 `reportEvery` 次采样发一次 GET,payload 全部放在 query string;不重试、不补发,页面关闭时未发送的样本会丢失。内存采样始终运行,关闭上报不等于关闭采样。2 MB 轮转与宿主重启后继续追加按实现语义描述,尚未单独实测。
+- `diag` 默认关闭;开启后每 `reportEvery` 次采样发一次 JSON POST,payload 全部放在请求体;不重试、不补发,页面关闭时未发送的样本会丢失。内存采样始终运行,关闭上报不等于关闭采样。2 MB 轮转由 L1 用例覆盖;宿主重启后继续追加按实现语义描述,尚未单独实测。
 
 ## dsh 版本兼容
 
@@ -293,7 +300,7 @@ tail -n 3 "${TMPDIR:-/tmp}/dsh-bug-perf-diag.jsonl"
 - `jobStreamLimit` 的准入判定读 `workspaces.list` 与 `uiSession.isMain`;两个服务都按使用点软读,缺失时退化为"按未归档放行/先到先得",不影响其他功能。
 - 已验证版本:`0.2.1-rc.2`(旧两功能完整功能面)、`0.2.2-rc.1`(旧两功能完整功能面;新增功能见下)。
 - 新增 `socketKeepAlive` / `stuckSession` 目前只在 `0.2.2-rc.1` 隔离工位验证;`jobStreamLimit` 已完成生产页面实测(2026-11-09,旧判定按"非子 agent 会话")与 0.2.2-rc.1 隔离工位复测(未归档会话 + 当前视图放行,见 `兼容性测试.md` 状态表与 #24/#24b);`dshReleases` 的既有条目不含这几个功能,升级宿主后须按 `兼容性测试.md` 重新核对。
-- `listSlim` 从 `dsh-session-manager` 迁入,依赖宿主 `sessionController` 服务与 `ctx.invocation` 主体判定;迁移后完成宿主接线、配置归一化与 L1 单元验证,仓库 `node scripts/smoke-load.mjs` 20 包通过,0.2.2-rc.1 隔离 boot 页面/激活通过,隔离宿主进程内同构 invocation 多主体取证通过(#33/#34;真实 Liveshare server 未部署);旧包 0.10.0 共存实测确认 viewer 泄漏。`dshReleases` 未单独登记该功能。`dsh-session-manager` 已同批发布 0.11.0(旧包装的鉴权绕过随之消除)。
+- `listSlim` 从 `dsh-session-manager` 迁入,依赖宿主 `sessionController` 服务与 `ctx.invocation` 主体判定;迁移后完成宿主接线、配置归一化与 L1 单元验证,仓库 `node scripts/smoke-load.mjs` 21 包通过,0.2.2-rc.1 隔离 boot 页面/激活通过,隔离宿主进程内同构 invocation 多主体取证通过(#33/#34;真实 Liveshare server 未部署);旧包 0.10.0 共存实测确认 viewer 泄漏。`dshReleases` 未单独登记该功能。`dsh-session-manager` 已同批发布 0.11.0(旧包装的鉴权绕过随之消除)。
 - 兼容性细节与逐版本证据见 [兼容性测试.md](兼容性测试.md)。
 
 ## 安装

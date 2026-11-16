@@ -1,6 +1,7 @@
 // 配置路由接线测试:handler 真实调用守卫,拒绝路径必须回 403/415 而不是抛错
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { createServer } from 'node:http'
 
 import { apply } from '../src/index.js'
 
@@ -107,23 +108,46 @@ test('接线:同源 JSON 写入生效', async () => {
   assert.equal(writes[0].patch.maxConsecutive, 5)
 })
 
+test('接线:结案强制开关可经面板关闭', async () => {
+  const { handler, writes } = await makeHarness()
+  const res = makeRes()
+  await handler(
+    makeReq({ body: { enforceClosure: false }, headers: { origin: 'http://localhost:3080', 'content-type': 'application/json' } }),
+    res,
+  )
+  assert.equal(res.status, 200)
+  assert.equal(writes[0].patch.enforceClosure, false)
+})
+
+test('接线:结案强制关闭时提示词段落照常注册,GET 回读为 false', async () => {
+  const settings = {
+    describe: () => [{ ns: 'keep-working', value: { enforceClosure: false }, revision: 1 }],
+  }
+  const { handler, sections } = await makeHarness({ settings })
+  assert.equal(sections.length, 1, '提示词段落不随开关变化')
+  const res = makeRes()
+  await handler(makeReq({ method: 'GET' }), res)
+  assert.equal(res.payload.value.enforceClosure, false)
+})
+
 test('接线:跨源 Origin 回 403 且不写设置', async () => {
   const { handler, writes } = await makeHarness()
   const res = makeRes()
   await handler(makeReq({ body: { maxConsecutive: 5 }, headers: { origin: 'http://evil.example', 'content-type': 'application/json' } }), res)
   assert.equal(res.status, 403)
-  assert.equal(res.payload.ok, false)
+  assert.match(res.payload.error, /跨源/)
   assert.equal(writes.length, 0)
 })
 
-test('接线:非 JSON 体回 415 且不写设置', async () => {
+test('接线:非 JSON 体回 400 且不写设置', async () => {
   const { handler, writes } = await makeHarness()
   const res = makeRes()
   await handler(
     makeReq({ body: { maxConsecutive: 5 }, headers: { origin: 'http://localhost:3080', 'content-type': 'text/plain' } }),
     res,
   )
-  assert.equal(res.status, 415)
+  assert.equal(res.status, 400)
+  assert.match(res.payload.error, /application\/json/)
   assert.equal(writes.length, 0)
 })
 
@@ -141,8 +165,9 @@ test('接线:GET 回读走默认值,非 POST 方法 405', async () => {
   await handler(makeReq({ method: 'GET' }), get)
   assert.equal(get.status, 200)
   assert.equal(typeof get.payload.value.graceMs, 'number')
+  assert.equal(get.payload.value.enforceClosure, true)
   const put = makeRes()
-  await handler(makeReq({ method: 'PUT' }), put)
+  await handler(makeReq({ method: 'PUT', headers: { 'content-type': 'application/json' } }), put)
   assert.equal(put.status, 405)
 })
 
@@ -187,6 +212,30 @@ test('接线:设置修订冲突回 409 并带原因', async () => {
   assert.equal(res.status, 409)
   assert.equal(res.payload.ok, false)
   assert.match(res.payload.error, /其他窗口/)
+})
+
+test('真实 socket:70KB 请求体回 413 且不写设置', async () => {
+  const { handler, writes } = await makeHarness()
+  const server = createServer((req, res) => handler(req, res))
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const { port } = server.address()
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}${PATH}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', connection: 'close' },
+      body: 'x'.repeat(70 * 1024),
+    })
+    assert.equal(response.status, 413)
+    const payload = await response.json()
+    assert.equal(payload.ok, false)
+    assert.match(payload.error, /过大/)
+    assert.equal(writes.length, 0)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
 })
 
 test('接线:loader/volatile-update 触发运行期重建', async () => {

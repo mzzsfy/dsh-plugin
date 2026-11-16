@@ -1,6 +1,6 @@
 {
   "name": "@mzzsfy/dsh-usage-dash",
-  "description": "用量统计面板:天/小时/分钟三粒度 token 与请求统计,26 周活跃热力图、缓存命中率/生成速度/首 token 延迟曲线、模型占比与四桶明细,会话底栏官方数据后追加增强项与官方动作行回合费用芯片,多条件分时段定价规则与费用估算,en/zh 双语;复刻自 github.com/HaoyueQin/dsh-usage-statistics-panel,感谢原作者 HaoyueQin",
+  "description": "DSH 用量统计:三粒度面板、定价规则、省钱沙盘、成本护栏、异常哨兵与输入区常驻读数",
   "version": "0.14.0",
   "type": "module",
   "main": "src/index.js",
@@ -28,8 +28,7 @@
     }
   },
   "scripts": {
-    "test": "node --test \"test/*.test.mjs\"",
-    "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
+    "test": "node --test \"test/*.test.mjs\""
   },
   "publishConfig": {
     "access": "public",
@@ -55,6 +54,7 @@
     "src",
     "test",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "兼容性测试.md"
   ]
 }

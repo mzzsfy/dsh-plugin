@@ -52,3 +52,25 @@ test('Given 快照在途且有dirty When dispose后完成 Then 不再补拉', as
   work.refresh(); await flush(); work.refresh(); work.dispose(); release(); t.mock.timers.tick(5000); await flush()
   assert.equal(count, 1)
 })
+
+test('Given 失效通知抛错 When 同步与定时器触发 Then 告警隔离且后续刷新仍受时间窗约束', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 0 })
+  const warnings = []
+  const original = console.warn
+  console.warn = (...args) => warnings.push(args.join(' '))
+  t.after(() => { console.warn = original })
+  let calls = 0
+  const work = host.createChangeNotifier(() => { calls += 1; throw Error('planned publish failure') })
+  // 首次立即发布:同步路径同样隔离,不向调用方抛错
+  assert.doesNotThrow(() => work.refresh())
+  assert.equal(calls, 1)
+  // 窗口内再次失效只挂定时器;定时器回调里的抛错没有调用方兜底,不得成为 uncaughtException
+  work.refresh(); await flush()
+  assert.equal(calls, 1)
+  assert.doesNotThrow(() => t.mock.timers.tick(1000))
+  assert.equal(calls, 2)
+  assert.equal(warnings.filter(line => line.includes('变更通知失败')).length, 2, '每次失败恰告警一次')
+  work.dispose()
+  t.mock.timers.tick(5000)
+  assert.equal(calls, 2)
+})

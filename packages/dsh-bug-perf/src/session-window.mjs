@@ -79,8 +79,11 @@ export function installSessionWindow(ctx, options = {}) {
           warn('sessionController 不可用,跳过')
           return
         }
-        if (controller[INSTALL_MARKER] !== undefined) return
         let active = true
+        let disposed = false
+        // 每代独立 marker: 旧代未卸载时新代登记等待, 旧代 dispose 后同步接管,
+        // 避免新代直接放弃、旧代卸载后窗口限制静默消失。
+        const marker = { wrapped: new Map(), waiters: new Set() }
 
         // 读取当前窗口上限;开关与配置读取抛错都按关闭处理,保证包装自身永不成为失败源
         const currentWindow = () => {
@@ -92,14 +95,14 @@ export function installSessionWindow(ctx, options = {}) {
           }
         }
 
-        const wrapped = new Map()
         for (const method of HISTORY_METHODS) {
           const implementation = implementationOf(controller, method)
           if (implementation === undefined) continue
-          // 只替换首个参数(请求),其余参数(cancellation signal 等)原样转发
+          // 只替换首个参数(请求),其余参数(cancellation signal 等)原样转发;
+          // receiver 用调用方的 this: 宿主按 invocation 逐项过滤时按实例身份判定
           const patched = function (...args) {
             const window = currentWindow()
-            if (window === undefined) return implementation.apply(controller, args)
+            if (window === undefined) return implementation.apply(this, args)
             let next = args[0]
             try {
               next = limitHistoryRequest(args[0], window)
@@ -107,44 +110,89 @@ export function installSessionWindow(ctx, options = {}) {
               next = args[0]
             }
             args[0] = next
-            return implementation.apply(controller, args)
+            return implementation.apply(this, args)
           }
-          wrapped.set(method, patched)
+          marker.wrapped.set(method, patched)
         }
-        if (wrapped.size === 0) {
+        if (marker.wrapped.size === 0) {
           warn('sessionController 缺少历史入口,跳过')
           return
         }
 
-        // 实例上定义同名属性覆盖原型方法;卸载时删除属性即回到原型实现
-        Object.defineProperty(controller, INSTALL_MARKER, { value: wrapped, configurable: true })
-        const applied = []
-        try {
-          for (const [method, patched] of wrapped) {
-            Object.defineProperty(controller, method, { value: patched, writable: true, configurable: true })
-            applied.push(method)
+        const install = () => {
+          if (controller[INSTALL_MARKER] === marker) return true
+          if (controller[INSTALL_MARKER] !== undefined) return false
+          // 实例上定义同名属性覆盖原型方法;卸载时删除属性即回到原型实现
+          Object.defineProperty(controller, INSTALL_MARKER, { value: marker, configurable: true })
+          const applied = []
+          try {
+            for (const [method, patched] of marker.wrapped) {
+              Object.defineProperty(controller, method, { value: patched, writable: true, configurable: true })
+              applied.push(method)
+            }
+          } catch (error) {
+            for (const method of applied) delete controller[method]
+            delete controller[INSTALL_MARKER]
+            throw error
           }
-        } catch (error) {
-          for (const method of applied) delete controller[method]
-          delete controller[INSTALL_MARKER]
-          throw error
+          return true
+        }
+
+        const tryInstall = () => {
+          if (!active) return
+          const owner = controller[INSTALL_MARKER]
+          if (owner === marker) return
+          if (owner !== undefined) {
+            owner?.waiters?.add(tryInstall)
+            return
+          }
+          try {
+            install()
+          } catch (error) {
+            warn('等待后装载失败: ' + String(error?.message ?? error))
+          }
         }
 
         const dispose = () => {
+          if (disposed) return
+          disposed = true
           active = false
+          const ownsMarker = controller[INSTALL_MARKER] === marker
           // 服务属性读取可能被依赖追踪代理包成新引用,比较要取实例上的属性描述符
-          for (const [method, patched] of wrapped) {
+          for (const [method, patched] of marker.wrapped) {
             if (Object.getOwnPropertyDescriptor(controller, method)?.value === patched) delete controller[method]
           }
-          if (Object.getOwnPropertyDescriptor(controller, INSTALL_MARKER)?.value === wrapped) delete controller[INSTALL_MARKER]
+          if (!ownsMarker) return
+          delete controller[INSTALL_MARKER]
+          // 先恢复自己的包装,再唤醒等待代;等待代看到 marker 已空后接管
+          const waiters = [...marker.waiters]
+          marker.waiters.clear()
+          for (const waiter of waiters) waiter()
+        }
+
+        const owner = controller[INSTALL_MARKER]
+        if (owner === undefined) install()
+        else if (typeof owner?.waiters?.add === 'function') owner.waiters.add(tryInstall)
+        else {
+          warn('检测到不可接管的窗口包装,跳过')
+          return
+        }
+        const cleanup = () => {
+          active = false
+          owner?.waiters?.delete(tryInstall)
+          dispose()
         }
         try {
-          scope.effect(() => dispose)
+          scope.effect(() => cleanup)
         } catch (error) {
-          dispose()
+          cleanup()
           throw error
         }
-        ctx.logger?.info?.(`${LOG_PREFIX} 已装载 (${[...wrapped.keys()].join(',')})`)
+        if (controller[INSTALL_MARKER] === marker) {
+          ctx.logger?.info?.(`${LOG_PREFIX} 已装载 (${[...marker.wrapped.keys()].join(',')})`)
+        } else {
+          ctx.logger?.info?.(`${LOG_PREFIX} 等待旧代卸载 (${[...marker.wrapped.keys()].join(',')})`)
+        }
       } catch (error) {
         warn('装载失败,保持原行为: ' + String(error?.message ?? error))
       }

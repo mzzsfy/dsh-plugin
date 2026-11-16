@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs'
 const source = readFileSync(new URL('../src/client.js', import.meta.url), 'utf8')
 function environment() {
   const instances = [], timers = new Map(), warns = []
-  let timerId = 0
+  let timerId = 0, parseCalls = 0, encoderConstructions = 0
   class Socket {
     static OPEN = 1
     constructor(url) { this.url = url; this.readyState = 0; this.bufferedAmount = 0; this.sent = []; instances.push(this) }
@@ -16,10 +16,16 @@ function environment() {
     ready() { const request = this.sent.filter(frame => frame.type === 'subscribe').at(-1); this.frame({ type: 'ready', plugins: request.plugins, revision: request.revision }) }
   }
   const window = { location: { href: 'https://example.test/' }, __ModuleLoader__: { load: module => { window.module = module } } }
+  // 注入计数门面:只统计 client.js 自身的 JSON 解析/编码器构造,测试桩的解析走真实全局
+  const json = { stringify: JSON.stringify, parse(text) { parseCalls += 1; return JSON.parse(text) } }
+  class CountingTextEncoder extends TextEncoder {
+    constructor() { super(); encoderConstructions += 1 }
+  }
   function load() {
-    new Function('window', 'document', 'console', 'WebSocket', 'setTimeout', 'clearTimeout', source)(
+    new Function('window', 'document', 'console', 'WebSocket', 'setTimeout', 'clearTimeout', 'JSON', 'TextEncoder', source)(
       window, {}, { warn: message => warns.push(message) }, Socket,
       (fn, ms) => { timers.set(++timerId, { fn, ms }); return timerId }, id => timers.delete(id),
+      json, CountingTextEncoder,
     )
     return window.module.factory(() => ({}))
   }
@@ -29,7 +35,10 @@ function environment() {
     return { ctx, bus: load().setupCommonTools(ctx), dispose: ctx.dispose }
   }
   const fireTimer = () => { const [id, timer] = timers.entries().next().value; timers.delete(id); timer.fn(); return timer.ms }
-  return { load, owner, instances, warns, timers, fireTimer }
+  return {
+    load, owner, instances, warns, timers, fireTimer,
+    counters: { get parses() { return parseCalls }, get encoders() { return encoderConstructions } },
+  }
 }
 const message = (plugin, payload = null) => ({ type: 'message', plugin, payload })
 
@@ -184,4 +193,14 @@ test('Given 多实例接收 When 一个ctx卸载 Then 只清其资源并拒绝�
   b.dispose()
   assert.equal(socket.closed, true)
   assert.throws(() => f.load().setupCommonTools({}), /entry.options.name/)
+})
+
+test('Given 连续发布 When 发送 Then 复用单一编码器且不回读整帧 JSON', () => {
+  const f = environment(), bus = f.owner().bus
+  const socket = f.instances[0]
+  socket.open(); socket.ready()
+  const parses = f.counters.parses, encoders = f.counters.encoders
+  for (let i = 0; i < 5; i++) bus.publish({ text: '甲'.repeat(512) })
+  assert.equal(f.counters.parses, parses, '发送热路径不得 JSON.parse 整帧')
+  assert.equal(f.counters.encoders, encoders, 'TextEncoder 实例单例复用,不逐帧新建')
 })

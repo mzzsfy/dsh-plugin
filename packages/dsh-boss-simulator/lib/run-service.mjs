@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto'
-import { ACTIVE_RUN_STATES, checkExecutionPermission, recordRun, markSessionExecutor, confirmResume } from './core/task.mjs'
+import { ACTIVE_RUN_STATES, checkExecutionPermission, recordRun, markSessionExecutor, confirmResume, expireStaleRuns } from './core/task.mjs'
+import { defaultPhaseFor } from './core/query.mjs'
+import { convergeRunUsage } from './core/usage.mjs'
 import { reconcileStoppedTask } from './core/orchestrator.mjs'
 
 function requireOk(outcome) {
@@ -18,23 +20,35 @@ export function createExecutionGate() {
 
 export function createRunService({ store, sessionAdapter, followRuns = () => {}, withExecution = action => action() }) {
   async function dispatch(args) {
-    const { taskId, workItemId, runId, requestId, phase = 'implement', content } = args
-    const actorRole = args.actorRole ?? (phase === 'accept' ? 'reviewer' : 'executor')
+    const { taskId, workItemId, runId, requestId, content } = args
     if (![taskId, workItemId, runId, requestId].every(value => typeof value === 'string' && value.trim())) throw new Error('taskId/workItemId/runId/requestId 必填')
     if (typeof content !== 'string' || !content.trim()) throw new Error('派发 content 必须为非空任务说明')
     const globalControl = await store.loadControl()
     const sessionId = randomUUID()
-    const fingerprint = JSON.stringify({ workItemId, phase, actorRole, content })
+    // 缺省阶段与 nextDispatch 同源:awaitingReview 派验收、已有产物派 fix,不得退回 implement 推进产物代次
+    let phase = args.phase
+    let actorRole = args.actorRole
     let created = false
-    const prepared = await store.updateAggregate(taskId, current => {
-      if (!current) throw new Error(`任务不存在: ${taskId}`)
+    const prepared = await store.updateAggregate(taskId, raw => {
+      // 失联 Run 不再占执行槽与工作项:先收敛,再按最新事实判许可
+      const current = expireStaleRuns(raw).result?.aggregate ?? raw
       const existing = current.runs[runId]
       if (existing) {
-        if (existing.requestId !== requestId || existing.dispatchFingerprint !== fingerprint) throw new Error('派发标识已被其他内容使用')
+        // 重放按原 Run 还原缺省阶段/角色,避免子项状态前进后指纹漂移
+        const replayPhase = phase ?? existing.phase
+        const replayRole = actorRole ?? existing.actorRole
+        const replayFingerprint = JSON.stringify({ workItemId, phase: replayPhase, actorRole: replayRole, content })
+        if (existing.requestId !== requestId || existing.dispatchFingerprint !== replayFingerprint) throw new Error('派发标识已被其他内容使用')
+        phase = replayPhase
+        actorRole = replayRole
         return current
       }
       if (Object.values(current.runs).some(run => run.requestId === requestId)) throw new Error('requestId 已绑定其他 Run')
       if (Object.values(current.runs).some(run => run.workItemId === workItemId && ACTIVE_RUN_STATES.has(run.state))) throw new Error('工作项存在未核清 Run')
+      phase = phase ?? defaultPhaseFor(current, workItemId)
+      if (!phase) throw new Error(`无法从子项状态推导派发阶段: ${workItemId}`)
+      actorRole = actorRole ?? (phase === 'accept' ? 'reviewer' : 'executor')
+      const fingerprint = JSON.stringify({ workItemId, phase, actorRole, content })
       const permission = requireOk(checkExecutionPermission(current, globalControl, { workItemId, phase, actorRole }))
       const currentArtifactRevision = Object.values(current.runs).filter(candidate => candidate.workItemId === workItemId && candidate.actorRole === 'executor').length
       if (actorRole === 'reviewer' && !Object.values(current.reports).some(report => report.workItemId === workItemId && !report.historical && report.verdict === 'ready_for_review' && report.artifactRevision === currentArtifactRevision && current.runs[report.runId]?.state === 'settled')) throw new Error('独立验收须先有当前最新实施产物的有效报告')
@@ -72,7 +86,13 @@ export function createRunService({ store, sessionAdapter, followRuns = () => {},
       await store.updateAggregate(taskId, current => {
         const active = current.runs[runId]
         if (!['prepared', 'submitted'].includes(active.state)) return current
-        return { ...current, runs: { ...current.runs, [runId]: { ...active, state: prompted && !error.rejected ? 'unknown' : 'rejected', dispatchError: String(error.message) } } }
+        const terminal = { ...active, state: prompted && !error.rejected ? 'unknown' : 'rejected', dispatchError: String(error.message) }
+        const next = { ...current, runs: { ...current.runs, [runId]: terminal } }
+        // 终态收敛处结算已观察用量;unknown 仍属在飞,等跟随器收敛。
+        // rejected = prompt 未被受理,模型零调用确有证据,按明确零入账(coverage 才可能 complete)
+        if (terminal.state !== 'rejected') return next
+        const converged = convergeRunUsage(next, runId, { completeUsage: true })
+        return converged.ok ? converged.result.aggregate : next
       })
       if (prompted && !error.rejected) followRuns(taskId, sessionId)
       throw error
@@ -80,6 +100,10 @@ export function createRunService({ store, sessionAdapter, followRuns = () => {},
   }
   async function confirmResumeIntent({ taskId, resumeIntentId }) {
     if (!sessionAdapter) throw new Error('标准会话适配未就绪')
+    // 终态先拒绝,避免对 completed/cancelled 先做停止核对等副作用
+    const snapshot = await store.loadAggregate(taskId)
+    if (!snapshot) throw new Error(`任务不存在: ${taskId}`)
+    if (['completed', 'cancelled'].includes(snapshot.businessState)) throw new Error(`终态任务不可恢复: ${snapshot.businessState}`)
     const reconciled = await reconcileStoppedTask(store, taskId, sessionAdapter)
     if (!reconciled.stopConfirmed) throw new Error('旧执行会话或队列尚未核清')
     const global = await store.loadControl()

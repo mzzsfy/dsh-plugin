@@ -37,10 +37,12 @@ function rejectCrossOrigin(req, res) {
   return true
 }
 
-// 写路由强制 JSON: 简单请求(content-type 非 JSON)不触发预检, 是跨站写入的唯一通道
+// 写路由强制 JSON: 简单请求(content-type 非 JSON)不触发预检, 是跨站写入的唯一通道。
+// 媒体类型按 essence 精确比较(对齐 route-gate), 子串混入的伪装形态一律拒绝。
 function rejectNonJson(req, res) {
-  const contentType = String(req.headers?.['content-type'] ?? '')
-  if (contentType.includes('application/json')) return false
+  const contentType = req.headers ? String(req.headers['content-type'] || '') : ''
+  const essence = contentType.split(';', 1)[0].trim().toLowerCase()
+  if (essence === 'application/json') return false
   sendJson(res, 400, { error: MESSAGES.badContentType })
   return true
 }
@@ -52,46 +54,71 @@ function respondError(res, error, logSystem) {
   sendJson(res, 400, { error: message })
 }
 
-function readBody(req) {
+// 读请求体: 超限只暂停流入并标记, 不销毁 socket——连接毁了 413 就送不出去;
+// 响应收尾(finish)后再销毁请求, 防已暂停的流入把 socket 挂住(shared-terminal 同构)
+function readBody(req, res) {
   return new Promise((resolve, reject) => {
     let size = 0
+    let over = false
     const chunks = []
     req.on('data', (chunk) => {
       size += chunk.length
       if (size > BODY_MAX_BYTES) {
-        reject(new Error(MESSAGES.bodyTooLarge))
-        req.destroy()
+        over = true
+        req.pause()
+        reject(Object.assign(new Error(MESSAGES.bodyTooLarge), { overLimit: true }))
         return
       }
-      chunks.push(chunk)
+      if (!over) chunks.push(chunk)
     })
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
-    req.on('error', reject)
+    req.on('end', () => { if (!over) resolve(Buffer.concat(chunks).toString('utf8')) })
+    req.on('error', () => { if (!over) reject(new Error(MESSAGES.badJsonBody)) })
+    res.on('finish', () => { if (over) req.destroy() })
   })
 }
 
-async function readJsonBody(req) {
+async function readJsonBody(req, res) {
   let body
   try {
-    body = JSON.parse(await readBody(req))
+    body = JSON.parse(await readBody(req, res))
   } catch (error) {
-    if (error && error.message === MESSAGES.bodyTooLarge) throw error
+    if (error?.overLimit === true) throw error
     throw new Error(MESSAGES.badJsonBody)
   }
   return body && typeof body === 'object' ? body : {}
 }
 
 // readUi/updateUi: 设置读写在宿主半区(settings 服务语义归属 index.js), 此处仅路由
-export function createApi({ tunnelsApi, readUi, updateUi, logSystem }) {
+export function createApi({ tunnelsApi, readUi, updateUi, lanOrigin, logSystem }) {
   const routes = [
-    { method: 'GET', segments: ['tunnels'], handler: () => ({ items: tunnelsApi.list().tunnels }) },
+    { method: 'GET', segments: ['tunnels'], handler: async ({ url }) => {
+      const result = await tunnelsApi.list({ probe: url.searchParams.get('probe') === '1' })
+      return { items: result.tunnels }
+    } },
     { method: 'POST', segments: ['tunnels'], handler: ({ body }) => {
       const outcome = tunnelsApi.open(body)
       if (!outcome.ok) throw new Error(outcome.error)
       return outcome
     } },
+    { method: 'PATCH', segments: ['tunnels', ':name'], handler: async ({ params, body }) => {
+      const outcome = await tunnelsApi.update({ name: params.name, patch: body })
+      if (!outcome.ok) throw new Error(outcome.error)
+      return outcome
+    } },
     { method: 'DELETE', segments: ['tunnels', ':name'], handler: ({ params }) => tunnelsApi.close({ name: params.name }) },
-    { method: 'GET', segments: ['status'], handler: () => ({ ui: readUi(), total: tunnelsApi.list().tunnels.length }) },
+    { method: 'GET', segments: ['status'], handler: async () => {
+      const result = await tunnelsApi.list()
+      return { ui: readUi(), total: result.tunnels.length, lanOrigin: lanOrigin?.() }
+    } },
+    { method: 'GET', segments: ['ports'], handler: ({ url }) => tunnelsApi.listPorts({
+      all: url.searchParams.get('all') === '1',
+      refresh: url.searchParams.get('refresh') === '1',
+    }) },
+    { method: 'GET', segments: ['probe'], handler: async ({ url }) => {
+      const outcome = await tunnelsApi.probePort(Number(url.searchParams.get('port')))
+      if (!outcome.ok) throw new Error(outcome.error)
+      return outcome
+    } },
     { method: 'POST', segments: ['ui-settings'], handler: ({ body }) => updateUi(body) },
   ]
 
@@ -129,16 +156,20 @@ export function createApi({ tunnelsApi, readUi, updateUi, logSystem }) {
       try {
         if (req.method !== 'GET' && req.method !== 'HEAD') {
           if (rejectCrossOrigin(req, res)) return
-          if (req.method === 'POST' && rejectNonJson(req, res)) return
+          if (rejectNonJson(req, res)) return
         }
         const matched = matchRoute(req.method, segments)
         if (!matched) {
           sendJson(res, 404, { error: MESSAGES.notFound })
           return
         }
-        const body = req.method === 'POST' ? await readJsonBody(req) : undefined
+        const body = req.method === 'POST' || req.method === 'PATCH' ? await readJsonBody(req, res) : undefined
         sendJson(res, 200, await matched.route.handler({ req, res, url, params: matched.params, body }))
       } catch (error) {
+        if (error?.overLimit === true) {
+          sendJson(res, 413, { error: error.message })
+          return
+        }
         respondError(res, error, logSystem)
       }
     },

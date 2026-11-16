@@ -54,6 +54,15 @@ window.__ModuleLoader__.load({
     // 数据镜像常量:与 core.mjs 的 AUDIO_EXTS/MIME_BY_EXT/CATEGORY_LABELS 同源,parity 锁定
     const AUDIO_EXTS = ['wav', 'mp3', 'ogg']
     const MIME_BY_EXT = { wav: 'audio/wav', ogg: 'audio/ogg', mp3: 'audio/mpeg' }
+    // 上传前置上限与 core.mjs 同源:浏览端先拒空文件与超限文件,避免整文件读入/解码后才由服务端 413
+    const UPLOAD_FILE_MAX_BYTES = 2 * 1024 * 1024
+    function pickFileProblem(file) {
+      const ext = (/\.([^.]+)$/.exec(file.name) || [])[1]?.toLowerCase() || ''
+      if (AUDIO_EXTS.indexOf(ext) < 0) return '仅支持 ' + AUDIO_EXTS.join(' / ')
+      if (!(file.size >= 1)) return '文件为空'
+      if (file.size > UPLOAD_FILE_MAX_BYTES) return '单文件超过上限'
+      return null
+    }
 
     const CATEGORY_LABELS = {
       completed: '任务完成',
@@ -90,6 +99,8 @@ window.__ModuleLoader__.load({
     let notificationWindowId
     const KEY_LOCK = 'turn-notify:lock:'
     const KEY_DONE = 'turn-notify:done:'
+    // 跨窗口"已处理"事实:任意窗口处理会话后写时间戳键,其他窗口经 storage 事件撤销二次提醒
+    const KEY_SESSION_HANDLED = 'turn-notify:session-handled:'
     const KEY_DND = 'turn-notify:dnd'
     const KEY_FOREGROUND_SYSTEM = 'turn-notify:foreground-system'
     const KEY_VOLUME = 'turn-notify:volume'
@@ -567,16 +578,32 @@ window.__ModuleLoader__.load({
     // ---- 页内通知与标题闪烁 ----
 
     const KEY_TOAST_APPEARANCE = 'turn-notify:toast-appearance'
-    const TOAST_APPEARANCES = { toast: '标准浮条', panel: '主题卡片' }
-    const readToastAppearance = () => localGet(KEY_TOAST_APPEARANCE) === 'panel' ? 'panel' : 'toast'
+    // 形态值域与公共依赖 toast 的 appearance 一一对应(common-tools 只发 patch,新增样式须两侧同批):
+    // 标准浮条=宿主原生 toast 外观,主题卡片=面板底+描边+状态色边,极简细条=去阴影的紧凑条,
+    // 状态强调=状态色浅底,倒计时=面板外观+底部进度条
+    const TOAST_APPEARANCES = { toast: '标准浮条', panel: '主题卡片', minimal: '极简细条', accent: '状态强调', progress: '倒计时' }
+    // 分类到 toast 状态色:完成绿、出错红、中断与截断黄、审批黄、提问走品牌色
+    const CATEGORY_KINDS = {
+      completed: 'ok',
+      error: 'error',
+      interrupted: 'warn',
+      'max-tokens': 'warn',
+      approval: 'warn',
+      ask: 'info',
+    }
+    const readToastAppearance = () => {
+      const stored = localGet(KEY_TOAST_APPEARANCE)
+      return Object.hasOwn(TOAST_APPEARANCES, stored) ? stored : 'toast'
+    }
 
     // 每次呈现读取本机偏好,其他窗口更改及二次提醒同样即时生效。
-    function showPageNotification(text, onClick) {
-      return toast(text, { holdMs: TOAST_MS, appearance: readToastAppearance(), onClick })
+    function showPageNotification(text, onClick, kind) {
+      return toast(text, { holdMs: TOAST_MS, appearance: readToastAppearance(), kind, onClick })
     }
 
     function previewPageNotification() {
-      return showPageNotification('[dsh] 页内通知样式预览\n耗时 12 秒 · 1.5k tokens · 已完成任务')
+      // 预览按完成态着色,让状态强调/倒计时形态的颜色可见
+      return showPageNotification('[dsh] 页内通知样式预览\n耗时 12 秒 · 1.5k tokens · 已完成任务', undefined, CATEGORY_KINDS.completed)
     }
 
     let blinkTimer = null
@@ -653,6 +680,7 @@ window.__ModuleLoader__.load({
       const channels = chooseChannels(isEngaged(), notificationPermission(), Date.now() - lastActionAt(), null, null, null)
       const delivered = []
       if (channels.toast) {
+        // 外部事件不在六类分类里,状态色按中性处理;桥契约 version 为 1 且无 kind 参数,要着色须抬代数后与消费方同批发布
         showPageNotification(body === '' ? title : title + '\n' + body)
         delivered.push('toast')
       }
@@ -765,7 +793,7 @@ window.__ModuleLoader__.load({
           rememberSessionHighlight(unit, engaged)
         }
         if (channels.toast) {
-          showPageNotification(unit.text + (unit.summary ? '\n' + unit.summary : ''), activateSessionFromUnit(unit))
+          showPageNotification(unit.text + (unit.summary ? '\n' + unit.summary : ''), activateSessionFromUnit(unit), CATEGORY_KINDS[unit.category])
         }
         // 页内提示音与通知声音互斥(pageSound 已含 !sound),同一通知至多一声;
         // 页内音色按页内场景映射解析:通知生效映射为底,页内显式配置覆盖
@@ -862,30 +890,74 @@ window.__ModuleLoader__.load({
     // 无条件挂——高亮是未读 UI 状态,不属通知轰炸,错过窗口的存量照样强调;
     // 开关关闭不积累条目;聚焦时正在查看的会话不挂——与 dsh 原版一致,正在看即已读,
     // 失焦期间照常挂,返回页面时由可见性同步清除(回来即已读);
-    // 投影字段名为 session(buildUnit 输出形态,webhook 结构化字段同名)
+    // 投影字段名为 session(buildUnit 输出形态,webhook 结构化字段同名)。
+    // 会话身份一律落根会话:子会话在主列表无行,高亮随根会话行呈现。
+    // host 通知时已按会话头归结根会话并随 unit 下发 rootSessionId;旧投影/测试
+    // 单元缺该字段时按当前 sessions 快照重解析,仍不可知才退回自身 id。
+    function highlightEntryRoot(entry) {
+      if (typeof entry.rootSessionId === 'string' && entry.rootSessionId.length > 0) return entry.rootSessionId
+      return rootSessionIdOf(entry.sessionId) ?? entry.sessionId
+    }
+    // 快照未就绪时登记的高亮键可能是子会话 id;快照补全/重应用时迁移到根键并去重,
+    // 让冷启动期间的子代理高亮最终落到根会话行。迁移只允许升级或保持已解析根,
+    // 子会话行后置被移出快照时不得把已解析的根键降级回子 id。
+    function migrateSessionHighlights() {
+      if (sessionHighlights.size === 0) return
+      const merged = new Map()
+      let changed = false
+      for (const [key, entry] of sessionHighlights) {
+        const storedRoot = typeof entry.rootSessionId === 'string' && entry.rootSessionId.length > 0 ? entry.rootSessionId : null
+        let rootId = storedRoot
+        if (rootId === null) {
+          const resolved = rootSessionIdOf(entry.sessionId)
+          if (resolved !== undefined && resolved !== entry.sessionId) rootId = resolved
+        }
+        const target = rootId ?? key
+        if (target !== key || merged.has(target)) changed = true
+        const next = rootId === null ? { ...entry, rootSessionId: null } : { ...entry, rootSessionId: rootId }
+        const previous = merged.get(target)
+        merged.set(target, previous === undefined ? next : { ...previous, ...next })
+      }
+      if (!changed) return
+      sessionHighlights.clear()
+      for (const [key, entry] of merged) {
+        if (sessionHighlights.size >= SESSION_HL_MAX) sessionHighlights.delete(sessionHighlights.keys().next().value)
+        sessionHighlights.set(key, entry)
+      }
+    }
     function rememberSessionHighlight(unit, engaged) {
       if (!sessionHighlightEnabled || !hasSessionId(unit)) return
-      if (engaged && currentSessionId() === unit.sessionId) return
-      sessionHighlights.delete(unit.sessionId)
+      const sessionId = unitRootId(unit)
+      if (sessionId === undefined) return
+      const current = currentSessionId()
+      if (engaged && current !== null && (rootSessionIdOf(current) ?? current) === sessionId) return
+      sessionHighlights.delete(sessionId)
       if (sessionHighlights.size >= SESSION_HL_MAX) sessionHighlights.delete(sessionHighlights.keys().next().value)
-      sessionHighlights.set(unit.sessionId, unit.category)
+      sessionHighlights.set(sessionId, {
+        category: unit.category,
+        sessionId: unit.sessionId,
+        // 注册时已解析出的根必须写回;只保存 null 会让后续迁移在子行消失时失去根身份
+        rootSessionId: knownUnitRoot(unit),
+      })
     }
 
     // 增量重应用:仅补缺失类,不产生多余 DOM 写,防 MutationObserver 回调自我触发成环;
     // 快照遍历:行进入运行状态时清理对应条目,迭代中删除不改快照
     function applySessionHighlights() {
       if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return
+      migrateSessionHighlights()
       const current = isEngaged() ? currentSessionId() : null
       if (current !== null) markSessionHandled(current)
       if (!sessionHighlightEnabled) return
       const wanted = new Map()
-      for (const [sessionId, category] of [...sessionHighlights]) {
+      for (const [sessionId, entry] of [...sessionHighlights]) {
         const row = findSessionRow(sessionId)
         if (!row) continue
         if (isRowRunning(row)) {
           sessionHighlights.delete(sessionId)
           continue
         }
+        const category = entry.category
         wanted.set(row, CATEGORIES.indexOf(category) >= 0 ? SESSION_HL_CLASS + '--' + category : SESSION_HL_CLASS + '--ask')
       }
       for (const row of document.querySelectorAll('.' + SESSION_HL_CLASS)) {
@@ -969,13 +1041,17 @@ window.__ModuleLoader__.load({
     // 不按 cwd 猜归属。byId 含不在 ids 中的 catalog 子行(官方同构)。
     function folderActivityOwners(sessionsState, workspacesState) {
       const byId = (sessionsState && sessionsState.byId) || {}
-      const archived = new Set((workspacesState && workspacesState.archivedSessionIds) || [])
+      // 归档集合仅在快照 phase==='ready' 时才是权威;未就绪按未知处理:
+      // 不据此删链、不注入归档判定(方向性 fail-open,多余运行标记优于漏标)
+      const archived = workspacesState && workspacesState.phase === 'ready' && Array.isArray(workspacesState.archivedSessionIds)
+        ? new Set(workspacesState.archivedSessionIds.map(String))
+        : null
       const current = mainSessionId(byId)
       const owners = new Map()
       for (const id of Object.keys(byId)) {
         let root = id
         const seen = new Set()
-        while (byId[root] && !archived.has(root) && !seen.has(root)) {
+        while (byId[root] && !(archived !== null && archived.has(root)) && !seen.has(root)) {
           seen.add(root)
           const row = byId[root]
           if (row.origin !== 'subagent') {
@@ -1081,7 +1157,31 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function activateSessionFromUnit(unit) {
+    // unit 根身份:host 通知时已归结并随 unit 下发;缺字段的旧投影再按快照解析。
+    // 显式 null/空表示 host 也未知,不得回退快照把中间 id 当根;字段缺席才是旧投影。
+    // fallback=false 用于导航/触发判定:孤儿与环保持"不可归结"而不误跳自身。
+    const hasUnitRootField = (unit) => Object.prototype.hasOwnProperty.call(unit, 'rootSessionId')
+    function unitRootId(unit, fallback = true) {
+      if (hasUnitRootField(unit)) {
+        return typeof unit.rootSessionId === 'string' && unit.rootSessionId.length > 0 ? unit.rootSessionId : undefined
+      }
+      if (!hasSessionId(unit)) return undefined
+      const rootId = rootSessionIdOf(unit.sessionId)
+      if (rootId !== undefined) return rootId
+      return fallback ? unit.sessionId : undefined
+    }
+    // 注册时可确认的根:显式字段,或快照解析出不同于自身的祖先;快照空白时保持 null,
+    // 留给后续快照补全时迁移,避免把当时的子 id 固化成根。
+    function knownUnitRoot(unit) {
+      if (hasUnitRootField(unit)) {
+        return typeof unit.rootSessionId === 'string' && unit.rootSessionId.length > 0 ? unit.rootSessionId : null
+      }
+      if (!hasSessionId(unit)) return null
+      const rootId = rootSessionIdOf(unit.sessionId)
+      return rootId !== undefined && rootId !== unit.sessionId ? rootId : null
+    }
+
+    function activateSessionFromUnit(unit, knownRoot) {
       const controller = notificationController
       return () => {
         try { if (typeof window.focus === 'function') window.focus() } catch { /* 唤醒失败不阻断导航 */ }
@@ -1095,7 +1195,7 @@ window.__ModuleLoader__.load({
         }
         // 历史投影和无会话测试通知不含 ID,只唤醒,不冒险跳到同名会话。
         if (!hasSessionId(unit)) return
-        const targetSessionId = rootSessionIdOf(unit.sessionId)
+        const targetSessionId = typeof knownRoot === 'string' && knownRoot.length > 0 ? knownRoot : unitRootId(unit, false)
         if (!targetSessionId) return
         const sessionNavigator = [...sessionNavigators.values()].at(-1)
         if (!sessionNavigator) {
@@ -1104,8 +1204,9 @@ window.__ModuleLoader__.load({
         }
         try {
           sessionNavigator.openSession(targetSessionId)
-          // 已读收尾只在登记实例仍存活时执行,过期代际闭包不误清当前代高亮
-          if (controller && !controller.signal.aborted && controller === notificationController) markSessionHandled(unit.sessionId)
+          // 已读收尾只在登记实例仍存活时执行,过期代际闭包不误清当前代高亮;
+          // 处理标记落根会话,子会话通知与根会话已读事实同源
+          if (controller && !controller.signal.aborted && controller === notificationController) markSessionHandled(targetSessionId)
         } catch {
           toast('无法打开通知对应的会话，请在会话列表中查看', { holdMs: TOAST_MS })
         }
@@ -1116,40 +1217,95 @@ window.__ModuleLoader__.load({
 
     // 等待用户动作的事件超此时长未处理即补发一轮(一次,不连环)。
     const ACTION_REMIND_MS = 10 * 60 * 1000
+    // 跨窗口已处理信号的重复写窗口:高频 DOM 扫描反复命中同一会话时避免事件风暴
+    const HANDLED_SIGNAL_MIN_MS = 1 * 1000
     // 提醒处理独立于高亮可见性；只撤当前已登记项，后续同会话通知可重新登记。
+    // 提醒归属落根会话:子会话通知随根会话的已处理事实撤销。
+    // 提醒项同时保存注册时可确认的根 id;快照当时未就绪则留 null,清除/触发时再按
+    // 最新快照重解析。两者都不可用时退回原始 sessionId(旧行为,至少不清错别的会话)。
     const pendingReminders = new Map()
-    function markSessionHandled(sessionId) {
-      sessionHighlights.delete(sessionId)
-      const row = findSessionRow(sessionId)
-      if (row) removeRowHighlight(row)
+    let lastHandledPruneAt = 0
+    function reminderRootId(reminder) {
+      if (typeof reminder.rootSessionId === 'string' && reminder.rootSessionId.length > 0) return reminder.rootSessionId
+      return unitRootId(reminder.unit) ?? reminder.unit.sessionId
+    }
+    function clearSessionReminders(sessionId) {
       for (const [id, reminder] of pendingReminders) {
-        if (reminder.unit.sessionId !== sessionId) continue
+        if (reminderRootId(reminder) !== sessionId) continue
         clearTimeout(reminder.timer)
         pendingReminders.delete(id)
       }
     }
-    function actionHandled(unit) {
-      return hasSessionId(unit) && isEngaged() && currentSessionId() === unit.sessionId
+    function clearUnitReminder(unitId) {
+      const reminder = pendingReminders.get(unitId)
+      if (reminder === undefined) return
+      clearTimeout(reminder.timer)
+      pendingReminders.delete(unitId)
+    }
+    // 跨窗口已处理信号:写时间戳触发其他窗口 storage 事件;同值不触发事件,故不写固定值。
+    // 顺带清理超过提醒寿命的历史信号,防 localStorage 无界累积。
+    function signalSessionHandled(sessionId) {
+      if (typeof sessionId !== 'string' || sessionId.length === 0) return
+      const key = KEY_SESSION_HANDLED + sessionId
+      const now = Date.now()
+      const previous = Number(localGet(key))
+      if (Number.isFinite(previous) && now - previous < HANDLED_SIGNAL_MIN_MS) return
+      if (now - lastHandledPruneAt >= ACTION_REMIND_MS) {
+        lastHandledPruneAt = now
+        try {
+          for (let index = window.localStorage.length - 1; index >= 0; index -= 1) {
+            const name = window.localStorage.key(index)
+            if (name === null || name.indexOf(KEY_SESSION_HANDLED) !== 0) continue
+            const at = Number(window.localStorage.getItem(name))
+            if (!Number.isFinite(at) || now - at > ACTION_REMIND_MS) localDel(name)
+          }
+        } catch {
+          storageState.broken = true
+        }
+      }
+      localSet(key, String(now))
+    }
+    // 高亮清除单点:本窗处理与他窗已处理信号共用,保证集合条目与行类同步移除
+    function clearSessionHighlight(sessionId) {
+      for (const [key, entry] of [...sessionHighlights]) {
+        if (key === sessionId || entry.sessionId === sessionId || highlightEntryRoot(entry) === sessionId) sessionHighlights.delete(key)
+      }
+      const row = findSessionRow(sessionId)
+      if (row) removeRowHighlight(row)
+    }
+    function markSessionHandled(sessionId) {
+      const rootId = rootSessionIdOf(sessionId) ?? sessionId
+      clearSessionHighlight(rootId)
+      clearSessionReminders(rootId)
+      signalSessionHandled(rootId)
+    }
+    function actionHandled(unit, knownRoot) {
+      if (!hasSessionId(unit) || !isEngaged()) return false
+      const rootId = typeof knownRoot === 'string' && knownRoot.length > 0 ? knownRoot : unitRootId(unit, false)
+      const current = currentSessionId()
+      const currentRoot = current === null ? null : (rootSessionIdOf(current) ?? current)
+      return rootId !== undefined && currentRoot === rootId
     }
     function scheduleActionReminder(unit, channels) {
       if (unit.category !== 'approval' && unit.category !== 'ask') return
       if (pendingReminders.has(unit.id)) return
+      const rootSessionId = knownUnitRoot(unit)
       const timer = setTimeout(() => {
-        if (!pendingReminders.has(unit.id)) return
+        const reminder = pendingReminders.get(unit.id)
+        if (reminder === undefined) return
         pendingReminders.delete(unit.id)
-        if (actionHandled(unit)) return
+        if (actionHandled(unit, reminder.rootSessionId)) return
         // 补发独立于聚焦静默与路由名单:它就是"通道没送达"的兜底
-        showPageNotification('[再次提醒] ' + unit.text + (unit.summary ? '\n' + unit.summary : ''), activateSessionFromUnit(unit))
+        showPageNotification('[再次提醒] ' + unit.text + (unit.summary ? '\n' + unit.summary : ''), activateSessionFromUnit(unit, reminder.rootSessionId), CATEGORY_KINDS[unit.category])
         playSound(resolveSound(unit.category, effectiveMapping(), uploadedIds)).catch(() => {})
         startTitleBlink()
       }, ACTION_REMIND_MS)
       if (typeof timer.unref === 'function') timer.unref()
-      pendingReminders.set(unit.id, { unit, timer })
+      pendingReminders.set(unit.id, { unit, timer, rootSessionId })
     }
-    // 投影刷新同步:单元过期即撤登记(通知已被其他窗口处理或已出投影窗口)
-    function pruneReminders(liveIds) {
+    // 卸载清理:只撤待发定时器;投影刷新不撤销登记(登记寿命独立于投影 TTL)
+    function pruneReminders() {
       for (const [id, reminder] of pendingReminders) {
-        if (liveIds.has(id)) continue
         clearTimeout(reminder.timer)
         pendingReminders.delete(id)
       }
@@ -1171,6 +1327,27 @@ window.__ModuleLoader__.load({
       }
       window[KEY_HL_LISTENER] = listener
       document.addEventListener('click', listener, true)
+    }
+
+    // 跨窗口已处理监听:他窗写 KEY_SESSION_HANDLED 后本窗口 storage 事件到达,
+    // 撤销对应根会话的待发提醒;令牌承载 dispose,HMR 换代先摘旧代再挂新代
+    const KEY_HANDLED_LISTENER = 'turn-notify:handled-listener'
+    function ensureHandledListener() {
+      if (typeof window.addEventListener !== 'function') return
+      if (typeof window[KEY_HANDLED_LISTENER] === 'function') window.removeEventListener('storage', window[KEY_HANDLED_LISTENER])
+      const listener = (event) => {
+        if (!event || typeof event.key !== 'string') return
+        if (event.key.indexOf(KEY_SESSION_HANDLED) === 0) {
+          const sessionId = event.key.slice(KEY_SESSION_HANDLED.length)
+          clearSessionReminders(sessionId)
+          clearSessionHighlight(sessionId)
+          return
+        }
+        // 完成标记被他窗改写(认领/消费)时同样意味着该条已有窗口处理
+        if (event.key.indexOf(KEY_DONE) === 0) clearUnitReminder(event.key.slice(KEY_DONE.length))
+      }
+      window[KEY_HANDLED_LISTENER] = listener
+      window.addEventListener('storage', listener)
     }
 
     // 返回即已读:窗口重获焦点或页面重新可见时清除当前会话高亮。
@@ -1213,9 +1390,11 @@ window.__ModuleLoader__.load({
         ensureHighlightListener()
         ensureHighlightVisibilitySync()
         ensureHighlightObserver()
+        ensureHandledListener()
         const highlightListener = window[KEY_HL_LISTENER]
         const highlightVisibility = window[KEY_HL_VISIBLE]
         const highlightObserver = window[KEY_HL_OBSERVER]
+        const handledListener = window[KEY_HANDLED_LISTENER]
         const disposeAudio = startAudio()
         refreshSounds()
         const dispose = () => {
@@ -1229,15 +1408,16 @@ window.__ModuleLoader__.load({
           notificationOwners.clear()
           activeNotificationOwner = null
           notificationController = null
-          pruneReminders(new Set())
+          pruneReminders()
           stopTitleBlink()
           highlightVisibility?.dispose()
           highlightObserver?.disconnect()
           if (typeof highlightListener === 'function') document.removeEventListener('click', highlightListener, true)
+          if (typeof handledListener === 'function') window.removeEventListener('storage', handledListener)
           if (typeof window[KEY_HL_FRAME] === 'number') cancelAnimationFrame(window[KEY_HL_FRAME])
           sessionHighlights.clear()
           clearSessionHighlightClasses()
-          for (const [key, value] of [[KEY_HL_LISTENER, highlightListener], [KEY_HL_VISIBLE, highlightVisibility], [KEY_HL_OBSERVER, highlightObserver], [KEY_POLL_TOKEN, controller], [KEY_POLL_DISPOSE, dispose]]) {
+          for (const [key, value] of [[KEY_HL_LISTENER, highlightListener], [KEY_HL_VISIBLE, highlightVisibility], [KEY_HL_OBSERVER, highlightObserver], [KEY_HANDLED_LISTENER, handledListener], [KEY_POLL_TOKEN, controller], [KEY_POLL_DISPOSE, dispose]]) {
             if (window[key] === value) delete window[key]
           }
         }
@@ -1522,6 +1702,9 @@ window.__ModuleLoader__.load({
         const syncPreferences = (event) => {
           const keys = [KEY_SOUND, KEY_TOAST, KEY_SYSTEM, KEY_PAGE_SOUND, KEY_DND, KEY_FOREGROUND_SYSTEM, KEY_DEGRADE_HINT, KEY_VOLUME, KEY_TOAST_APPEARANCE, KEY_SOUND_CATEGORIES, KEY_PAGE_SOUND_CATEGORIES, KEY_MAPPING_LOCAL, KEY_MAPPING, KEY_PAGE_MAPPING, KEY_SESSION_HL]
           if (event.key !== null && !keys.includes(event.key)) return
+          // 跨标签页改高亮开关必须立即作用到运行时(开关标志、已挂集合与行类),
+          // 不能等下一轮投影轮询;写回同值不会触发新的 storage 事件
+          if (event.key === null || event.key === KEY_SESSION_HL) writeSessionHighlightEnabled(readSessionHighlightEnabled())
           setToastAppearance(readToastAppearance())
           setBrowserPrefs({
             sound: localGet(KEY_SOUND) !== '0', toast: localGet(KEY_TOAST) !== '0',
@@ -1555,8 +1738,8 @@ window.__ModuleLoader__.load({
         try {
           for (const file of files) {
             try {
-              const ext = (/\.([^.]+)$/.exec(file.name) || [])[1]?.toLowerCase() || ''
-              if (AUDIO_EXTS.indexOf(ext) < 0) throw new Error('仅支持 ' + AUDIO_EXTS.join(' / '))
+              const problem = pickFileProblem(file)
+              if (problem !== null) throw new Error(problem)
               const raw = await file.arrayBuffer()
               // 入库前双重校验的浏览器半区:解码失败即拒绝;
               // 解码吃副本,原始 buffer 留给确认后的上传与试听
@@ -2124,7 +2307,7 @@ window.__ModuleLoader__.load({
                 field('通知样式', [
                   h('select', {
                     className: 'tn-select', 'aria-label': '页内提示样式', value: toastAppearance, disabled: !browserPrefs.toast,
-                    title: '两种样式均跟随主题；选择后新通知立即采用。',
+                    title: '共 ' + Object.keys(TOAST_APPEARANCES).length + ' 种样式，均跟随主题，状态色按事件分类着色；选择后新通知立即采用。',
                     onChange: (e) => { localSet(KEY_TOAST_APPEARANCE, e.target.value); setToastAppearance(readToastAppearance()) },
                   }, Object.entries(TOAST_APPEARANCES).map(([value, label]) => h('option', { key: value, value }, label))),
                   testButton('预览样式', '显示当前样式的示例通知，不播放声音。', previewNotificationStyle, !browserPrefs.toast),
@@ -2497,7 +2680,7 @@ window.__ModuleLoader__.load({
       },
       // 测试钩子:供全链路集成测试注入 stub 后取内部函数,生产无消费方;
       // 页内通知的展示结果经 require 桩捕获,不在本包断言
-      __test: { poll, pendingReminders, markSessionHandled, pollOnce, storageState, announcedIds, submitCategoryToggle, start, pruneReminders, previewPageNotification, notifyExternal, installNotifyBridge, uninstallNotifyBridge, stopTitleBlink },
+      __test: { poll, pendingReminders, sessionHighlights, markSessionHandled, pollOnce, storageState, announcedIds, submitCategoryToggle, start, pruneReminders, previewPageNotification, notifyExternal, installNotifyBridge, uninstallNotifyBridge, stopTitleBlink, rootSessionIdOf, folderActivityOwners, get sessionHighlightEnabled() { return sessionHighlightEnabled } },
     }
   },
 })

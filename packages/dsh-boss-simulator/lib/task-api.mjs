@@ -1,11 +1,14 @@
-// 人类操作入口:创建/授权/派发由面板直达,复用 core 状态机与 Run 服务,不复制规则。
+// 人类操作入口:创建/授权/派发/删除由面板直达,复用 core 状态机与 Run 服务,不复制规则。
 // 任务创建以客户端生成的 taskId 作幂等键;重复提交得到冲突而不是第二条任务。
 import { randomUUID } from 'node:crypto'
-import { createTask, defineWorkItem, authorizeTask } from './core/task.mjs'
+import { createTask, defineWorkItem, authorizeTask, hasActiveRuns, expireStaleRuns } from './core/task.mjs'
+import { defaultPhaseFor, nextDispatchOf } from './core/query.mjs'
 import { createRunService } from './run-service.mjs'
-import { sendJson, readJsonBody } from './http.mjs'
+import { sendJson, readJsonBody, rejectMethod } from './http.mjs'
 
-const ACTIONS = ['create', 'authorize', 'dispatch']
+const ACTIONS = ['create', 'authorize', 'dispatch', 'delete']
+const METHODS = { workspaces: ['GET'], task: ['POST'] }
+const DELETE_CONFIRM = 'delete'
 const DEFAULT_WORK_ITEM_ID = 'w1'
 const DEFAULT_PHASE = 'implement'
 const CRITERION_PREFIX = 'c'
@@ -40,6 +43,7 @@ function statusOf(error) {
 
 export function createTaskApi({ store, drive, listWorkspaces = () => [], now = Date.now }) {
   async function handleWorkspaces(req, res) {
+    if (rejectMethod(req, res, METHODS.workspaces)) return
     try {
       const host = await listWorkspaces()
       const fromHost = (Array.isArray(host) ? host : [])
@@ -89,8 +93,7 @@ export function createTaskApi({ store, drive, listWorkspaces = () => [], now = D
     const taskId = requireText(body.taskId, 'taskId')
     if (!(await store.loadAggregate(taskId))) throw Object.assign(new Error(`任务不存在: ${taskId}`), { code: 'NOT_FOUND' })
     const updated = await store.updateAggregate(taskId, (aggregate) => {
-      // 重复授权不再改写记录:已授权且定义未变即当前事实
-      if (aggregate.authorization && aggregate.authorization.definitionRevision === aggregate.definitionRevision) return aggregate
+      // 幂等短路在 core:已授权且定义未变时不改写记录,也不作废既有验收
       const outcome = authorizeTask(aggregate, {
         sourceMessageRef: { sessionId: 'boss-simulator-panel', messageId: body.commandId ?? randomUUID() },
       })
@@ -100,17 +103,38 @@ export function createTaskApi({ store, drive, listWorkspaces = () => [], now = D
     return { ok: true, taskId, businessState: updated.businessState, controlState: updated.control.state }
   }
 
-  async function dispatch(body) {
+  // 删除任务:放弃任务的唯一出口。在飞 Run 未核清时先要求停止/强制停止,
+  // 失联 Run 按已断收敛后不再阻塞删除;删除本身需显式确认,避免误触。
+  async function remove(body) {
     const taskId = requireText(body.taskId, 'taskId')
-    const workItemId = requireText(body.workItemId, 'workItemId')
+    if (body.confirm !== DELETE_CONFIRM) {
+      throw Object.assign(new Error(`删除任务须显式确认(confirm: ${DELETE_CONFIRM})`), { statusCode: 400, code: 'CONFIRMATION_REQUIRED' })
+    }
     const aggregate = await store.loadAggregate(taskId)
     if (!aggregate) throw Object.assign(new Error(`任务不存在: ${taskId}`), { code: 'NOT_FOUND' })
+    const settled = expireStaleRuns(aggregate).result?.aggregate ?? aggregate
+    if (hasActiveRuns(settled)) {
+      throw Object.assign(new Error('任务存在未核清 Run,须先停止或强制停止后再删除'), { code: 'EXECUTION_STILL_ACTIVE' })
+    }
+    await store.deleteAggregate(taskId)
+    return { ok: true, taskId, deleted: true }
+  }
+
+  async function dispatch(body) {
+    const taskId = requireText(body.taskId, 'taskId')
+    const aggregate = await store.loadAggregate(taskId)
+    if (!aggregate) throw Object.assign(new Error(`任务不存在: ${taskId}`), { code: 'NOT_FOUND' })
+    // 未指定子项时按服务端推进目标派发:面板不在客户端复制"先派第一个"的选择规则
+    const planned = nextDispatchOf(aggregate)
+    const workItemId = body.workItemId === undefined ? planned?.workItemId : requireText(body.workItemId, 'workItemId')
+    if (!workItemId) throw Object.assign(new Error('没有可推进的子项(无待实施或待验收项)'), { code: 'INVALID_ARGUMENT' })
+    // 缺省阶段与 nextDispatch 同源:显式 workItemId 也按子项派生态推导(已有产物代次→fix)
+    const phase = body.phase ?? defaultPhaseFor(aggregate, workItemId) ?? DEFAULT_PHASE
     // 预检只给出可读错误码,执行期规则仍由 Run 服务内的许可校验决定
     if (!aggregate.authorization || aggregate.authorization.definitionRevision !== aggregate.definitionRevision) {
       throw Object.assign(new Error('当前定义无有效授权'), { code: 'AUTHORIZATION_REQUIRED' })
     }
     if (!drive?.sessionAdapter) throw Object.assign(new Error('标准会话适配未就绪'), { statusCode: 501 })
-    const phase = body.phase ?? DEFAULT_PHASE
     const service = createRunService({
       store,
       sessionAdapter: drive.sessionAdapter,
@@ -127,9 +151,10 @@ export function createTaskApi({ store, drive, listWorkspaces = () => [], now = D
     })
   }
 
-  const handlers = { create, authorize, dispatch }
+  const handlers = { create, authorize, dispatch, delete: remove }
 
   async function handleTask(req, res) {
+    if (rejectMethod(req, res, METHODS.task)) return
     try {
       const body = await readJsonBody(req, res)
       if (body === null) return

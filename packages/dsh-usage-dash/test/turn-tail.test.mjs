@@ -226,7 +226,7 @@ test('芯片文本取不到价为占位符', () => {
 
 test('title 含 token 摘要与估算口径,可选桶未上报追加标注', () => {
   const full = { uncachedInputTokens: 8000, outputTokens: 1000, totalTokens: 9000, cacheReadTokens: 0, cacheWriteTokens: 0 }
-  assert.equal(turnCostTitleText(zhT, full), '输入 8K tok · 输出 1K tok,单轮用量按当前费率估算')
+  assert.equal(turnCostTitleText(zhT, full), '输入 8.0K tok · 输出 1.0K tok,单轮用量按当前费率估算')
   const missing = { uncachedInputTokens: 1, outputTokens: 1, totalTokens: 2 }
   assert.equal(turnCostTitleText(zhT, missing), '输入 1 tok · 输出 1 tok,单轮用量按当前费率估算,该提供商未上报此桶')
   assert.equal(turnCostTitleText(enT, missing), 'Input 1 tok · Output 1 tok,Per-turn usage estimated at current rates,Not reported by this provider')

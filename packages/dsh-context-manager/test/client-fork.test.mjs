@@ -56,6 +56,7 @@ function loadClient({ sessions, remoteSession } = {}) {
       register: (options, component) => registered.push({ options, component }),
     },
     remote: { session: remoteSession },
+    inject: (deps, register) => { if (deps.includes('remote.session') && ctx.remote.session) register(ctx) },
   }
   mod.apply(ctx)
   return { registered }
@@ -70,12 +71,13 @@ function findForkEntry({ sessions, remoteSession } = {}) {
 
 const EMPTY_FOLLOW = { follow: () => followStub([]).frames }
 
-test('inject 点分声明 remote.namespace(规约:禁止 apply 内同步探测 remote 面)', () => {
+test('inject 分层:主 inject 不绑定 remote.session,点分子面独立注入(单面缺失不拖垮其余功能)', () => {
   const declared = CLIENT_SRC.match(/inject: \[([^\]]*)\]/)
-  assert.ok(declared, 'client.js 缺 inject 声明')
+  assert.ok(declared, 'client.js 缺主 inject 声明')
   const names = declared[1].split(',').map((item) => item.trim().replace(/'/g, '')).filter(Boolean)
-  assert.ok(names.includes('remote'), 'inject 必须声明 remote')
-  assert.ok(names.includes('remote.session'), 'inject 必须点分声明 remote.session(cordis 门控 namespace 就绪)')
+  assert.ok(names.includes('slots'), '主 inject 必须声明 slots')
+  assert.ok(!names.includes('remote.session'), 'remote.session 不得进入主 inject(缺失会拖垮历史/设置卡/复制/克隆)')
+  assert.ok(CLIENT_SRC.includes("ctx.inject(['remote.session']"), 'fork 应以点分子面 inject 等待 remote.session 就绪')
 })
 
 test('Given sessions 服务与 remote.session.follow 齐备, When apply, Then 注册 fork dock 条目', () => {
@@ -191,6 +193,91 @@ test('Given follow 失败, When loadTurnEnds, Then 异常向上传播(组件侧�
   await assert.rejects(props.loadTurnEnds(), /gateway down/)
 })
 
+// P2-35:四个注入面共用一个全文档观察器,流式热路径按帧批处理;已注入节点用
+// isConnected 短路,避免每次变异重跑全量选择器查询
+test('P2-35:全文档注入共用一个 MutationObserver,rAF 批处理且 isConnected 短路', () => {
+  assert.equal((CLIENT_SRC.match(/new MutationObserver/g) || []).length, 1, '全文档只允许一个共享观察器')
+  assert.ok(CLIENT_SRC.includes('mutationScans'), '共享观察器应有扫描订阅集合')
+  assert.ok(CLIENT_SRC.includes("requestAnimationFrame(runMutationScans)"), '变异回调应按动画帧合并')
+  assert.ok(CLIENT_SRC.includes("injectedButton.isConnected !== false"), '历史按钮应经已注入引用短路')
+  assert.ok(CLIENT_SRC.includes("existingForkButton.isConnected !== false"), 'fork 按钮应经已注入引用短路')
+  assert.ok(CLIENT_SRC.includes("existing && existing.isConnected !== false"), '撤回按钮应经已注入引用短路')
+})
+
+// 首轮 + 第 0 轮 turn/end:映射只有 turn 0,用于模拟挂载后新轮尚不在快照窗口
+function baseTurnRecords() {
+  return [
+    { event: { type: 'user/message', seq: 1, data: { source: { kind: 'user' }, content: [{ type: 'text', text: '首问' }] } } },
+    { event: { type: 'turn/end', seq: 2, data: { turn: 0 } } },
+  ]
+}
+
+test('P1-4:挂载后新轮不在旧快照,前向补拉重新 followOpening 并登记新轮锚点', async () => {
+  let followCalls = 0
+  const plusNewTurn = baseTurnRecords().concat([
+    { event: { type: 'user/message', seq: 3, data: { source: { kind: 'user' }, content: [{ type: 'text', text: '第二问' }] } } },
+    { event: { type: 'turn/end', seq: 4, data: { turn: 1 } } },
+  ])
+  const remoteSession = {
+    follow: () => {
+      followCalls += 1
+      return followStub(followCalls === 1 ? baseTurnRecords() : plusNewTurn).frames
+    },
+  }
+  const { entry } = findForkEntry({ remoteSession })
+  const props = entry.options.inject('s1')
+  const first = await props.loadTurnEnds()
+  assert.equal(first.has(1), false, '旧快照不应含挂载后新增的第 1 轮')
+  const refreshed = await props.loadTurnEnds({ forward: true, turn: 1 })
+  assert.equal(followCalls, 2, '缺失轮号大于已知最大轮号时必须重新 followOpening')
+  assert.ok(refreshed.has(1), '前向补拉后第 1 轮必须进入映射')
+  assert.equal(refreshed.get(1).seq, 4)
+  assert.equal(refreshed.get(1).text, '第二问')
+})
+
+test('P2-31:同一缺失轮连续前向补拉至多 K 次,事件游标未推进不重复请求', async () => {
+  let followCalls = 0
+  const remoteSession = {
+    follow: () => {
+      followCalls += 1
+      return followStub(baseTurnRecords()).frames
+    },
+  }
+  const { entry } = findForkEntry({ remoteSession })
+  const props = entry.options.inject('s1')
+  await props.loadTurnEnds()
+  for (let index = 0; index < 6; index += 1) {
+    await props.loadTurnEnds({ forward: true, turn: 1 })
+  }
+  assert.equal(followCalls, 2, '挂载首拉 1 次 + 同一缺失轮前向补拉 1 次,后续扫描不得形成补拉风暴')
+})
+
+test('P3:分页失败不提前消耗页预算,连续失败后仍可重试到成功', async () => {
+  let pageCalls = 0
+  const remoteSession = {
+    follow: () => followStub(baseTurnRecords()).frames,
+    page: async () => {
+      pageCalls += 1
+      if (pageCalls < 40) throw new Error('page down')
+      return { ok: true, value: { records: [] } }
+    },
+  }
+  const { entry } = findForkEntry({ remoteSession })
+  const props = entry.options.inject('s1')
+  await props.loadTurnEnds()
+  for (let index = 0; index < 39; index += 1) {
+    await assert.rejects(props.loadTurnEnds(), /page down/)
+  }
+  await props.loadTurnEnds()
+  assert.equal(pageCalls, 40, '失败不得把 pages 预算烧到上限,恢复后必须还能请求分页')
+})
+
+test('P3:forkAnchorLoaders 有 LRU 上限,切走会话不会无界积累', () => {
+  assert.ok(CLIENT_SRC.includes('const FORK_ANCHOR_LOADER_MAX = 16'), '加载器缓存必须有上限')
+  assert.ok(CLIENT_SRC.includes('while (forkAnchorLoaders.size > FORK_ANCHOR_LOADER_MAX)'), '超限必须淘汰最久未用会话')
+  assert.ok(CLIENT_SRC.includes('forkAnchorLoaders.delete(forkAnchorLoaders.keys().next().value)'), '淘汰应删最旧条目')
+})
+
 // 注入契约(源码级守卫):锚点属性/按钮标记/官方类名克隆/清理/点分门控必须存在
 test('ForkDock 注入契约:轮号锚点属性、按钮标记、防重标记与卸载清理齐备', () => {
   assert.ok(CLIENT_SRC.includes("TURN_ATTR = 'data-chat-turn'"), 'fork 锚点必须使用官方轮号标记')
@@ -199,7 +286,7 @@ test('ForkDock 注入契约:轮号锚点属性、按钮标记、防重标记与�
   assert.ok(CLIENT_SRC.includes("FLOW_KIND_ATTR = 'data-chat-flow-kind'"), '应识别官方气泡语义类型标记')
   assert.ok(CLIENT_SRC.includes("getAttribute(FLOW_KIND_ATTR) !== 'user'"), '只注入用户输入气泡(官方分支按钮驻留轮尾,语义互补不重叠)')
   assert.ok(CLIENT_SRC.includes('increaseTitle: true'), 'fork 请求应递增子会话标题')
-  assert.ok(CLIENT_SRC.includes('observer.disconnect()'), '卸载应断开观察')
+  assert.ok(CLIENT_SRC.includes('unsubscribeScan()'), '卸载应断开共享观察订阅')
   assert.ok(CLIENT_SRC.includes("remote.follow({ address: { kind: 'session', sessionId }"), '锚点必须按会话寻址 follow 开场帧')
   assert.ok(CLIENT_SRC.includes("frame.type === 'snapshot'"), '映射构建必须取自 follow 开场帧')
   // 图标与官方同源:fill 细路径单 path 形态(官方 IconBranchOutline16)

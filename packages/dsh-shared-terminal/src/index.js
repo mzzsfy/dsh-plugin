@@ -6,7 +6,7 @@ import { readControllerViewport, readActiveBufferType } from './lib/private-scre
 import { createTerminalReply } from './lib/terminal-reply.mjs'
 import { createPumpFactory } from './lib/attach-pump.mjs'
 import { createWaitSkipRegistry } from './lib/wait-skip.mjs'
-import { withHostGate } from './route-gate.mjs'
+import { withRouteGate } from './route-gate.mjs'
 
 export const name = 'dsh-shared-terminal'
 export const inject = ['terminalController', 'tools', 'webServer']
@@ -42,8 +42,8 @@ const readBody = (req, res) => new Promise((resolve, reject) => {
   })
   req.on('end', () => { if (!over) resolve(Buffer.concat(chunks).toString('utf8')) })
   req.on('error', () => { if (!over) reject(new Error('请求体读取失败')) })
-  // 超限后 end 不再流到(已暂停):挂 res 收尾销毁,防 socket 悬挂
-  res.on('finish', () => req.destroy())
+  // 只有超限暂停过流入才需要收尾销毁;正常请求保持 keep-alive,不得在每次响应后毁连接
+  res.on('finish', () => { if (over) req.destroy() })
 })
 
 // 跨源防护以 Origin 与 Host 同源比对为上限(仓库安全边界约定,不做自有认证层)
@@ -52,7 +52,9 @@ const rejectCrossOrigin = (req, res) => {
   if (!origin) return false
   let sameOrigin = false
   try {
-    sameOrigin = new URL(origin).host === req.headers?.host
+    sameOrigin = typeof req.headers?.host === 'string'
+      && req.headers.host.length > 0
+      && new URL(origin).host.toLowerCase() === req.headers.host.toLowerCase()
   } catch {
     sameOrigin = false
   }
@@ -61,10 +63,20 @@ const rejectCrossOrigin = (req, res) => {
   return true
 }
 
+// 写路由只接受 JSON:跨站表单(enctype=text/plain)是无预检的简单请求,必须显式拒绝
+const isJsonContentType = (req) => {
+  const value = req.headers?.['content-type']
+  return typeof value === 'string' && value.split(';', 1)[0].trim().toLowerCase() === 'application/json'
+}
+
 // 统一的 POST+同源+JSON body 入口:失败时已写好响应,调用方拿到 undefined 直接返回
 async function readPostJson(req, res) {
   if (req.method !== 'POST') {
     sendJson(res, 405, { error: 'method not allowed' })
+    return undefined
+  }
+  if (!isJsonContentType(req)) {
+    sendJson(res, 400, { error: 'content-type 须为 application/json' })
     return undefined
   }
   if (rejectCrossOrigin(req, res)) return undefined
@@ -138,8 +150,8 @@ function registerSharedTerminalRoutes(ctx, { waitSkipRegistry, tools, controller
       readBufferType: readActiveBufferType,
     }))
     // 形状漂移(有服务无 register)直接抛错暴露宿主 API 变更,不做静默降级
-    const unregisterRoute = webServer.register({ kind: 'exact', path: WAIT_SKIP_PATH, handler: withHostGate(ctx, waitSkipHandler) })
-    const unregisterPumpRoute = webServer.register({ kind: 'exact', path: PUMP_STATE_PATH, handler: withHostGate(ctx, pumpStateHandler) })
+    const unregisterRoute = webServer.register({ kind: 'exact', path: WAIT_SKIP_PATH, handler: withRouteGate(ctx, waitSkipHandler) })
+    const unregisterPumpRoute = webServer.register({ kind: 'exact', path: PUMP_STATE_PATH, handler: withRouteGate(ctx, pumpStateHandler) })
     return () => {
       stopTool?.()
       unregisterRoute?.()

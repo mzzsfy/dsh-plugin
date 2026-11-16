@@ -12,6 +12,7 @@ import {
   lastAssistantText,
   matchMarker,
   turnInitiator,
+  turnSlice,
   userTookOver,
 } from '../src/closure.mjs'
 
@@ -84,6 +85,27 @@ test('lastAssistantText 跳过无文本的 assistant 消息', () => {
   assert.equal(lastAssistantText(events, TURN), '先说明')
 })
 
+test('turnSlice 缺 turn/start 时不得从 0 吞入上一回合', () => {
+  const events = [
+    turnStart(0, 1),
+    userMessage(1),
+    assistant(2, 1, '上一回合'),
+    turnEnd(3, 1),
+    userMessage(4),
+    assistant(5, 2, '本回合'),
+    turnEnd(6, 2),
+  ]
+  const slice = turnSlice(events, 2)
+  assert.deepEqual(slice.map((item) => item.seq), [4, 5], '从上一回合 turn/end 之后开始')
+  assert.equal(lastAssistantText(events, 2), '本回合')
+})
+
+test('turnSlice 无回合号或无 start 边界时返回可用范围而不是整段污染', () => {
+  const events = [turnStart(0, 1), assistant(1, 1, '上一回合'), turnEnd(2, 1), assistant(3, 1, '同回合续写')]
+  assert.deepEqual(turnSlice(events, undefined), [])
+  assert.deepEqual(turnSlice(events, 1).map((item) => item.seq), [0, 1])
+})
+
 test('S1 有文件写入但无 present 且无标记:未结案', () => {
   const events = [turnStart(0, TURN), userMessage(1), toolCall(2, TURN, 'write'), assistant(3, TURN, '改好了')]
   const verdict = closureVerdict(events, TURN)
@@ -138,6 +160,20 @@ test('S6 有文件写入时标记无效:未结案', () => {
   const verdict = closureVerdict(events, TURN)
   assert.equal(verdict.closed, false)
   assert.equal(verdict.reason, 'file-write-requires-present')
+})
+
+test('S6b 关闭结案强制:写文件后无 present 不再返回 file-write-requires-present', () => {
+  const events = [turnStart(0, TURN), userMessage(1), toolCall(2, TURN, 'write'), assistant(3, TURN, '改好了')]
+  const verdict = closureVerdict(events, TURN, { enforce: false })
+  assert.equal(verdict.closed, false)
+  assert.equal(verdict.reason, 'no-signal')
+})
+
+test('S6c 关闭结案强制:写文件后标记仍算结案', () => {
+  const events = [turnStart(0, TURN), userMessage(1), toolCall(2, TURN, 'write'), assistant(3, TURN, '完成\nTASK_DONE')]
+  const verdict = closureVerdict(events, TURN, { enforce: false })
+  assert.equal(verdict.closed, true)
+  assert.equal(verdict.reason, 'marker')
 })
 
 test('S7 无本回合写入但 present 存在:结案', () => {

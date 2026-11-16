@@ -9,16 +9,17 @@
 //   [--only 包,包] [--skip-externals] [--crash-only] [--seed-gateway](主测槽:seed echo 路由入隔离 profile)
 //   [--keep](宿主+模拟器驻留交接,live.json 落盘,收尾 keep-stop.mjs;与 --crash-only 互斥)
 import { spawn, spawnSync } from 'node:child_process'
-import { createWriteStream, existsSync, writeFileSync, readFileSync, mkdirSync, renameSync, rmSync } from 'node:fs'
+import { closeSync, createWriteStream, existsSync, openSync, writeFileSync, readFileSync, mkdirSync, renameSync, rmSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'node:net'
 import { basename, join, resolve } from 'node:path'
 import { COMPAT_ROOT, DSH_PACKAGE, CORDIS_GROUP_PIN, DEFAULT_PORT, REPO_ROOT, workspaceYaml, runCmd, killPortOwner, symlinkDir, log } from './lib.mjs'
-import { acquireBridgeLock, bridgeArtifactShape, bridgeBackupPath, healBridgeBackups } from './bridge-mutex.mjs'
-import { buildProfile, installPackageExternals, enumeratePackages } from './profile.mjs'
+import { compatEnv } from './env.mjs'
+import { acquireBridgeLock, BRIDGE_PACKAGES, bridgeArtifactShape, bridgeBackupPath, healBridgeBackups } from './bridge-mutex.mjs'
+import { buildProfile, installPackageExternals } from './profile.mjs'
 import { isSemver } from './window.mjs'
 import { dismissOnboardingEval, verifyTypedEval, newSessionEval, ONBOARDING_CLEARED_VALUES } from './probe-evals.mjs'
-import { judgeUpstreamSeen, judgeRoundtrip, judgeLlm, judgeImportFailures, judgeFinal } from './compat-judges.mjs'
+import { judgeUpstreamSeen, judgeRoundtrip, judgeImportFailures, judgeFinal } from './compat-judges.mjs'
 import { probeHostGate } from './gate-probe.mjs'
 import { PLATFORM_GATED_BUNDLES, COMPAT_CHAT_MESSAGE, COMPAT_ANTHROPIC_MESSAGE } from './compat-criteria.mjs'
 
@@ -30,17 +31,10 @@ const ACTIVATION_POLL_MS = 5 * 1000
 const ACTIVATION_POLL_MAX = 40
 const FETCH_TIMEOUT_MS = 10 * 1000
 const KILL_GRACE_MS = 2 * 1000
-// 根桥内与宿主版本耦合的解析面:运行期重指宿主闭包同版本,对齐生产
-// healProfileModuleFallback 形态(插件 import 与宿主同源),结束后还原
-const BRIDGE_PACKAGES = [
-  '@deepseek-ai/dsh-storage-domain',
-  '@deepseek-ai/dsh-tools',
-  '@deepseek-ai/schemastery',
-  'zod',
-]
 
 function parseArgs(argv) {
-  const args = { port: DEFAULT_PORT, workRoot: COMPAT_ROOT }
+  // 端口占用默认拒绝清理:默认清理会杀别的会话实例,与 AGENTS 的随机端口+refuse 相悖
+  const args = { port: DEFAULT_PORT, workRoot: COMPAT_ROOT, refusePortOwner: true }
   for (let i = 0; i < argv.length; i++) {
     const map = {
       '--version': () => { args.version = argv[++i] },
@@ -57,6 +51,7 @@ function parseArgs(argv) {
       },
       '--keep': () => { args.keep = true },
       '--refuse-port-owner': () => { args.refusePortOwner = true },
+      '--allow-port-owner-kill': () => { args.refusePortOwner = false },
     }
     const handler = map[argv[i]]
     if (!handler) throw new Error(`未知参数: ${argv[i]}`)
@@ -65,7 +60,9 @@ function parseArgs(argv) {
   if (!args.version) throw new Error('缺少 --version')
   if (args.keep === true && args.crashOnly === true) throw new Error('--keep 与 --crash-only 互斥(keep 依赖 LLM 模拟器)')
   if (!isSemver(args.version)) throw new Error(`非法版本号: ${args.version}`)
-  if (!Number.isInteger(args.port) || args.port < 1 || args.port > 65535) throw new Error(`--port 非法: ${args.port}`)
+  // 端口只允许隔离段(9291/9292 为 CI 槽,9296-9310 为人工随机段):默认端口约束之外
+  // 也必须挡住 3080/9191 等生产/人工实例,不能靠调用者自觉。
+  if (!Number.isInteger(args.port) || args.port < 9291 || args.port > 9310) throw new Error(`--port 须在 9291-9310 隔离段: ${args.port}`)
   // spawn 会切换 cwd,路径参数必须先定死为绝对
   args.workRoot = resolve(args.workRoot)
   if (args.hostDir) args.hostDir = resolve(args.hostDir)
@@ -75,16 +72,16 @@ function parseArgs(argv) {
 // 根桥重指:dst 原位暂存为带 pid 后缀的备份;中途失败自动还原已重指部分。
 // 重指是全局副作用,先抢根桥锁:持有者存活立刻失败(提示占用工位),陈旧锁接管;
 // restore 完成后释放锁。每次形态变迁落审计日志:桥包消失事故定位需要确切的变迁时刻与前后形态
-function repointBridgeFromHost(hostDir, { workRoot, repoRoot = REPO_ROOT } = {}) {
-  const lock = acquireBridgeLock({ repoRoot, workRoot, log })
+export function repointBridgeFromHost(hostDir, { workRoot, repoRoot = REPO_ROOT } = {}) {
+  const lock = acquireBridgeLock({ repoRoot, workRoot, hostDir, log })
   const backups = []
   const audit = (phase, name, dst, backup) => log(
     `[bridge] ${phase} ${name}: dst=${bridgeArtifactShape(dst)} bak=${bridgeArtifactShape(backup)}`,
   )
   const restore = () => {
-    for (const { dst, backup } of backups) {
+    for (const { dst, backup, backedUp } of backups) {
       rmSync(dst, { recursive: true, force: true })
-      if (existsSync(backup)) renameSync(backup, dst)
+      if (backedUp && existsSync(backup)) renameSync(backup, dst)
       audit('restore', basename(dst), dst, backup)
     }
     backups.length = 0
@@ -105,9 +102,20 @@ function repointBridgeFromHost(hostDir, { workRoot, repoRoot = REPO_ROOT } = {})
       audit('repoint-before', name, dst, backup)
       // 锁在手,该目标下的遗留备份必属已死工位:校验形态后 heal,防止本次误删原件
       healBridgeBackups(dst, { log })
-      if (existsSync(dst)) renameSync(dst, backup)
-      symlinkDir(src, dst)
-      backups.push({ dst, backup })
+      let backedUp = false
+      if (existsSync(dst)) {
+        renameSync(dst, backup)
+        backedUp = true
+      }
+      try {
+        symlinkDir(src, dst)
+      } catch (error) {
+        // symlink 失败时 backup 尚未登记也必须立即还原,否则根桥直接缺失
+        rmSync(dst, { recursive: true, force: true })
+        if (backedUp && existsSync(backup)) renameSync(backup, dst)
+        throw error
+      }
+      backups.push({ dst, backup, backedUp })
       audit('repoint-after', name, dst, backup)
     }
   } catch (error) {
@@ -275,7 +283,7 @@ function startSimulator(workDir) {
       const match = out.match(/listening 127\.0\.0\.1:(\d+)/)
       if (match) {
         clearTimeout(timer)
-        resolve({ child, port: Number(match[1]), logPath })
+        resolve({ child, port: Number(match[1]), logPath, startedAt: Date.now() })
       }
     })
     child.on('exit', (code) => {
@@ -589,6 +597,23 @@ async function mintSessionCookie(base, token) {
   return first.includes('=') ? first : ''
 }
 
+// 信号收尾:CI/本地中断时 finally 不执行,孤儿宿主会留在独立进程组并让根桥保持重指。
+// 收尾动作与正常路径共用同一 teardown,幂等;信号处理器只负责等待并退出。
+let activeTeardown = null
+let teardownStarted = false
+async function runTeardown() {
+  if (teardownStarted) return
+  teardownStarted = true
+  if (activeTeardown) await activeTeardown()
+}
+for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143]]) {
+  // 只在本文件被直接执行时注册:boot-keep 会 import repointBridgeFromHost,
+  // 若顶层注册信号处理器,boot-keep 收信号会走这里的空 teardown 并跳过自身 finally。
+  if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+    process.once(signal, () => { runTeardown().finally(() => process.exit(code)) })
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   const workDir = join(args.workRoot, args.version)
@@ -643,12 +668,44 @@ async function main() {
     simulator = await startSimulator(workDir)
     log(`[${args.version}] LLM 模拟器就绪(:${simulator.port},留档 ${simulator.logPath})`)
   }
-  const bootLog = createWriteStream(bootLogPath, { flags: 'w' })
+  // --keep 的宿主输出直接写 boot.log 文件描述符:交接后父进程退出,若仍用管道
+  // 则无人消费且父进程被 stdio 句柄卡住。非 keep 路径保持流式管道,失败收尾可 flush。
+  let bootLog = null
+  let keepBootFd = null
+  if (args.keep === true) keepBootFd = openSync(bootLogPath, 'w')
+  else bootLog = createWriteStream(bootLogPath, { flags: 'w' })
   let child = null
   let restoreBridge = null
   // 成功交接标记:--keep 只在宿主与模拟器全部就绪并写出 live.json 后移交,
   // 失败路径一律收尾,不保留半启动工位
   let handedOver = false
+  // 正常路径与信号路径共用:kill 组、落 boot 日志、还原根桥、端口残留处置
+  const teardown = async () => {
+    if (handedOver !== true) {
+      if (child) killTree(child)
+      if (simulator) simulator.child.kill()
+      await sleep(KILL_GRACE_MS)
+      if (child) killTree(child, { force: true })
+      // keep 模式在 spawn 前已打开文件描述符;任何失败路径都要关闭父进程副本
+      if (keepBootFd !== null) {
+        closeSync(keepBootFd)
+        keepBootFd = null
+      }
+      // bootLog 只属于失败/正常非交接收尾;交接时不存在父进程侧写流可 end
+      if (bootLog) await new Promise((done) => bootLog.end(done))
+    }
+    restoreBridge?.()
+    if (handedOver !== true && child && !(await canBind(args.port))) {
+      // 残留监听只可能是本次 spawn 的宿主(收尾已组杀),正常即端口已释放;
+      // 仍被占说明有未知第三方进程,按 opt-in 约定处置
+      if (args.refusePortOwner) log(`端口 ${args.port} 残留未知监听,按 --refuse-port-owner 跳过清理`)
+      else {
+        log(`端口 ${args.port} 残留监听,强制清理`)
+        killPortOwner(args.port)
+      }
+    }
+  }
+  activeTeardown = teardown
   try {
     const profile = await buildProfile({
       version: args.version,
@@ -674,26 +731,31 @@ async function main() {
     }
 
     // detached 使 POSIX 子进程为进程组长,killTree 组杀才生效;win32 由 taskkill /T 承担
+    // 启动时间取 spawn 前时刻:等就绪后写会在慢启动时晚于真实启动时间,pid 校验失败
+    const childStartedAt = Date.now()
     child = spawn(process.execPath, [profile.binPath, 'web', '--no-open', '--port', String(args.port)], {
       cwd: profile.homeDir,
-      env: {
-        ...process.env,
+      env: compatEnv({
         DSH_HOME: profile.homeDir,
         // 逐包数据目录隔离(boot-keep 同款):缺一会写到生产 ~/.dsh,
         // 测试账号 Key 明文落生产文件。新增带数据目录的包时在此追加
         DSH_CRON_BOARD_DATA_DIR: join(workDir, 'data', 'cron-board'),
         DSH_USAGE_PANEL_DATA_DIR: join(workDir, 'data', 'usage-panel'),
         DSH_HISTORY_CACHE_DIR: join(workDir, 'data', 'context-manager-history'),
-        DSH_RS_WORKFLOW_DATA_DIR: join(workDir, 'data', 'rs-workflow'),
-        DSH_RS_WORKFLOW_PRESET_ROOT: join(workDir, 'data', 'rs-workflow-presets'),
         ECHO_KEY: 'echo-compat',
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      }),
+      // keep 交接时宿主直接写 boot.log 文件:父进程退出后日志继续增长且无管道消费方
+      stdio: ['ignore', args.keep === true ? keepBootFd : 'pipe', args.keep === true ? keepBootFd : 'pipe'],
       windowsHide: true,
       detached: true,
     })
-    child.stdout.pipe(bootLog)
-    child.stderr.pipe(bootLog)
+    if (args.keep === true) {
+      closeSync(keepBootFd)
+      keepBootFd = null
+    } else {
+      child.stdout.pipe(bootLog)
+      child.stderr.pipe(bootLog)
+    }
 
     restoreBridge = repointBridgeFromHost(hostDir, { workRoot: args.workRoot })
 
@@ -749,40 +811,29 @@ async function main() {
     // 桥重指不还原会污染宿主解析,keep 路径必须在还原桥之后退出
     if (args.keep === true) {
       // simulatorPid 是 keep-stop 精确收尾的唯一依据(端口是模拟器动态自报,命令行只有 --port 0)
-      writeFileSync(join(workDir, 'live.json'), JSON.stringify({ port: args.port, token, simulatorPort: simulator.port, simulatorPid: simulator.child.pid, pid: child.pid, logPath: simulator.logPath }, null, 2), 'utf8')
+      writeFileSync(join(workDir, 'live.json'), JSON.stringify({ port: args.port, token, simulatorPort: simulator.port, simulatorPid: simulator.child.pid, simulatorStartedAt: simulator.startedAt, hostStartedAt: childStartedAt, pid: child.pid, logPath: simulator.logPath, hostDir }, null, 2), 'utf8')
       log(`[${args.version}] keep:宿主 :${args.port} token=${token} 模拟器 :${simulator.port}(live.json 已落,自行收尾用 scripts/compat/keep-stop.mjs)`)
       handedOver = true
+      // 交接:模拟器 stdout 只用于启动握手,握手完成后解除监听与句柄引用;
+      // 宿主 keep 模式已直写文件描述符,父进程不再持任何 stdio 管道
+      simulator.child.stdout.removeAllListeners('data')
+      simulator.child.stdout.destroy()
+      child.unref()
+      simulator.child.unref()
     }
-    if (args.keep === true) return
   } finally {
     // 资源收尾按所有权与交接,不按参数:keep 仅在成功交接(live.json 已写)后生效,
     // 失败路径无条件收尾,半启动工位不留孤儿
-    if (handedOver !== true) {
-      killTree(child)
-      if (simulator) simulator.child.kill()
-      await sleep(KILL_GRACE_MS)
-      killTree(child, { force: true })
-    }
-    await new Promise((done) => bootLog.end(done))
-    restoreBridge?.()
-    if (handedOver !== true && !(await canBind(args.port))) {
-      // 残留监听只可能是本次 spawn 的宿主(收尾已组杀),正常即端口已释放;
-      // 仍被占说明有未知第三方进程,按 opt-in 约定处置
-      if (args.refusePortOwner) log(`端口 ${args.port} 残留未知监听,按 --refuse-port-owner 跳过清理`)
-      else {
-        log(`端口 ${args.port} 残留监听,强制清理`)
-        killPortOwner(args.port)
-      }
-    }
+    await teardown()
   }
+  // 交接成功即退出父进程(restoreBridge 已在 teardown 完成);boot 日志由宿主直写续写
+  if (handedOver === true) process.exit(0)
 
-  const llmOk = judgeLlm(checks.llm)
   // boot.log 入库面断言:行级 "failed to import"/"did not activate" 不阻塞
   // boot(0.1.7-rc.1 实测 false-pass——主行 import 崩溃仅此一行 error,activation
   // 仍 live)。本包任一行出现加载失败字样直接 FAIL,与 activation/llm 判定并联
   let importFailures = []
   try {
-    const names = enumeratePackages().all
     importFailures = judgeImportFailures(readFileSync(bootLogPath, 'utf8').split('\n'))
   } catch { /* 日志缺失按无失败处理,activation/llm 判定兜底 */ }
 
@@ -795,7 +846,9 @@ async function main() {
   process.exitCode = ok ? 0 : 1
 }
 
-main().catch((error) => {
-  console.error(`[compat] run 失败: ${error.message}`)
-  process.exitCode = 1
-})
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(`[compat] run 失败: ${error.message}`)
+    process.exitCode = 1
+  })
+}

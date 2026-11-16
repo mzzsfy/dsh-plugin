@@ -118,6 +118,19 @@ test('SC-3 白名单热改:volatile-update 现读 ref 重收敛', () => {
   assert.equal('deferLoading' in h.definitionOf('agent#1', 'shell'), false)
 })
 
+// P4:收敛与读写面必须同一清洗口径——settings 历史脏值 [' read '] 在设置页
+// 显示为全量注入(读路径 cleanAllowlist),收敛却按原始值找不到 'read',
+// 会把 read 打 defer,形成「显示注入、实际延迟」的两套事实源。
+test('P4 收敛白名单 trim:[" read "] 按 read 命中,与读写面同口径', () => {
+  const h = harness(
+    { scoped: { 'agent#1': { read: { name: 'read' }, shell: { name: 'shell' } } } },
+    { allowlist: [' read '] },
+  )
+  h.applyRow()
+  assert.equal('deferLoading' in h.definitionOf('agent#1', 'read'), false, 'trim 后应命中 read')
+  assert.equal(h.definitionOf('agent#1', 'shell').deferLoading, true, '未列名仍延迟加载')
+})
+
 test('SC-4 新 scoped 层(tools/change)收敛打标', () => {
   const h = harness({ global: { read: { name: 'read' } } })
   h.applyRow()
@@ -162,6 +175,28 @@ test('SC-6 二次 dispose 幂等(journal 已清,空转)', () => {
   h.dispose()
   h.dispose()
   assert.equal('deferLoading' in h.definitionOf('global', 'web'), false)
+})
+
+// Given 同名工具连续换过两次定义对象(旧对象均离场,测试仍持有引用);
+// When 收敛后退场;Then 每个仍存活的定义各按自己的原状还原(记录不因换代失联,
+// 也不因旧条目常驻而漏还原新对象)。
+test('SC-6b 同名多次换定义:退场逐条还原存活对象', () => {
+  const h = harness({ scoped: { 'agent#1': { web_search: { name: 'web_search' } } } })
+  h.applyRow()
+  const first = h.definitionOf('agent#1', 'web_search')
+  assert.equal(first.deferLoading, true)
+  const second = { name: 'web_search' }
+  h.tools.layers.scoped.get('agent#1').tools.data.set('web_search', registrationOf(second))
+  h.emit('tools/change')
+  assert.equal(second.deferLoading, true, '新对象重新打标')
+  const third = { name: 'web_search' }
+  h.tools.layers.scoped.get('agent#1').tools.data.set('web_search', registrationOf(third))
+  h.emit('tools/change')
+  assert.equal(third.deferLoading, true, '再换一代仍打标')
+  h.dispose()
+  assert.equal('deferLoading' in first, false, '离场但存活的第一代还原')
+  assert.equal('deferLoading' in second, false, '第二代还原')
+  assert.equal('deferLoading' in third, false, '当前代还原')
 })
 
 test('SC-7 enabled=false 还原全部并停止打标;回 true 重新收敛', () => {
@@ -310,6 +345,42 @@ test('SC-19 collapse=false:门关全量透传(打标维持)', () => {
   assert.equal(h.definitionOf('global', 'web').deferLoading, true)
   piAdapter.streamWithSnapshot({ tools: [{ name: 'read' }, { name: 'web' }] }, {})
   assert.deepEqual(piCalls[0].tools.map((tool) => tool.name), ['read', 'web'])
+})
+
+// S16:配置严格解析(schema + 解箱深拷)是请求扳机上的热路径。volatile 字段
+// 签名不变时复用解析产物;写事务换值后必须失效,不能拿缓存回陈旧开关。
+// 观测面 = structuredClone 调用次数(resolveConfigStrict 的唯一深拷点)。
+test('S16 配置解析缓存:签名不变不重新解析,配置变化即失效', () => {
+  const originalClone = globalThis.structuredClone
+  let clones = 0
+  globalThis.structuredClone = (value) => {
+    clones += 1
+    return originalClone(value)
+  }
+  try {
+    const piCalls = []
+    const piAdapter = new (makeAdapterClass(piCalls))()
+    const h = harness(
+      { global: { read: { name: 'read' }, web: { name: 'web' } } },
+      { allowlist: ['read'], llm: makeLlm(piAdapter, new (makeAdapterClass([]))()) },
+    )
+    h.applyRow()
+    const baseline = clones
+    assert.ok(baseline >= 1, '首次解析必须发生')
+    // 同内容 volatile-update(真机写事务常见:换 ref 不换值)+ 逐请求折叠
+    h.emit('loader/volatile-update')
+    piAdapter.streamWithSnapshot({ tools: [{ name: 'web' }] }, {})
+    piAdapter.streamWithSnapshot({ tools: [{ name: 'web' }] }, {})
+    assert.equal(clones, baseline, '签名不变时不得重复解析')
+    // 开关变化:缓存失效,新值进请求改写
+    h.current.collapse = false
+    h.emit('loader/volatile-update')
+    assert.ok(clones > baseline, '配置变化必须重新解析')
+    piAdapter.streamWithSnapshot({ tools: [{ name: 'web' }] }, {})
+    assert.deepEqual(piCalls.at(-1).tools, [{ name: 'web' }], 'collapse=false 后原样透传(不吃旧缓存)')
+  } finally {
+    globalThis.structuredClone = originalClone
+  }
 })
 
 // Given apply 时层为空(空表无从判定),注册进层的条目是裸 definition;

@@ -108,8 +108,9 @@ test('kline 参数校验 400', async () => {
 test('trend 不写缓存每次触源', async () => {
   const fx = fetchFixture()
   const app = await setup(fx.fetch)
-  const routesTrend = [{ id: 'xhkg-kline-trend', capability: 'kline', market: 'XHKG', instrument: 'equity', primaryInstanceId: 'em-default', fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true }]
-  const check = await app.providerCheck({ providers, routes: routesTrend, capabilities: ['kline'] })
+  // 分时是独立能力: 要有自己的路由才请求得出去
+  const routesTrend = [{ id: 'xhkg-trend', capability: 'trend', market: 'XHKG', instrument: 'equity', primaryInstanceId: 'em-default', fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true }]
+  const check = await app.providerCheck({ providers, routes: routesTrend, capabilities: ['trend'] })
   await app.configuration({ operationId: '00000000-0000-4000-8000-000000000002', expectedRevision: 1, payload: { providers, routes: routesTrend }, checkIds: [check.checkId] })
   const before = fx.calls.length
   await app.kline({ securityId: 'XHKG:equity:00700', period: 'trend' })

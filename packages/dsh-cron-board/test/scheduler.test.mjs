@@ -3,6 +3,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { existsSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -29,12 +30,13 @@ function stubRunner() {
   }
 }
 
-async function makeScheduler(t, { maxConcurrent = 2 } = {}) {
+async function makeScheduler(t, { maxConcurrent = 2, logSystem } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'cron-board-sched-'))
   // Windows 下并行测试时 Defender/索引器短暂锁目录,rmdir 报瞬态 EBUSY,有界重试消解
   t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
   const store = await createStore({ dir })
-  const logger = createLogger({ rootDir: join(dir, 'logs') })
+  const logsDir = join(dir, 'logs')
+  const logger = createLogger({ rootDir: logsDir })
   const runner = stubRunner()
   const executor = createExecutor({ store, logger, runner, readMaxConcurrent: () => maxConcurrent })
   let nowMs = Date.now()
@@ -43,11 +45,14 @@ async function makeScheduler(t, { maxConcurrent = 2 } = {}) {
     executor,
     readTickMs: () => TICK_MS,
     now: () => nowMs,
+    logSystem,
   })
   return {
     store,
     runner,
     scheduler,
+    executor,
+    logsDir,
     advance: (ms) => { nowMs += ms },
     now: () => nowMs,
   }
@@ -78,6 +83,54 @@ test('scheduler:到期触发产生 cron RunRecord 且 nextRunAt 先推进', asyn
     return record && record.status !== 'queued' && record.status !== 'running' ? record : null
   })
   assert.equal(finished.status, 'success')
+})
+
+test('scheduler:推进 nextRunAt 后任务已被删除,不再 dispatch 已删任务', async (t) => {
+  // Given 到期任务;模拟删除发生在 tick 的 await updateRuntime 之后、dispatch 之前
+  const { store, runner, scheduler, executor, advance, now, logsDir } = await makeScheduler(t)
+  const job = await store.jobs.create({
+    name: '删除竞态', kind: 'shell', command: 'echo hi', schedule: '* * * * *',
+    enabled: true, timeoutMs: 1000, nextRunAt: now() + 100,
+  })
+  advance(200)
+  const rawUpdate = store.jobs.updateRuntime.bind(store.jobs)
+  store.jobs.updateRuntime = async (id, patch) => {
+    const row = await rawUpdate(id, patch)
+    if (id === job.id) await store.jobs.remove(id)
+    return row
+  }
+  // When tick
+  await scheduler.tick()
+  store.jobs.updateRuntime = rawUpdate
+  // Then 不产生不可见 run、不创建日志目录、执行链无排队
+  assert.equal(store.jobs.get(job.id), undefined)
+  assert.equal(store.runs.list(job.id).length, 0)
+  assert.equal(executor.status().queued, 0)
+  assert.equal(runner.pending.length, 0)
+  assert.equal(existsSync(join(logsDir, job.id)), false, '不得为已删任务重建日志目录')
+})
+
+test('scheduler:dispatch 失败落 cron fail 记录并告警,触发点不被静默消耗', async (t) => {
+  // Given 到期任务与必定抛错的执行链
+  const logs = []
+  const { store, scheduler, executor, advance, now } = await makeScheduler(t, { logSystem: (line) => logs.push(line) })
+  const job = await store.jobs.create({
+    name: '调度失败', kind: 'shell', command: 'echo hi', schedule: '* * * * *',
+    enabled: true, timeoutMs: 1000, nextRunAt: now() + 100,
+  })
+  const rawDispatch = executor.dispatch.bind(executor)
+  executor.dispatch = async () => { throw new Error('执行链拒绝新运行') }
+  advance(200)
+  // When tick
+  await scheduler.tick()
+  executor.dispatch = rawDispatch
+  // Then 有 fail 记录与告警,nextRunAt 仍推进(不会在同一触发点重试轰炸)
+  const rows = store.runs.list(job.id)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].status, 'fail')
+  assert.match(rows[0].message, /调度失败/)
+  assert.ok(logs.some((line) => line.includes('cron 调度失败') && line.includes(job.id)))
+  assert.ok(store.jobs.get(job.id).nextRunAt > Date.now())
 })
 
 test('scheduler:同一触发点连续两次 tick 不重复触发', async (t) => {
@@ -130,12 +183,17 @@ test('scheduler:禁用任务不触发', async (t) => {
   assert.equal(store.runs.list(job.id).length, 0)
 })
 
-test('scheduler:recover 将遗留 queued/running 孤儿记录标 interrupted', async (t) => {
+test('scheduler:recover 将遗留 queued/running 孤儿记录标 interrupted 并回填任务卡状态', async (t) => {
   // Given runs.json 遗留 queued 与 running 记录(上次进程遗留)
   const { store, scheduler } = await makeScheduler(t)
-  await store.runs.create({ runId: 'r-queued', jobId: 'j1', trigger: 'cron', status: 'queued' })
-  await store.runs.create({ runId: 'r-running', jobId: 'j1', trigger: 'cron', status: 'running' })
-  await store.runs.create({ runId: 'r-done', jobId: 'j1', trigger: 'cron', status: 'success' })
+  const job = await store.jobs.create({
+    name: 'j1', kind: 'shell', command: 'x', schedule: '* * * * *',
+    enabled: true, timeoutMs: 1000, lastStatus: 'success',
+  })
+  const configVersion = job.updatedAt
+  await store.runs.create({ runId: 'r-queued', jobId: job.id, trigger: 'cron', status: 'queued' })
+  await store.runs.create({ runId: 'r-running', jobId: job.id, trigger: 'cron', status: 'running' })
+  await store.runs.create({ runId: 'r-done', jobId: job.id, trigger: 'cron', status: 'success' })
   // When 重启恢复
   await scheduler.recover()
   // Then 孤儿标 interrupted(message=dsh 重启中断),终态记录不动
@@ -143,6 +201,9 @@ test('scheduler:recover 将遗留 queued/running 孤儿记录标 interrupted', a
   assert.equal(store.runs.get('r-queued').message, 'dsh 重启中断')
   assert.equal(store.runs.get('r-running').status, 'interrupted')
   assert.equal(store.runs.get('r-done').status, 'success')
+  // Then 任务卡不再显示历史 success,而是中断;配置版本不被运行态回填推进
+  assert.equal(store.jobs.get(job.id).lastStatus, 'interrupted')
+  assert.equal(store.jobs.get(job.id).updatedAt, configVersion)
 })
 
 test('scheduler:recover 自愈残留触发点——nextRunAt 非当前表达式触发点即重算', async (t) => {
@@ -297,3 +358,55 @@ function waitFor(pick, timeoutMs = 10 * 1000) {
     tick()
   })
 }
+
+// 挂起 tick 内第一次推进 nextRunAt 的 update:把 dispose 精确投放在 tick 进行中
+function suspendNextRunUpdate(store) {
+  const original = store.jobs.updateRuntime.bind(store.jobs)
+  let release
+  let reached = false
+  const gate = new Promise((resolve) => { release = resolve })
+  store.jobs.updateRuntime = async (jobId, patch) => {
+    if (!reached && patch && Object.prototype.hasOwnProperty.call(patch, 'nextRunAt')) {
+      reached = true
+      await gate
+    }
+    return original(jobId, patch)
+  }
+  return {
+    release,
+    async whenReached() { await waitFor(() => (reached ? true : null)) },
+  }
+}
+
+test('S4: dispose 等待在飞 tick 收尾,停止后不写调度失败记录', async (t) => {
+  const { store, scheduler } = await makeScheduler(t)
+  const jobA = await store.jobs.create({
+    name: 'a', kind: 'shell', command: 'echo a', schedule: '30 8 * * *',
+    enabled: true, timeoutMs: 60 * 1000, nextRunAt: Date.now() - 1000,
+  })
+  const jobB = await store.jobs.create({
+    name: 'b', kind: 'shell', command: 'echo b', schedule: '0 9 * * *',
+    enabled: true, timeoutMs: 60 * 1000, nextRunAt: Date.now() - 1000,
+  })
+  const dueB = store.jobs.get(jobB.id).nextRunAt
+  // Given tick 正挂在推进 A 的 nextRunAt 上
+  const gate = suspendNextRunUpdate(store)
+  const tickPromise = scheduler.tick()
+  await gate.whenReached()
+  // When 插件停止
+  const disposePromise = scheduler.dispose()
+  // Then dispose 必须等 tick 收尾(旧实现立即返回,tick 随后 dispatch 失败并写 fail 记录)
+  const first = await Promise.race([
+    disposePromise.then(() => 'disposed'),
+    new Promise((resolve) => setTimeout(() => resolve('pending'), 100)),
+  ])
+  assert.equal(first, 'pending')
+  gate.release()
+  await disposePromise
+  await tickPromise
+  // And 停止后没有新运行记录,后续任务的 nextRunAt 也未被消耗
+  assert.equal(store.runs.list().length, 0)
+  assert.equal(store.jobs.get(jobB.id).nextRunAt, dueB)
+  assert.deepEqual(scheduler.status(), { active: 0, queued: 0 })
+  assert.ok(store.jobs.get(jobA.id))
+})

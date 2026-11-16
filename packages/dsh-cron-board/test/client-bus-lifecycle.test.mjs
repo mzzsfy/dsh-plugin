@@ -10,7 +10,8 @@ function fixture(sidebarTab, { real = false, deferredStatus = false } = {}) {
   let definition, pendingEffects
   const owners = new Map(), requests = [], clocks = new Set()
   const window = { __ModuleLoader__: { load: value => { definition = value } } }
-  const document = { getElementById: () => ({}) }
+  // 在位样式元素桩:必须实现 setAttribute(规约:复用路径无条件补 data-plugin)
+  const document = { getElementById: () => ({ isConnected: true, setAttribute() {}, textContent: '' }) }
   const timers = new Map(), pending = []
   let now = 0, timerId = 0, common
   class Clock extends Date { static now() { return now } }
@@ -40,7 +41,7 @@ function fixture(sidebarTab, { real = false, deferredStatus = false } = {}) {
   const fetch = async path => {
     requests.push(path)
     if (deferredStatus && path.endsWith('/status')) await new Promise(resolve => pending.push(resolve))
-    return { ok: true, json: async () => ({ items: [], ui: { sidebarTab } }) }
+    return { ok: true, json: async () => ({ items: [], ui: { sidebarTab, showAutomationTasks: false } }) }
   }
   new Function('window', 'document', 'fetch', 'setInterval', 'clearInterval', source)(
     window, document, fetch,

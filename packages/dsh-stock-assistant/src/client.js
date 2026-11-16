@@ -1,9 +1,11 @@
 window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-stock-assistant',
   factory(require) {
-    const PANEL_ID = 'stock-assistant', BASE = '/api/stock-assistant', BROWSE_PAGE = 50
+    const PANEL_ID = 'stock-assistant', BASE = '/api/stock-assistant', BROWSE_PAGE = 50, BROWSE_SYNC_POLL_MS = 5 * 1000
     // 单票标签上限与服务端 schemas.MAX_TAGS 一致, 由 tags-schema 测试守卫; 客户端只做前置提示, 服务端仍校验
     const MAX_TAGS = 8
+    // 与 schemas 的 fallbackInstanceIds 上限一致: 超出的备源保存时会被整份配置拒绝, 这里提前挡住
+    const MAX_FALLBACKS = 3
     // K线结果的归属键: 拉取、校验、灌图三处必须用同一个拼法, 否则校验形同虚设
     function klineKeyOf(securityId, period) { return `${securityId}|${period}` }
     // 灌图计划: 空壳只清屏且不记 key(空数据上 fitContent 是 no-op, 记了就再也不会铺满);
@@ -95,7 +97,7 @@ window.__ModuleLoader__.load({
       return amount.toFixed(0)
     }
     // 一键全能力自举: 启用实例的适配器能力声明(capabilities×markets)是唯一事实源, 缺什么补什么
-    const CAP_ORDER = ['quotes', 'kline', 'catalog', 'search', 'calendar']
+    const CAP_ORDER = ['quotes', 'kline', 'trend', 'catalog', 'search', 'calendar']
     const bootstrapRoutes = ({ adapters, providers, routes }) => {
       const enabled = providers.filter(p => p.enabled)
       if (!enabled.length) return routes
@@ -111,8 +113,9 @@ window.__ModuleLoader__.load({
         const minCaps = (adapters.find(x => x.adapterId === supporters[0].adapterId)?.capabilities || []).length
         const preferred = supporters.find(p => p.id === marketRoute?.primaryInstanceId && (adapters.find(x => x.adapterId === p.adapterId)?.capabilities || []).length === minCaps)
         const primary = preferred || supporters[0]
-        // 只有报价与K线支持备用源(schema 约束), 其余能力恒单源不切换
-        const failover = ['quotes', 'kline'].includes(capability)
+        // 只有报价/K线/分时支持备用源(schema 约束), 其余能力恒单源不切换
+        const failover = ['quotes', 'kline', 'trend'].includes(capability)
+        // 一键自举只配一个备用源: 多级降级交给用户自己在设置页加, 不替人猜优先级
         const fallbacks = failover ? supporters.filter(p => p.id !== primary.id).map(p => p.id).slice(0, 1) : []
         out.push({ id: `${market.toLowerCase()}-${capability}`, capability, market, instrument: 'equity', primaryInstanceId: primary.id, fallbackInstanceIds: fallbacks, failoverMode: failover && fallbacks.length ? 'network' : 'off', maxDelaySeconds: null, acceptUnknownDelay: true })
       }
@@ -124,33 +127,71 @@ window.__ModuleLoader__.load({
       const target = id => `${id}:${route.capability}:${route.market}`
       const alive = [route.primaryInstanceId, ...route.fallbackInstanceIds].filter(id => !deniedKeys.has(target(id)))
       if (!alive.length) return null
-      return { ...route, primaryInstanceId: alive[0], fallbackInstanceIds: alive.slice(1, 2), failoverMode: alive.length > 1 ? route.failoverMode : 'off' }
+      return { ...route, primaryInstanceId: alive[0], fallbackInstanceIds: alive.slice(1), failoverMode: alive.length > 1 ? route.failoverMode : 'off' }
     }).filter(Boolean)
     const BROWSE_MARKETS = { XSHG: '沪 A', XSHE: '深 A', XHKG: '港股', XNAS: '纳斯达克', XNYS: '纽交所', XJPX: '日本', XKRX: '韩国', XLON: '英国' }
+    // 客户端请求的三种时限: 普通读写、探针、目录同步; 超时统一折算成用户可读且可退避的中文错误
+    const REQUEST_TIMEOUT_MESSAGE = '请求超时，请重试'
+    // 页面重置/换代主动中止在飞请求不是故障: 用可识别的取消错误代替英文 AbortError
+    const REQUEST_CANCELLED_MESSAGE = '请求已取消，请重试'
+    const REQUEST_TIMEOUT_MS = 11 * 1000, PROVIDER_CHECK_TIMEOUT_MS = 61 * 1000, CATALOG_SYNC_TIMEOUT_MS = 121 * 1000
     function createPageRuntime({ layout, bus, tools, document: doc = document, fetch: request = fetch }) {
-      let disposed = false, generation = 0, demandGeneration = 0, pageId = crypto.randomUUID(), timer, heartbeat, undoTimer, queryGeneration = 0, querying, composing = false
+      let disposed = false, generation = 0, demandGeneration = 0, pageId = crypto.randomUUID(), timer, heartbeat, undoTimer, browseTimer, queryGeneration = 0, querying, composing = false
       const subscribers = new Set(), retiredEpochs = new Set(), requests = new Set()
-      let state = { view: { view: 'list', query: '', selectedId: null, detailId: null, sort: 'manual', focusId: null, keyboardNavigating: false, frozenOrder: null, settingsDraft: null, scrollTop: 0, menuId: null, alias: '', browseMarket: 'XSHG', browseRows: null, browseTotal: 0, browseOffset: 0, notice: '', browsePeek: {} }, data: null, paused: false, error: '', errorCode: '', busy: {}, candidates: [], composing: false, undo: null }
+      let state = { view: { view: 'list', query: '', selectedId: null, detailId: null, sort: 'manual', focusId: null, keyboardNavigating: false, frozenOrder: null, settingsDraft: null, scrollTop: 0, menuId: null, alias: '', browseMarket: 'XSHG', browseRows: null, browseTotal: 0, browseOffset: 0, notice: '', browsePeek: {} }, data: null, paused: false, error: '', errorCode: '', errorKey: '', dataError: '', busy: {}, candidates: [], composing: false, undo: null, peekQuotes: {} }
       function emit() { for (const fn of subscribers) fn() }
       function patch(next) { if (!disposed) { state = { ...state, ...next }; emit() } }
+      // 操作错误按产生它的动作记账: 只有同名动作重试或用户关闭才清; 数据面快照刷新不清
+      function clearOperationError(key) { if (state.errorKey === key) patch({ error: '', errorCode: '', errorKey: '' }) }
+      // 草稿基线: 同一宿主实例内只前进(并发快照/迟到响应不能把已推进的基线拉回);
+      // 宿主换代(serverEpoch 变)时以新实例的 revision 重新定基, 否则 Math.max 会让旧基线永久 409
+      function draftRevisionAfter(draft, revision, epoch) {
+        if (!draft || !Number.isInteger(revision)) return null
+        if (epoch && draft.epoch && draft.epoch !== epoch) return revision
+        return Math.max(Number.isInteger(draft.expectedRevision) ? draft.expectedRevision : revision, revision)
+      }
+      function rebaseDraft(revision, epoch = state.data?.serverEpoch) {
+        const draft = state.view.settingsDraft, next = draftRevisionAfter(draft, revision, epoch)
+        if (!draft || next === null) return
+        const needsEpoch = !!epoch && draft.epoch !== epoch
+        if (draft.expectedRevision === next && !needsEpoch) return
+        patch({ view: { ...state.view, settingsDraft: { ...draft, expectedRevision: next, ...(epoch ? { epoch } : {}) } } })
+      }
       function applySnapshot(data, explicit = false) {
         if (disposed || !data || retiredEpochs.has(data.serverEpoch)) return
         const old = state.data
         if (old?.serverEpoch === data.serverEpoch && old.snapshotSeq > data.snapshotSeq) return
         if (old && old.serverEpoch !== data.serverEpoch) retiredEpochs.add(old.serverEpoch)
         if (!explicit && state.paused && old && old.serverEpoch === data.serverEpoch && old.routingRevision === data.routingRevision && JSON.stringify(old.routeSelections) === JSON.stringify(data.routeSelections)) data = { ...data, quotes: old.quotes }
-        patch({ data, error: '' })
+        const draft = state.view.settingsDraft, revision = data?.control?.revision, epoch = data?.serverEpoch
+        const next = draftRevisionAfter(draft, revision, epoch)
+        const rebased = draft && next !== null && (draft.expectedRevision !== next || (!!epoch && draft.epoch !== epoch))
+          ? { ...draft, expectedRevision: next, ...(epoch ? { epoch } : {}) } : null
+        patch({ data, dataError: '', ...(rebased ? { view: { ...state.view, settingsDraft: rebased } } : {}) })
       }
+      // 超时与外部取消都表现为 AbortError: 只有内部计时器触发的那次才折算成可重试的中文超时;
+      // 其余 controller 被外部 abort(页面重置/换代)折算成带 cancelled 标记的取消错误, 由调用方决定静默还是提示
       async function api(path, method = 'GET', body, signal) {
         const controller = new AbortController(); requests.add(controller)
         const abort = () => controller.abort(); signal?.addEventListener('abort', abort, { once: true })
-        const timeout = setTimeout(() => controller.abort(), path === '/provider-check' ? 61000 : path === '/catalog-sync' ? 121000 : 11000)
+        let timedOut = false
+        const timeoutMs = path === '/provider-check' ? PROVIDER_CHECK_TIMEOUT_MS : path === '/catalog-sync' ? CATALOG_SYNC_TIMEOUT_MS : REQUEST_TIMEOUT_MS
+        const timeoutError = () => Object.assign(new Error(REQUEST_TIMEOUT_MESSAGE), { code: 'TIMEOUT' })
+        const cancelledError = () => Object.assign(new Error(REQUEST_CANCELLED_MESSAGE), { code: 'CANCELLED', cancelled: true })
+        const timeout = setTimeout(() => { timedOut = true; controller.abort() }, timeoutMs)
         try {
-          const response = await request(BASE + path, { method, headers: { 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: controller.signal })
+          let response
+          try { response = await request(BASE + path, { method, headers: { 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: controller.signal }) }
+          catch (error) {
+            if (timedOut) throw timeoutError()
+            if (controller.signal.aborted || error?.name === 'AbortError') throw cancelledError()
+            throw error
+          }
           let result
           try { result = await response.json() } catch (error) {
             // 读响应体被中止(超时/页面重置)属于外部取消, 不能伪装成服务故障
-            if (error?.name === 'AbortError') throw error
+            if (timedOut) throw timeoutError()
+            if (controller.signal.aborted || error?.name === 'AbortError') throw cancelledError()
             // 插件 host 半区未激活时宿主对未注册路由回纯文本 "not found", 解析器报错对用户无信息量
             const unavailable = new Error(`股票工具服务不可用（HTTP ${response.status}）`)
             unavailable.code = 'SERVICE_UNAVAILABLE'
@@ -163,9 +204,15 @@ window.__ModuleLoader__.load({
       const refresher = tools.createSnapshotRefresh(async () => {
         const gen = generation
         try { const data = await api('/snapshot'); if (gen === generation) applySnapshot(data) }
-        catch (e) { if (!disposed && gen === generation) patch({ error: e.message }) }
+        // 数据面错误独立记账: 下一次快照成功即自愈, 不与用户操作的错误横幅互相清除
+        catch (e) { if (!disposed && gen === generation && !e.cancelled) patch({ dataError: e.message }) }
       })
-      function wanted() { return !disposed && layout.panelInfo.getSnapshot().activePanelId === PANEL_ID && doc.visibilityState !== 'hidden' && !state.paused && ['list', 'detail'].includes(state.view.view) }
+      // 采集只跟随真正可见的内容: 详情抽屉(可能从浏览/搜索打开)要采集; 设置弹窗压住列表时停止;
+      // 浏览/搜索主视图停止, 不能只看 view.view(list 在设置页仍不变)
+      function wanted() {
+        const view = state.view, watching = view.overlay === 'detail' || !view.overlay && (view.view === 'list' || view.view === 'detail')
+        return !disposed && layout.panelInfo.getSnapshot().activePanelId === PANEL_ID && doc.visibilityState !== 'hidden' && !state.paused && watching
+      }
       let lastWanted = null
       function sendDemand(force = false) {
         const active = wanted()
@@ -184,10 +231,23 @@ window.__ModuleLoader__.load({
       } })
       doc.addEventListener('visibilitychange', visible)
       visible()
-      async function action(key, work) {
+      // busy 按通道合并(自选/偏好共用一个写锁), 错误横幅按动作家族分账:
+      // 偏好保存成功不能清掉自选失败的横幅, 反之亦然
+      async function action(key, work, errorKey = key) {
         if (disposed || state.busy[key]) return
-        patch({ busy: { ...state.busy, [key]: true }, error: '' })
-        try { return await work() } catch (e) { if (e.snapshot) applySnapshot(e.snapshot); patch({ error: e.message, errorCode: e.code }); throw e }
+        // 同名动作重试即清掉它上次的错误; 别的动作(或数据面刷新)无权改写这条横幅
+        clearOperationError(errorKey)
+        patch({ busy: { ...state.busy, [key]: true } })
+        try { return await work() }
+        catch (e) {
+          // 外部取消(页面重置/换代)是生命周期事件: 交给调用方收尾, 不写错误横幅
+          if (e.cancelled) throw e
+          if (e.snapshot) applySnapshot(e.snapshot)
+          // 服务端 409 会带上当前 revision: 立刻把草稿基线推到最新, 用户再点一次即可保存
+          if (e.code === 'REVISION_CONFLICT') rebaseDraft(e.revision)
+          patch({ error: e.message, errorCode: e.code || '', errorKey })
+          throw e
+        }
         finally { patch({ busy: { ...state.busy, [key]: false } }) }
       }
       // 离开 detail 视图时统一清详情态, 防止列表视图残留 detail 面板
@@ -197,13 +257,16 @@ window.__ModuleLoader__.load({
       function updateView(next) {
         const leaveDetail = next.view && next.view !== 'detail' && !next.overlay
         const detailChanged = next.detailId !== undefined && next.detailId !== state.view.detailId
-        const saved = next.detailId === undefined ? undefined : (state.data?.control.watchlist.items[next.detailId] || state.view.browsePeek?.[next.detailId])
+        const saved = next.detailId === undefined ? undefined : (state.data?.control?.watchlist?.items?.[next.detailId] || state.view.browsePeek?.[next.detailId])
         const alias = next.alias !== undefined ? { alias: next.alias } : detailChanged ? { alias: saved?.alias || '' } : {}
-        patch({ view: { ...state.view, ...next, ...alias, ...(leaveDetail ? { detailId: null, alias: '', browsePeek: {} } : {}), ...(detailChanged ? { markDraft: null, tagDraft: null, markError: null, tagError: null } : {}) } })
+        // peek 报价只服务当前详情: 换标的/关抽屉/切视图时立刻释放, 不在页面内存里留旧标的行情
+        const closesPeek = leaveDetail || detailChanged || (next.detailId === null) || (next.overlay !== undefined && !next.overlay)
+        patch({ view: { ...state.view, ...next, ...alias, ...(leaveDetail ? { detailId: null, alias: '', browsePeek: {} } : {}), ...(detailChanged ? { markDraft: null, tagDraft: null, markError: null, tagError: null } : {}) }, ...(closesPeek ? { peekQuotes: {} } : {}) })
         sendDemand()
       }
       function scheduleSearch(query) {
         updateView({ query, selectedId: null }); clearTimeout(timer); querying?.abort(); querying = new AbortController()
+        clearOperationError('search')
         if (composing || !query.trim()) { patch({ candidates: [] }); return }
         const gen = ++queryGeneration, routingRevision = state.data?.routingRevision, signal = querying.signal
         timer = setTimeout(async () => {
@@ -213,23 +276,33 @@ window.__ModuleLoader__.load({
               if (disposed || signal.aborted || gen !== queryGeneration || state.data?.routingRevision !== routingRevision || result.routingRevision !== routingRevision) return
               const map = new Map((phase === 'remote' ? state.candidates : []).map(s => [s.id, s]))
               for (const item of result.items) map.set(item.id, item)
-              patch({ candidates: [...map.values()], error: '' })
+              patch({ candidates: [...map.values()] })
             }
-          } catch (e) { if (!signal.aborted && gen === queryGeneration) patch({ error: e.message, errorCode: e.code }) }
+          } catch (e) { if (!signal.aborted && gen === queryGeneration) patch({ error: e.message, errorCode: e.code || '', errorKey: 'search' }) }
         }, 300)
       }
-      const operation = () => ({ operationId: crypto.randomUUID(), expectedRevision: state.data?.control.revision ?? 0 })
+      const operation = () => ({ operationId: crypto.randomUUID(), expectedRevision: state.data?.control?.revision ?? 0 })
       // K线请求代际: 同 key 并发时只认最后一次发出的请求
       let klineSeq = 0
+      // 退避等待定时器: dispose 后必须清掉并让等待立即结束, 否则页面卸载后还会醒来打一次请求
+      const klineRetryTimers = new Map()
+      const klineDelay = ms => new Promise(resolve => {
+        if (disposed) return resolve()
+        const delayTimer = setTimeout(() => { klineRetryTimers.delete(delayTimer); resolve() }, ms)
+        klineRetryTimers.set(delayTimer, resolve)
+      })
       return {
         getSnapshot: () => state,
         subscribe(fn) { subscribers.add(fn); return () => subscribers.delete(fn) },
         updateView, api, action, applySnapshot,
+        // 横幅只能由产生它的动作重试或用户关闭清除, 数据面刷新不得代用户做这个决定
+        clearError() { patch({ error: '', errorCode: '', errorKey: '' }) },
+        clearDataError() { patch({ dataError: '' }) },
         // 详情只有一个入口: 面板/邻移/悬浮窗都走这里。
         // 面板不在前台时"打开详情"点了没反应, 所以先 selectPanel; 草稿由 updateView 在 detailId 变更处统一清。
         // 不预载 K 线: KlineView 的加载 effect 会在 detailId 变化时自己发起, 预载只会让同一 key 请求两遍。
         openDetail(securityId) {
-          const config = state.data?.control, item = config?.watchlist.items[securityId] || state.view.browsePeek?.[securityId]
+          const config = state.data?.control, item = config?.watchlist?.items?.[securityId] || state.view.browsePeek?.[securityId]
           if (!item) return
           layout.selectPanel?.(PANEL_ID)
           updateView({ view: 'list', detailId: securityId, selectedId: securityId, overlay: 'detail' })
@@ -240,27 +313,87 @@ window.__ModuleLoader__.load({
         search: scheduleSearch,
         composition(value) { composing = value; patch({ composing: value }); if (!value) scheduleSearch(state.view.query) },
         loadBrowse(market, offset) {
+          clearTimeout(browseTimer)
           return action('browse', async () => {
             const result = await api(`/browse?${new URLSearchParams({ market, offset: String(offset), limit: String(BROWSE_PAGE) })}`, 'GET')
-            // 首次目录后台同步中: 展示等待态, 用户稍后点市场键即拿到已同步数据
-            if (result.syncing) { updateView({ browseMarket: market, browseOffset: offset, browseRows: [], browseTotal: 0, browseSyncing: true }); return }
-            patch({ browseSyncing: null })
-            updateView({ browseMarket: market, browseOffset: offset, browseRows: result.items, browseTotal: result.total })
-            patch({ data: { ...state.data, browseOverview: result.overview || null } })
+            // 首次目录后台同步中: 展示等待态, 用户稍后点市场键即拿到已同步数据。
+            // browseRows 保持 null, 空数组会让"同步中"提示永远不出现
+            // 同步失败也要有出口: 服务端把上次同步的错误带回 syncing 响应, 页面给失败原因与重试按钮,
+            // 而不是让"首次同步中"永远挂着
+            if (result.syncing) {
+              updateView({ browseMarket: market, browseOffset: offset, browseRows: null, browseTotal: 0, browseSyncing: true, browseSyncError: result.syncError || null })
+              // 后台同步可能持续一两分钟: 轮询到出结果或失败为止, 用户停在本页也能看到失败出口
+              if (!result.syncError && !disposed) browseTimer = setTimeout(() => { if (state.view.view === 'browse' && state.view.browseSyncing) this.loadBrowse(market, offset).catch(() => {}) }, BROWSE_SYNC_POLL_MS)
+              return
+            }
+            updateView({ browseSyncing: null, browseSyncError: null, browseMarket: market, browseOffset: offset, browseRows: result.items, browseTotal: result.total })
+            // 首屏快照未到时不能构造缺少 control 的半截 data, 否则后续读取 data.control 直接崩
+            if (state.data?.control) patch({ data: { ...state.data, browseOverview: result.overview || null } })
           })
         },
         async mutate(actionName, payload) {
           return action('write', async () => {
             const op = operation(), result = await api('/watchlist', 'POST', { ...op, action: actionName, payload })
             if (actionName === 'remove' && !result.unchanged) { patch({ undo: { removeOperationId: op.operationId, until: Date.now() + 8000 } }); clearTimeout(undoTimer); undoTimer = setTimeout(() => patch({ undo: null }), 8000) }
-            if (state.data) patch({ data: { ...state.data, control: { ...state.data.control, revision: Math.max(state.data.control.revision, result.revision) } } })
+            if (state.data?.control) patch({ data: { ...state.data, control: { ...state.data.control, revision: Math.max(state.data.control.revision, result.revision) } } })
+            rebaseDraft(result.revision)
             if (actionName === 'restore') patch({ undo: null })
             refresher.refresh(); return result
+          }, 'watchlist')
+        },
+        refresh(securityIds) {
+          return action('refresh', async () => {
+            const gen = generation
+            let data
+            try { data = await api('/refresh', 'POST', { expectedRoutingRevision: state.data?.routingRevision, ...(securityIds ? { securities: securityIds } : {}) }) } catch (e) {
+              // 全部证券失败时服务端把带 lastError 的条目塞在错误快照里: 详情要留着它,
+              // 否则接下来的常驻快照(按自选过滤)一到, 详情就只剩"等待报价"看不出失败原因。
+              const detailId = state.view.overlay === 'detail' ? state.view.detailId : null
+              const entry = detailId && e.snapshot?.quotes?.[detailId]
+              if (entry && gen === generation) patch({ peekQuotes: { [detailId]: entry } })
+              throw e
+            }
+            if (gen !== generation) return
+            // 服务端只在本次响应里带 peek 报价(常驻快照按自选过滤): 只接住"当前详情"的这一份,
+            // 关闭/切换详情后晚到的响应不能再把它写回来
+            const detailId = state.view.overlay === 'detail' ? state.view.detailId : null
+            if (securityIds?.length && detailId) {
+              const entry = data?.quotes?.[detailId], watchItems = data?.control?.watchlist?.items || {}
+              if (entry && !watchItems[detailId]) patch({ peekQuotes: { [detailId]: entry } })
+            }
+            applySnapshot(data, true)
           })
         },
-        refresh(securityIds) { return action('refresh', async () => { const gen = generation; const data = await api('/refresh', 'POST', { expectedRoutingRevision: state.data?.routingRevision, ...(securityIds ? { securities: securityIds } : {}) }); if (gen === generation) applySnapshot(data, true) }) },
-        preferences(patchValue) { return action('write', async () => { const result = await api('/preferences', 'POST', { ...operation(), patch: patchValue }); if (state.data && state.data.control.revision <= result.revision) patch({ data: { ...state.data, control: { ...state.data.control, revision: result.revision, preferences: { ...state.data.control.preferences, ...patchValue } } } }); refresher.refresh() }) },
-        configuration: configuration => action('configuration', async () => { await api('/configuration', 'POST', { ...operation(), ...configuration, expectedRevision: state.view.settingsDraft?.expectedRevision ?? state.data?.control.revision }); updateView({ settingsDraft: null }); refresher.refresh() }),
+        preferences(patchValue) { return action('write', async () => { const result = await api('/preferences', 'POST', { ...operation(), patch: patchValue }); if (state.data?.control && state.data.control.revision <= result.revision) patch({ data: { ...state.data, control: { ...state.data.control, revision: result.revision, preferences: { ...state.data.control.preferences, ...patchValue } } } }); rebaseDraft(result.revision); refresher.refresh() }, 'preferences') },
+        // 保存配置: 响应带回的新 revision 立即前推本地版本, 下一次写入不必等快照;
+        // 数据源页只提交实例(keepRoutes), 未提交的市场/能力草稿必须保留, 不能整份清掉
+        configuration: (configuration, { keepRoutes = false } = {}) => action('configuration', async () => {
+          const result = await api('/configuration', 'POST', { ...operation(), ...configuration, expectedRevision: state.view.settingsDraft?.expectedRevision ?? state.data?.control?.revision })
+          if (state.data?.control && Number.isInteger(result?.revision)) patch({ data: { ...state.data, control: { ...state.data.control, revision: Math.max(state.data.control.revision, result.revision) } } })
+          const latest = state.view.settingsDraft
+          if (keepRoutes && latest) {
+            // 保存期间用户可能继续编辑: 只前推基线, 不用点击时闭包里的 providers/routes 覆盖新输入
+            const next = draftRevisionAfter(latest, result?.revision, state.data?.serverEpoch)
+            updateView({ settingsDraft: { ...latest, ...(next === null ? {} : { expectedRevision: next }), ...(state.data?.serverEpoch ? { epoch: state.data.serverEpoch } : {}), checkResults: [], probes: {} } })
+          } else updateView({ settingsDraft: null })
+          refresher.refresh()
+        }),
+        // 凭据引用的合法前提是"已被某个数据源声明", 而声明可能还在草稿里: 先落配置再写凭据,
+        // 用户按自然顺序(填引用名→填密钥→保存密钥)即可, 不必先单独点一次"保存数据源"
+        saveCredential({ ref, value, providers, routes }) {
+          return action('credential', async () => {
+            const saved = state.data?.control, draft = state.view.settingsDraft
+            const configurationSaved = !!saved && (JSON.stringify(saved.providers) !== JSON.stringify(providers) || JSON.stringify(saved.routes) !== JSON.stringify(routes))
+            if (configurationSaved) {
+              const result = await api('/configuration', 'POST', { ...operation(), providers, routes, expectedRevision: draft?.expectedRevision ?? saved.revision })
+              // 保留草稿(展开态/未提交项)只推进基线版本, 否则下一次保存会拿旧 revision 撞 409
+              rebaseDraft(result.revision)
+            }
+            const result = await api('/credential', 'POST', { ref, value })
+            applySnapshot(await api('/snapshot'), true)
+            return { ...result, configurationSaved }
+          })
+        },
         sync: market => action('sync', async () => { const result = await api('/catalog-sync', 'POST', { market, expectedRoutingRevision: state.data?.routingRevision }); refresher.refresh(); return result }),
         check: configuration => action('check', () => api('/provider-check', 'POST', configuration)),
         switchPrimary: routeId => action('switch', async () => { const data = await api('/route-selection', 'POST', { routeId, target: 'primary', expectedRoutingRevision: state.data.routingRevision, expectedRouteEpoch: state.data.routeSelections[routeId].routeEpoch }); applySnapshot(data) }),
@@ -272,12 +405,14 @@ window.__ModuleLoader__.load({
         // 检查通过即保存: 分批探测(避开单请求预算), denied 目标剔除后整轮重查, 收敛即提交。
         // 一键启用与"应用推荐配置"共用此流程——两者的差别只是初始配置从哪来。
         async commitConfiguration({ providers, routes, notice }) {
-          const CAP_LABEL = { quotes: '行情', kline: 'K线', catalog: '目录', search: '搜索', calendar: '日历' }
+          const CAP_LABEL = { quotes: '行情', kline: 'K线', trend: '分时', catalog: '目录', search: '搜索', calendar: '日历' }
           await action('configuration', async () => {
             let current = routes
             let progress = ''
             // 推荐配置与一键补全自带体检: 探针不可用的目标先剔除, 保证装上的是立刻能出数的组合。
             // 这只是推荐配置的质量保证, 手动保存路由不走这条路, 也不看探针结果。
+            // 体检不探分时: 分时是单源能力, 探针失败也不会被剪掉(剪了没有别的源可回退), 探了只是让一次保存多等十几个探针;
+            // 要验分时就在市场行对那一格单独点「测试」。
             for (let round = 0; round < 3; round++) {
               const denied = []
               for (const caps of [['quotes'], ['kline'], ['catalog', 'search']]) {
@@ -290,25 +425,27 @@ window.__ModuleLoader__.load({
               }
               if (!denied.length) break
               current = pruneDeniedTargets(current, new Set(denied))
-              if (!current.length) { patch({ error: '已启用数据源暂无可用探针，请检查网络后重试', checkProgress: null }); return }
+              if (!current.length) { patch({ error: '已启用数据源暂无可用探针，请检查网络后重试', errorCode: '', errorKey: 'configuration', checkProgress: null }); return }
             }
             patch({ checkProgress: null })
-            await api('/configuration', 'POST', { operationId: crypto.randomUUID(), expectedRevision: state.data.control.revision, providers, routes: current })
+            const result = await api('/configuration', 'POST', { operationId: crypto.randomUUID(), expectedRevision: state.view.settingsDraft?.expectedRevision ?? state.data.control.revision, providers, routes: current })
+            // 推荐配置/一键补全直连 api, 同样要按响应前推本地版本, 否则紧接着的保存会拿旧基线撞 409
+            if (state.data?.control && Number.isInteger(result?.revision) && result.revision > state.data.control.revision) patch({ data: { ...state.data, control: { ...state.data.control, revision: result.revision } } })
             updateView({ view: 'list', settingsDraft: null, notice })
           }).finally(() => patch({ checkProgress: null }))
         },
         // 一键启用: 按当前草稿里已启用的实例补全缺失的市场能力路由
         async oneClickKline() {
           const saved = state.data.control
-          const draft = state.view.settingsDraft || { providers: saved.providers, routes: saved.routes, expectedRevision: saved.revision, checkResults: [], probes: {} }
+          const draft = state.view.settingsDraft || { providers: saved.providers, routes: saved.routes, expectedRevision: saved.revision, epoch: state.data?.serverEpoch, checkResults: [], probes: {} }
           const routes = bootstrapRoutes({ adapters: state.data.adapters, providers: draft.providers, routes: draft.routes })
           if (routes.length === draft.routes.length) { updateView({ view: 'list', notice: '已启用数据源的能力路由均已配置，打开证券详情即可查看行情与K线。' }); return }
-          await this.commitConfiguration({ providers: draft.providers, routes, notice: `已自动启用 ${routes.length - draft.routes.length} 项能力路由（行情/K线/目录/搜索），全部市场可用。` })
+          await this.commitConfiguration({ providers: draft.providers, routes, notice: `已自动启用 ${routes.length - draft.routes.length} 项能力路由（行情/K线/分时/目录/搜索；分时未体检），全部市场可用。` })
         },
         // 推荐配置: 内置免凭据源 + 八市场能力一次到位, 覆盖数据源与路由, 自选与显示偏好不动
         async applyRecommended() {
           const suggested = state.data?.suggested
-          if (!suggested?.providers?.length) { patch({ error: '推荐配置不可用' }); return }
+          if (!suggested?.providers?.length) { patch({ error: '推荐配置不可用', errorCode: '', errorKey: 'configuration' }); return }
           await this.commitConfiguration({ providers: suggested.providers, routes: suggested.routes, notice: '已应用推荐配置：免凭据数据源与八市场能力路由全部就绪。' })
         },
         // kline 数据流: 详情视图触发;force=true 走 ?force=1 让服务端跳缓存读;结果入 state 供 KlineView 汇合灌入。
@@ -322,7 +459,7 @@ window.__ModuleLoader__.load({
           // 同一 key 也可能并发(例如 ↻ 连点): 只让最后一次发出的请求落地, 否则先发后到会盖掉新的
           const seq = ++klineSeq
           patch({ klineKey: key, kline: { loading: !held?.candles, error: '', candles: held?.candles ?? null, loadedAt: held?.loadedAt } })
-          const attempt = (delayMs = 0, retried = false) => new Promise(resolve => setTimeout(resolve, delayMs)).then(() => {
+          const attempt = (delayMs = 0, retried = false) => klineDelay(delayMs).then(() => {
             // 退避期间可能已经来了同 key 的新请求, 等到点了就别再打这一枪
             if (seq !== klineSeq) return undefined
             return api(`/kline?${new URLSearchParams({ securityId, period, limit: String(250), ...(force ? { force: '1' } : {}) })}`, 'GET')
@@ -337,9 +474,10 @@ window.__ModuleLoader__.load({
             if (seq !== klineSeq) return undefined
             // 切走之后就别再为废弃的 key 退避重试了, 白打一次请求还占额度
             if (state.klineKey !== key) throw e
-            // 额度窗口瞬时满/网络抖动: 退避自动重试一次; 服务端带 retryAfterMs 时按其等待, 否则 4s
+            // 额度窗口瞬时满/网络抖动/客户端超时: 退避自动重试一次; 服务端带 retryAfterMs 时按其等待, 否则 4s
+            // 超时在 api 层已折算成 TIMEOUT, 外部取消(页面重置)是 CANCELLED, 不得借退避再发请求
             if (!retried && ['RATE_LIMIT', 'NETWORK', 'TIMEOUT'].includes(e.code)) return attempt(Math.max(4 * 1000, e.retryAfterMs || 0), true)
-            patch({ kline: { loading: false, error: e.message || 'K线加载失败', errorCode: e.code, candles: null } })
+            patch({ kline: { loading: false, error: e.message || 'K线加载失败', errorCode: e.code || '', candles: null } })
             throw e
           })
           return attempt()
@@ -349,7 +487,7 @@ window.__ModuleLoader__.load({
         dispose() {
           if (disposed) return
           try { bus.publish({ type: 'watch-demand', pageId, generation: ++demandGeneration, active: false }) } catch {}
-          disposed = true; generation++; queryGeneration++; clearTimeout(timer); clearTimeout(undoTimer); clearInterval(heartbeat); querying?.abort(); for (const c of requests) c.abort(); requests.clear()
+          disposed = true; generation++; queryGeneration++; klineSeq++; clearTimeout(timer); clearTimeout(undoTimer); clearTimeout(browseTimer); for (const [delayTimer, resolve] of klineRetryTimers) { clearTimeout(delayTimer); resolve() } klineRetryTimers.clear(); clearInterval(heartbeat); querying?.abort(); for (const c of requests) c.abort(); requests.clear()
           stopLayout(); stopBus(); doc.removeEventListener('visibilitychange', visible); refresher.dispose(); subscribers.clear()
         },
       }
@@ -467,13 +605,17 @@ window.__ModuleLoader__.load({
       const step = (high - low) / (max - 1)
       return Array.from({ length: max }, (_, index) => Number((low + step * index).toFixed(4)))
     }
-    // 列表悬停: 当日区间与全部标记; 缺字段给破折号, 不能把 null 当 0 显示
+    // 列表悬停: 当日区间、全部标记与持仓盈亏; 缺字段给破折号, 不能把 null 当 0 显示。
+    // 盈亏只在这里出现: 列表每行保持一只票一行, 想看赚亏把鼠标移上来
     function quoteTipLines({ quote, marks, scale }) {
       const price = value => priceTextOf(value, scale)
+      const pl = costPlOf(marks, quote?.last)
       return [
-        `今高 ${price(quote?.high)}　今低 ${price(quote?.low)}`,
-        `今开 ${price(quote?.open)}　昨收 ${price(quote?.previousClose)}`,
-        ...(marks || []).map(mark => `${mark.kind === 'cost' ? '成本' : '卖价'} ${price(mark.price)}`),
+        { text: `今高 ${price(quote?.high)}　今低 ${price(quote?.low)}` },
+        { text: `今开 ${price(quote?.open)}　昨收 ${price(quote?.previousClose)}` },
+        ...(marks || []).map(mark => ({ text: `${mark.kind === 'cost' ? '成本' : '卖价'} ${price(mark.price)}` })),
+        // 没成本不占位; 有成本没现价(停牌/盘前)给占位符而不是 +0.00%
+        ...(pl ? [{ text: `盈亏 ${plTextOf(pl)}　每股 ${plAmountOf(pl, scale)}`, tone: toneClass(pl.pct) }] : []),
       ]
     }
     // K线十字线读数: 图例只报最后一根, 悬停时要能读到光标下那根的开高低收与量
@@ -618,18 +760,26 @@ window.__ModuleLoader__.load({
       const left = Math.max(DROPDOWN.edge, Math.min(rect.left, viewport.width - rect.width - DROPDOWN.edge))
       return { left, top: up ? Math.max(DROPDOWN.edge, rect.top - DROPDOWN.gap - maxHeight) : rect.bottom + DROPDOWN.gap, minWidth: rect.width, maxHeight }
     }
+    // 当前值不在选项里(适配器被移除/数据源被禁用)时补一个异常项:
+    // 直接回退到 options[0] 会把"实际保存的是 x"显示成"未配置/第一个选项", 用户看不出配置已经失效
+    function selectEntries(value, options) {
+      if (options.some(option => option.value === value)) return options
+      if (value === undefined || value === null || value === '') return options
+      return [{ value, label: `${value}（不可用）`, unavailable: true }, ...options]
+    }
     function Select({ value, options, onChange, disabled = false, label }) {
       const [open, setOpen] = React.useState(false), [active, setActive] = React.useState(0), [place, setPlace] = React.useState(null)
       const rootRef = React.useRef(null), triggerRef = React.useRef(null), menuRef = React.useRef(null), menuId = React.useId()
-      const selectedAt = Math.max(0, options.findIndex(option => option.value === value))
-      const current = options[selectedAt]
+      const entries = selectEntries(value, options)
+      const selectedAt = Math.max(0, entries.findIndex(option => option.value === value))
+      const current = entries[selectedAt]
       const close = React.useCallback(() => setOpen(false), [])
       // 打开时才量坐标: 设置页有折叠区, 渲染期算出的位置会过期
       const openMenu = React.useCallback(() => {
         if (disabled || !triggerRef.current) return
-        setPlace(dropdownPlacement(triggerRef.current.getBoundingClientRect(), { width: innerWidth, height: innerHeight }, options.length))
+        setPlace(dropdownPlacement(triggerRef.current.getBoundingClientRect(), { width: innerWidth, height: innerHeight }, entries.length))
         setActive(selectedAt); setOpen(true)
-      }, [disabled, options.length, selectedAt])
+      }, [disabled, entries.length, selectedAt])
       React.useEffect(() => {
         if (!open) return
         const onPointer = event => { if (!rootRef.current?.contains(event.target) && !menuRef.current?.contains(event.target)) close() }
@@ -643,8 +793,9 @@ window.__ModuleLoader__.load({
       }, [open, close])
       React.useEffect(() => { if (disabled) close() }, [disabled, close])
       const choose = index => {
-        const option = options[index]
-        if (!option) return
+        const option = entries[index]
+        // 异常项只用于展示当前失效值, 不是可选项
+        if (!option || option.unavailable) return
         setOpen(false); triggerRef.current?.focus()
         if (option.value !== value) onChange(option.value)
       }
@@ -656,9 +807,9 @@ window.__ModuleLoader__.load({
         }
         if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); return }
         if (event.key === 'Tab') { close(); return }
-        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setActive(at => Math.max(0, Math.min(options.length - 1, at + (event.key === 'ArrowDown' ? 1 : -1)))); return }
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setActive(at => Math.max(0, Math.min(entries.length - 1, at + (event.key === 'ArrowDown' ? 1 : -1)))); return }
         if (event.key === 'Home') { event.preventDefault(); setActive(0); return }
-        if (event.key === 'End') { event.preventDefault(); setActive(options.length - 1); return }
+        if (event.key === 'End') { event.preventDefault(); setActive(entries.length - 1); return }
         if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); choose(active) }
       }
       const optionId = index => `${menuId}-opt-${index}`
@@ -669,9 +820,9 @@ window.__ModuleLoader__.load({
         role: 'listbox', id: menuId, hidden: !open, className: 'ssb-select-menu', 'aria-label': label,
         ref: menuRef,
         style: place ? { left: place.left, top: place.top, minWidth: place.minWidth, maxHeight: place.maxHeight } : undefined,
-      }, ...options.map((option, index) => h('div', {
-        key: option.value, id: optionId(index), role: 'option', 'aria-selected': option.value === value,
-        className: `ssb-select-option${index === active ? ' ssb-select-option-active' : ''}`,
+      }, ...entries.map((option, index) => h('div', {
+        key: option.value, id: optionId(index), role: 'option', 'aria-selected': option.value === value, 'aria-disabled': option.unavailable ? 'true' : undefined,
+        className: `ssb-select-option${index === active ? ' ssb-select-option-active' : ''}${option.unavailable ? ' ssb-select-option-unavailable' : ''}`,
         onPointerDown: event => event.preventDefault(),
         onClick: () => choose(index),
         onPointerEnter: () => setActive(index),
@@ -681,7 +832,7 @@ window.__ModuleLoader__.load({
           type: 'button', ref: triggerRef, className: 'ssb-select-trigger', role: 'combobox', disabled, 'aria-label': label,
           'aria-haspopup': 'listbox', 'aria-expanded': open, 'aria-controls': menuId, 'aria-activedescendant': open ? optionId(active) : undefined,
           onClick: () => (open ? close() : openMenu()), onKeyDown,
-        }, h('span', { className: 'ssb-select-value' }, current?.label ?? ''), h('span', { className: 'ssb-select-caret', 'aria-hidden': 'true' })),
+        }, h('span', { className: `ssb-select-value${current?.unavailable ? ' ssb-select-value-invalid' : ''}` }, current?.label ?? ''), h('span', { className: 'ssb-select-caret', 'aria-hidden': 'true' })),
         menu)
     }
     function QuoteStatus({ entry, short = false }) {
@@ -723,7 +874,8 @@ window.__ModuleLoader__.load({
       // 草稿清理由 updateView 在 detailId 变更处统一处理, 这里再清一遍会把键盘导航到同一只时输了一半的内容抹掉
       function open(id) { runtime.updateView({ detailId: id, selectedId: id, overlay: 'detail', focusId: id, keyboardNavigating: false, menuId: null }) }
       // 概览横幅: 仅异常态显示(健康态运维摘要收进「更多」菜单), Leek-Fund 模式=主页纯列表
-      const unhealthy = (state.data.providerStatus || []).filter(s => { const log = s.recentRequests || []; return log.length && log[0].status !== 'ok' })
+      // 概览横幅直指用户请求: 后台探测的失败不是用户动作, 不在横幅上报
+      const unhealthy = (state.data.providerStatus || []).filter(s => { const log = (s.recentRequests || []).filter(r => !r.probe); return log.length && log[0].status !== 'ok' })
       const providers = state.data.control.providers || []
       const sourcesBanner = unhealthy.length || providers.some(p => !p.enabled) ? h('div', { className: 'ssb-banner' }, `${providers.filter(p => p.enabled).length}/${providers.length} 个数据源启用${unhealthy.length ? `，${unhealthy.map(s => s.id).join('、')} 最近请求失败` : ''}`, h(Button, { onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) }, '查看')) : null
       // 分组 tab: 全部 → 各标签(首现序) → 未分组; 一只票可同时属于多个标签, 于是在多个 tab 可见
@@ -861,25 +1013,45 @@ window.__ModuleLoader__.load({
     const EMA_WINDOW = 12, BOLL_WINDOW = 20, BOLL_K = 2
     const VENDOR_URL = '/plugins-vendor/dsh-stock-assistant/lightweight-charts.standalone.production.js'
     const MA_WINDOWS = [5, 10, 20, 60]
-    // ensureLwc: 模块级 promise 单例;script 已存在等 onload,否则注入 vendor URL;失败统一文案 reject。
+    const LWC_LOAD_TIMEOUT_MS = 10 * 1000
+    // ensureLwc: 模块级 promise 单例; 超时/加载后校验失败都要移除脚本并清空单例, 下一次详情才能重建。
+    // onload 本身不代表全局可用: vendor 被替换或是别的脚本时, 不能把 undefined 当成功永久缓存。
     let lwcPromise = null
+    const lwcReady = () => typeof window.LightweightCharts?.createChart === 'function'
     function ensureLwc(document) {
       if (lwcPromise) return lwcPromise
-      lwcPromise = new Promise((resolve, reject) => {
-        if (window.LightweightCharts?.createChart) { resolve(window.LightweightCharts); return }
+      const attempt = new Promise((resolve, reject) => {
+        if (lwcReady()) { resolve(window.LightweightCharts); return }
+        let settled = false, timer = null, script = null
+        const finish = (fn, value) => { if (settled) return; settled = true; clearTimeout(timer); fn(value) }
+        const fail = message => {
+          if (settled) return
+          if (script) { if (script.dataset) script.dataset.lwcState = 'error'; script.remove() }
+          finish(reject, new Error(message))
+        }
+        const onLoad = () => {
+          if (!lwcReady()) { fail('图表组件不可用'); return }
+          finish(resolve, window.LightweightCharts)
+        }
+        const stale = document.querySelector('script[data-lwc]')
+        if (stale?.dataset?.lwcState === 'error' || stale?.dataset?.lwcState === 'loaded') stale.remove()
         const existing = document.querySelector('script[data-lwc]')
         if (existing) {
-          existing.addEventListener('load', () => resolve(window.LightweightCharts))
-          existing.addEventListener('error', () => { lwcPromise = null; reject(new Error('图表组件不可用')) })
-          return
+          script = existing
+          existing.addEventListener('load', onLoad)
+          existing.addEventListener('error', () => fail('图表组件不可用'))
+        } else {
+          script = document.createElement('script')
+          script.dataset.lwc = '1'
+          script.src = VENDOR_URL
+          script.onload = () => { script.dataset.lwcState = 'loaded'; onLoad() }
+          script.onerror = () => fail('图表组件不可用')
+          document.head.appendChild(script)
         }
-        const script = document.createElement('script')
-        script.dataset.lwc = '1'
-        script.src = VENDOR_URL
-        script.onload = () => resolve(window.LightweightCharts)
-        script.onerror = () => { lwcPromise = null; reject(new Error('图表组件不可用')) }
-        document.head.appendChild(script)
+        // 脚本请求悬挂时 onload/onerror 都不来: 到点移除脚本并失败, 不能把详情永久卡在加载中
+        timer = setTimeout(() => fail('图表组件加载超时'), LWC_LOAD_TIMEOUT_MS)
       })
+      lwcPromise = attempt.catch(error => { lwcPromise = null; throw error })
       return lwcPromise
     }
     function readChartTheme(root, colorMode) {
@@ -951,6 +1123,8 @@ window.__ModuleLoader__.load({
       const markLinesRef = React.useRef([])
       // 十字线读数: 悬停那根的读数是瞬时状态, 离开图面即清空
       const [crosshair, setCrosshair] = React.useState(null)
+      // 建图失败(vendor 超时/未就绪)后点重试: 递增它让建图 effect 重跑, 否则数据重拉成功也只剩空白图座
+      const [chartAttempt, setChartAttempt] = React.useState(0)
       function drawMarks(series, palette, list) {
         if (!series) return
         for (const line of markLinesRef.current) { try { series.removePriceLine(line) } catch { } }
@@ -1013,7 +1187,7 @@ window.__ModuleLoader__.load({
         return { ma: MA_WINDOWS.map(n => seriesMA(candles, n)), ema: [seriesEMA(candles, EMA_WINDOW)], boll: seriesBoll(candles, BOLL_WINDOW, BOLL_K), bbi: [seriesBBI(candles)] }
       }, [kline?.candles, wantTrend])
       // 建图与重涂都在空依赖的回调里跑, 用这份最新值替代首帧闭包
-      liveRef.current = { candles: kline?.candles, colorMode: state.data?.control.preferences?.colorMode, indicators: indicatorValues, period, priceScale: item.priceScale, timezone: item.timezone, preClose: kline?.preClose, guides }
+      liveRef.current = { candles: kline?.candles, colorMode: state.data?.control?.preferences?.colorMode, indicators: indicatorValues, period, priceScale: item.priceScale, timezone: item.timezone, preClose: kline?.preClose, guides }
       const legend = React.useMemo(() => {
         const candles = kline?.candles || []
         if (!candles.length) return null
@@ -1204,7 +1378,7 @@ window.__ModuleLoader__.load({
           if (chart) { if (onCross) chart.unsubscribeCrosshairMove(onCross); chart.remove() }
           chartRef.current = null
         }
-      }, [])
+      }, [chartAttempt])
       // 数据时间面: 首末日期 + 共几根 + 今日有没有交易。判断只用数据本身, 不猜日历——
       // 最后一根的日期就是市场时区的今天, 说明今天开过市, 否则说明今天还没有行情。
       function klineMetaText(result, trend) {
@@ -1257,7 +1431,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'ssb-more', style: { position: 'relative' } }, h(Button, { 'aria-expanded': !!state.view.guideOpen, onClick: () => runtime.updateView({ guideOpen: !state.view.guideOpen }) }, '辅助线'),
             state.view.guideOpen ? h('div', { className: 'ssb-menu', style: { position: 'absolute', left: 0, top: 'calc(100% + 4px)', background: 'var(--ssb-bg)', border: '1px solid var(--ssb-border)', borderRadius: 'var(--ssb-radius-md)', padding: '8px', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10, minWidth: '170px' }, role: 'menu' },
               ...GUIDE_GROUPS.flatMap(group => [h('div', { key: group.title, className: 'ssb-menu-title' }, group.title), ...group.items.map(([key, label]) => h(Toggle, { key, label, checked: !!guides[key], onChange: () => setGuides({ [key]: !guides[key] }) }))])) : null),
-          h('span', { className: 'ssb-kline-meta' }, klineMetaText(kline, wantTrend))),
+          h('span', { className: 'ssb-kline-meta' }, `${offlinePrefix(kline.offline)}${klineMetaText(kline, wantTrend)}`)),
         legend ? h('div', { className: 'ssb-kline-legend' },
           // 成本与卖价都是报价要素, 跟开高低收放同一行; 放在指标行会被挤到第三行去
           h('div', { className: 'ssb-legend-row' }, ...legend.quote.map(([label, value, tone]) => h('span', { key: label, className: `ssb-legend-item${tone || ''}` }, h('span', { className: 'ssb-legend-label' }, label), value == null ? '—' : value)),
@@ -1270,7 +1444,7 @@ window.__ModuleLoader__.load({
           legend.series.length ? h('div', { className: 'ssb-legend-row' },
             ...legend.series.map(([label, value, tone]) => h('span', { key: label, className: `ssb-legend-item${tone || ''}` }, h('span', { className: 'ssb-legend-label' }, label), Number(value).toFixed(item.priceScale ?? 2)))) : null) : null,
         kline.loading ? h('div', { className: 'ssb-kline-skeleton', role: 'status' }, '加载K线…') : null,
-        kline.error ? h(KlineError, { message: kline.error, busyOneClick: !!state.busy.configuration, onRetry: () => quiet(() => runtime.loadKline(item.id, period, true))(), guide: kline.errorCode === 'NO_ROUTE' ? { label: '一键开启', onClick: () => quiet(async () => { await runtime.oneClickKline(); await runtime.loadKline(item.id, period, true) })() } : kline.errorCode === 'UNSUPPORTED_CAPABILITY' ? { label: '去设置换源', onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) } : null }) : null,
+        kline.error ? h(KlineError, { message: kline.error, busyOneClick: !!state.busy.configuration, onRetry: () => { if (!chartRef.current) setChartAttempt(n => n + 1); quiet(() => runtime.loadKline(item.id, period, true))() }, guide: kline.errorCode === 'NO_ROUTE' ? { label: '一键开启', onClick: () => quiet(async () => { await runtime.oneClickKline(); await runtime.loadKline(item.id, period, true) })() } : kline.errorCode === 'UNSUPPORTED_CAPABILITY' ? { label: '去设置换源', onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) } : null }) : null,
         !kline.loading && !kline.error && kline.candles && !kline.candles.length ? h('div', { className: 'ssb-empty' }, h('p', null, '暂无K线数据（停牌或已退市）')) : null,
         state.data.vendorAvailable === false ? h('div', { className: 'ssb-banner' }, '图表组件不可用，已降级为数字详情。') : null,
         // 出错时隐藏画布: 图表实例挂在同一个 DOM 节点上, 卸载会丢实例, 只做可见性切换
@@ -1325,15 +1499,17 @@ window.__ModuleLoader__.load({
     function Detail({ runtime, state }) {
       const { data, view } = state
       // 详情解析链: 自选优先, browsePeek 兜底(市场浏览点进来的临时详情, 无需先加自选)
-      const item = data.control.watchlist.items[view.detailId] || view.browsePeek?.[view.detailId]
+      const item = data?.control?.watchlist?.items?.[view.detailId] || view.browsePeek?.[view.detailId]
+      // 空态判断必须先于任何 item 解引用: 详情打开期间标的被另一页面移除时会直接白屏
+      if (!item) return h('aside', { className: 'ssb-detail ssb-empty' }, h('p', null, '选择一只证券查看基础行情。'))
       // 邻移: 自选详情在抽屉内直接切上下只(对比场景免关-点-开三步); order 为当前排序视图
-      const order = data.control.watchlist.order
+      const order = data?.control?.watchlist?.order || []
       const at = order.indexOf(item.id)
       const neighbor = dir => order[(at + dir + order.length) % order.length]
       const openNeighbor = id => runtime.openDetail(id)
-      const inWatchlist = !!data.control.watchlist.items[view.detailId]
-      if (!item) return h('aside', { className: 'ssb-detail ssb-empty' }, h('p', null, '选择一只证券查看基础行情。'))
-      const entry = data.quotes[item.id], q = entry?.quote
+      const inWatchlist = !!data?.control?.watchlist?.items?.[view.detailId]
+      // peek 报价不来自常驻快照, 由打开详情时的 /refresh 响应私有保存
+      const entry = data?.quotes?.[item.id] || state.peekQuotes?.[item.id], q = entry?.quote
       const direction = toneClass(q?.changePct)
       const marketLabel = MARKET_LABEL[item.exchange] || item.exchange
       // 币种唯一来源是自选条目 currency(watchlist 写入时由 MARKET_META 保证), client 不设回退表
@@ -1379,7 +1555,7 @@ window.__ModuleLoader__.load({
       })) : null
       // 分组标签: 一只票可同时属于多个分组, 整组替换提交; 已有标签 pill 一键加入, 新标签走输入框
       const tags = item.tags || []
-      const allTags = [...new Set(Object.values(data.control.watchlist.items).flatMap(other => other.tags || []))]
+      const allTags = [...new Set(Object.values(data?.control?.watchlist?.items || {}).flatMap(other => other.tags || []))]
       // 失败就地报错: 顶部横幅在抽屉之后, 详情里点标签出错时会被盖住
       const applyTags = next => () => runtime.mutate('tags', { securityId: item.id, tags: next }).then(() => runtime.updateView({ tagError: '' })).catch(e => runtime.updateView({ tagError: e?.message || '标签更新失败' }))
       const tagForm = inWatchlist ? h('div', { className: 'ssb-tag-editor' },
@@ -1435,17 +1611,36 @@ window.__ModuleLoader__.load({
         watchActions ? h('div', { className: 'ssb-detail-forms' }, watchActions) : null)
     }
     // 显示偏好(悬浮窗位置/辅助线开关)属于纯客户端状态: 存本地, 不进宿主 schema,
-    // 否则每加一个开关都要重启宿主。同页用自定义事件广播, storage 事件只在跨标签页触发。
+    // 否则每加一个开关都要重启宿主。同页广播自定义事件, 跨页走 storage 事件, 两者都回读同一份本地真源。
+    const PREF_WRITE_ERROR = '浏览器本地存储不可用，显示偏好未能保存'
+    let prefError = ''
+    const prefErrorListeners = new Set()
+    function setPrefError(message) { if (prefError === message) return; prefError = message; for (const listener of prefErrorListeners) listener(message) }
+    const clearPrefError = () => setPrefError('')
+    function usePrefError() {
+      const [message, setMessage] = React.useState(prefError)
+      React.useEffect(() => { prefErrorListeners.add(setMessage); return () => prefErrorListeners.delete(setMessage) }, [])
+      return message
+    }
     const readPref = (key, fallback) => { try { return { ...fallback, ...(JSON.parse(localStorage.getItem(key) || 'null') || {}) } } catch { return { ...fallback } } }
-    const writePref = (key, next) => { try { localStorage.setItem(key, JSON.stringify(next)) } catch { } window.dispatchEvent(new Event(`ssb:${key}`)) }
+    // 写失败(隐私模式/配额满)不能广播成功事件: 各组件会回读旧值, 广播只会制造"已生效"的错觉; 由页面横幅提示
+    const writePref = (key, next) => {
+      try { localStorage.setItem(key, JSON.stringify(next)) } catch { setPrefError(PREF_WRITE_ERROR); return false }
+      clearPrefError()
+      window.dispatchEvent(new Event(`ssb:${key}`))
+      return true
+    }
+    function subscribePref(key, target, sync) {
+      const local = () => sync()
+      const remote = event => { if (event?.key === key) sync() }
+      target.addEventListener(`ssb:${key}`, local)
+      target.addEventListener('storage', remote)
+      return () => { target.removeEventListener(`ssb:${key}`, local); target.removeEventListener('storage', remote) }
+    }
     function usePref(key, fallback) {
       const [value, setValue] = React.useState(() => readPref(key, fallback))
-      React.useEffect(() => {
-        const sync = () => setValue(readPref(key, fallback))
-        window.addEventListener(`ssb:${key}`, sync)
-        return () => window.removeEventListener(`ssb:${key}`, sync)
-      }, [key])
-      return [value, next => writePref(key, { ...readPref(key, fallback), ...next })]
+      React.useEffect(() => subscribePref(key, window, () => setValue(readPref(key, fallback))), [key])
+      return [value, next => { writePref(key, { ...readPref(key, fallback), ...next }) }]
     }
     // ---- FloatingTicker: 悬浮盯盘, portal 到 body 常驻, 不随面板切换卸载 ----
     // 悬浮窗自己的数据流: 列表模式批量拉勾选标的的报价, 图形模式只拉当前这只的分时
@@ -1687,24 +1882,37 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'ssb-float-list', onScroll },
         ...(picked.length ? picked.map(id => {
           const item = items[id], quote = entryOf(id)?.quote, change = quote?.changePct
-          const pl = costPlOf(item.marks, quote?.last)
+          // 盈亏是单只票的深度读数, 只归图形模式: 列表要保持一只票一行, 不换行塞第二行
           return h('button', { key: id, type: 'button', className: `ssb-float-row${id === securityId ? ' ssb-float-row-on' : ''}`, onClick: () => onPick(id), onPointerEnter: event => onTip(id, event), onPointerLeave: onLeave },
             h('span', { className: 'ssb-float-row-name' }, item.alias || item.officialName),
             h('span', { className: 'ssb-float-code' }, item.code),
             h('span', { className: `ssb-float-row-price ssb-number${toneClass(change)}` }, priceTextOf(quote?.last, item.priceScale)),
-            h('span', { className: `ssb-float-row-pct ssb-number${toneClass(change)}` }, change == null ? '—' : `${signed(Number(change).toFixed(2))}%`),
-            // 设了成本就给持仓盈亏: 与当日涨跌是两套读数, 所以自占一行小字, 不挤进涨跌列
-            pl ? h('span', { className: `ssb-float-row-pl ssb-number${toneClass(pl.pct) || ' ssb-muted'}` }, `盈亏 ${plTextOf(pl)}`) : null)
+            h('span', { className: `ssb-float-row-pct ssb-number${toneClass(change)}` }, change == null ? '—' : `${signed(Number(change).toFixed(2))}%`))
         }) : [h('p', { className: 'ssb-muted' }, '未选择标的，点 ☰ 勾选')]))
     }
-    function FloatChart({ securityId, current, candles, preClose, error, last, pct }) {
+    // 离线兜底提示: 当日缓存说出是哪一次成功的, 追加过报价点也要说清补了几个——都不能让用户以为这是实时分时
+    function offlineText(offline) {
+      if (!offline) return ''
+      return `离线：当日缓存 ${clockText(offline.cachedAt)}${offline.appended ? `，补 ${offline.appended} 个报价点` : ''}`
+    }
+    // 离线提示的前缀: 浮窗图下与详情页元信息共用同一句话, 免得两处说法不一致
+    const offlinePrefix = offline => offline ? `${offlineText(offline)} · ` : ''
+    // 数值一律先过 finiteOr: Number(null) 是 0, 会把缺失的昨收当成真实的 0 交给下游
+    function floatReadout({ candles, trendData, quote }) {
+      return { last: finiteOr(candles?.at(-1)?.close ?? quote?.last), base: finiteOr(trendData?.preClose ?? quote?.previousClose) }
+    }
+    function FloatChart({ securityId, current, candles, preClose, error, last, pct, offline }) {
       const pl = costPlOf(current.marks, last)
       return h(React.Fragment, null,
         h('div', { className: `ssb-float-quote ssb-number${toneClass(pct)}` },
           h('span', { className: 'ssb-float-price' }, Number.isFinite(last) ? priceTextOf(last, current.priceScale) : '—'),
           h('span', { className: 'ssb-float-pct' }, pct == null ? '—' : `${signed(pct.toFixed(2))}%`),
           pl ? h('span', { className: `ssb-float-pl ssb-number${toneClass(pl.pct) || ' ssb-muted'}`, title: `成本 ${priceTextOf(pl.base, current.priceScale)} · 每股 ${plAmountOf(pl, current.priceScale)}` }, `盈亏 ${plTextOf(pl)}`) : null),
-        error ? h('p', { className: 'ssb-float-error' }, error) : h('div', { className: `ssb-float-chart${toneClass(pct)}` }, h(Sparkline, { key: securityId, candles, preClose, marks: current.marks, scale: current.priceScale })),
+        // 有兜底数据就画兜底线: 此时"连接失败"已经不成立, 再报错等于把可用的图盖掉
+        !error || offline
+          ? h('div', { className: `ssb-float-chart${toneClass(pct)}` }, h(Sparkline, { key: securityId, candles, preClose, marks: current.marks, scale: current.priceScale }))
+          : h('p', { className: 'ssb-float-error' }, error),
+        offline ? h('p', { className: 'ssb-float-offline' }, offlineText(offline)) : null,
         // 标记价常驻一行: 图里画得出的是范围内的横线, 范围外的用这行交代, 不必悬停才知道
         (current.marks || []).length ? h('div', { className: 'ssb-float-marks' }, ...(current.marks || []).map(mark => h('span', { key: mark.id, className: mark.kind === 'cost' ? 'ssb-legend-cost' : 'ssb-legend-target' }, `${mark.kind === 'cost' ? '成本' : '卖价'} ${priceTextOf(mark.price, current.priceScale)}`))) : null)
     }
@@ -1726,8 +1934,8 @@ window.__ModuleLoader__.load({
       const [trend, setTrend] = React.useState(null)
       const [error, setError] = React.useState('')
       const [picker, setPicker] = React.useState(false)
-      const items = state.data?.control.watchlist.items || {}
-      const order = state.data?.control.watchlist.order || []
+      const items = state.data?.control?.watchlist?.items || {}
+      const order = state.data?.control?.watchlist?.order || []
       // 勾选的观测目标: 空则退回自选前几只, 但绝不隐式等于全部自选
       const picked = (Array.isArray(floating.ids) ? floating.ids : order.slice(0, 5)).filter(id => items[id])
       const mode = floating.mode === 'kline' ? 'kline' : 'list'
@@ -1736,8 +1944,8 @@ window.__ModuleLoader__.load({
       const update = next => setFloating(next)
       const drag = useFloatingDrag(update)
       // 悬浮窗节奏取自独立偏好, 列表间隔不再参与
-      const floatRefresh = floatIntervalOf(state.data?.control.preferences?.floatRefreshSeconds)
-      useFloatingPolling({ open, mode, securityId, picked, items, live: floating.live, floatSeconds: floatRefresh, quotes: state.data?.quotes, fetched, revision: state.data?.control.revision, setFetched, setTrend, setError })
+      const floatRefresh = floatIntervalOf(state.data?.control?.preferences?.floatRefreshSeconds)
+      useFloatingPolling({ open, mode, securityId, picked, items, live: floating.live, floatSeconds: floatRefresh, quotes: state.data?.quotes, fetched, revision: state.data?.control?.revision, setFetched, setTrend, setError })
       // 面板已经刷过的报价先拿来渲染, 悬浮窗自己的 refresh 结果回来后再按 receivedAt 择优:
       // 否则首次打开要干等一轮上游请求, 列表是空的
       const entryOf = id => {
@@ -1749,6 +1957,7 @@ window.__ModuleLoader__.load({
       const quoteOf = id => entryOf(id)?.quote
       // 标记价提醒的开关与瞬时高亮都是本组件的常驻状态: 必须在提前 return 之前声明
       const [alert, setAlert] = usePref(ALERT_PREF_KEY, ALERT_PREF_DEFAULT)
+      const prefError = usePrefError()
       const [alerting, setAlerting] = React.useState(false)
       const [rowTip, setRowTip] = React.useState(null)
       const alertTimer = React.useRef(null)
@@ -1807,10 +2016,11 @@ window.__ModuleLoader__.load({
       const liveQuoteTimes = picked.filter(id => !QUIET_STATES.has(quoteOf(id)?.sessionState)).map(id => timestampOf(quoteOf(id)?.receivedAt)).filter(at => at != null)
       const trendAt = mode === 'kline' ? (timestampOf(candles?.at(-1)?.at) ?? timestampOf(trendData?.fetchedAt)) : null
       const { stamp, stale } = floatFreshness({ mode, quoteTimes, liveQuoteTimes, trendAt, quiet: QUIET_STATES.has(quoteOf(securityId)?.sessionState), now: Date.now(), refreshSeconds: floatRefresh })
-      // 这里必须先过 finiteOr: Number(null) 是 0, 会把缺失的昨收当成真实的 0 交给下游,
-      // 结果是迷你图基准画在 0、价格显示 "0", 与图例里的「昨收 —」自相矛盾
-      const last = finiteOr(candles?.at(-1)?.close)
-      const base = finiteOr(trendData?.preClose)
+      // 图形模式的读数: 分时有数据就用图上最后一根, 没有就退回报价行的现价与昨收——
+      // 上游断开时不该连价格都显示破折号, 那也是"体验太差"的一部分
+      const readout = floatReadout({ candles, trendData, quote: quoteOf(securityId) })
+      const last = readout.last
+      const base = readout.base
       const pct = Number.isFinite(last) && Number.isFinite(base) && base ? (last - base) / base * 100 : null
       const showRowTip = (id, event) => {
         // 行提示走公共悬浮组件(common-tools Tooltip):portal 到 body, 不受列表 overflow 裁剪;
@@ -1818,17 +2028,18 @@ window.__ModuleLoader__.load({
         const rect = event.currentTarget.getBoundingClientRect()
         setRowTip({ id, anchor: { kind: 'rect', left: rect.left, top: rect.top, width: rect.width, height: rect.height } })
       }
-      const greenUp = state.data?.control.preferences.colorMode === 'green-up' ? ' ssb-green-up' : ''
+      const greenUp = state.data?.control?.preferences?.colorMode === 'green-up' ? ' ssb-green-up' : ''
       // 勾选写入一律按自选顺序重排, 否则反复勾选会把 ids 变成点击次序, 列表顺序会跳
       const setPicked = ids => { const set = new Set(ids); update({ ids: order.filter(id => set.has(id)) }) }
       return h('div', { className: `ssb-float${greenUp}${alerting ? ' ssb-float-alerting' : ''}`, role: 'complementary', 'aria-label': '悬浮盯盘', style: position, onPointerDown: drag.onPointerDown, onPointerMove: drag.onPointerMove, onPointerUp: drag.onPointerUp, onPointerCancel: drag.onPointerUp },
         React.createElement('style', { 'data-plugin': '@mzzsfy/dsh-stock-assistant', dangerouslySetInnerHTML: { __html: CSS } }),
+        prefError ? h('div', { className: 'ssb-banner ssb-error', role: 'alert', style: { margin: '0 12px' } }, prefError, h(Button, { onClick: clearPrefError }, '关闭')) : null,
         h(FloatHeader, { mode, picker, current, picked, onStep: step, onMode: next => update({ mode: next }), onPicker: setPicker, onClose: () => update({ open: false }) }),
         picker
           ? h(FloatPicker, { order, items, picked, onPicked: setPicked })
           : mode === 'list'
             ? h(FloatList, { picked, items, securityId, entryOf, onPick: id => update({ mode: 'kline', securityId: id }), onTip: showRowTip, onLeave: () => setRowTip(null), onScroll: () => setRowTip(null) })
-            : !current ? h('p', { className: 'ssb-muted' }, '未选择标的') : h(FloatChart, { securityId, current, candles, preClose: base, error, last, pct }),
+            : !current ? h('p', { className: 'ssb-muted' }, '未选择标的') : h(FloatChart, { securityId, current, candles, preClose: base, error, last, pct, offline: trendData?.offline }),
         h(FloatFoot, {
           mode, securityId, picked, current, stamp, stale, alertOn, error, liveOn: floating.live !== false, refresh: floatRefresh,
           onBell: () => { const next = !alertOn; alertStates.current = {}; setAlert({ on: next }); if (next) requestAlertPermission() },
@@ -1841,14 +2052,15 @@ window.__ModuleLoader__.load({
           onDetail: () => { if (securityId) runtime.openDetail(securityId) },
         }),
         rowTip && items[rowTip.id] ? h(tools.Tooltip, { anchor: rowTip.anchor },
-          ...quoteTipLines({ quote: quoteOf(rowTip.id), marks: items[rowTip.id].marks, scale: items[rowTip.id].priceScale }).map((text, index) => h('div', { key: index }, text))) : null)
+          h('div', { className: `ssb-row-tip${greenUp}` },
+            ...quoteTipLines({ quote: quoteOf(rowTip.id), marks: items[rowTip.id].marks, scale: items[rowTip.id].priceScale }).map((row, index) => h('div', { key: index, className: row.tone || undefined }, row.text)))) : null)
     }
     function BrowseView({ runtime, state }) {
       const { view, busy, data } = state
       const rows = view.browseRows
       return h('section', { className: 'ssb-search-view' },
         h('div', { className: 'ssb-panel-head' }, h('h2', null, '浏览市场'), h('div', { className: 'ssb-toolbar' }, h(Button, { onClick: () => runtime.updateView({ view: 'list' }) }, '返回自选'))),
-        h('div', { className: 'ssb-toolbar', style: { padding: '12px 16px 0' } }, ...Object.keys(BROWSE_MARKETS).filter(market => (data?.control.routes || []).some(r => r.capability === 'catalog' && r.market === market)).map(market => h(Button, { key: market, primary: (view.browseMarket || 'XSHG') === market, disabled: busy.browse, onClick: quiet(() => runtime.loadBrowse(market, 0)) }, BROWSE_MARKETS[market]))),
+        h('div', { className: 'ssb-toolbar', style: { padding: '12px 16px 0' } }, ...Object.keys(BROWSE_MARKETS).filter(market => (data?.control?.routes || []).some(r => r.capability === 'catalog' && r.market === market)).map(market => h(Button, { key: market, primary: (view.browseMarket || 'XSHG') === market, disabled: busy.browse, onClick: quiet(() => runtime.loadBrowse(market, 0)) }, BROWSE_MARKETS[market]))),
         data?.browseOverview ? (() => {
           // 缺 previousClose 时 change/changePct 会是 null, Number(null) 得 0, 直接拼会渲染出「+null（+null%）」
           const ov = data.browseOverview, change = finiteOr(ov.change), changePct = finiteOr(ov.changePct)
@@ -1857,9 +2069,16 @@ window.__ModuleLoader__.load({
           const fmt = raw => { if (raw == null || raw === '') return '—'; const n = Number(raw); return Number.isFinite(n) ? `${n >= 0 ? '+' : ''}${raw}` : '—' }
           return h('div', { className: 'ssb-banner ssb-banner-ok', style: { margin: '12px 16px 0' } }, `${ov.name} ${ov.last ?? '—'}`, h('span', { className: `ssb-number${tone}` }, `${fmt(ov.change)}（${fmt(ov.changePct)}%）`), h('span', { className: 'ssb-muted' }, `${ov.source} · ${ov.delayKind === 'unknown' ? '延迟未知' : delayText(ov)}`))
         })() : null,
-        !rows ? h('div', { className: 'ssb-empty' }, view.browseSyncing ? h('p', null, '目录首次同步中（约一两分钟），完成后重新点击该市场即可浏览。') : h(React.Fragment, null, h('p', null, '该市场目录未同步。可直接搜索添加自选，或同步目录后浏览。'), h(Button, { primary: true, onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) }, '前往设置'), h(Button, { disabled: busy.sync, onClick: quiet(() => runtime.sync(view.browseMarket || 'XSHG')) }, '同步当前市场目录'))) :
+        !rows || (view.browseSyncing && !rows.length) ? h('div', { className: 'ssb-empty' }, view.browseSyncing
+          ? (view.browseSyncError
+            ? h(React.Fragment, null,
+              h('p', null, `目录同步失败：${view.browseSyncError.message || view.browseSyncError.code || '未知原因'}`),
+              h(Button, { disabled: busy.sync, onClick: quiet(async () => { try { await runtime.sync(view.browseMarket || 'XSHG') } catch {} return runtime.loadBrowse(view.browseMarket || 'XSHG', 0) }) }, '重试同步'),
+              h(Button, { onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) }, '前往设置'))
+            : h('p', null, '目录首次同步中（约一两分钟），完成后重新点击该市场即可浏览。'))
+          : h(React.Fragment, null, h('p', null, '该市场目录未同步。可直接搜索添加自选，或同步目录后浏览。'), h(Button, { primary: true, onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) }, '前往设置'), h(Button, { disabled: busy.sync, onClick: quiet(() => runtime.sync(view.browseMarket || 'XSHG')) }, '同步当前市场目录'))) :
           h('div', { className: 'ssb-results', role: 'list', 'aria-label': '市场证券列表' }, ...rows.map(item => {
-            const added = !!data?.control.watchlist.items[item.id]
+            const added = !!data?.control?.watchlist?.items?.[item.id]
             return h('div', { className: 'ssb-candidate', role: 'listitem', key: item.id }, h('button', { type: 'button', className: 'ssb-stock-name', onClick: () => { runtime.updateView({ detailId: item.id, view: view.view, overlay: 'detail', browsePeek: { ...(view.browsePeek || {}), [item.id]: item } }); runtime.refresh([{ id: item.id, exchange: item.exchange, code: item.code, officialName: item.officialName }]).catch(() => {}) } }, h('strong', null, item.officialName), h('span', { className: 'ssb-muted' }, `${MARKET_LABEL[item.exchange] || item.exchange} ${item.code}`)), h(Button, { disabled: added || busy.write, onClick: quiet(() => runtime.mutate('add', { securityId: item.id })) }, added ? '已在自选' : '加自选'))
           })),
         rows?.length ? h('div', { className: 'ssb-toolbar', style: { padding: '0 16px 12px' } }, h('span', { className: 'ssb-muted' }, `共 ${view.browseTotal} 只`), h(Button, { disabled: !view.browseOffset || busy.browse, onClick: quiet(() => runtime.loadBrowse(view.browseMarket, Math.max(0, view.browseOffset - BROWSE_PAGE))) }, '上一页'), h(Button, { disabled: view.browseOffset + BROWSE_PAGE >= view.browseTotal || busy.browse, onClick: quiet(() => runtime.loadBrowse(view.browseMarket, view.browseOffset + BROWSE_PAGE)) }, '下一页')) : null)
@@ -1879,28 +2098,28 @@ window.__ModuleLoader__.load({
           if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); const index = e.key === 'ArrowDown' ? Math.min(visible.length - 1, at + 1) : Math.max(0, at - 1); if (visible[index]) choose(visible[index]) }
           if (e.key === 'Escape') runtime.updateView({ view: 'list' })
         } }))),
-        h('div', { role: 'listbox', 'aria-label': '证券搜索结果', className: 'ssb-results' }, ...visible.map(item => h('div', { role: 'option', 'aria-selected': view.selectedId === item.id, key: item.id, className: `ssb-candidate${view.selectedId === item.id ? ' ssb-selected' : ''}`, onClick: () => choose(item) }, h('span', { className: 'ssb-peek', role: 'button', tabIndex: 0, onClick: e => { e.stopPropagation(); runtime.updateView({ detailId: item.id, view: view.view, overlay: 'detail', browsePeek: { ...(view.browsePeek || {}), [item.id]: item } }); runtime.refresh([{ id: item.id, exchange: item.exchange, code: item.code, officialName: item.officialName }]).catch(() => {}) } }, h('strong', null, item.officialName), h('span', { className: 'ssb-muted' }, `${MARKET_LABEL[item.exchange] || item.exchange} ${item.code}${item.currency ? ` · ${item.currency}` : ''}`)), h(Button, { disabled: !!data?.control.watchlist.items[item.id] || state.busy.write, onClick: quiet(() => runtime.mutate('add', { securityId: item.id })) }, data?.control.watchlist.items[item.id] ? '已在自选' : '加自选')))),
+        h('div', { role: 'listbox', 'aria-label': '证券搜索结果', className: 'ssb-results' }, ...visible.map(item => h('div', { role: 'option', 'aria-selected': view.selectedId === item.id, key: item.id, className: `ssb-candidate${view.selectedId === item.id ? ' ssb-selected' : ''}`, onClick: () => choose(item) }, h('span', { className: 'ssb-peek', role: 'button', tabIndex: 0, onClick: e => { e.stopPropagation(); runtime.updateView({ detailId: item.id, view: view.view, overlay: 'detail', browsePeek: { ...(view.browsePeek || {}), [item.id]: item } }); runtime.refresh([{ id: item.id, exchange: item.exchange, code: item.code, officialName: item.officialName }]).catch(() => {}) } }, h('strong', null, item.officialName), h('span', { className: 'ssb-muted' }, `${MARKET_LABEL[item.exchange] || item.exchange} ${item.code}${item.currency ? ` · ${item.currency}` : ''}`)), h(Button, { disabled: !!data?.control?.watchlist?.items?.[item.id] || state.busy.write, onClick: quiet(() => runtime.mutate('add', { securityId: item.id })) }, data?.control?.watchlist?.items?.[item.id] ? '已在自选' : '加自选')))),
         !visible.length ? h('p', { className: 'ssb-muted', style: { margin: 0 } }, view.query ? '暂无匹配。目录未同步时，请先到设置配置并同步目录。' : '输入关键词开始搜索，例如代码、名称或拼音首字母。') : null,
         state.errorCode === 'CATALOG_NOT_READY' ? h('div', { className: 'ssb-banner', style: { margin: 0 } }, '目录未就绪。可以直接浏览市场添加自选。', h(Button, { onClick: () => runtime.updateView({ view: 'browse' }) }, '前往浏览市场')) : null,
-        h('div', { className: 'ssb-toolbar', style: { margin: 0 } }, h(Button, { primary: true, disabled: !view.selectedId || !!data?.control.watchlist.items[view.selectedId] || state.busy.write, onClick: quiet(async () => { await runtime.mutate('add', { securityId: view.selectedId }); runtime.updateView({ view: 'list', selectedId: null }) }) }, data?.control.watchlist.items[view.selectedId] ? '已在自选' : '确认添加'))))
+        h('div', { className: 'ssb-toolbar', style: { margin: 0 } }, h(Button, { primary: true, disabled: !view.selectedId || !!data?.control?.watchlist?.items?.[view.selectedId] || state.busy.write, onClick: quiet(async () => { await runtime.mutate('add', { securityId: view.selectedId }); runtime.updateView({ view: 'list', selectedId: null }) }) }, data?.control?.watchlist?.items?.[view.selectedId] ? '已在自选' : '确认添加'))))
     }
     const defaultProvider = (id, adapterId = 'tushare') => ({ id, adapterId, enabled: true, credentialRef: adapterId === 'tushare' ? 'DSH_STOCK_TUSHARE_TOKEN' : null, quotaGroup: adapterId + '-account', budget: { requestsPerMinute: adapterId === 'tushare' ? null : 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } })
     // 密钥输入: 值直接写宿主的凭据存储, 不进配置草稿, 也不回显。保存后重新拉一次快照让"已配置"状态跟上
-    function CredentialField({ runtime, refName, present }) {
+    function CredentialField({ runtime, configuration, refName, present, label = '密钥' }) {
       const [value, setValue] = React.useState(''), [busy, setBusy] = React.useState(false), [notice, setNotice] = React.useState('')
       const submit = async next => {
         if (busy) return
         setBusy(true); setNotice('')
         try {
-          await runtime.api('/credential', 'POST', { ref: refName, value: next })
+          // 引用名可能刚在草稿里改过: 由 runtime 先落配置再写凭据, 顺序与用户填写顺序一致
+          const outcome = await runtime.saveCredential({ ref: refName, value: next, ...configuration })
           setValue('')
-          setNotice(next === null ? '已清除' : '已保存')
-          runtime.applySnapshot(await runtime.api('/snapshot'), true)
+          setNotice(outcome?.configurationSaved ? '已保存（数据源配置已同步落盘）' : next === null ? '已清除' : '已保存')
         } catch (e) { setNotice(e.message || '保存失败') }
         finally { setBusy(false) }
       }
       return h('div', { className: 'ssb-credential', style: { gridColumn: '1 / -1' } },
-        h('label', { className: 'ssb-field' }, h('span', null, present ? '密钥（已配置，留空表示不修改）' : '密钥（未配置）'),
+        h('label', { className: 'ssb-field' }, h('span', null, present ? `${label}（已配置，留空表示不修改）` : `${label}（未配置）`),
           h('input', { type: 'password', value, autoComplete: 'new-password', spellCheck: false, placeholder: present ? '留空则不修改' : '粘贴密钥后保存', onChange: e => setValue(e.target.value) })),
         h('div', { className: 'ssb-credential-actions' },
           h(Button, { disabled: busy || !value.trim(), onClick: () => submit(value.trim()) }, '保存密钥'),
@@ -1908,18 +2127,64 @@ window.__ModuleLoader__.load({
           notice ? h('span', { className: 'ssb-muted', role: 'status' }, notice) : null))
     }
     const routeFor = (market, capability, instance) => ({ id: `${market.toLowerCase()}-${capability}`, capability, market, instrument: 'equity', primaryInstanceId: instance, fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true })
+    // 数据源保存只提交仍被启用实例引用的路由: 禁用/移除实例后, 旧路由里的主/备引用必须同步剪掉,
+    // 否则服务端按 INVALID_ROUTE 拒绝整次保存(用户看到的是"保存数据源"永远失败)
+    function routesForProviders(routes, providers) {
+      // 快照未就绪(测试桩/半截 data)时没有判据, 原样返回而不是把路由清空
+      if (!Array.isArray(providers)) return routes || []
+      const enabled = new Set(providers.filter(p => p.enabled).map(p => p.id))
+      return routes.flatMap(route => {
+        if (!enabled.has(route.primaryInstanceId)) return []
+        const fallbackInstanceIds = route.fallbackInstanceIds.filter(id => enabled.has(id))
+        return [{ ...route, fallbackInstanceIds, failoverMode: fallbackInstanceIds.length ? route.failoverMode : 'off' }]
+      })
+    }
+    // 适配器能力矩阵是路由合法性的判据: 换适配器后旧路由可能引用新适配器不支持的能力/市场,
+    // 服务端校验会整次 422(用户看到的是"保存数据源永远失败")。切换入口即时剪枝, 保存载荷再兜底一次。
+    function routesForAdapter(routes, provider, adapters) {
+      const adapter = (adapters || []).find(a => a.adapterId === provider.adapterId)
+      // 能力矩阵缺失(旧宿主/测试桩)时不剪枝: 没有判据的删除比保留更危险
+      if (!adapter || !Array.isArray(adapter.capabilities) || !Array.isArray(adapter.markets)) return routes
+      const supports = route => adapter.capabilities.includes(route.capability) && adapter.markets.includes(route.market)
+      return routes.flatMap(route => {
+        if (route.primaryInstanceId === provider.id) return supports(route) ? [route] : []
+        if (!route.fallbackInstanceIds.includes(provider.id) || supports(route)) return [route]
+        const fallbackInstanceIds = route.fallbackInstanceIds.filter(id => id !== provider.id)
+        return [{ ...route, fallbackInstanceIds, failoverMode: fallbackInstanceIds.length ? route.failoverMode : 'off' }]
+      })
+    }
+    function routesForAdapters(routes, providers, adapters) {
+      return (providers || []).reduce((current, provider) => routesForAdapter(current, provider, adapters), routes || [])
+    }
+    // 数据源页的交互模型: 启用开关关闭/适配器切换都即时剪枝草稿路由; 保存时再以当前草稿兜底计算一次
+    function providerChangeDraft(draft, id, patch, adapters = []) {
+      const providers = draft.providers.map(p => p.id === id ? { ...p, ...patch } : p)
+      const changed = providers.find(p => p.id === id)
+      let routes = patch.adapterId === undefined ? draft.routes : routesForAdapter(draft.routes, changed, adapters)
+      if (patch.enabled === false) routes = routesForProviders(routes, providers)
+      return { providers, routes }
+    }
+    // 两个页签的保存语义不同: 数据源页只落实例(路由以已保存配置为基数做合法性剪枝),
+    // 市场与能力页才提交草稿路由。两个页签都提交草稿 providers, 否则路由页新加实例的路由会被当孤儿剪掉。
+    function settingsSavePayload(tab, draft, saved, adapters = []) {
+      const providers = draft.providers
+      // 已保存路由未知(测试桩/半截 data)时退回草稿: 没有判据的保存不清空路由
+      const baseRoutes = tab === 'sources' ? saved?.routes ?? draft.routes : draft.routes
+      return { providers, routes: routesForProviders(routesForAdapters(baseRoutes, providers, adapters), providers) }
+    }
     function SettingsView({ runtime, state }) {
       const saved = state.data.control
-      const draft = state.view.settingsDraft || { providers: saved.providers, routes: saved.routes, expectedRevision: saved.revision, checkResults: [], probes: {} }
+      const draft = state.view.settingsDraft || { providers: saved.providers, routes: saved.routes, expectedRevision: saved.revision, epoch: state.data?.serverEpoch, checkResults: [], probes: {} }
       const configuration = { providers: draft.providers, routes: draft.routes }
       function change(next, invalidate = true) { runtime.updateView({ settingsDraft: { ...draft, ...next, ...(invalidate ? { checkResults: [], probes: {} } : {}) } }) }
-      const providerChange = (id, patch) => change({ providers: draft.providers.map(p => p.id === id ? { ...p, ...patch } : p) })
+      const providerChange = (id, patch) => change(providerChangeDraft(draft, id, patch, adapters))
       const field = (label, value, onChange, props = {}) => h('label', { className: 'ssb-field' }, h('span', null, label), h('input', { value: value ?? '', onChange: e => onChange(e.target.value), ...props }))
-      const CAP_LABEL = { quotes: '报价', catalog: '证券目录', search: '远程搜索', calendar: '交易日历', kline: 'K线' }
+      const CAP_LABEL = { quotes: '报价', catalog: '证券目录', search: '远程搜索', calendar: '交易日历', kline: 'K线', trend: '分时' }
       const tab = draft.tab || 'sources'
       const TABS = [['sources', '数据源'], ['routes', '市场与能力'], ['display', '显示偏好']]
-      const providersOnly = { providers: draft.providers, routes: saved.routes }
-      const routesOnly = { providers: saved.providers, routes: draft.routes }
+      const adapters = state.data.adapters || []
+      const providersOnly = settingsSavePayload('sources', draft, saved, adapters)
+      const routesOnly = settingsSavePayload('routes', draft, saved, adapters)
       const providerCards = draft.providers.map(p => {
         const adapter = state.data.adapters.find(a => a.adapterId === p.adapterId)
         const status = state.data.providerStatus?.find(s => s.id === p.id)
@@ -1948,25 +2213,28 @@ window.__ModuleLoader__.load({
               h('div', { className: 'ssb-field ssb-provider-adapter' }, h('span', null, '适配器'), h(Select, { value: p.adapterId, label: '适配器', options: state.data.adapters.map(a => ({ value: a.adapterId, label: a.adapterId + (a.credential === 'none' ? '（免凭据）' : '') })), onChange: adapterId => { const descriptor = state.data.adapters.find(a => a.adapterId === adapterId); providerChange(p.id, { adapterId, credentialRef: descriptor?.credential === 'none' ? null : descriptor?.credential || null, quotaGroup: adapterId + '-account', budget: descriptor?.credential === 'none' && p.budget.requestsPerMinute === null ? { ...p.budget, requestsPerMinute: 60 } : p.budget }) } })),
               h('div', { className: 'ssb-provider-switches' },
                 h(Toggle, { label: '启用', checked: p.enabled, onChange: value => providerChange(p.id, { enabled: value }) }),
-                h(Button, { danger: true, onClick: () => change({ providers: draft.providers.filter(other => other.id !== p.id), routes: draft.routes.filter(r => r.primaryInstanceId !== p.id).map(r => ({ ...r, fallbackInstanceIds: r.fallbackInstanceIds.filter(id => id !== p.id), failoverMode: r.fallbackInstanceIds.includes(p.id) ? 'off' : r.failoverMode })) }) }, '移除'))),
+                h(Button, { danger: true, onClick: () => { const providers = draft.providers.filter(other => other.id !== p.id); change({ providers, routes: routesForProviders(draft.routes, providers) }) } }, '移除'))),
             h('div', { className: 'ssb-provider-advanced-open' },
               h('div', { className: 'ssb-form-grid' },
                 openSource ? h('span', { className: 'ssb-muted', style: { gridColumn: '1 / -1' } }, '公开来源，无需凭据') : field('密钥引用名', p.credentialRef, value => providerChange(p.id, { credentialRef: value }), { autoComplete: 'off', spellCheck: false }),
                 field('共享额度组（同账号保持一致）', p.quotaGroup, value => providerChange(p.id, { quotaGroup: value })),
-                openSource || !p.credentialRef ? null : h(CredentialField, { key: 'cred-' + p.id, runtime, refName: p.credentialRef, present: status?.credentialPresent }),
+                openSource || !p.credentialRef ? null : h(CredentialField, { key: 'cred-' + p.id, runtime, configuration: providersOnly, refName: p.credentialRef, present: status?.credentialPresent }),
                 field('每分钟请求上限（留空仅允许探针）', p.budget.requestsPerMinute, value => providerChange(p.id, { budget: { ...p.budget, requestsPerMinute: value ? Number(value) : null } }), { type: 'number', min: 1 }),
                 field('每日请求上限（留空无限制）', p.budget.dailyRequestLimit, value => providerChange(p.id, { budget: { ...p.budget, dailyRequestLimit: value ? Number(value) : null } }), { type: 'number', min: 1 }),
                 h('div', { className: 'ssb-field' }, h('span', null, '计费单位'), h(Select, { value: p.budget.billingUnit, label: '计费单位', options: [{ value: 'request', label: '请求' }, { value: 'symbol', label: '证券' }], onChange: value => providerChange(p.id, { budget: { ...p.budget, billingUnit: value } }) })),
                 p.budget.billingUnit === 'symbol' ? field('每分钟证券额度', p.budget.symbolCreditsPerMinute, value => providerChange(p.id, { budget: { ...p.budget, symbolCreditsPerMinute: value ? Number(value) : null } }), { type: 'number', min: 1 }) : null,
-                ...['quotes', 'catalog', 'search', 'calendar'].map(cap => field(`${({ quotes: '报价', catalog: '目录', search: '搜索', calendar: '日历' })[cap]}每分钟上限`, p.budget.capabilityLimits[cap] ?? '', value => providerChange(p.id, { budget: { ...p.budget, capabilityLimits: Object.fromEntries(Object.entries({ ...p.budget.capabilityLimits, [cap]: value ? Number(value) : null }).filter(([, limit]) => limit !== null)) } }), { type: 'number', min: 1, key: cap })),
+                ...['quotes', 'kline', 'catalog', 'search', 'calendar', 'trend'].map(cap => field(`${({ quotes: '报价', kline: 'K线', catalog: '目录', search: '搜索', calendar: '日历', trend: '分时' })[cap]}每分钟上限`, p.budget.capabilityLimits[cap] ?? '', value => providerChange(p.id, { budget: { ...p.budget, capabilityLimits: Object.fromEntries(Object.entries({ ...p.budget.capabilityLimits, [cap]: value ? Number(value) : null }).filter(([, limit]) => limit !== null)) } }), { type: 'number', min: 1, key: cap })),
+                field('代理出口（http(s)://host:port，不含账号密码）', p.proxy || '', value => providerChange(p.id, { proxy: value.trim() || undefined }), { placeholder: '留空直连', spellCheck: false }),
+                field('代理凭据引用名（留空表示代理无需认证）', p.proxyCredentialRef || '', value => providerChange(p.id, { proxyCredentialRef: value.trim() || undefined }), { placeholder: '例如 DSH_STOCK_PROXY', spellCheck: false }),
+                p.proxy && p.proxyCredentialRef ? h(CredentialField, { key: 'proxy-cred-' + p.id, runtime, configuration: providersOnly, refName: p.proxyCredentialRef, present: status?.proxyCredentialPresent, label: '代理凭据（用户名:密码）' }) : null,
                 adapter?.endpointKeys?.length ? h('details', { key: 'ep-' + p.id, style: { gridColumn: '1 / -1' } },
                   h('summary', { className: 'ssb-muted' }, `接口反代${status?.endpointsCovered ? `（已覆盖 ${status.endpointsCovered} 项）` : ''}`),
                   h('p', { className: 'ssb-muted', style: { gridColumn: '1 / -1' } }, '自建反向代理或镜像站时替换对应地址，留空使用官方默认。路径与参数由本插件拼接，反代只需原样转发。'),
                   h('div', { className: 'ssb-form-grid' }, ...adapter.endpointKeys.map(({ key, label }) => field(label, (p.endpoints || {})[key] || '', value => { const endpoints = { ...p.endpoints }; if (value) endpoints[key] = value; else delete endpoints[key]; providerChange(p.id, { endpoints: Object.keys(endpoints).length ? endpoints : undefined }) }, { placeholder: '官方默认', spellCheck: false })))) : null,
-                h('details', { key: 'obs-' + p.id, style: { gridColumn: '1 / -1' } }, h('summary', { className: 'ssb-muted' }, '运行状态'), status?.recentRequests?.length ? h('ul', { className: 'ssb-reqlog' }, ...status.recentRequests.slice(0, 5).map((r, i) => h('li', { key: i }, `${timeText(r.at)} · ${r.url} · ${r.status} · ${r.ms}ms`))) : h('p', { className: 'ssb-muted' }, '暂无请求记录；启用并保存后，行情/K线请求会在此留最近 20 条轨迹。'))))) : null)
+                h('details', { key: 'obs-' + p.id, style: { gridColumn: '1 / -1' } }, h('summary', { className: 'ssb-muted' }, '运行状态'), status?.recentRequests?.length ? h('ul', { className: 'ssb-reqlog' }, ...status.recentRequests.slice(0, 5).map((r, i) => h('li', { key: i }, `${timeText(r.at)} · ${r.url} · ${r.status} · ${r.ms}ms`))) : h('p', { className: 'ssb-muted' }, '暂无请求记录；启用并保存后，行情/K线/分时请求会在此留最近 20 条轨迹。'))))) : null)
       })
       const routeRows = Object.keys(MARKET_LABEL).map(market => {
-        const caps = ['catalog', 'search', 'quotes', 'kline', ...(['XSHG', 'XSHE'].includes(market) ? ['calendar'] : [])]
+        const caps = ['catalog', 'search', 'quotes', 'kline', 'trend', ...(['XSHG', 'XSHE'].includes(market) ? ['calendar'] : [])]
         const marketRoutes = draft.routes.filter(r => r.market === market)
         const expanded = (draft.expandedMarket || '') === market
         // 摘要优先: 八市场默认收成八行, 只暴露「用什么源、备源是谁」, 改的时候才展开下拉
@@ -1974,7 +2242,7 @@ window.__ModuleLoader__.load({
         const backs = marketRoutes.filter(r => r.fallbackInstanceIds.length)
         // 能力按固定顺序呈现, 不跟随 routes 数组顺序(来源提高的顺序会变)
         const capOrder = caps.filter(cap => marketRoutes.some(r => r.capability === cap))
-        const allocation = marketRoutes.map(r => `${CAP_LABEL[r.capability]}: ${r.primaryInstanceId}${r.fallbackInstanceIds.length ? `（备 ${r.fallbackInstanceIds[0]}）` : ''}`).join('\n')
+        const allocation = marketRoutes.map(r => `${CAP_LABEL[r.capability]}: ${r.primaryInstanceId}${r.fallbackInstanceIds.length ? `（备 ${r.fallbackInstanceIds.join(' → ')}）` : ''}`).join('\n')
         const cells = caps.map(cap => {
           const route = draft.routes.find(r => r.market === market && r.capability === cap)
           const options = [{ value: '', label: '未配置' }, ...draft.providers.filter(p => p.enabled && state.data.adapters.find(a => a.adapterId === p.adapterId)?.capabilities.includes(cap)).map(p => ({ value: p.id, label: p.id }))]
@@ -2005,15 +2273,21 @@ window.__ModuleLoader__.load({
               title: probe.error ? `${probe.error.code || ''} ${probe.error.message || ''}`.trim() : `耗时 ${probe.ms}ms`,
             }, probe.status === 'ready' ? `✓ ${probe.ms ?? '—'}ms` : '✗') : null)
         })
-        // 备源与延迟只对报价/ K线有意义,收进行内折叠,避免八市场铺成三屏
-        const tuned = draft.routes.filter(r => r.market === market && (r.capability === 'quotes' || r.capability === 'kline'))
+        // 备源与延迟只对报价/K线/分时有意义,收进行内折叠,避免八市场铺成三屏;
+        // 分时目前只有一个源, 没有第二个声明者时这一行恒为空操作, 不渲染
+        const supports = (provider, cap) => { const adapter = (state.data.adapters || []).find(a => a.adapterId === provider.adapterId); return !!adapter?.capabilities.includes(cap) && !!adapter.markets?.includes(market) }
+        const trendSources = draft.providers.filter(p => p.enabled && supports(p, 'trend'))
+        const tuned = draft.routes.filter(r => r.market === market && ((r.capability === 'quotes' || r.capability === 'kline') || (r.capability === 'trend' && trendSources.length > 1)))
         const advanced = tuned.map(route => {
           const cap = route.capability
           const updateRoute = patch => change({ routes: draft.routes.map(r => r === route ? { ...r, ...patch } : r) })
-          const options = [{ value: '', label: '无' }, ...draft.providers.filter(p => p.enabled && state.data.adapters.find(a => a.adapterId === p.adapterId)?.capabilities.includes(cap) && p.id !== route.primaryInstanceId).map(p => ({ value: p.id, label: p.id }))]
+          const pickable = route.fallbackInstanceIds.length >= MAX_FALLBACKS ? [] : draft.providers.filter(p => p.enabled && supports(p, cap) && p.id !== route.primaryInstanceId && !route.fallbackInstanceIds.includes(p.id)).map(p => ({ value: p.id, label: p.id }))
           return h('div', { className: 'ssb-route-tune', key: cap },
             h('span', { className: 'ssb-route-tune-label' }, CAP_LABEL[cap]),
-            h('div', { className: 'ssb-field' }, h('span', null, '备用源'), h(Select, { value: route.fallbackInstanceIds[0] || '', label: '备用源', options, onChange: value => updateRoute({ fallbackInstanceIds: value ? [value] : [], failoverMode: 'off' }) })),
+            h('div', { className: 'ssb-field' }, h('span', null, '备用源'),
+              route.fallbackInstanceIds.length ? h('div', { className: 'ssb-tag-chips' }, ...route.fallbackInstanceIds.map((id, index) => h('span', { key: id, className: 'ssb-tag-chip' }, id,
+                h('button', { type: 'button', className: 'ssb-tag-x', 'aria-label': `移除备用源 ${id}`, onClick: () => updateRoute({ fallbackInstanceIds: route.fallbackInstanceIds.filter((_, other) => other !== index), failoverMode: route.fallbackInstanceIds.length > 1 ? route.failoverMode : 'off' }) }, '×')))) : null,
+              pickable.length ? h(Select, { value: '', label: '添加备用源', options: [{ value: '', label: '添加…' }, ...pickable], onChange: value => value && updateRoute({ fallbackInstanceIds: [...route.fallbackInstanceIds, value] }) }) : null),
             h(Toggle, { label: '自动切换', disabled: !route.fallbackInstanceIds.length, checked: route.failoverMode === 'network', onChange: on => updateRoute({ failoverMode: on ? 'network' : 'off' }) }),
             cap === 'quotes' ? h(Toggle, { label: '接受延迟未知', checked: route.acceptUnknownDelay, onChange: on => updateRoute({ acceptUnknownDelay: on }) }) : null,
             cap === 'quotes' ? h('label', { className: 'ssb-field ssb-route-delay' }, h('span', null, '最大延迟秒'), h('input', { type: 'number', min: 0, value: route.maxDelaySeconds ?? '', placeholder: '不限', onChange: e => updateRoute({ maxDelaySeconds: e.target.value ? Number(e.target.value) : null }) })) : null)
@@ -2027,7 +2301,7 @@ window.__ModuleLoader__.load({
           h('span', { className: 'ssb-market-code' }, market),
           h('span', { className: 'ssb-market-caps' }, primaries.length === 1 ? primaries[0] : primaries.length ? `${primaries.length} 个主源` : '未配置',
             h('span', { className: 'ssb-muted' }, ` · ${capOrder.length ? capOrder.map(c => CAP_LABEL[c]).join('/') : '无能力'}`)),
-          h('span', { className: 'ssb-market-back' }, backs.length ? `备 ${[...new Set(backs.map(r => r.fallbackInstanceIds[0]))].join('/')}` : '无备源'),
+          h('span', { className: 'ssb-market-back' }, backs.length ? `备 ${[...new Set(backs.flatMap(r => r.fallbackInstanceIds))].join('/')}` : '无备源'),
           h('span', { className: 'ssb-market-edit' }, expanded ? '收起' : '改')),
           expanded ? h('div', { className: 'ssb-market-body' },
             h('div', { className: 'ssb-route-grid' }, ...cells),
@@ -2038,7 +2312,7 @@ window.__ModuleLoader__.load({
         !draft.providers.length ? h('div', { className: 'ssb-banner' }, '尚未配置任何数据源。点上方「应用推荐配置」一次装好内置的免凭据源（延迟未知、无SLA）。') : null,
         h('div', { className: 'ssb-section-head' }, h('h3', null, '数据源'), h(Button, { disabled: state.busy.configuration || draft.providers.length >= 8, onClick: () => { let n = 1; while (draft.providers.some(p => p.id === `ts-${n}`)) n++; change({ providers: [...draft.providers, defaultProvider(`ts-${n}`)] }) } }, '添加实例')),
         providerCards,
-        h('div', { className: 'ssb-toolbar' }, h(Button, { primary: true, disabled: state.busy.configuration || !draft.providers.length, onClick: quiet(() => runtime.configuration(providersOnly, [])) }, '保存数据源'), h('span', { className: 'ssb-muted' }, '仅保存实例；能力分配在「市场与能力」页检查并保存'))) :
+        h('div', { className: 'ssb-toolbar' }, h(Button, { primary: true, disabled: state.busy.configuration || !draft.providers.length, onClick: quiet(() => runtime.configuration(providersOnly, { keepRoutes: true })) }, '保存数据源'), h('span', { className: 'ssb-muted' }, '保存实例并剪除失效路由引用；能力分配在「市场与能力」页检查并保存'))) :
         tab === 'routes' ? h(React.Fragment, null,
         h('div', { className: 'ssb-section-head' }, h('h3', null, '市场与能力'), h('span', { className: 'ssb-muted', 'aria-live': 'polite' }, state.checkProgress || `${configuredMarkets} 个市场已配置，点行尾「改」调整，其余保持默认即可`)),
         h('div', { className: 'ssb-market-list' },
@@ -2046,7 +2320,7 @@ window.__ModuleLoader__.load({
             h('span', null, '市场'), h('span', null, '代码'), h('span', null, '行情来源'), h('span', null, '备用源'), h('span', null, '')),
           ...routeRows),
         h('div', { className: 'ssb-section-foot' },
-          h('p', { className: 'ssb-muted' }, '目录、搜索、报价、日历与K线可独立指定来源；未配置的能力不会隐式借用其他来源。展开任一市场可对单项能力做一次探测，结果只作参考，不阻塞保存。')),
+          h('p', { className: 'ssb-muted' }, '目录、搜索、报价、日历、K线与分时可独立指定来源；未配置的能力不会隐式借用其他来源。展开任一市场可对单项能力做一次探测，结果只作参考，不阻塞保存。')),
         h('div', { className: 'ssb-toolbar' },
           h(Button, { primary: true, disabled: state.busy.configuration || !draft.routes.length, onClick: quiet(() => runtime.configuration(routesOnly)) }, '保存路由'),
           h(Button, { disabled: state.busy.configuration || state.busy.check || !draft.routes.length, onClick: quiet(async () => {
@@ -2111,10 +2385,14 @@ window.__ModuleLoader__.load({
 .ssb-select-option { display:flex; align-items:center; min-height:28px; padding:4px 8px; border-radius:var(--ssb-radius-sm); font-size:13px; color:var(--ssb-text); white-space:nowrap; cursor:pointer; }
 .ssb-select-option-active { background:var(--ssb-hover); }
 .ssb-select-option[aria-selected="true"] { color:var(--ssb-accent); }
-.ssb-select-option[aria-selected="true"].ssb-select-option-active { background:var(--ssb-accent-wash); }.ssb-field { display:flex; flex-direction:column; gap:6px; min-width:0; }.ssb-muted { color:var(--ssb-text-sub); }.ssb-code,.ssb-source { display:block; font-size:11px; }.ssb-code,.ssb-number { font-family:var(--ds-font-family-code); font-variant-numeric:tabular-nums; }.ssb-code { color:var(--ssb-text-sub); margin-top:4px; }.ssb-small { font-size:13px; margin-left:12px; }
+.ssb-select-option[aria-selected="true"].ssb-select-option-active { background:var(--ssb-accent-wash); }.ssb-select-option-unavailable { color:var(--ssb-danger); cursor:default; }.ssb-select-value-invalid { color:var(--ssb-danger); }.ssb-field { display:flex; flex-direction:column; gap:6px; min-width:0; }.ssb-muted { color:var(--ssb-text-sub); }.ssb-code,.ssb-source { display:block; font-size:11px; }.ssb-code,.ssb-number { font-family:var(--ds-font-family-code); font-variant-numeric:tabular-nums; }.ssb-code { color:var(--ssb-text-sub); margin-top:4px; }.ssb-small { font-size:13px; margin-left:12px; }
 .ssb-content { display:grid; grid-template-columns:minmax(0,1fr); gap:16px; }
 /* 浮层须压过宿主侧栏拖拽手柄; 取 60 与其它插件弹窗同档, 仍在宿主抽屉遮罩之下 */
 .ssb-overlay { position:fixed; inset:0; background:color-mix(in srgb, var(--dsw-alias-label-primary) 45%, transparent); display:flex; z-index:60; animation:ssb-fade .15s ease-out; }.ssb-drawer { animation:ssb-slide .2s ease-out; }.ssb-modal-card {}@keyframes ssb-fade { from { opacity:0; } }@keyframes ssb-slide { from { transform:translateX(40px); opacity:0; } }.ssb-overlay-drawer { justify-content:flex-end; }.ssb-overlay-modal { align-items:center; justify-content:center; padding:24px; }.ssb-drawer { width:min(80vw,94vw); height:100%; overflow:auto; background:var(--ssb-bg); border-left:1px solid var(--ssb-border); box-shadow:var(--dsw-shadow-lv3); padding:16px; }.ssb-modal-card { width:min(880px,94vw); max-height:88vh; overflow:auto; background:var(--ssb-bg); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-lg); box-shadow:var(--dsw-shadow-lv3); padding:16px; }.ssb-drawer-head { display:flex; justify-content:flex-end; }.ssb-drawer .ssb-detail, .ssb-drawer .ssb-settings { border:0; padding:0; background:transparent; }.ssb-list-pane,.ssb-detail { border:.5px solid var(--ssb-border); border-radius:var(--ssb-radius-md); min-width:0; }.ssb-detail { padding:16px; background:var(--ssb-bg-sub); }.ssb-detail .ssb-section-head { padding:0; }.ssb-detail-price { font-size:28px; margin:20px 0 4px; }.ssb-table-scroll { max-height:65vh; overflow:auto; border-radius:0 0 var(--ssb-radius-md) var(--ssb-radius-md); }.ssb-foot { margin:12px 0 4px; }.ssb-table { width:100%; border-collapse:collapse; table-layout:auto; }.ssb-table th { color:var(--ssb-text-sub); font-weight:400; font-size:12px; background:var(--ssb-bg-sub); position:sticky; top:0; z-index:1; }.ssb-table td,.ssb-table th { padding:8px 12px; text-align:left; border-top:.5px solid var(--ssb-border); }.ssb-table td.ssb-number { text-align:right; white-space:nowrap; }.ssb-table tr:hover { background:var(--dsw-alias-interactive-bg-hover); }.ssb-selected { background:var(--ssb-accent-wash); }.ssb-stock-name { font:inherit; color:inherit; background:transparent; border:0; padding:0; text-align:left; cursor:pointer; }.ssb-stale td.ssb-number { opacity:.65; }.ssb-up { color:var(--ssb-danger); }.ssb-down { color:var(--ssb-ok); }.ssb-green-up .ssb-up { color:var(--ssb-ok); }.ssb-green-up .ssb-down { color:var(--ssb-danger); }
+/* 列表悬停浮层由宿主 Tooltip 挂在 portal 上, 拿不到插件根作用域的调色变量与色偏, 在这里补一份 */
+.ssb-row-tip { --ssb-ok:var(--dsw-alias-state-success-primary); --ssb-danger:var(--dsw-alias-state-error-primary); }
+/* 离线兜底提示: 图下方一行小字, 说清这条线是当日缓存与补了几个点, 不抢图的视线 */
+.ssb-float-offline { margin:4px 0 0; font-size:11px; line-height:1.4; color:var(--ssb-text-dim); }
 .ssb-table th.ssb-number { text-align:right; }.ssb-table th.ssb-col-status { text-align:right; }
 .ssb-table td { vertical-align:middle; padding-top:8px; padding-bottom:8px; }.ssb-table td:first-child { max-width:240px; }
 .ssb-stock-name { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
@@ -2223,7 +2501,7 @@ window.__ModuleLoader__.load({
 .ssb-picker-head > span { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .ssb-picker-all { flex:0 0 auto; padding:1px 6px; font:inherit; font-size:11px; color:var(--ssb-accent); background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); cursor:pointer; }
 .ssb-picker-all:hover { border-color:var(--ssb-accent); }
-.ssb-float-row { display:flex; flex-wrap:wrap; row-gap:0; align-items:baseline; column-gap:8px; padding:4px 6px; font:inherit; text-align:left; color:inherit; background:transparent; border:0; border-radius:var(--ssb-radius-sm); cursor:pointer; }
+.ssb-float-row { display:flex; align-items:baseline; column-gap:8px; padding:4px 6px; font:inherit; text-align:left; color:inherit; background:transparent; border:0; border-radius:var(--ssb-radius-sm); cursor:pointer; }
 .ssb-float-row:hover { background:var(--dsw-alias-interactive-bg-hover); }
 .ssb-float-row-on { background:var(--ssb-accent-wash); }
 .ssb-float-row-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -2231,8 +2509,7 @@ window.__ModuleLoader__.load({
 .ssb-float-code { flex:none; font-size:11px; font-weight:400; color:var(--ssb-text-dim); font-variant-numeric:tabular-nums; }
 .ssb-float-row-price { font-size:12px; }
 .ssb-float-row-pct { width:58px; text-align:right; font-size:11px; }
-/* 持仓盈亏自成一行小字: 与当日涨跌是两套读数, 不挤同一列; 方向色与浮窗图模式共用涨跌类 */
-.ssb-float-row-pl { flex:0 0 100%; text-align:right; font-size:11px; line-height:16px; }
+/* 列表模式一行四列: 名称/代码/现价/当日涨跌, 每只票固定一行, 不换行 */
 .ssb-float-modes { display:flex; gap:2px; }
 .ssb-float-mode { padding:2px 6px; font:inherit; font-size:11px; color:var(--ssb-text-sub); background:transparent; border:1px solid transparent; border-radius:var(--ssb-radius-sm); cursor:pointer; }
 .ssb-float-mode.on { color:var(--ssb-text); border-color:var(--ssb-border); background:var(--ssb-bg-sub); }
@@ -2283,7 +2560,7 @@ window.__ModuleLoader__.load({
 .ssb-kline-tip { position:absolute; z-index:3; width:200px; padding:8px 10px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); background:var(--ssb-bg-sub); box-shadow:var(--dsw-shadow-lv3); font-size:12px; line-height:1.5; color:var(--ssb-text-sub); font-family:var(--ds-font-family-code); font-variant-numeric:tabular-nums; pointer-events:none; }
 .ssb-kline-tip-time { color:var(--ssb-text); }.ssb-kline-skeleton { height:340px; border:1px dashed var(--ssb-border); border-radius:var(--ssb-radius-sm); display:flex; align-items:center; justify-content:center; color:var(--ssb-text-sub); margin-bottom:8px; }
 .ssb-detail-grid { display:grid; grid-template-columns:minmax(0,1fr) 240px; gap:16px; align-items:start; }.ssb-detail-side { min-width:0; }.ssb-detail-side .ssb-facts { grid-template-columns:auto minmax(0,1fr); gap:6px 12px; }.ssb-detail-side .ssb-facts dt { white-space:nowrap; }
-.ssb-empty { padding:48px 16px; color:var(--ssb-text-sub); text-align:center; font-size:14px; }.ssb-banner { border:1px solid var(--ssb-border); border-left:3px solid var(--ssb-warn); border-radius:var(--ssb-radius-sm); padding:12px; margin:12px 0; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }.ssb-banner-ok { border-left-color:var(--ssb-ok); }.ssb-error { border-left-color:var(--ssb-danger); }.ssb-banner p { margin:0; }.ssb-search-view { max-width:760px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); background:var(--ssb-bg); padding-bottom:4px; }.ssb-panel-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px; border-bottom:.5px solid var(--ssb-border); flex-wrap:wrap; }.ssb-panel-head h2 { font-size:16px; margin:0; }.ssb-panel-body { padding:16px; display:flex; flex-direction:column; gap:12px; }.ssb-form-row { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; }.ssb-form-row > .ssb-field { flex:0 0 176px; }.ssb-search-label { display:grid; gap:8px; margin-top:20px; }.ssb-form-row > .ssb-search-label { flex:1 1 300px; margin-top:0; }.ssb-results { display:grid; gap:8px; margin:16px; }.ssb-candidate { padding:10px 12px; display:flex; justify-content:space-between; align-items:center; gap:12px; background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); color:var(--ssb-text); font:inherit; cursor:pointer; }.ssb-candidate:hover { border-color:var(--ssb-accent); }.ssb-candidate.ssb-selected { background:var(--ssb-accent-wash); border-color:var(--ssb-accent); }.ssb-peek { display:flex; flex:1; flex-direction:column; gap:2px; text-align:left; cursor:pointer; min-width:0; }.ssb-peek:hover strong { text-decoration:underline; }.ssb-provider { border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); padding:16px; margin:12px 0; min-width:0; }.ssb-provider legend { padding:0 6px; color:var(--ssb-text-sub); }.ssb-provider details { grid-column:1 / -1; }.ssb-provider summary { cursor:pointer; }.ssb-reqlog { margin:8px 0 0; padding:0 0 0 18px; color:var(--ssb-text-sub); }.ssb-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }.ssb-route-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(132px,1fr)); gap:12px; }.ssb-route-cell { display:grid; gap:6px; min-width:0; }.ssb-route-cell-label { color:var(--ssb-text-sub); font-size:11px; }.ssb-route-cell select { width:100%; min-width:0; }.ssb-route-advanced { margin-top:12px; }.ssb-route-advanced > summary { cursor:pointer; }.ssb-route-tune { display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap; padding:8px 0; border-top:1px solid var(--ssb-border); }.ssb-route-tune-label { min-width:32px; color:var(--ssb-text-sub); }.ssb-route-delay { flex:0 0 120px; }
+.ssb-empty { padding:48px 16px; color:var(--ssb-text-sub); text-align:center; font-size:14px; }.ssb-banner { border:1px solid var(--ssb-border); border-left:3px solid var(--ssb-warn); border-radius:var(--ssb-radius-sm); padding:12px; margin:12px 0; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }.ssb-banner-ok { border-left-color:var(--ssb-ok); }.ssb-error { border-left-color:var(--ssb-danger); }.ssb-banner-floating { position:fixed; top:12px; left:50%; transform:translateX(-50%); z-index:80; width:min(720px,92vw); margin:0; background:var(--ssb-bg); box-shadow:var(--dsw-shadow-lv3); }.ssb-banner p { margin:0; }.ssb-search-view { max-width:760px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); background:var(--ssb-bg); padding-bottom:4px; }.ssb-panel-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px; border-bottom:.5px solid var(--ssb-border); flex-wrap:wrap; }.ssb-panel-head h2 { font-size:16px; margin:0; }.ssb-panel-body { padding:16px; display:flex; flex-direction:column; gap:12px; }.ssb-form-row { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; }.ssb-form-row > .ssb-field { flex:0 0 176px; }.ssb-search-label { display:grid; gap:8px; margin-top:20px; }.ssb-form-row > .ssb-search-label { flex:1 1 300px; margin-top:0; }.ssb-results { display:grid; gap:8px; margin:16px; }.ssb-candidate { padding:10px 12px; display:flex; justify-content:space-between; align-items:center; gap:12px; background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); color:var(--ssb-text); font:inherit; cursor:pointer; }.ssb-candidate:hover { border-color:var(--ssb-accent); }.ssb-candidate.ssb-selected { background:var(--ssb-accent-wash); border-color:var(--ssb-accent); }.ssb-peek { display:flex; flex:1; flex-direction:column; gap:2px; text-align:left; cursor:pointer; min-width:0; }.ssb-peek:hover strong { text-decoration:underline; }.ssb-provider { border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); padding:16px; margin:12px 0; min-width:0; }.ssb-provider legend { padding:0 6px; color:var(--ssb-text-sub); }.ssb-provider details { grid-column:1 / -1; }.ssb-provider summary { cursor:pointer; }.ssb-reqlog { margin:8px 0 0; padding:0 0 0 18px; color:var(--ssb-text-sub); }.ssb-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }.ssb-route-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(132px,1fr)); gap:12px; }.ssb-route-cell { display:grid; gap:6px; min-width:0; }.ssb-route-cell-label { color:var(--ssb-text-sub); font-size:11px; }.ssb-route-cell select { width:100%; min-width:0; }.ssb-route-advanced { margin-top:12px; }.ssb-route-advanced > summary { cursor:pointer; }.ssb-route-tune { display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap; padding:8px 0; border-top:1px solid var(--ssb-border); }.ssb-route-tune-label { min-width:32px; color:var(--ssb-text-sub); }.ssb-route-delay { flex:0 0 120px; }
 .ssb-switch { display:inline-flex; align-items:center; gap:8px; cursor:pointer; position:relative; }.ssb-switch input[type="checkbox"] { position:absolute; opacity:0; width:1px; height:1px; }.ssb-switch__track { display:inline-flex; flex-shrink:0; align-items:center; width:34px; height:19px; padding:3px; border-radius:999px; background:var(--ssb-bg-muted); border:1px solid var(--ssb-border); transition:background .15s ease; }.ssb-switch__thumb { width:13px; height:13px; border-radius:50%; background:var(--ssb-text-sub); transition:transform .15s ease; }.ssb-switch input[type="checkbox"]:checked + .ssb-switch__track { background:var(--ssb-accent); }.ssb-switch input[type="checkbox"]:checked + .ssb-switch__track .ssb-switch__thumb { transform:translateX(13px); background:var(--ssb-bg); }.ssb-switch input[type="checkbox"]:focus-visible + .ssb-switch__track { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:2px; }.ssb-switch input[type="checkbox"]:disabled + .ssb-switch__track { opacity:.5; cursor:not-allowed; }.ssb-switch:hover .ssb-switch__track { border-color:var(--ssb-accent); }
 @media(max-width:720px) { .ssb-detail-grid { grid-template-columns:minmax(0,1fr); } }
 @media(max-width:959px) { .ssb-content { grid-template-columns:minmax(0,1fr); }.ssb-page { padding:16px; } }
@@ -2294,28 +2571,35 @@ window.__ModuleLoader__.load({
       const state = React.useSyncExternalStore(runtime.subscribe, runtime.getSnapshot, runtime.getSnapshot), { data, view } = state
       // 盯盘开关提到主导航: 它是这张面板最常被打开的东西, 收进「更多」等于藏起来
       const [floating, setFloating] = usePref(FLOAT_KEY, FLOAT_DEFAULT)
+      const prefError = usePrefError()
       const root = React.useRef(null)
       React.useEffect(() => {
         const node = view.view === 'search' ? root.current?.querySelector('input[type="search"]') : view.view === 'list' && view.focusId ? [...(root.current?.querySelectorAll('.ssb-stock-name') || [])].find(n => n.dataset.securityId === view.focusId) : root.current?.querySelector('h2')
         if (node?.tagName === 'H2') node.setAttribute('tabindex', '-1'); node?.focus({ preventScroll: true })
       }, [view.view])
-      return h('div', { className: `ssb-root${data?.control.preferences.colorMode === 'green-up' ? ' ssb-green-up' : ''}`, ref: root },
+      return h('div', { className: `ssb-root${data?.control?.preferences?.colorMode === 'green-up' ? ' ssb-green-up' : ''}`, ref: root },
         React.createElement('style', { 'data-plugin': '@mzzsfy/dsh-stock-assistant', dangerouslySetInnerHTML: { __html: CSS } }),
         h('div', { className: 'ssb-page' }, h('header', { className: 'ssb-header' },
-          h('div', null, h('h1', null, '股票'), h('p', { className: 'ssb-muted' }, scopeText(data?.control.watchlist.order || []))),
+          h('div', null, h('h1', null, '股票'), h('p', { className: 'ssb-muted' }, scopeText(data?.control?.watchlist?.order || []))),
           h('div', { className: 'ssb-header-actions' },
             h(Button, { disabled: !data || state.busy.refresh, onClick: quiet(() => runtime.refresh()) }, state.busy.refresh ? '刷新中…' : '刷新'),
             h(Button, { primary: floating.open, 'aria-pressed': floating.open, onClick: () => setFloating({ open: !floating.open }) }, floating.open ? '收起盯盘' : '悬浮盯盘'),
             h('div', { className: 'ssb-more', style: { position: 'relative' } }, h(Button, { 'aria-label': '更多操作', 'aria-expanded': !!view.menuOpen, onClick: () => runtime.updateView({ menuOpen: !view.menuOpen }) }, '更多'), view.menuOpen ? h('div', { className: 'ssb-menu', style: { position: 'absolute', right: 0, top: 'calc(100% + 4px)', background: 'var(--ssb-bg)', border: '1px solid var(--ssb-border)', borderRadius: 'var(--ssb-radius-md)', padding: '8px', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10, minWidth: '140px' }, role: 'menu' },
               h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '4px 8px' } }, h(Toggle, { label: '暂停采集', checked: state.paused, onChange: runtime.setPaused })),
-              h('div', { className: 'ssb-muted', style: { padding: '0 8px', fontSize: '11px' } }, `${(data?.control.providers || []).filter(p => p.enabled).length}/${(data?.control.providers || []).length} 源启用${state.data?.klineReady ? ` · K线 ${Object.keys(state.data.klineReady).length} 市场` : ''}`),
+              h('div', { className: 'ssb-muted', style: { padding: '0 8px', fontSize: '11px' } }, `${(data?.control?.providers || []).filter(p => p.enabled).length}/${(data?.control?.providers || []).length} 源启用${state.data?.klineReady ? ` · K线 ${Object.keys(state.data.klineReady).length} 市场` : ''}`),
               h(Button, { onClick: () => { runtime.updateView({ view: 'list', overlay: 'settings', menuOpen: false }) } }, '设置'),
               h(Button, { onClick: () => { runtime.updateView({ menuOpen: false }); layout.selectPanel(null) } }, '返回对话')) : null))),
         h('nav', { className: 'ssb-tablist', 'aria-label': '股票视图' },
           h('button', { type: 'button', className: 'ssb-tab' + (view.view === 'list' ? ' ssb-tab-on' : ''), 'aria-current': view.view === 'list' ? 'page' : undefined, onClick: () => runtime.updateView({ view: 'list' }) }, '自选'),
           h('button', { type: 'button', className: 'ssb-tab' + (view.view === 'browse' ? ' ssb-tab-on' : ''), 'aria-current': view.view === 'browse' ? 'page' : undefined, onClick: () => { runtime.updateView({ view: 'browse' }); if (!runtime.getSnapshot().view.browseRows) quiet(() => runtime.loadBrowse('XSHG', 0))() } }, '市场'),
           h('button', { type: 'button', className: 'ssb-tab' + (view.view === 'search' ? ' ssb-tab-on' : ''), 'aria-current': view.view === 'search' ? 'page' : undefined, onClick: () => runtime.updateView({ view: 'search' }) }, '搜索')),
-          state.error ? h('div', { className: 'ssb-banner ssb-error', role: 'alert' }, state.error, h(Button, { onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) }, '检查设置')) : null,
+          // 浮层(z-index 60)盖住页面后, 普通文档流里的错误横幅会被压在下面: 保存 409/500 用户完全看不到。
+          // 浮层打开时把横幅提到浮层之上固定在顶部, 关掉浮层恢复文档流布局。
+          state.error ? h('div', { className: `ssb-banner ssb-error${view.overlay ? ' ssb-banner-floating' : ''}`, role: 'alert' }, state.error, h(Button, { onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) }, '检查设置'), h(Button, { onClick: () => runtime.clearError() }, '关闭')) : null,
+          // 数据面错误(后台快照失败)与操作错误分开: 下一次快照成功自动消失, 也可手动关闭;
+          // 它不抢浮层之上的位置, 避免与操作错误横幅叠在同一坐标
+          state.dataError ? h('div', { className: 'ssb-banner ssb-error', role: 'alert' }, state.dataError, h(Button, { onClick: () => runtime.clearDataError() }, '关闭')) : null,
+          prefError ? h('div', { className: 'ssb-banner ssb-error', role: 'alert' }, prefError, h(Button, { onClick: clearPrefError }, '关闭')) : null,
           state.view.notice ? h('div', { className: 'ssb-banner', role: 'status' }, state.view.notice, h(Button, { onClick: () => runtime.updateView({ notice: '' }) }, '知道了')) : null,
           data?.ensureError ? h('div', { className: 'ssb-banner', role: 'status' }, `后台目录同步失败：${data.ensureError.message}。可在设置中手动同步。`, h(Button, { onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) }, '前往设置')) : null,
           state.paused ? h('div', { className: 'ssb-banner', role: 'status' }, '自动采集已暂停，保留当前行情。', h(Button, { onClick: () => runtime.setPaused(false) }, '恢复采集')) : null,
@@ -2352,7 +2636,7 @@ window.__ModuleLoader__.load({
           return () => { for (const stop of disposers.reverse()) stop() }
         }, 'stock-assistant main panel')
       },
-      __testing: { createPageRuntime, StockPage, FloatingTicker, FloatHeader, FloatPicker, FloatList, FloatChart, FloatFoot, Sparkline, Select, dropdownPlacement, dragOrder, quiet, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, toneClass, priceTextOf, tagTabs, resolveTab, costBaseOf, costPlOf, markPct, pollPlan, QUIET_STATES, POLL_EVERY, floatPollDelay, floatIntervalOf, FLOAT_INTERVALS, FLOAT_FALLBACK_SECONDS, timestampOf, floatFreshness, priceTimeOf, clockText, staleAfter, markAlertOf, markAlertText, deliverMarkAlert, sparkIndexAt, candleTimeText, quoteTipLines, crosshairTipLines, crosshairTimeText, timeKeyOf, crosshairTipStyle, rowTipPositionOf, sparkRangeOf, sparkTicksOf, seriesPaintPlan, sanitizeCandles, themeSignature },
+      __testing: { createPageRuntime, StockPage, FloatingTicker, FloatHeader, FloatPicker, FloatList, FloatChart, FloatFoot, KlineView, Sparkline, Select, dropdownPlacement, dragOrder, quiet, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, subscribePref, LWC_LOAD_TIMEOUT_MS, klineKeyOf, klineShipPlan, finiteOr, formatAmount, toneClass, priceTextOf, tagTabs, resolveTab, costBaseOf, costPlOf, markPct, pollPlan, QUIET_STATES, POLL_EVERY, floatPollDelay, floatIntervalOf, FLOAT_INTERVALS, FLOAT_FALLBACK_SECONDS, timestampOf, floatFreshness, priceTimeOf, clockText, staleAfter, markAlertOf, markAlertText, deliverMarkAlert, sparkIndexAt, candleTimeText, quoteTipLines, crosshairTipLines, crosshairTimeText, timeKeyOf, crosshairTipStyle, rowTipPositionOf, sparkRangeOf, sparkTicksOf, seriesPaintPlan, sanitizeCandles, themeSignature, ensureLwc, routesForProviders, routesForAdapter, routesForAdapters, providerChangeDraft, settingsSavePayload, pruneDeniedTargets, selectEntries, offlineText, offlinePrefix, floatReadout },
     }
   },
 })

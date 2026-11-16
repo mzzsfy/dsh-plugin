@@ -118,7 +118,8 @@ try {
     assert.equal(entry.path, expectedPath, `${label}: 实际请求路径`)
     assert.equal(entry.body.stream, true)
     const keys = {
-      session_id: entry.headers.session_id,
+      // pi-ai 按协议发送:Chat 为 session_id,Responses 为 session-id(实测 1.5.2)
+      session_id: entry.headers.session_id ?? entry.headers['session-id'],
       'x-client-request-id': entry.headers['x-client-request-id'],
       prompt_cache_key: entry.body.prompt_cache_key,
       user_id: entry.body.metadata?.user_id,

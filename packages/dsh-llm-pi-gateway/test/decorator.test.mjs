@@ -2,7 +2,10 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createMarkerInject, patchAdapterPrototype, sweepRegisteredAdapters } from '../src/decorator.mjs'
+import {
+  createMarkerInject, ownerCount, patchAdapterPrototype, sweepRegisteredAdapters,
+  MARKER_CACHE_LIMIT, WARNED_CACHE_LIMIT,
+} from '../src/decorator.mjs'
 import { deriveMarker } from '../src/marker.mjs'
 
 const PREFIX = 'dsh'
@@ -219,7 +222,7 @@ test('同会话标记缓存', () => {
   assert.equal(consumed[0].options.metadata.user_id, consumed[1].options.metadata.user_id)
 })
 
-test('同一会话前缀热更新后保持旧标记', () => {
+test('同一会话在 prefix 热更后按新前缀重算,同前缀内保持稳定且 Chat 头不受影响', () => {
   let prefix = 'before'
   const { Adapter, models, consumed } = makeParts()
   const adapter = new Adapter()
@@ -227,10 +230,17 @@ test('同一会话前缀热更新后保持旧标记', () => {
   adapter.streamWithSnapshot({ sessionId: 'stable-session' }, { models })
   prefix = 'after'
   adapter.streamWithSnapshot({ sessionId: 'stable-session' }, { models })
-  adapter.streamWithSnapshot({ sessionId: 'new-session' }, { models })
+  adapter.streamWithSnapshot({ sessionId: 'stable-session' }, { models })
+  adapter.streamWithSnapshot({ sessionId: 'stable-session', api: 'openai-completions' }, { models })
+  prefix = 'before'
+  adapter.streamWithSnapshot({ sessionId: 'stable-session' }, { models })
   assert.match(consumed[0].options.metadata.user_id, /^before:/)
-  assert.equal(consumed[1].options.metadata.user_id, consumed[0].options.metadata.user_id)
-  assert.match(consumed[2].options.metadata.user_id, /^after:/)
+  assert.equal(consumed[1].options.metadata.user_id, deriveMarker('stable-session', 'after'))
+  assert.equal(consumed[2].options.metadata.user_id, consumed[1].options.metadata.user_id)
+  assert.deepEqual(consumed[3].options.headers, {
+    session_id: 'stable-session', 'x-client-request-id': 'stable-session',
+  })
+  assert.equal(consumed[4].options.metadata.user_id, consumed[0].options.metadata.user_id)
 })
 
 test('sessionId 缺失按 model 去重 warn 并透传', () => {
@@ -307,19 +317,162 @@ test('相同实例被不同 gateway owner 重复授权时选择最近活跃 owne
 test('重新扫描相同 owner 不重复叠加', () => {
   const { Adapter, models, consumed } = makeParts()
   const adapter = new Adapter()
+  const llm = {
+    adapters: new Map([['route', { provider: { id: 'route' }, adapter }]]),
+    directory: new Map([['route', { provider: 'route', settingsNs: 'llm-pi-ai' }]]),
+  }
   const inject = baseInject({ getConfig: () => ({ enabled: true, prefix: 'same' }) })
   const isActive = () => true
-  patchAdapterPrototype(adapter, inject, isActive)
+  sweepRegisteredAdapters(llm, inject, isActive)
+  sweepRegisteredAdapters(llm, inject, isActive)
   adapter.streamWithSnapshot({ sessionId: 'session-a' }, { models })
-  patchAdapterPrototype(adapter, inject, isActive)
-  adapter.streamWithSnapshot({ sessionId: 'session-a' }, { models })
-  assert.match(consumed[1].options.metadata.user_id, /^same:/)
+  assert.match(consumed[0].options.metadata.user_id, /^same:/)
+  assert.equal(ownerCount(adapter), 1)
 })
-test('重复 patch 幂等', () => {
+test('重复 patch 幂等:同一 inject/isActive 引用只登记一个 owner', () => {
+  const { Adapter, models, consumed } = makeParts()
+  const adapter = new Adapter()
+  const inject = baseInject()
+  const isActive = () => true
+  assert.equal(patchAdapterPrototype(adapter, inject, isActive), true)
+  assert.equal(patchAdapterPrototype(adapter, inject, isActive), true)
+  assert.equal(ownerCount(adapter), 1)
+  adapter.streamWithSnapshot({ sessionId: 'session-a' }, { models })
+  assert.equal(consumed[0].options.metadata.user_id, deriveMarker('session-a'))
+})
+
+test('省略 isActive 的重复 patch 与 sweep 共用模块级缺省活性,owner 不重复登记', () => {
+  const { Adapter, models, consumed } = makeParts()
+  const adapter = new Adapter()
+  const inject = baseInject()
+  const llm = {
+    adapters: new Map([['route', { provider: { id: 'route' }, adapter }]]),
+    directory: new Map([['route', { provider: 'route', settingsNs: 'llm-pi-ai' }]]),
+  }
+  assert.equal(patchAdapterPrototype(adapter, inject), true)
+  assert.equal(patchAdapterPrototype(adapter, inject), true)
+  assert.equal(sweepRegisteredAdapters(llm, inject), 1)
+  sweepRegisteredAdapters(llm, inject)
+  assert.equal(ownerCount(adapter), 1)
+  adapter.streamWithSnapshot({ sessionId: 'session-a' }, { models })
+  assert.equal(consumed[0].options.metadata.user_id, deriveMarker('session-a'))
+})
+
+test('显式传入不同 isActive 的重复 patch 仍分别登记(多代 owner 并存语义保留)', () => {
+  const { Adapter } = makeParts()
+  const adapter = new Adapter()
+  const inject = baseInject()
+  patchAdapterPrototype(adapter, inject)
+  patchAdapterPrototype(adapter, inject, () => true)
+  assert.equal(ownerCount(adapter), 2)
+})
+
+test('原型方法被外部替换后按当前方法重新包装,注入不失效且 owner 不重复登记', () => {
+  const { Adapter, models, consumed } = makeParts()
+  const official = Adapter.prototype.streamWithSnapshot
+  const adapter = new Adapter()
+  const inject = baseInject()
+  const isActive = () => true
+  assert.equal(patchAdapterPrototype(adapter, inject, isActive), true)
+
+  const externalCalls = []
+  Adapter.prototype.streamWithSnapshot = function (...args) {
+    externalCalls.push(args)
+    return official.apply(this, args)
+  }
+  assert.equal(patchAdapterPrototype(adapter, inject, isActive), true)
+  adapter.streamWithSnapshot({ sessionId: 'session-a' }, { models })
+  assert.equal(externalCalls.length, 1) // 外部包装仍在外层链上
+  assert.equal(consumed[0].options.metadata.user_id, deriveMarker('session-a'))
+  assert.equal(ownerCount(adapter), 1)
+})
+
+test('原型方法被外部替换为非函数时返回 false 不抛错', () => {
   const { Adapter } = makeParts()
   const adapter = new Adapter()
   assert.equal(patchAdapterPrototype(adapter, baseInject()), true)
-  assert.equal(patchAdapterPrototype(adapter, baseInject()), true)
+  Adapter.prototype.streamWithSnapshot = null
+  assert.equal(patchAdapterPrototype(adapter, baseInject()), false)
+})
+
+test('无活跃 owner 时直通原始方法,不复制 snapshot、不建 Models facade', () => {
+  const seen = []
+  class Adapter {
+    streamWithSnapshot(options, snapshot) {
+      seen.push({ options, snapshot })
+      return 'raw'
+    }
+  }
+  const official = new Adapter()
+  const foreign = new Adapter()
+  let active = true
+  const models = { streamSimple: () => assert.fail('不应构造 facade') }
+  patchAdapterPrototype(official, baseInject(), () => active)
+
+  const unauthorized = { models, extra: 1 }
+  assert.equal(foreign.streamWithSnapshot({ sessionId: 'session-a' }, unauthorized), 'raw')
+  assert.equal(seen[0].snapshot, unauthorized) // 未授权实例:snapshot 原引用直通
+
+  active = false
+  const disposed = { models, extra: 1 }
+  assert.equal(official.streamWithSnapshot({ sessionId: 'session-a' }, disposed), 'raw')
+  assert.equal(seen[1].snapshot, disposed) // owner 失活:同样原引用直通
+})
+
+test('已保存的 Models facade 在 owner dispose 后旁路,reapply 后跟随新 owner', () => {
+  const consumed = []
+  const facades = []
+  const models = { streamSimple: (_model, _context, options) => { consumed.push(options); return 'stream' } }
+  class Adapter {
+    streamWithSnapshot(options, snapshot) {
+      facades.push(snapshot.models)
+      return snapshot.models.streamSimple({ api: 'anthropic-messages', id: 'claude-x' }, [], options)
+    }
+  }
+  const adapter = new Adapter()
+  let active = true
+  patchAdapterPrototype(adapter, baseInject({ getConfig: () => ({ enabled: true, prefix: 'old' }) }), () => active)
+  adapter.streamWithSnapshot({ sessionId: 'session-a' }, { models })
+  const facade = facades[0]
+  assert.notEqual(facade, models) // 有活跃 owner 时确有 facade
+  assert.match(consumed[0].metadata.user_id, /^old:/)
+
+  active = false
+  const afterDispose = { sessionId: 'session-a' }
+  facade.streamSimple({ api: 'anthropic-messages', id: 'claude-x' }, [], afterDispose)
+  assert.equal(consumed[1], afterDispose) // 旧 facade 不得复用创建时捕获的 owner inject
+
+  patchAdapterPrototype(adapter, baseInject({ getConfig: () => ({ enabled: true, prefix: 'new' }) }))
+  facade.streamSimple({ api: 'anthropic-messages', id: 'claude-x' }, [], { sessionId: 'session-a' })
+  assert.match(consumed[2].metadata.user_id, /^new:/) // 旧 facade 由新 owner 恢复注入
+})
+
+test('patchAdapterPrototype 拒绝 null 与非对象 adapter', () => {
+  for (const adapter of [null, undefined, 42, 'adapter', true]) {
+    assert.equal(patchAdapterPrototype(adapter, baseInject()), false)
+  }
+})
+
+test('sweep 跳过畸形 registration,不阻断其余官方 adapter', () => {
+  const { Adapter, models, consumed } = makeParts()
+  const good = new Adapter()
+  const routes = ['missing-adapter', 'null-entry', 'null-adapter', 'primitive-adapter', 'good']
+  const llm = {
+    adapters: new Map([
+      ['missing-adapter', { provider: { id: 'missing-adapter' } }],
+      ['null-entry', null],
+      ['null-adapter', { provider: { id: 'null-adapter' }, adapter: null }],
+      ['primitive-adapter', { provider: { id: 'primitive-adapter' }, adapter: 42 }],
+      ['good', { provider: { id: 'good' }, adapter: good }],
+    ]),
+    directory: new Map(routes.map((provider) => [provider, { provider, settingsNs: 'llm-pi-ai' }])),
+  }
+  assert.equal(sweepRegisteredAdapters(llm, baseInject()), 1)
+  good.streamWithSnapshot({ sessionId: 'session-a' }, { models })
+  assert.match(consumed[0].options.metadata.user_id, /^dsh:/)
+  assert.equal(ownerCount(null), 0)
+  assert.equal(ownerCount(undefined), 0)
+  assert.equal(ownerCount(42), 0)
 })
 
 test('原型方法缺失返回 false(版本漂移防御)', () => {
@@ -458,4 +611,40 @@ test('sweepRegisteredAdapters:匹配官方 namespace 且无效服务返回零', 
   assert.match(consumed[0].options.metadata.user_id, /^dsh:/)
   assert.equal(sweepRegisteredAdapters(undefined, baseInject()), 0)
   assert.equal(sweepRegisteredAdapters({ adapters: new Set(), directory: new Map() }, baseInject()), 0)
+})
+
+test('标记缓存条目数封顶,淘汰后同会话按当前 prefix 重算为稳定值', () => {
+  const { Adapter, models, consumed } = makeParts()
+  const adapter = new Adapter()
+  const inject = baseInject()
+  patchAdapterPrototype(adapter, inject)
+  adapter.streamWithSnapshot({ sessionId: 'oldest' }, { models })
+  for (let index = 0; index < MARKER_CACHE_LIMIT; index += 1) {
+    adapter.streamWithSnapshot({ sessionId: `fill-${index}` }, { models })
+  }
+  assert.equal(inject.markerCacheSize, MARKER_CACHE_LIMIT) // oldest 已按最久未用淘汰
+  adapter.streamWithSnapshot({ sessionId: 'oldest' }, { models })
+  assert.equal(inject.markerCacheSize, MARKER_CACHE_LIMIT)
+  assert.equal(consumed.at(-1).options.metadata.user_id, deriveMarker('oldest'))
+})
+
+test('缺 sessionId 告警去重达上限后按最近使用淘汰,热模型不重复告警', () => {
+  const warnings = []
+  const inject = baseInject({ onWarn: (model) => warnings.push(model) })
+  const options = {}
+  for (let index = 0; index < WARNED_CACHE_LIMIT; index += 1) {
+    inject(options, { api: 'anthropic-messages', id: `model-${index}` })
+  }
+  assert.equal(warnings.length, WARNED_CACHE_LIMIT)
+  // 命中已告警模型:不重复告警,并刷新为最近使用
+  inject(options, { api: 'anthropic-messages', id: 'model-0' })
+  assert.equal(warnings.length, WARNED_CACHE_LIMIT)
+  // 新模型触发淘汰,被淘汰的是最久未用的 model-1 而非刚命中的 model-0
+  inject(options, { api: 'anthropic-messages', id: 'model-overflow' })
+  assert.equal(warnings.length, WARNED_CACHE_LIMIT + 1)
+  inject(options, { api: 'anthropic-messages', id: 'model-0' })
+  assert.equal(warnings.length, WARNED_CACHE_LIMIT + 1)
+  inject(options, { api: 'anthropic-messages', id: 'model-1' })
+  assert.equal(warnings.length, WARNED_CACHE_LIMIT + 2)
+  assert.equal(warnings.at(-1), 'model-1')
 })

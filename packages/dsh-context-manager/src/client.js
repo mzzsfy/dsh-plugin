@@ -32,6 +32,51 @@ window.__ModuleLoader__.load({
     // cordis.patch.yml 自带,模块表缺失即 factory 抛错,由装载层判定失败
     const toast = require('@mzzsfy/dsh-common-tools/client').toast.show
 
+    // 全文档 MutationObserver 统一为单个共享观察器:四个注入面(历史按钮/撤回/fork/
+    // 克隆)都在流式输出热路径上,逐观察器按变异条数重跑全量选择器查询会持续卡顿。
+    // 回调按动画帧合并,同帧多来源只跑一次扫描;已注入节点由各自 isConnected 短路。
+    const mutationScans = new Set()
+    let documentObserver = null
+    let mutationFrame = null
+    function runMutationScans() {
+      mutationFrame = null
+      const scans = [...mutationScans]
+      for (const scan of scans) {
+        try {
+          scan()
+        } catch (error) {
+          console.warn('[context-manager] 注入扫描失败', error)
+        }
+      }
+    }
+    function scheduleMutationScans() {
+      if (mutationFrame !== null) return
+      mutationFrame = typeof requestAnimationFrame === 'function'
+        ? requestAnimationFrame(runMutationScans)
+        : setTimeout(runMutationScans, 0)
+    }
+    function subscribeMutationScan(scan, targetDoc = document) {
+      if (typeof MutationObserver === 'undefined' || typeof targetDoc === 'undefined'
+        || typeof targetDoc.querySelectorAll !== 'function') return () => {}
+      mutationScans.add(scan)
+      if (documentObserver === null) {
+        documentObserver = new MutationObserver(scheduleMutationScans)
+        documentObserver.observe(targetDoc.documentElement, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ['disabled'],
+        })
+      }
+      return () => {
+        mutationScans.delete(scan)
+        if (mutationScans.size === 0 && documentObserver !== null) {
+          documentObserver.disconnect()
+          documentObserver = null
+        }
+      }
+    }
+
 const CSS = [
   // 包局部视觉 token(plugin-ui-design 契约):值只引用宿主语义别名,不写字面 fallback。
   // 四个 UI 岛(历史浮层/克隆弹窗/设置卡/标题栏按钮)各自是根,同一规则挂 token 供内部继承
@@ -417,6 +462,8 @@ function HistoryDock({ session, inputActions }) {
   const [scopeOpen, setScopeOpen] = useState(false)
   const [aligning, setAligning] = useState(false)
   const [loadError, setLoadError] = useState(false)
+  // 错误态边沿:轮询失败每 3s 一次,只在 正常→失败 时 toast;成功恢复后重置
+  const loadErrorRef = useRef(false)
   // 收藏集合:浮层打开时并行拉一次,行悬停星标据此显示实/空心;
   // editing 仅常用范围可进入(行内改/删 + 底部新增)
   const [collected, setCollected] = useState(() => new Set())
@@ -803,6 +850,7 @@ function HistoryDock({ session, inputActions }) {
         if (generation !== scopeGenerationRef.current) return
         applyResult(scopeIdx, result)
         // 成功即清错误态(F21):此前 loadError 只在打开时清,失败后成功永不恢复
+        loadErrorRef.current = false
         setLoadError(false)
         scheduleNext()
       })
@@ -816,9 +864,12 @@ function HistoryDock({ session, inputActions }) {
         }
         rawItemsRef.current = []
         syncView({ items: [] })
+        const firstFailure = !loadErrorRef.current
+        loadErrorRef.current = true
         setLoadError(true)
         setItems([])
-        toast(error && error.message ? error.message : String(error), { kind: 'error' })
+        // 持久失败只在错误态首次出现时提示,轮询重试不重复打扰
+        if (firstFailure) toast(error && error.message ? error.message : String(error), { kind: 'error' })
         scheduleNext()
       })
   }
@@ -840,6 +891,7 @@ function HistoryDock({ session, inputActions }) {
     setScopeIndex(HISTORY_SCOPE_DEFAULT)
     setCursor(-1)
     setAligning(false)
+    loadErrorRef.current = false
     setLoadError(false)
     setItems(null)
     setEditing(false)
@@ -860,6 +912,7 @@ function HistoryDock({ session, inputActions }) {
     setScopeIndex(next)
     setCursor(-1)
     setAligning(false)
+    loadErrorRef.current = false
     setLoadError(false)
     setItems(null)
     setEditing(false)
@@ -1005,24 +1058,27 @@ function HistoryDock({ session, inputActions }) {
   // 启停读 ref(开关值挂载拉取后即时反映),停用/卸载按标记全量移除
   const buttonScanRef = React.useRef(null)
   useEffect(() => {
+    let injectedButton = null
     function removeAll() {
       document.querySelectorAll('[' + HISTORY_BTN_FLAG + ']').forEach((button) => button.remove())
+      injectedButton = null
     }
     function sync() {
       if (enabledRef.current === false || buttonEnabledRef.current === false) {
         removeAll()
         return
       }
+      // 已注入节点仍连接:官方工具排没有重建,无需再做全文档寻行
+      if (injectedButton !== null && injectedButton.isConnected !== false) return
       const row = findToolsRow(document)
-      if (row) ensureHistoryButton(document, row, () => toggleRef.current())
+      if (row) injectedButton = ensureHistoryButton(document, row, () => toggleRef.current())
     }
     buttonScanRef.current = sync
-    const observer = new MutationObserver(sync)
-    observer.observe(document.documentElement, { childList: true, subtree: true })
+    const unsubscribe = subscribeMutationScan(sync)
     sync()
     return () => {
       buttonScanRef.current = null
-      observer.disconnect()
+      unsubscribe()
       removeAll()
     }
   }, [])
@@ -1341,20 +1397,96 @@ function firstEventSeq(records) {
   return undefined
 }
 
-// 会话级锚点加载器:首次取最近一页,之后每次调用向更早回溯一页;取尽或超页数上限后不再请求
+function lastEventSeq(records) {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const seq = records[index] && records[index].event && records[index].event.seq
+    if (typeof seq === 'number') return seq
+  }
+  return undefined
+}
+
+// 前向快照与历史页合并:按事件 seq 去重(新快照覆盖同 seq 旧记录),保持升序
+function mergeAnchorRecords(existing, incoming) {
+  const bySeq = new Map()
+  const extras = []
+  for (const record of existing) {
+    const seq = record && record.event ? record.event.seq : undefined
+    if (typeof seq !== 'number') {
+      extras.push(record)
+      continue
+    }
+    bySeq.set(seq, record)
+  }
+  for (const record of incoming) {
+    const seq = record && record.event ? record.event.seq : undefined
+    if (typeof seq !== 'number') {
+      extras.push(record)
+      continue
+    }
+    bySeq.set(seq, record)
+  }
+  return Array.from(bySeq.keys())
+    .sort((left, right) => left - right)
+    .map((seq) => bySeq.get(seq))
+    .concat(extras)
+}
+
+// 同一缺失轮的前向补拉上限:流式期间 DOM 每帧都可能报同一缺失轮,不能按帧补拉
+const FORK_FORWARD_RETRY_LIMIT = 2
+// 宿主轮号从 1 起(agent loop 每轮 turn = 上一轮 + 1):首轮无更早的 turn/end,
+// 分叉边界不可表达。首轮气泡必须在补拉分支之前短路——否则每次 DOM 变异都会
+// 为它翻一页更早锚点,40 页预算耗尽后真正需要的更早页反而补不到
+const FIRST_CHAT_TURN = 1
+// 会话级加载器缓存上限:切走会话不淘汰会按会话数无界增长(每会话最多 40 页记录)
+const FORK_ANCHOR_LOADER_MAX = 16
+
+// 会话级锚点加载器:首次取最近一页;向更早用 beforeSeq 分页;缺失轮号大于已知
+// 最大轮号时重新 followOpening 前向补快照(挂载后新增轮只出现在新快照里)。
+// 同一缺失轮最多补拉 K 次,且仅在事件游标推进后重试。
 function createTurnAnchorLoader(remote, sessionId) {
-  const state = { records: [], beforeSeq: undefined, exhausted: false, pages: 0 }
-  return async function load() {
-    if (state.pages === 0) {
-      state.pages = 1
-      state.records = await followOpening(remote, sessionId)
+  const state = {
+    records: [],
+    beforeSeq: undefined,
+    lastSeq: undefined,
+    exhausted: false,
+    pages: 0,
+    forwardTurn: undefined,
+    forwardAttempts: 0,
+    forwardLastSeq: undefined,
+  }
+  async function loadForward(turn) {
+    if (state.forwardTurn !== turn) {
+      state.forwardTurn = turn
+      state.forwardAttempts = 0
+      state.forwardLastSeq = state.lastSeq
+    }
+    if (state.forwardAttempts >= FORK_FORWARD_RETRY_LIMIT) return state.records
+    // 上次补拉后事件游标未推进:快照内容不可能变化,不重复请求
+    if (state.forwardAttempts > 0 && state.lastSeq === state.forwardLastSeq) return state.records
+    state.forwardAttempts += 1
+    const incoming = await followOpening(remote, sessionId)
+    if (incoming.length > 0) {
+      state.records = mergeAnchorRecords(state.records, incoming)
       state.beforeSeq = firstEventSeq(state.records)
-      if (state.records.length === 0 || state.beforeSeq === undefined) state.exhausted = true
+      state.lastSeq = lastEventSeq(state.records)
+    }
+    return state.records
+  }
+  return async function load(options = {}) {
+    if (options && options.forward === true) return loadForward(options.turn)
+    if (state.pages === 0) {
+      // pages 只在快照成功后推进:首拉失败保持 0,下次重试仍是首拉方向
+      const records = await followOpening(remote, sessionId)
+      state.records = records
+      state.pages = 1
+      state.beforeSeq = firstEventSeq(records)
+      state.lastSeq = lastEventSeq(records)
+      if (records.length === 0 || state.beforeSeq === undefined) state.exhausted = true
       return state.records
     }
     if (state.exhausted || state.pages >= FORK_PAGE_LIMIT) return state.records
-    state.pages += 1
     const older = await readOlderAnchors(remote, sessionId, state.beforeSeq)
+    state.pages += 1
     if (older.length === 0) {
       state.exhausted = true
       return state.records
@@ -1365,14 +1497,22 @@ function createTurnAnchorLoader(remote, sessionId) {
   }
 }
 
-// 按会话复用加载器:inject 回调每次渲染都会新建 props,状态必须跨渲染保留
+// 按会话复用加载器:inject 回调每次渲染都会新建 props,状态必须跨渲染保留;
+// LRU 上限防会话数量无界积累
 const forkAnchorLoaders = new Map()
 
 function forkAnchorLoaderFor(remote, sessionId) {
   const cached = forkAnchorLoaders.get(sessionId)
-  if (cached !== undefined && cached.remote === remote) return cached.load
+  if (cached !== undefined && cached.remote === remote) {
+    forkAnchorLoaders.delete(sessionId)
+    forkAnchorLoaders.set(sessionId, cached)
+    return cached.load
+  }
   const load = createTurnAnchorLoader(remote, sessionId)
   forkAnchorLoaders.set(sessionId, { remote, load })
+  while (forkAnchorLoaders.size > FORK_ANCHOR_LOADER_MAX) {
+    forkAnchorLoaders.delete(forkAnchorLoaders.keys().next().value)
+  }
   return load
 }
 
@@ -1502,14 +1642,13 @@ function SteerRecallDock({ useSession, inputActions, updateQueue, inboxFace }) {
           if (existing) existing.remove()
           return
         }
-        if (existing) return
+        if (existing && existing.isConnected !== false) return
+        if (existing) existing.remove()
         injectRecall(bubble)
       })
     }
-    if (typeof MutationObserver === 'undefined' || typeof document.querySelectorAll !== 'function') return undefined
     const scanRef = { current: scan }
-    const observer = new MutationObserver(() => { if (scanRef.current) scanRef.current() })
-    observer.observe(document.documentElement, { childList: true, subtree: true })
+    const unsubscribeScan = subscribeMutationScan(scan)
     // 投影订阅:应用/撤回改变 next-step 行集时重扫,按钮显隐不依赖气泡 DOM 变化
     const face = depsRef.current && depsRef.current.inboxFace
     const unsubscribe = face && typeof face.subscribe === 'function'
@@ -1519,7 +1658,7 @@ function SteerRecallDock({ useSession, inputActions, updateQueue, inboxFace }) {
     return () => {
       scanRef.current = null
       if (typeof unsubscribe === 'function') unsubscribe()
-      observer.disconnect()
+      unsubscribeScan()
       removeAll()
     }
   }, [enabled, inboxFace])
@@ -1551,37 +1690,54 @@ function ForkDockWithBootstrap({ session, inputActions, useInput, forkSession, c
   // 映射基线:重拉结果与基线比对,相同则不 setState——setState 会触发重渲染并再次
   // 触发扫描,新轮在映射中缺失时形成 拉取→setState→扫描→拉取 的无限循环
   const turnEndsRef = useRef(null)
-  // 在途门控:MutationObserver 在流式输出期间高频触发,无门控会造成请求风暴
+  // 会话代际:在途补拉的写回必须同时匹配 sessionId 与代际,切会话/卸载后的迟到响应
+  // 直接丢弃(轮号跨会话重叠,旧 seq 写回会让分叉锚点错位);门控随代际复位
+  const generationRef = useRef(0)
+  const sessionIdRef = useRef(sessionId)
+  sessionIdRef.current = sessionId
+  // 映射属于哪个会话:新会话渲染首帧旧 state 尚未清空时不得服务新 DOM
+  const turnEndsSessionRef = useRef(undefined)
+  const currentTurnEnds = turnEnds !== null && turnEndsSessionRef.current === sessionId ? turnEnds : null
+  turnEndsSessionRef.current = sessionId
+  turnEndsRef.current = currentTurnEnds
+  // 在途门控:共享变异观察器在流式输出期间高频触发,无门控会造成请求风暴
   const refreshPendingRef = useRef(false)
   // 重拉入口装配到 ref 供扫描调用:新轮 turn/end 落在拉取窗口之后时映射里没有该轮,
   // 注入资格判空即跳过,按钮永不出现(实测:必须刷新页面才恢复)。门控保证同时在途
-  // 最多一次;结果与基线相同则不 setState,避免 setState→扫描→拉取的循环
+  // 最多一次;结果与基线相同则不 setState(但快照本身已经重新拉取)
   const refreshRef = useRef(null)
-  refreshRef.current = () => {
+  refreshRef.current = (options) => {
     if (refreshPendingRef.current) return
+    const generation = generationRef.current
+    const requestSessionId = sessionId
     refreshPendingRef.current = true
-    Promise.resolve(loadRef.current())
+    Promise.resolve(loadRef.current(options))
       .then((map) => {
+        if (generation !== generationRef.current || requestSessionId !== sessionIdRef.current) return
         refreshPendingRef.current = false
-        // 同内容签名即终止:窗口外轮仍会补拉一次,结果不变则不再 setState,
-        // 否则 setState→扫描→补拉形成无界循环
+        // 同内容签名只抑制 setState:否则 setState→扫描→补拉形成无界循环
         if (turnEndsRef.current !== null
           && turnEndsSignature(turnEndsRef.current) === turnEndsSignature(map)) return
         turnEndsRef.current = map
         setTurnEnds(map)
       })
-      .catch(() => { refreshPendingRef.current = false })
+      .catch(() => {
+        if (generation !== generationRef.current || requestSessionId !== sessionIdRef.current) return
+        refreshPendingRef.current = false
+      })
   }
   useEffect(() => {
     if (sessionId === undefined || isSubagentSession) return undefined
     let disposed = false
+    generationRef.current += 1
+    refreshPendingRef.current = false
     // 拉取前置空:会话切换后旧会话的映射不得继续服务新会话——轮号跨会话重叠,
     // 旧 seq 会让分叉锚点错位;置空期间 ForkDock 以 null 短路,不注入按钮
     setTurnEnds(null)
     turnEndsRef.current = null
     loadRef.current()
       .then((map) => {
-        if (disposed) return
+        if (disposed || sessionIdRef.current !== sessionId) return
         turnEndsRef.current = map
         setTurnEnds(map)
       })
@@ -1590,7 +1746,11 @@ function ForkDockWithBootstrap({ session, inputActions, useInput, forkSession, c
         // 刷新页面重试,不做自动重试风暴
         console.warn('[context-manager] fork 轮号映射拉取失败', error)
       })
-    return () => { disposed = true }
+    return () => {
+      disposed = true
+      generationRef.current += 1
+      refreshPendingRef.current = false
+    }
   }, [sessionId, isSubagentSession])
   // 重试草稿消费:open 切到子会话后本 dock 随之挂载,inputActions 绑定子会话,
   // 暂存文本此刻回填;消费即清除。open 失败时暂存保留,用户手动打开子会话仍兑现。
@@ -1639,7 +1799,7 @@ function ForkDockWithBootstrap({ session, inputActions, useInput, forkSession, c
     return undefined
   }, [sessionId, inputActions, draftPollTick])
   if (isSubagentSession) return null
-  return h(ForkDock, { session, forkSession, cancelSession, turnEnds, refreshRef })
+  return h(ForkDock, { session, forkSession, cancelSession, turnEnds: currentTurnEnds, refreshRef })
 }
 
 function ForkDock({ session, forkSession, cancelSession, turnEnds, refreshRef }) {
@@ -1678,6 +1838,10 @@ function ForkDock({ session, forkSession, cancelSession, turnEnds, refreshRef })
         return
       }
       if (turnEndsRef.current === null) return
+      const turnEndsMap = turnEndsRef.current
+      const knownTurns = Array.from(turnEndsMap.keys())
+      const floor = knownTurns.length > 0 ? Math.min(...knownTurns) : Number.POSITIVE_INFINITY
+      const maxKnown = knownTurns.length > 0 ? Math.max(...knownTurns) : Number.NEGATIVE_INFINITY
       const bubbles = document.querySelectorAll('[' + TURN_ATTR + ']')
       bubbles.forEach((bubble) => {
         // 只注入用户输入气泡:重写该轮改的是该轮的输入;官方分支按钮已驻留在
@@ -1685,29 +1849,45 @@ function ForkDock({ session, forkSession, cancelSession, turnEnds, refreshRef })
         if (bubble.getAttribute(FLOW_KIND_ATTR) !== 'user') return
         const actionsRow = bubble.querySelector(BUBBLE_ACTIONS_SUFFIX)
         if (!actionsRow) return
-        if (actionsRow.querySelector('[' + FORK_BTN_FLAG + ']')) return
+        const existingForkButton = actionsRow.querySelector('[' + FORK_BTN_FLAG + ']')
+        if (existingForkButton && existingForkButton.isConnected !== false) return
+        if (existingForkButton) existingForkButton.remove()
         // 空属性串 Number('') = 0,会把无轮号气泡误判为第 0 轮,先判空
         const rawTurn = bubble.getAttribute(TURN_ATTR)
         if (rawTurn === null || rawTurn.trim() === '') return
         const turn = Number(rawTurn)
         if (!Number.isInteger(turn)) return
+        // 首轮无更早上下文可继承:宿主 fork 边界必须落在 turn/end 上,复制零事件
+        // 不可表达——既无可注入锚点,也没有「补一页就能补到」的前一轮。必须在
+        // 补拉分支之前短路,否则每次 DOM 变异都会为非前向补拉翻页,最终耗尽
+        // 整个锚点分页预算,真正需要更早页的轮反而补不到。
+        // 宿主轮号从 1 起(agent loop 每轮 turn = 上一轮 + 1);映射里已有更小轮号时
+        // 按映射自身判断(0 起轮号的映射夹具/旧数据同样不误伤第 2 轮)
+        if (turn <= FIRST_CHAT_TURN && turn <= floor) return
         // 重试资格三查:映射缺失的轮(超窗口/新轮)不可分叉;首轮无前锚(宿主
         // fork 边界必须落在 turn/end,复制零事件不可表达);无首问文本(纯图等)
         // 回填无从谈起。open=true 的进行中轮 turn/end 未落账,同样可分叉——
         // 锚点取其前一个闭合轮,该轮未完成的回复分叉后停掉(见点击处理器)。
         // 按钮在场即暗示可用,禁用态文案无法区分成因,不注入即误导
-        const entry = turnEndsRef.current.get(turn)
+        const entry = turnEndsMap.get(turn)
         if (entry === undefined) {
-          // 新轮:映射是挂载时的一次快照,补拉后由 setState 触发重扫
-          if (refreshRef.current) refreshRef.current()
+          if (!refreshRef.current) return
+          // 缺失轮号大于已知最大轮号 = 挂载后新增的轮:只有重新 followOpening
+          // 才能拿到新快照(向更早分页永远补不到);同一缺失轮的重复补拉由
+          // 加载器按代际限次,且仅在事件游标推进后重试
+          if (turn > maxKnown) {
+            refreshRef.current({ forward: true, turn })
+            return
+          }
+          // 前一轮比映射里最早的轮还早:更早的锚点页尚未取到,补拉一页再由重扫决定;
+          // 前一轮本来就在映射里却不可用(进行中轮无 seq 等)补页也无解,不空翻
+          if (turn - 1 < floor) refreshRef.current()
           return
         }
         if (entry.text === null) return
         let previous = null
-        let floor = Number.POSITIVE_INFINITY
-        for (const key of turnEndsRef.current.keys()) {
-          const candidate = turnEndsRef.current.get(key)
-          if (key < floor) floor = key
+        for (const key of turnEndsMap.keys()) {
+          const candidate = turnEndsMap.get(key)
           if (key < turn && candidate && candidate.seq !== null && (previous === null || key > previous)) previous = key
         }
         if (previous === null) {
@@ -1716,7 +1896,7 @@ function ForkDock({ session, forkSession, cancelSession, turnEnds, refreshRef })
           if (turn - 1 < floor && refreshRef.current) refreshRef.current()
           return
         }
-        const anchor = turnEndsRef.current.get(previous)
+        const anchor = turnEndsMap.get(previous)
         const official = actionsRow.querySelector('button:not([' + FORK_BTN_FLAG + '])')
         if (!official) return
         const button = document.createElement('button')
@@ -1765,14 +1945,10 @@ function ForkDock({ session, forkSession, cancelSession, turnEnds, refreshRef })
         actionsRow.appendChild(button)
       })
     }
-    if (typeof MutationObserver === 'undefined' || typeof document.querySelectorAll !== 'function') return undefined
-    const scanRef = { current: scan }
-    const observer = new MutationObserver(() => { if (scanRef.current) scanRef.current() })
-    observer.observe(document.documentElement, { childList: true, subtree: true })
+    const unsubscribeScan = subscribeMutationScan(scan)
     scan()
     return () => {
-      scanRef.current = null
-      observer.disconnect()
+      unsubscribeScan()
       removeAll()
     }
   }, [turnEnds])
@@ -2001,18 +2177,40 @@ function ensureCloneButton(doc, footerParts, onOpen) {
 // 变异风暴(隔离环境实测);body 直挂节点 React 管不到,位置校正用条件写
 // (值不变不落样式),稳态零变异
 function ensureHeaderCloneButton(doc, onOpen, allowed) {
+  // 容器宽度护栏:官方样式对 headerActions 硬编码 max-width(仅容 2 图标)+
+  // overflow:hidden,第 3 个图标会被整体裁掉;首次放宽时记录原值,隐藏分支还原
+  const relaxMaxWidth = (parent) => {
+    if (!parent || !parent.style || parent.style.maxWidth === 'none') return false
+    if (!Object.prototype.hasOwnProperty.call(parent, '__cxHeaderMaxWidth')) {
+      parent.__cxHeaderMaxWidth = parent.style.maxWidth
+    }
+    parent.style.maxWidth = 'none'
+    return true
+  }
+  const restoreMaxWidth = (parent) => {
+    if (!parent || !parent.style || !Object.prototype.hasOwnProperty.call(parent, '__cxHeaderMaxWidth')) return false
+    const original = parent.__cxHeaderMaxWidth
+    delete parent.__cxHeaderMaxWidth
+    if (parent.style.maxWidth === original) return false
+    parent.style.maxWidth = original
+    return true
+  }
   const existing = doc.querySelector('[' + HEADER_CLONE_BTN_FLAG + ']')
   const addBtn = doc.querySelector('button[aria-label=添加工作区]')
   if (allowed === false) {
     // auth 在场:header 保持官方布局,隐藏(而非移除)已注入按钮,状态翻转可复显
     if (!existing) return false
-    if (existing.style.display !== 'none') { existing.style.display = 'none'; return true }
-    return false
+    let touched = false
+    if (existing.style.display !== 'none') { existing.style.display = 'none'; touched = true }
+    if (restoreMaxWidth(existing.parentElement)) touched = true
+    return touched
   }
   if (!addBtn || !addBtn.parentElement) {
     if (!existing) return false
-    if (existing.style.display !== 'none') existing.style.display = 'none'
-    return true
+    let touched = false
+    if (existing.style.display !== 'none') { existing.style.display = 'none'; touched = true }
+    if (restoreMaxWidth(existing.parentElement)) touched = true
+    return touched
   }
   if (existing) {
     let touched = false
@@ -2020,9 +2218,7 @@ function ensureHeaderCloneButton(doc, onOpen, allowed) {
     // disabled 镜像:基座重渲染会重建按钮并重置镜像,条件写跟进
     const next = addBtn.disabled
     if (existing.disabled !== next) { existing.disabled = next; touched = true }
-    // 容器宽度护栏:官方样式对 headerActions 硬编码 max-width(仅容 2 图标)+
-    // overflow:hidden,第 3 个图标会被整体裁掉;条件写解除,隐藏分支回落原状
-    if (addBtn.parentElement.style.maxWidth !== 'none') { addBtn.parentElement.style.maxWidth = 'none'; touched = true }
+    if (relaxMaxWidth(addBtn.parentElement)) touched = true
     return touched
   }
   const button = doc.createElement('button')
@@ -2036,7 +2232,7 @@ function ensureHeaderCloneButton(doc, onOpen, allowed) {
   button.disabled = addBtn.disabled
   button.addEventListener('click', onOpen)
   addBtn.parentElement.insertBefore(button, addBtn.nextSibling)
-  addBtn.parentElement.style.maxWidth = 'none'
+  relaxMaxWidth(addBtn.parentElement)
   return true
 }
 function readMemory(key) {
@@ -2143,8 +2339,8 @@ function openCloneModal(doc, { parentDir, onSubmit }) {
     if (derived !== null) targetField.input.value = joinTarget(derived)
   })
   targetField.input.addEventListener('input', () => { targetDirty = true })
-  const initialName = deriveRepoNameClient('')
-  targetField.input.value = baseDir === '' ? '' : joinTarget(initialName || 'repo')
+  // 初始目标 = 父目录 + 默认目录名;地址填写后 change 事件按推导名重算
+  targetField.input.value = baseDir === '' ? '' : joinTarget('repo')
 
   const switchLabel = doc.createElement('label')
   switchLabel.className = 'cx-switch cx-clone__switch'
@@ -2258,7 +2454,7 @@ function setupCloneInjection(doc, { enabledRef, onOpen }) {
   let disposed = false
   let writes = 0
   let windowStart = Date.now()
-  let observer = null
+  let unsubscribeScan = () => {}
   // header 兜底入口:默认注入(无闸门环境基座按钮无反应,第 4 按钮是唯一入口),
   // 启动后轮询探测登录闸门——`/login` 是 auth 包的排他性路由,带闸门宿主返回
   // 200,无闸门宿主 404;命中即物理移除按钮还原官方 3 按钮布局,克隆入口收敛到
@@ -2363,22 +2559,21 @@ function setupCloneInjection(doc, { enabledRef, onOpen }) {
     writes += 1
     if (writes > CLONE_SCAN_LIMIT) {
       console.error('[context-manager] 克隆按钮注入触发变异风暴,已自动断开观察器', JSON.stringify({ writes, wroteFrom }))
-      if (observer) observer.disconnect()
+      unsubscribeScan()
       removeAll()
       removeAllHeader()
     }
   }
-  observer = new MutationObserver(rescan)
+  unsubscribeScan = subscribeMutationScan(rescan, doc)
   // disabled 属性观察:空目录导航完成后无 childList 变异,打开按钮的可用态
   // 翻转只有属性事件;镜像写入是条件写(值不变不落属性),不构成变异环
-  observer.observe(doc.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled'] })
   armAuthProbe()
   rescan()
   return () => {
     disposed = true
     if (headerProbeTimer) clearInterval(headerProbeTimer)
     if (headerRetryTimer) clearTimeout(headerRetryTimer)
-    if (observer) observer.disconnect()
+    unsubscribeScan()
     removeAll()
     removeAllHeader()
   }
@@ -2455,15 +2650,14 @@ function ContextPanel() {
 }
 
     return {
-      // remote.session 点分声明交 cordis 门控(规约禁 apply 内同步探测该面):
-      // namespace 由宿主异步 $mount,fiber 等其就绪才激活,旧宿主无此 namespace
-      // 即整体未激活(干净禁用,不阻塞 web 启动)
-      inject: ['slots', 'sessions', 'workspaces', 'uiWorkspace', 'remote', 'remote.session'],
+      // 主 inject 只声明历史/撤回/设置卡/克隆共用的服务面;remote.session 只是
+      // fork 的锚点通道,点分声明放进 apply 内独立的 ctx.inject 子面——旧宿主
+      // 缺该 namespace 时只有 fork 不注册,历史浮层/设置卡/复制/克隆照常工作
+      inject: ['slots', 'sessions', 'workspaces', 'uiWorkspace'],
       apply(ctx) {
         const uiWorkspace = ctx.get('uiWorkspace')
         const sessions = ctx.get('sessions')
         const workspaces = ctx.get('workspaces')
-        const remoteSession = ctx.remote ? ctx.remote.session : undefined
         // 分叉动作通道:分叉本体只依赖 sessions.fork;open 仅是分叉成功后打开
         // 子会话的收尾动作(失败单独吞掉,警告日志),缺失时条件执行——各代宿主
         // client 面均无 sessions.open(FIND-020-2:双函数在场探测致 fork dock
@@ -2481,20 +2675,6 @@ function ContextPanel() {
             }
             return childId
           })
-          : null
-
-        // 自动重发通道:开启开关时分叉后以该轮原输入 prompt 子会话;
-        // remote.session 缺失或缺 prompt(旧宿主/部分 stub)时返回 null,降级为仅回填;
-        // 请求形态与官方 client face 同源:content 为 text 分段数组(宿主 hasPromptContent
-        // 校验),mode=queue(无进行中轮即直接开跑),clientTimeZone 随本地时区
-        const submitPrompt = (remoteSession && typeof remoteSession.prompt === 'function')
-          ? ({ sessionId: targetId, text }) => remoteSession.prompt({
-              requestId: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()),
-              sessionId: targetId,
-              mode: 'queue',
-              content: [{ type: 'text', text }],
-              clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-            })
           : null
 
         // 样式挂载在宿主文档级:设置页未打开时面板不存在,
@@ -2571,11 +2751,29 @@ function ContextPanel() {
         // 对话 fork 入口:锚点映射经 remote.session.follow 开场帧一次拉取
         // (开场帧自带回溯窗口内的全部事件与 seq,取到即断开订阅,不做 live 消费),
         // 分叉动作经 sessions 服务面;分叉服务面缺失即整体不注册(干净禁用)。
-        // inputActions 由插槽宿主按会话绑定注入,子会话挂载时消费重试草稿
-        if (forkService) {
+        // inputActions 由插槽宿主按会话绑定注入,子会话挂载时消费重试草稿。
+        // remote.session 单独点分注入:namespace 异步 $mount,旧宿主缺失时只停 fork。
+        // 插槽注册必须挂在 inject 子 fiber(scopeCtx)上:remote.session 服务重启会让
+        // 注入回调重跑,挂外层 ctx.slots 的注册不随子 fiber 回收,重跑一次就多一份
+        // fork 入口(重复按钮)
+        const registerFork = (scopeCtx, remoteSession) => {
+          if (!forkService) return
+          // 自动重发通道:开启开关时分叉后以该轮原输入 prompt 子会话;
+          // remote.session 缺 prompt(旧宿主/部分 stub)时返回 null,降级为仅回填;
+          // 请求形态与官方 client face 同源:content 为 text 分段数组(宿主
+          // hasPromptContent 校验),mode=queue(无进行中轮即直接开跑)
+          const submitPrompt = typeof remoteSession.prompt === 'function'
+            ? ({ sessionId: targetId, text }) => remoteSession.prompt({
+                requestId: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()),
+                sessionId: targetId,
+                mode: 'queue',
+                content: [{ type: 'text', text }],
+                clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+              })
+            : null
           try {
-            ctx.slots.inject('conversation.input.dock', () =>
-              ctx.slots.register(
+            scopeCtx.slots.inject('conversation.input.dock', () =>
+              scopeCtx.slots.register(
                 {
                   name: 'conversation.input.dock',
                   id: 'context-manager-fork',
@@ -2586,7 +2784,7 @@ function ContextPanel() {
                       ? (opts) => remoteSession.cancel(opts)
                       : null,
                     submitPrompt,
-                    loadTurnEnds: () => forkAnchorLoaderFor(remoteSession, sessionId)().then((records) => {
+                    loadTurnEnds: (options) => forkAnchorLoaderFor(remoteSession, sessionId)(options).then((records) => {
                       // 轮号 → { 结束 seq, 该轮首问文本, open }:上个 turn/end 之后首条
                       // 携带非空文本的 user 本人消息即该轮首问(轮内纯图消息跳过,
                       // 后续文本插话可补位);turn/end 落账并重置;
@@ -2623,6 +2821,10 @@ function ContextPanel() {
             console.warn('[context-manager] 对话 fork 入口未注册(宿主无 conversation.input.dock 插槽)', error)
           }
         }
+        ctx.inject(['remote.session'], (sessionCtx) => {
+          const remoteSession = sessionCtx && sessionCtx.remote ? sessionCtx.remote.session : undefined
+          if (remoteSession) registerFork(sessionCtx, remoteSession)
+        })
 
         // 标题栏复制 sessionId 入口:官方 conversation.session.header.actions 插槽
         // (list,order -9 紧随官方 agent-preset 标签 -10,即「标准模式」右侧);

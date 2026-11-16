@@ -180,16 +180,17 @@ test('评估接线: custom 账号 extract 规则驱动 balance 读数全链路(�
   }
 })
 
-test('notify-config: GET 回显 webhookUrl 原文', async () => {
+test('notify-config: GET 只回显 webhook 已配置标记,不回传地址', async () => {
   // Given 已配置 webhook 的 settings
   const { ctx, routes } = makeCtx({ settingsValue: { notify: { enabled: true, webhookUrl: 'https://hooks.example.com/private' } } })
   apply(ctx)
   // When 读取通知配置
   const res = await call(routes, '/api/usage-panel/notify-config', makeReq('GET'))
-  // Then 原文随响应回显, webhookConfigured 已移除
+  // Then 地址不出现,仅布尔标记
   assert.equal(res.status, 200)
-  assert.equal(res.payload.notify.webhookUrl, 'https://hooks.example.com/private')
-  assert.equal('webhookConfigured' in res.payload.notify, false)
+  assert.equal(res.payload.notify.webhookConfigured, true)
+  assert.equal('webhookUrl' in res.payload.notify, false)
+  assert.equal(JSON.stringify(res.payload).includes('hooks.example.com'), false)
   assert.equal(res.payload.imAvailable, false)
 })
 
@@ -209,7 +210,7 @@ test('notify-config: 非法补丁 400, 合法补丁合并生效', async () => {
   assert.equal(view.payload.notify.quotaThresholdPct, 80)
   assert.equal(view.payload.notify.balanceThreshold, 20)
   assert.equal(view.payload.notify.enabled, true)
-  assert.equal(view.payload.notify.webhookUrl, 'https://hooks.example.com/keep')
+  assert.equal(view.payload.notify.webhookConfigured, true, '未提供的键保持原值(已配置 webhook 不被清掉)')
 })
 
 test('notify-config: 并发 POST 串行化读改写, 先写不被后写基于旧快照覆盖', async () => {
@@ -442,39 +443,26 @@ function notifyRequest(query) {
 // 查询一次产生越阈事件:复用 kimi 桩形态,事件入投影即递增版本。
 // 每次独立账号 id:账号保存对缺省 last/notifyState 回填旧值,复用 id 会继承
 // 已解除武装的沿触发状态导致不再越阈
-let longpollSeq = 0
+let notifySeq = 0
 async function produceNotifyEvent(routes) {
-  longpollSeq += 1
+  notifySeq += 1
   const original = globalThis.fetch
   globalThis.fetch = async () => ({ ok: true, text: async () => JSON.stringify(KIMI_BODY) })
   try {
     await call(routes, '/api/usage-panel/accounts', makeReq('POST', {
-      accounts: [{ id: 'acct-lp-' + longpollSeq, name: '账号长轮询' + longpollSeq, type: 'kimi', apiKey: 'sk-test' }],
+      accounts: [{ id: 'acct-n-' + notifySeq, name: '账号通知' + notifySeq, type: 'kimi', apiKey: 'sk-test' }],
     }))
-    await call(routes, '/api/usage-panel/query', makeReq('POST', { id: 'acct-lp-' + longpollSeq }))
+    await call(routes, '/api/usage-panel/query', makeReq('POST', { id: 'acct-n-' + notifySeq }))
   } finally {
     globalThis.fetch = original
   }
 }
 
-test('长轮询: 无 cursor 首拉立即返回空投影与当前版本', async () => {
-  // Given 通知启用且投影为空
-  const { ctx, routes } = makeCtx({ settingsValue: NOTIFY_ON })
-  apply(ctx)
-  // When 无 cursor 首拉
-  const { req, res } = notifyRequest('')
-  await routes.get('/api/usage-panel/notifications')(req, res)
-  // Then 立即返回且携带版本号
-  assert.equal(res.status, 200)
-  assert.deepEqual(res.payload.units, [])
-  assert.equal(res.payload.version, 0)
-})
-
 test('快照: 恒立即返回全量投影与当前版本, 无挂起形态', async () => {
   // Given 通知启用且投影为空
   const { ctx, routes } = makeCtx({ settingsValue: NOTIFY_ON })
   apply(ctx)
-  // When 快照请求(带或带 cursor 均为全量形态)
+  // When 快照请求
   const { req, res } = notifyRequest('')
   await routes.get('/api/usage-panel/notifications')(req, res)
   // Then 立即返回且携带版本号

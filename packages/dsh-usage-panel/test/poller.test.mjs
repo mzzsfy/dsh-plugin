@@ -68,6 +68,39 @@ test('场景: 时间驱动到点判定', () => {
   assert.equal(isDue({ lastQuerySec: 0, nowSec: POLL_INTERVAL_SEC, intervalSec: POLL_INTERVAL_SEC }), true)
 })
 
+test('场景: 系统时钟回拨不放大轮询与退避', () => {
+  // 上次在 1000 查询,系统回拨到 400:不得等到新钟补回 1000 再满 10 分钟
+  assert.equal(isDue({ lastQuerySec: 1000, nowSec: 400, intervalSec: POLL_INTERVAL_SEC }), true, '回拨视为到点')
+  const backoff = createBackoff({ baseSec: POLL_INTERVAL_SEC })
+  backoff.onFailure(1000)
+  assert.equal(backoff.isBlocked(400), true, '回拨后退避按剩余 600 秒继续,不放大到回拨幅度')
+  assert.equal(backoff.isBlocked(999), true)
+  assert.equal(backoff.isBlocked(1000), false, '剩余退避走完即恢复')
+})
+
+test('场景: 1 秒时钟抖动不清零失败的指数退避历史', () => {
+  const backoff = createBackoff({ baseSec: POLL_INTERVAL_SEC })
+  backoff.onFailure(1000)
+  assert.equal(backoff.isBlocked(999), true)
+  backoff.onFailure(999)
+  assert.equal(backoff.nextRetryAt, 999 + POLL_INTERVAL_SEC * 2, '第二次失败仍按第 2 档退避,不从第 1 档重来')
+})
+
+test('场景: 大幅回拨后保留退避历史并按剩余时长恢复', () => {
+  const backoff = createBackoff({ baseSec: POLL_INTERVAL_SEC })
+  backoff.onFailure(10000)
+  assert.equal(backoff.isBlocked(4000), true, '回拨 6000 秒后仍有原剩余 600 秒退避')
+  assert.equal(backoff.isBlocked(4599), true)
+  assert.equal(backoff.isBlocked(4600), false)
+})
+
+test('场景: 系统时钟前跳正常到点且旧退避不扩大', () => {
+  assert.equal(isDue({ lastQuerySec: 100, nowSec: 100 + POLL_INTERVAL_SEC + 3600, intervalSec: POLL_INTERVAL_SEC }), true, '前跳不阻止到点')
+  const backoff = createBackoff({ baseSec: POLL_INTERVAL_SEC })
+  backoff.onFailure(0)
+  assert.equal(backoff.isBlocked(POLL_INTERVAL_SEC * BACKOFF_CAP_MULTIPLE + 3600), false, '前跳后旧退避已过期')
+})
+
 test('场景: 退避与到点独立叠加,双过才查(时序推演锁定)', () => {
   // 失败:退避基期 = 统一间隔;首次失败后一个周期内到点亦被退避压住
   const backoff = createBackoff({ baseSec: POLL_INTERVAL_SEC })

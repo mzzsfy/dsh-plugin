@@ -4,7 +4,6 @@
 // (0.1.7+ 宿主设置页模型新增因此原生完好)。
 
 import z from '@deepseek-ai/schemastery'
-import { SETTINGS_NS } from './config.mjs'
 import { createMarkerInject, sweepRegisteredAdapters } from './decorator.mjs'
 
 export const name = 'llm-pi-gateway'
@@ -57,6 +56,7 @@ export async function apply(ctx, config) {
   const swept = sweep()
   if (swept === 0) ctx.logger?.warn?.('llm-pi-gateway: apply 时无官方 adapter(等 llm/adapters-updated 兜底)')
   const offSweep = ctx.on('llm/adapters-updated', sweep, { global: true })
+  // 标记缓存键含 prefix,volatile 节写经 markerConfig 对后续请求立即生效,无需清缓存
   const offUpdate = ctx.on('loader/volatile-update', () => { markerConfig = readMarker() })
   ctx.fiber.effect(() => () => {
     active = false
@@ -66,5 +66,3 @@ export async function apply(ctx, config) {
   ctx.logger?.info?.('llm-pi-gateway: 装饰器就绪(官方行自服务,Anthropic 标记与 Chat 会话头注入)')
   return undefined
 }
-
-export { SETTINGS_NS }

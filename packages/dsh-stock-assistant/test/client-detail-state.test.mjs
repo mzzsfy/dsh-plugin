@@ -244,8 +244,8 @@ test('服务不可用: 非 JSON 响应翻成可读错误', async () => {
   runtime.dispose()
 })
 
-// 读响应体被中止(超时/页面重置)属于外部取消, 不能翻成"服务不可用"
-test('中止错误原样抛出, 不伪装成服务故障', async () => {
+// 读响应体被中止(超时/页面重置)属于外部取消, 不能翻成"服务不可用", 也不能把英文 AbortError 直出
+test('中止错误折算为中文取消, 不伪装成服务故障', async () => {
   const { createPageRuntime } = await load()
   const abortError = Object.assign(new Error('This operation was aborted'), { name: 'AbortError', code: 'ABORT_ERR' })
   const runtime = createPageRuntime({
@@ -256,7 +256,10 @@ test('中止错误原样抛出, 不伪装成服务故障', async () => {
     fetch: async () => ({ ok: false, status: 200, json: async () => { throw abortError } }),
   })
   await assert.rejects(runtime.api('/snapshot'), error => {
-    assert.equal(error.name, 'AbortError')
+    assert.equal(error.name, 'Error')
+    assert.equal(error.code, 'CANCELLED')
+    assert.equal(error.cancelled, true)
+    assert.equal(error.message, '请求已取消，请重试')
     assert.notEqual(error.code, 'SERVICE_UNAVAILABLE')
     return true
   })

@@ -9,6 +9,7 @@ import {
   DAY_MS,
   DEFAULT_AUTO_ARCHIVE_DAYS,
   DELETE_MESSAGES,
+  activeUnarchiveGraces,
   deleteOutcomeMessages,
   TOAST_MAX_TITLES,
   aggregateDeleteOutcome,
@@ -22,10 +23,12 @@ import {
   isSessionRunning,
   isDerivedSessionHeader,
   mergeDeletedEntry,
+  mergeOutcomeMessages,
   pageArchiveRows,
   projectArchiveRows,
   projectDeletedRows,
   removeDeletedEntry,
+  resolveArchivedIds,
   selectArchiveCandidates,
   UNARCHIVE_GRACE_MS,
   unarchiveGraceActive,
@@ -83,7 +86,7 @@ test('阈值负值与非有限值防御性关闭', () => {
   assert.deepEqual(selectArchiveCandidates({ records: [record({})], nowMs: NOW, thresholdDays: Number.NaN }), [])
 })
 
-test('全局宽限:取消归档后 graceMs 内宽限生效,到期与非法输入失效', () => {
+test('会话级宽限:取消归档后 graceMs 内宽限生效,到期与非法输入失效', () => {
   assert.equal(unarchiveGraceActive(NOW - 2 * 60 * 1000, NOW), true)
   assert.equal(unarchiveGraceActive(NOW - UNARCHIVE_GRACE_MS, NOW), false)
   assert.equal(unarchiveGraceActive(0, NOW), false)
@@ -91,8 +94,28 @@ test('全局宽限:取消归档后 graceMs 内宽限生效,到期与非法输入
   assert.equal(unarchiveGraceActive(Number.NaN, NOW), false)
 })
 
-test('全局宽限:常量与天级时长的量级自洽', () => {
+test('会话级宽限:负差值钳制不放大', () => {
+  // 墙钟回拨造成的未来时间戳按零差值处理,仍保留完整宽限;不得因负差值绕过判定
+  assert.equal(unarchiveGraceActive(NOW + UNARCHIVE_GRACE_MS * 2, NOW), true)
+  assert.equal(unarchiveGraceActive(NOW - UNARCHIVE_GRACE_MS - 1, NOW), false)
+  assert.equal(unarchiveGraceActive(NOW, undefined), false)
+})
+
+test('会话级宽限:常量与天级时长的量级自洽', () => {
   assert.equal(UNARCHIVE_GRACE_MS, 10 * 60 * 1000)
+})
+
+test('会话级宽限表:只保留在册未过期项,按会话互不影响', () => {
+  const table = new Map([
+    ['fresh', NOW - 60 * 1000],
+    ['expired', NOW - UNARCHIVE_GRACE_MS - 1],
+    ['invalid', 0],
+  ])
+  assert.deepEqual(activeUnarchiveGraces(table, NOW), [['fresh', NOW - 60 * 1000]])
+  // 另一会话过期不影响 fresh 仍在册:宽限按会话而非整表
+  assert.deepEqual(activeUnarchiveGraces(new Map([['a', NOW - 5 * 60 * 1000], ['b', NOW - 4 * 60 * 1000]]), NOW).map(([id]) => id), ['a', 'b'])
+  assert.deepEqual(activeUnarchiveGraces(new Map(), NOW), [])
+  assert.deepEqual(activeUnarchiveGraces(undefined, NOW), [])
 })
 
 test('updatedAt 取创建时间与最近活跃的较大者', () => {
@@ -304,6 +327,29 @@ test('归档集合差分只报新增,首帧基线不提示', () => {
   assert.deepEqual(diffArchived(['x', 'y'], ['x']), [])
 })
 
+// Given 归档快照三种相位, When 解箱权威集合, Then 只有 ready 帧权威,
+// 未就绪沿用上次权威集合(未知不当空集)
+test('归档集合解箱:ready 帧权威且 id 归一为字符串', () => {
+  assert.deepEqual(resolveArchivedIds(undefined, { phase: 'ready', archivedSessionIds: ['a', 1] }),
+    { phase: 'ready', ids: ['a', '1'] })
+  assert.deepEqual(resolveArchivedIds(['old'], { phase: 'ready', archivedSessionIds: [] }),
+    { phase: 'ready', ids: [] })
+})
+
+test('归档集合解箱:未就绪沿用上一次权威集合,从未就绪按未知', () => {
+  assert.deepEqual(resolveArchivedIds(['keep'], { phase: 'pending', archivedSessionIds: ['a'] }),
+    { phase: 'stale', ids: ['keep'] })
+  assert.deepEqual(resolveArchivedIds(undefined, { phase: 'pending', archivedSessionIds: ['a'] }),
+    { phase: 'unknown', ids: [] })
+  assert.deepEqual(resolveArchivedIds(undefined, undefined), { phase: 'unknown', ids: [] })
+})
+
+test('归档集合解箱:ready 帧但集合非数组按未就绪处理,不冒充空集', () => {
+  assert.deepEqual(resolveArchivedIds(['keep'], { phase: 'ready' }), { phase: 'stale', ids: ['keep'] })
+  assert.deepEqual(resolveArchivedIds(undefined, { phase: 'ready', archivedSessionIds: 'bad' }),
+    { phase: 'unknown', ids: [] })
+})
+
 test('Toast 差分:pending 空态与基线首装不提示,ready 后新增才提示', () => {
   let previous
   let step = archiveToastStep(previous, { phase: 'pending', archivedSessionIds: [] })
@@ -395,6 +441,15 @@ test('非归档会话拒绝删除', () => {
   const denied = deleteEligibility({ archivedIds: ['a'], sessionId: 'b' })
   assert.equal(denied.ok, false)
   assert.equal(denied.code, 'not-archived')
+})
+
+// Given 父级失败点与级联失败点, When 合并半失败文案, Then 两段都在、空段忽略
+test('半失败文案合并:父级与级联失败点不互相覆盖', () => {
+  assert.equal(mergeOutcomeMessages('已移入回收站,但重挂载记录失败', '父会话已删除,2 个子会话未完全清理'),
+    '已移入回收站,但重挂载记录失败;父会话已删除,2 个子会话未完全清理')
+  assert.equal(mergeOutcomeMessages(undefined, 'contained'), 'contained')
+  assert.equal(mergeOutcomeMessages('base', ''), 'base')
+  assert.equal(mergeOutcomeMessages('', undefined), '')
 })
 
 test('删除收尾聚合:失败矩阵折叠为三形态响应体', () => {

@@ -7,10 +7,10 @@ import { renderToStaticMarkup } from 'react-dom/server'
 
 // 悬浮盯盘的成本盈亏:
 //   Given 标的设置了成本价
-//   When 打开悬浮盯盘(列表或图形)
-//   Then 用小字给出相对成本的盈亏, 与当日涨跌分开读数
-//   Given 没有设置成本
-//   Then 不出现盈亏读数
+//   When 打开悬浮盯盘的图形模式
+//   Then 报价行右侧用小字给出相对成本的盈亏, 与当日涨跌分开读数
+//   When 打开列表模式
+//   Then 每只票只占一行, 不出盈亏读数(单只票的深度读数只归图形)
 const source = await readFile(new URL('../src/client.js', import.meta.url), 'utf8')
 
 async function load() {
@@ -28,43 +28,52 @@ const free = { ...held, id: 'XSHE:equity:000001', code: '000001', officialName: 
 const items = { [held.id]: held, [free.id]: free }
 const entryOf = id => ({ quote: { last: id === held.id ? 1444.99 : 12.16, changePct: id === held.id ? -0.55 : 1.28, receivedAt: 1 }, health: 'ok' })
 const renderList = (api, ids) => renderToStaticMarkup(React.createElement(api.FloatList, { picked: ids, items, securityId: ids[0], entryOf, onPick() {}, onTip() {}, onLeave() {}, onScroll() {} }))
-const plText = html => [...html.matchAll(/ssb-float-row-pl[^>]*>([^<]*)</g)].map(match => match[1])
+const renderChart = (api, current, overrides = {}) => renderToStaticMarkup(React.createElement(api.FloatChart, { securityId: current.id, current, candles: [{ close: 1444.99 }], preClose: 1453, error: '', last: 1444.99, pct: -0.55, ...overrides }))
 const chartPl = html => /class="ssb-float-pl[^"]*"[^>]*>([^<]*)</.exec(html)?.[1] ?? null
+const rowCells = html => [...html.matchAll(/class="ssb-float-row(?![-\w])[^"]*"[\s\S]*?<\/button>/g)].map(row => [...row[0].matchAll(/class="ssb-float-(?:row-name|code|row-price|row-pct)[^"]*"/g)].length)
 
-test('列表模式给设置了成本的标的补一行小字盈亏', async () => {
+test('列表模式每行只有四列, 不出现盈亏读数', async () => {
   const api = await load()
   const html = renderList(api, [held.id, free.id])
-  // +3.21% = (1444.99-1400)/1400, 分母是成本价; 若误用最新价做分母会得 +3.11%
-  assert.deepEqual([...plText(html)], ['盈亏 +3.21%'], '只有设了成本的行有读数')
-  assert.match(html, /ssb-float-row-pl ssb-number ssb-up/, '盈利按涨跌色着色(红涨)')
-  assert.match(html, /<span class="ssb-float-row-pct[^>]*>-0\.55%<\/span>/, '当日涨跌仍在原列, 两个读数分开')
+  assert.doesNotMatch(html, /盈亏/, '列表模式不显示持仓盈亏')
+  assert.doesNotMatch(html, /ssb-float-row-pl/, '原来的第二行盈亏节点已移除')
+  assert.deepEqual(rowCells(html), [4, 4], '设了成本的标的也保持一只票一行四列')
+  assert.match(html, /<span class="ssb-float-row-pct[^>]*>-0\.55%<\/span>/, '当日涨跌仍是列表唯一的百分比读数')
 })
 
-test('多条成本取最低价当基准, 与列表页口径一致', async () => {
-  const api = await load()
-  const single = { ...items, [doubleCost.id]: doubleCost }
-  const html = renderToStaticMarkup(React.createElement(api.FloatList, { picked: [doubleCost.id], items: single, securityId: doubleCost.id, entryOf, onPick() {}, onTip() {}, onLeave() {}, onScroll() {} }))
-  assert.deepEqual([...plText(html)], ['盈亏 +3.21%'], '成本 1500 不参与, 基准仍是最低 1400')
-})
-
-test('没有成本或没有现价时盈亏不写成 0', async () => {
+test('列表模式不因成本而多渲染占位: 有成本无行情也只是一行破折号', async () => {
   const api = await load()
   const html = renderToStaticMarkup(React.createElement(api.FloatList, { picked: [held.id], items, securityId: held.id, entryOf: () => null, onPick() {}, onTip() {}, onLeave() {}, onScroll() {} }))
-  assert.deepEqual([...plText(html)], ['盈亏 —'], '停牌/无行情时保留占位而不是算出 0%')
-  assert.doesNotMatch(html, /ssb-float-row-pl[^"]*ssb-(up|down)/, '无读数不上色')
+  assert.doesNotMatch(html, /盈亏/, '停牌/无行情时不出现盈亏占位')
+  assert.deepEqual(rowCells(html), [4], '缺行情仍是四列一行')
 })
 
 test('图形模式报价行给出同一口径的盈亏, 与当日涨跌分开', async () => {
   const api = await load()
-  const html = renderToStaticMarkup(React.createElement(api.FloatChart, { securityId: held.id, current: held, candles: [{ close: 1444.99 }], preClose: 1453, error: '', last: 1444.99, pct: -0.55 }))
+  const html = renderChart(api, held)
+  // +3.21% = (1444.99-1400)/1400, 分母是成本价; 若误用最新价做分母会得 +3.11%
   assert.equal(chartPl(html), '盈亏 +3.21%')
-  assert.match(html, /class="ssb-float-pct">-0\.55%</)
+  assert.match(html, /ssb-float-pl ssb-number ssb-up/, '盈利按涨跌色着色(红涨)')
+  assert.match(html, /class="ssb-float-pct">-0\.55%/, '当日涨跌仍在原位置, 两个读数分开')
   assert.match(html, /title="成本 1400\.00 · 每股 \+44\.99"/, '悬停给出成本基准与每股盈亏')
+})
+
+test('图形模式多条成本取最低价当基准, 与列表页口径一致', async () => {
+  const api = await load()
+  const html = renderChart(api, doubleCost)
+  assert.equal(chartPl(html), '盈亏 +3.21%', '成本 1500 不参与, 基准仍是最低 1400')
+})
+
+test('图形模式有成本但没有现价时盈亏写成破折号而不是 0', async () => {
+  const api = await load()
+  const html = renderChart(api, held, { last: undefined, pct: null })
+  assert.equal(chartPl(html), '盈亏 —', '停牌/盘前保留占位而不是算出 0%')
+  assert.doesNotMatch(html, /ssb-float-pl[^"]*ssb-(up|down)/, '无读数不上色')
 })
 
 test('图形模式没有成本就不出现盈亏读数', async () => {
   const api = await load()
-  const html = renderToStaticMarkup(React.createElement(api.FloatChart, { securityId: free.id, current: free, candles: [{ close: 12.16 }], preClose: 12.01, error: '', last: 12.16, pct: 1.28 }))
+  const html = renderChart(api, free, { last: 12.16, pct: 1.28 })
   assert.equal(chartPl(html), null)
 })
 

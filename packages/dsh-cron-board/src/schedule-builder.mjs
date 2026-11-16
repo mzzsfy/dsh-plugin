@@ -9,9 +9,11 @@ export const WEEKDAY_LABELS = { '0': '日', '1': '一', '2': '二', '3': '三', 
 export const MINUTE_MAX = 59
 export const HOUR_MAX = 23
 export const INTERVAL_MIN_MINUTES = 1
+const MINUTES_PER_HOUR = 60
 
 // 结构化调度状态:custom 时 expression 为唯一有效字段,其余字段仍保留(切回结构化频率不丢配置);
-// timezone 为内联时区后缀的偏移小时数,null 表示无后缀(按宿主系统时区)
+// timezone 为内联时区后缀的偏移小时数,后缀语法只收整小时,故非整点偏移在状态里保持 null
+// (按宿主系统时区),null 表示无后缀
 export function createScheduleState(expression) {
   return {
     freq: 'daily',
@@ -72,16 +74,27 @@ export function parseSchedule(expression) {
   return state
 }
 
-// 偏移小时数 → 后缀符号值:+8 / -5 / +0
+// 偏移小时数 → 展示值:+8 / -5 / +0;非整点(浏览器/宿主时区可能为 +5:30、+5:45)按 +5:30 展示
 export function formatTzOffset(offset) {
-  return (offset >= 0 ? '+' : '') + offset
+  const sign = offset >= 0 ? '+' : '-'
+  const totalMinutes = Math.round(Math.abs(offset) * MINUTES_PER_HOUR)
+  const hours = Math.floor(totalMinutes / MINUTES_PER_HOUR)
+  const minutes = totalMinutes % MINUTES_PER_HOUR
+  return sign + hours + (minutes === 0 ? '' : ':' + String(minutes).padStart(2, '0'))
 }
 
-// 构建器状态 → cron;custom 透传剥离后手工表达式;显式时区统一附加 T±N 后缀
+// 时区后缀只支持整小时:非整点偏移不得四舍五入成错误小时(+5:30 → T+6 会整体错半小时),
+// 返回 null 由调用方回退宿主默认
+export function tzSuffixOffset(offset) {
+  return Number.isInteger(offset) ? offset : null
+}
+
+// 构建器状态 → cron;custom 透传剥离后手工表达式;整点显式时区统一附加 T±N 后缀
 export function buildSchedule(state) {
   const base = buildBase(state)
-  if (state.timezone == null) return base
-  return base + 'T' + formatTzOffset(state.timezone)
+  const offset = tzSuffixOffset(state.timezone)
+  if (offset === null) return base
+  return base + 'T' + formatTzOffset(offset)
 }
 
 function buildBase(state) {
@@ -101,6 +114,15 @@ export const TZ_SUFFIX_MIN = -12
 export const TZ_SUFFIX_MAX = 14
 // T±N 整数小时,允许与表达式空格分隔,大小写均可
 const TZ_SUFFIX_PATTERN = /\s*T([+-])(\d{1,2})$/i
+
+// 时区下拉可选偏移:整点区间 + 当前值兜底 —— select 的 value 找不到对应 option 时会渲染空白,
+// 当前偏移不在区间内(非整点/脏状态)时补一项,保证选中项始终可见
+export function tzSelectOptions(current, min = TZ_SUFFIX_MIN, max = TZ_SUFFIX_MAX) {
+  const offsets = []
+  for (let offset = min; offset <= max; offset++) offsets.push(offset)
+  if (typeof current === 'number' && Number.isFinite(current) && !offsets.includes(current)) offsets.push(current)
+  return offsets.sort((a, b) => a - b)
+}
 
 // 剥离时区后缀:返回 { base, timezoneOffset },无后缀时 timezoneOffset 为 null;
 // 后缀超出支持范围抛业务错误(校验与桥接共用,脏数据须暴露)

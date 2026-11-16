@@ -14,11 +14,11 @@
 
 import { ShellExecutor } from '@deepseek-ai/dsh-shell'
 import { clampTimeout, deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
-import { Config, KINDS, buildArgv, requireEntry, resolveConfig, resolveConfigStrict, unwrapConfig, assertServiceableConfig, normalizeWin32Path } from './config.mjs'
+import { Config, KINDS, buildArgv, requireEntry, resolveConfigStrict, unwrapConfig, assertServiceableConfig, normalizeWin32Path } from './config.mjs'
 import { matchDeny } from './denylist.mjs'
 import { candidateExists, detectCandidates, resolveEntryPath } from './resolve.mjs'
 import { classifyDenial, classifyRunnerFailure, isRunnerSpawnFailure } from './sandbox-classify.mjs'
-import { registerShellTool } from './tool.mjs'
+import { registerShellTool, registerToolDefinitions } from './tool.mjs'
 import { mountShellPromptProjection } from './prompt-projection.mjs'
 import { mountPwshTakeover } from './pwsh-takeover.mjs'
 
@@ -123,10 +123,13 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
   // (getTraceable/createShadowMethod)会把经 ctx.shell 访问的方法 this 重定向到
   // 阴影对象,#私有字段在阴影 receiver 下触发 V8 品牌检查错误(官方工具
   // tool-pwsh 正是经 ctx.shell 调用,实测复现)。
-  /** 当前权威配置:行 Config(0.1.7 settings 面以行为存储,变更即行重载重建本实例)。 */
+  /** 当前权威配置(挂载/refresh 时一次 resolve,读路径零重算):行 Config
+   * 0.1.7 settings 面以行为存储,变更即行重载重建本实例或经 refresh 换源。 */
   source
-  /** 工具重注册句柄(仅构造期闭包触达,this 恒为裸实例)。 */
+  /** 工具注册句柄(disposer 函数,定义快照挂 `.definitions`;仅构造期闭包触达,this 恒为裸实例)。 */
   #toolRegistration = null
+  /** 最近一次成功注册的工具定义:新注册失败时原样恢复,不让瞬时故障永久丢 pwsh。 */
+  #toolDefinitions = null
   /** 配置快照(挂载时解包产物;volatile 变更经 refresh 换新)。 */
   #entry = {}
   /** 托管进程的每进程 confinement 事实(官方同构)。 */
@@ -140,15 +143,8 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
       this.unavailableError = resolved
     })
     this.#setEntry(config)
-    this.source = () => resolveConfig(this.#entry)
     // refresh 桥绑定随本 fiber 卸载自动解绑(实例退场后写路径请求静默丢弃)
     ctx.effect(() => bindShellRefreshBridge((next) => this.refresh(next)))
-    // 自带设置页(客户端半区自定义卡):抑制宿主按 schema 自动生成的原生页
-    // (官方 README 同构:可选子级注入声明策略归属 fiber,服务迟加载也采纳)
-    ctx.inject?.(['settings'], (child) => {
-      if (typeof child.settings?.configure !== 'function') return
-      child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
-    })
     this.#registerTool()
     this.#mountPromptSection()
     mountShellPromptProjection(ctx)
@@ -158,21 +154,32 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
   /** 挂载/换源共用落定:入参经宿主按 static Config resolve,volatile 字段是
    * boxed ref,存储前解箱成普通对象;落定校验走 strict——解箱后仍存在非法
    * 形态字段即抛(宿主契约变化炸在挂载点,接管序列回滚告警),禁止静默回落
-   * 出厂默认(行 config 永不生效缺陷的机械化防线)。 */
+   * 出厂默认(行 config 永不生效缺陷的机械化防线)。resolve 结果落 source 一次,
+   * 逐调用重读的热路径(assertNotDenied/entryFor/spawnSpec 等)不再重跑 schema。 */
   #setEntry(config) {
     this.#entry = unwrapConfig(config ?? {})
-    assertServiceableConfig(resolveConfigStrict(this.#entry))
+    const resolved = resolveConfigStrict(this.#entry)
+    assertServiceableConfig(resolved)
+    this.source = resolved
   }
 
   /** volatile-only 配置变更的活刷新:换配置源并重建工具注册(写路径经
-   * requestShellRefresh 触达;行不重挂,本实例与进行中执行不受扰)。 */
+   * requestShellRefresh 触达;行不重挂,本实例与进行中执行不受扰)。
+   * 注册失败时配置源与工具一起回退到上一份,刷新失败不影响在役工具。 */
   refresh(config) {
+    const previous = { entry: this.#entry, source: this.source }
     this.#setEntry(config)
-    this.#registerTool()
+    try {
+      this.#registerTool()
+    } catch (error) {
+      this.#entry = previous.entry
+      this.source = previous.source
+      throw error
+    }
   }
 
   get config() {
-    return this.source()
+    return this.source
   }
 
   // 命令黑名单检查(deny 绝对:命中即拒;沙箱拦截前的内容级护栏)。
@@ -245,10 +252,28 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
     }
   }
 
-  /** 注册/重注册 shell 工具(描述随客户端清单变化)。 */
+  /** 注册/重注册 shell 工具(描述随客户端清单变化)。
+   * 旧注册先卸(同名工具同层不允许并存);新注册失败时 registerShellTool 已
+   * 回滚半套,本方法用上一次成功的定义把旧工具原样恢复,pwsh 不因一次瞬时
+   * 失败永久消失,下一次 refresh 仍可成功。 */
   #registerTool() {
     this.#toolRegistration?.()
-    this.#toolRegistration = registerShellTool(this.ctx, { executor: this })
+    let next
+    try {
+      next = registerShellTool(this.ctx, { executor: this })
+    } catch (error) {
+      if (this.#toolDefinitions !== null) {
+        try {
+          this.#toolRegistration = registerToolDefinitions(this.ctx, this.#toolDefinitions)
+        } catch (restoreError) {
+          this.#toolRegistration = null
+          this.ctx.logger?.warn?.(`shell-select: 工具注册失败且旧工具恢复失败: ${restoreError?.message ?? restoreError}`)
+        }
+      }
+      throw error
+    }
+    this.#toolRegistration = next
+    this.#toolDefinitions = next.definitions
   }
 
   #mountPromptSection() {
@@ -667,7 +692,11 @@ export function bindShellRefreshBridge(handler) {
 }
 
 export function requestShellRefresh(snapshot) {
-  refreshBridge?.(snapshot)
+  // 三态契约:false = 无活跃执行面(未接管,写入只在下次挂载生效);
+  // true = 已送达活跃实例(其自身抛错由调用方按 refreshFailed 处理)
+  if (refreshBridge === null) return false
+  refreshBridge(snapshot)
+  return true
 }
 
 export default ShellSelectExecutor

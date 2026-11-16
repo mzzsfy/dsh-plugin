@@ -19,13 +19,15 @@ export const DEFAULTS = Object.freeze({
   resumeSilentTurns: true,
   pauseWhenOffline: true,
   offlineCheckMs: 15_000,
-  classify: true,
+  classify: false,
+  enforceClosure: true,
   retryableErrorPatterns: '',
   paused: false,
   continueText: '继续。上一步结果未知,确认后继续。',
   continueTextMaxTokens: '继续。上一轮被输出上限截断,分段接着输出。',
   continueTextSilent: '继续。上一轮没有可见输出,直接说明结果或继续执行。',
   continueTextInterrupted: '继续。上一步结果未知,确认后继续。',
+  restartText: '继续,dsh已重启',
   closureText:
     '[keepWork] 结束必须显式提交:没改文件末行单独写 TASK_DONE;任务阻塞末行单独写 TASK_BLOCKED: 原因;改过文件必须最后只使用 present;禁止同时 present 和 TASK_DONE',
 })
@@ -76,6 +78,7 @@ export function resolveConfig(input = {}, overrides = undefined) {
     pauseWhenOffline: booleanOr(value.pauseWhenOffline, DEFAULTS.pauseWhenOffline),
     offlineCheckMs: Math.max(1_000, numberOr(value.offlineCheckMs, DEFAULTS.offlineCheckMs)),
     classify: booleanOr(value.classify, DEFAULTS.classify),
+    enforceClosure: booleanOr(value.enforceClosure, DEFAULTS.enforceClosure),
     retryableErrorPatterns:
       typeof value.retryableErrorPatterns === 'string'
         ? value.retryableErrorPatterns.trim()
@@ -85,6 +88,7 @@ export function resolveConfig(input = {}, overrides = undefined) {
     continueTextMaxTokens: textOr(value.continueTextMaxTokens, DEFAULTS.continueTextMaxTokens),
     continueTextSilent: textOr(value.continueTextSilent, DEFAULTS.continueTextSilent),
     continueTextInterrupted: textOr(value.continueTextInterrupted, DEFAULTS.continueTextInterrupted),
+    restartText: textOr(value.restartText, DEFAULTS.restartText),
     closureText: textOr(value.closureText, DEFAULTS.closureText),
   }
 }

@@ -4,7 +4,18 @@ import assert from 'node:assert/strict'
 
 import { __test } from '../src/index.js'
 
-const { redactAccount, restoreHeaders, restoreBody, findRedacted, assertRestored, REDACTED } = __test
+const {
+  redactAccount,
+  redactUrl,
+  redactTextSecrets,
+  restoreHeaders,
+  restoreBody,
+  restoreUrl,
+  findRedacted,
+  assertRestored,
+  assertRestoredUrl,
+  REDACTED,
+} = __test
 
 const SECRET_HEADER = 'Bearer sk-secret'
 const SECRET_TOKEN = 'token-secret'
@@ -51,4 +62,26 @@ test('请求体 JSON 被改坏且含占位符:拒绝保存', () => {
 
 test('全新字段没有占位符:不误判', () => {
   assert.doesNotThrow(() => assertRestored({ headers: { 'X-Trace': 'plain' }, body: '{"model":"x"}' }))
+})
+
+// P3:URL query token 与上游错误体同样属凭据面,响应侧必须脱敏
+test('custom.url 的敏感查询参数脱敏,回存按参数名还原', () => {
+  const url = 'https://user:pw123@example.test/usage?token=query-secret&model=x'
+  const redacted = redactUrl(url)
+  assert.equal(redacted.includes('query-secret'), false)
+  assert.equal(decodeURIComponent(redacted).includes(REDACTED), true)
+  const restored = restoreUrl(redacted, url)
+  assert.equal(restored.includes('query-secret'), true)
+  assert.doesNotThrow(() => assertRestoredUrl(restored))
+  // 参数名被改后占位无法还原:拒绝落盘
+  const broken = redacted.replace('token=', 'tokenx=')
+  assert.throws(() => assertRestoredUrl(broken), /无法还原/)
+})
+
+test('上游错误体中的账号 Key 与常见 token 形态响应侧脱敏', () => {
+  const text = 'HTTP 401: {"error":"bad key sk-live-abcdefgh","echo":"Bearer sk-other-123456"}'
+  const redacted = redactTextSecrets(text, ['sk-live-abcdefgh'])
+  assert.equal(redacted.includes('sk-live-abcdefgh'), false)
+  assert.equal(redacted.includes('sk-other-123456'), false)
+  assert.match(redacted, /HTTP 401/)
 })

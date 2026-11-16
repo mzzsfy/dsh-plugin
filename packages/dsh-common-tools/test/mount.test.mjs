@@ -216,12 +216,12 @@ test('渲染产物:栈容器类名、变体类、role 与 sticky 按钮接线', 
   assert.equal(okTree.props.className, 'dsh-toast dsh-toast--ok dsh-toast--toast')
   assert.equal(okTree.props.role, 'alert')
   assert.equal(okTree.props.onClick, undefined, '无 onClick 条目整卡不可点')
-  assert.equal(okTree.children[1], null, '非 sticky 无按钮')
+  assert.equal(okTree.children.some((child) => child && child.props && child.props.className === 'dsh-toast__close'), false, '非 sticky 无按钮')
 
   const stickyItem = items.find((vnode) => vnode.props.item.text === '常驻')
   const stickyTree = stickyItem.type(stickyItem.props)
   assert.equal(stickyTree.props.className, 'dsh-toast dsh-toast--error dsh-toast--toast')
-  const button = stickyTree.children[1]
+  const button = stickyTree.children.find((child) => child && child.type === 'button')
   assert.equal(button.type, 'button')
   assert.equal(button.props.className, 'dsh-toast__close')
   button.props.onClick({ stopPropagation() {} })
@@ -247,7 +247,7 @@ test('渲染产物:onClick 条目整卡可点,点击即消失并触发回调;按
   const tree2 = roots[roots.length - 1].vnode.type()
   const vnode2 = tree2.children.flat().find((entry) => entry.props.item.text === '常驻可点')
   const card2 = vnode2.type(vnode2.props)
-  const button = card2.children[1]
+  const button = card2.children.find((child) => child && child.type === 'button')
   button.props.onClick({ stopPropagation() {} })
   assert.equal(stickyActivated, false, '显式关闭不触发直达')
   assert.equal(mod.toast.__test.getItems().length, 0)
@@ -277,28 +277,79 @@ test('CSS 内容齐备:选择器、变体、动画与减弱动态块', () => {
   const { mod } = loadModule(state)
   mod.toast.show('建立样式')
   const css = state.byId.get(STYLE_ID).textContent
-  for (const needle of ['.dsh-toast-stack', '.dsh-toast {', '.dsh-toast--ok', '.dsh-toast--error', '.dsh-toast__close', '@keyframes dsh-toast-in', 'animation:dsh-toast-in', 'prefers-reduced-motion']) {
+  for (const needle of ['.dsh-toast-stack', '.dsh-toast {', '.dsh-toast--ok', '.dsh-toast--warn', '.dsh-toast--error', '.dsh-toast__close', '.dsh-toast__icon', '@keyframes dsh-toast-in', 'animation:dsh-toast-in', 'prefers-reduced-motion',
+    '.dsh-toast--minimal', '.dsh-toast--accent', '.dsh-toast--progress', '.dsh-toast--countdown', '@keyframes dsh-toast-drain', 'animation:dsh-toast-in 0.18s ease-out, dsh-toast-drain']) {
     assert.ok(css.includes(needle), 'CSS 缺少 ' + needle)
+  }
+  // 减弱动态靠源序压住倒计时动画:媒体块必须排在动画规则之后,否则追加规则会静默失效
+  assert.ok(css.indexOf('@media (prefers-reduced-motion') > css.indexOf('.dsh-toast--countdown'), '减弱动态媒体块必须位于倒计时规则之后')
+})
+
+test('Given 非法的 kind 与 appearance When 展示与渲染 Then 一律回落到默认值', () => {
+  const state = makeState()
+  const { mod, roots } = loadRenderModule(state)
+  const cardOf = () => {
+    const tree = roots.at(-1).vnode.type()
+    const vnode = tree.children.flat().at(-1)
+    return vnode.type(vnode.props)
+  }
+  for (const kind of [undefined, '', 'ok ', 'OK', {}, '__proto__', 'toString', 1]) {
+    mod.toast.show('回落', { kind })
+    assert.equal(cardOf().props.className, 'dsh-toast dsh-toast--info dsh-toast--toast', 'kind=' + String(kind))
+  }
+  for (const appearance of [undefined, '', 'minimal ', 'Progress', {}, '__proto__', 'constructor', 0]) {
+    mod.toast.show('回落', { appearance })
+    assert.equal(cardOf().props.className, 'dsh-toast dsh-toast--info dsh-toast--toast', 'appearance=' + String(appearance))
   }
 })
 
-test('Given 通知含状态与多行文本 When 渲染两种样式 Then 保留选择、摘要和关闭动作', () => {
+test('Given 五种形态 When 渲染 Then 类名就位且只有倒计时形态挂展示期变量', () => {
   const state = makeState()
   const { mod, roots } = loadRenderModule(state)
-  for (const appearance of ['toast', 'panel']) {
-    for (const kind of ['info', 'ok', 'error']) {
+  const cardOf = () => {
+    const tree = roots.at(-1).vnode.type()
+    const vnode = tree.children.flat().at(-1)
+    return vnode.type(vnode.props)
+  }
+  for (const appearance of ['toast', 'panel', 'minimal', 'accent', 'progress']) {
+    mod.toast.show('标题\n摘要', { appearance, holdMs: 6 * 1000 })
+    const card = cardOf()
+    const countdown = appearance === 'progress' ? ' dsh-toast--countdown' : ''
+    assert.equal(card.props.className, 'dsh-toast dsh-toast--info dsh-toast--' + appearance + countdown)
+    assert.deepEqual(card.props.style, appearance === 'progress' ? { '--dct-hold-ms': '6000ms' } : undefined, appearance + ' 的内联样式')
+  }
+  // 常驻条目没有展示期:进度条停在满格,不驱动动画也不挂变量
+  mod.toast.show('常驻', { appearance: 'progress', sticky: true })
+  const stickyCard = cardOf()
+  assert.equal(stickyCard.props.className, 'dsh-toast dsh-toast--info dsh-toast--progress')
+  assert.equal(stickyCard.props.style, undefined)
+})
+
+test('Given 通知含状态与多行文本 When 渲染各样式 Then 保留选择、摘要和关闭动作', () => {
+  const state = makeState()
+  const { mod, roots } = loadRenderModule(state)
+  const iconPaths = new Map()
+  for (const appearance of ['toast', 'panel', 'minimal', 'accent', 'progress']) {
+    for (const kind of ['info', 'ok', 'warn', 'error']) {
       mod.toast.show('标题\n摘要', { kind, appearance, sticky: true })
       const tree = roots.at(-1).vnode.type()
       const vnode = tree.children.flat().at(-1)
       const card = vnode.type(vnode.props)
       assert.equal(card.props.className, 'dsh-toast dsh-toast--' + kind + ' dsh-toast--' + appearance)
-      assert.equal(card.children[0].props.className, 'dsh-toast__text')
-      assert.equal(card.children[0].children[0], '标题\n摘要')
-      card.children[1].props.onClick({ stopPropagation() {} })
+      assert.equal(card.children[0].props.className, 'dsh-toast__icon')
+      assert.equal(card.children[0].props['aria-hidden'], 'true')
+      const svg = card.children[0].children[0]
+      assert.equal(svg.type, 'svg')
+      assert.ok(svg.children[1].props.d.length > 0, kind + ' 的图标轮廓')
+      iconPaths.set(kind, svg.children[1].props.d)
+      assert.equal(card.children[1].props.className, 'dsh-toast__text')
+      assert.equal(card.children[1].children[0], '标题\n摘要')
+      card.children[2].props.onClick({ stopPropagation() {} })
       assert.equal(mod.toast.__test.getItems().length, 0)
     }
   }
-  for (const appearance of [undefined, '', 'unknown', {}, '__proto__']) {
+  assert.equal(new Set(iconPaths.values()).size, 4, '四种状态必须各有不同图标轮廓')
+  for (const appearance of [undefined, '', 'unknown', 'minimal ', 'Progress', {}, '__proto__']) {
     mod.toast.show('默认样式', { appearance })
     assert.equal(mod.toast.__test.getItems().at(-1).appearance, 'toast')
   }
@@ -312,20 +363,27 @@ test('主题色契约:每种样式成对消费宿主变量,状态色仅强调边
   for (const needle of [
     '--dct-bg:var(--dsw-alias-toast-bg)', '--dct-label:var(--dsw-alias-toast-label)',
     '--dct-panel-bg:var(--dsw-alias-bg-layer-1)', '--dct-text:var(--dsw-alias-label-primary)',
+    '--dct-warn:var(--dsw-alias-state-warn-primary)', '--dct-accent:var(--dsw-alias-brand-primary)',
     'background:var(--dct-panel-bg)', 'color:var(--dct-text)', 'white-space:pre-line',
   ]) assert.ok(css.includes(needle), 'CSS 缺少 ' + needle)
   const rule = selector => css.slice(css.indexOf(selector + ' {')).split('}')[0]
   for (const [selector, bg, text] of [
     ['.dsh-toast', '--dct-bg', '--dct-label'],
     ['.dsh-toast--panel', '--dct-panel-bg', '--dct-text'],
+    ['.dsh-toast--minimal', '--dct-panel-bg', '--dct-text'],
   ]) {
     assert.ok(rule(selector).includes('background:var(' + bg + ')'))
     assert.ok(rule(selector).includes('color:var(' + text + ')'))
   }
+  // 状态强调与倒计时分别消费令牌派生色/底:令牌已在位,不引入裸色
+  assert.ok(rule('.dsh-toast--accent').includes('color-mix(in srgb, var(--dct-tone) 14%, var(--dct-panel-bg))'))
+  assert.ok(rule('.dsh-toast--accent .dsh-toast__icon').includes('color-mix(in srgb, var(--dct-tone) 12%, transparent)'))
+  assert.ok(rule('.dsh-toast--progress').includes('linear-gradient(var(--dct-tone), var(--dct-tone))'))
+  assert.ok(css.includes('--dct-hold-ms:'))
   assert.ok(rule('.dsh-toast__close').includes('background:transparent'))
   assert.ok(rule('.dsh-toast__close').includes('color:inherit'))
   assert.doesNotMatch(rule('.dsh-toast__close'), /opacity:/)
-  for (const kind of ['ok', 'error']) {
+  for (const kind of ['ok', 'warn', 'error']) {
     const body = css.match(new RegExp('\\.dsh-toast--' + kind + ' \\{([^}]+)\\}'))?.[1]
     assert.ok(body?.includes('border-inline-start-color:'), '状态只影响强调边框')
     assert.doesNotMatch(body, /(?:background|(?:^|;)\s*color)\s*:/)

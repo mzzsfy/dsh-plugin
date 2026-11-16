@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { CLIENT_BODY, DECLARATION_NAMES } from './client-eval.mjs'
+import { dayKey, hourKey, minuteBucketStart, minuteKey } from '../src/store.js'
 
 const core = new Function(`${CLIENT_BODY}\nreturn { ${DECLARATION_NAMES.join(', ')} }`)()
 
@@ -51,7 +52,6 @@ const {
   donutSegments,
   formatCostCompact,
   pointStatsMatches,
-  formatCompact,
   formatCost,
   formatDuration,
   formatTokens,
@@ -92,6 +92,7 @@ const {
   renameRulesAt,
   resolveDayRange,
   resolveHourRange,
+  minuteBucketFloor,
   resolveMinuteRange,
   resolveHourCustomRange,
   resolveMinuteCustomRange,
@@ -159,8 +160,48 @@ test('minute 预设起点对齐 10 分钟桶,to 保持原始分钟', () => {
   assert.deepEqual(resolveMinuteRange('3h', offGrid), { from: '2026-03-15T11:30', to: '2026-03-15T14:37' })
 })
 
+test('minute 桶按本地墙钟对齐:+5:45 时区仍落桶边界(与服务端同口径)', () => {
+  // Given 尼泊尔偏移 -345(UTC+5:45):UTC 整十分钟刻度在本地墙钟落在 :45
+  const utcTen = Date.UTC(2026, 2, 15, 6, 0)
+  const wallMinuteOf = (ts) => new Date(ts + 345 * 60 * 1000).getUTCMinutes()
+  // Then UTC 纪元取整会得到非桶分钟(旧实现即此形态,服务端 400)
+  assert.equal(wallMinuteOf(utcTen), 45)
+  assert.notEqual(wallMinuteOf(utcTen) % 10, 0)
+  // When 客户端与服务端各自取桶起点
+  const clientStart = minuteBucketFloor(utcTen, -345)
+  const serverStart = minuteBucketStart(utcTen, -345)
+  // Then 两端同刻同桶,墙钟分钟回到桶边界
+  assert.equal(clientStart, serverStart)
+  assert.equal(wallMinuteOf(clientStart), 40)
+  assert.equal(wallMinuteOf(minuteBucketFloor(utcTen + 14 * 60 * 1000, -345)), 50)
+})
+
 test('minute 预设整桶边界不再回退', () => {
   assert.deepEqual(resolveMinuteRange('3h', new Date(2026, 2, 15, 14, 30, 0)), { from: '2026-03-15T11:30', to: '2026-03-15T14:30' })
+})
+
+test('A4 跨时区范围按宿主时区日历生成,与宿主桶键同源(浏览器 +8 / 宿主 UTC)', () => {
+  // Given 宿主 UTC、浏览器 +8:同一时刻在两侧日历分属不同日/小时
+  const instant = new Date('2026-03-15T18:30:00Z')
+  // When 用宿主时区生成范围 Then 日/时/分都落宿主日历,不随浏览器时区平移
+  assert.deepEqual(resolveDayRange('7', instant, 'UTC'), { from: '2026-03-09', to: '2026-03-15' })
+  assert.deepEqual(resolveHourRange('24h', instant, 'UTC'), { from: '2026-03-14T18', to: '2026-03-15T18' })
+  assert.deepEqual(resolveMinuteRange('3h', instant, 'UTC'), { from: '2026-03-15T15:30', to: '2026-03-15T18:30' })
+  // Then 与 store 桶键(同显式时区)逐点一致,请求 from/to 能覆盖宿主实际落桶
+  assert.equal(resolveDayRange('7', instant, 'UTC').to, dayKey(instant.getTime(), 'UTC'))
+  assert.equal(resolveHourRange('24h', instant, 'UTC').to, hourKey(instant.getTime(), 'UTC'))
+  assert.equal(resolveMinuteRange('3h', instant, 'UTC').to, minuteKey(instant.getTime(), 'UTC'))
+  // +8 宿主日历已跨到次日 02:30,证明结果由显式时区决定而非运行环境
+  assert.deepEqual(resolveDayRange('7', instant, 'Asia/Shanghai'), { from: '2026-03-10', to: '2026-03-16' })
+  assert.deepEqual(resolveHourRange('24h', instant, 'Asia/Shanghai'), { from: '2026-03-15T02', to: '2026-03-16T02' })
+  assert.deepEqual(resolveMinuteRange('3h', instant, 'Asia/Shanghai'), { from: '2026-03-15T23:30', to: '2026-03-16T02:30' })
+  assert.equal(formatDateTimeInput(instant, 'UTC'), '2026-03-15T18:30')
+  assert.equal(formatDateTimeInput(instant, 'Asia/Shanghai'), '2026-03-16T02:30')
+})
+
+test('A4 非法时区名回退浏览器本地时区,不抛错', () => {
+  const instant = new Date(2026, 2, 15, 14, 30)
+  assert.deepEqual(resolveDayRange('7', instant, 'Not/AZone'), resolveDayRange('7', instant))
 })
 
 test('预设定义表覆盖三视图', () => {
@@ -190,19 +231,37 @@ test('时/分挡位文案键逐挡齐备,含跨表同 id 挡位', () => {
   }
 })
 
-test('pointStats 缓存命中须视图与挡位双匹配', () => {
+test('pointStats 缓存命中须视图、挡位与宿主时区三重匹配', () => {
   // Given 同挡位 id 跨视图('24h') When 判定缓存命中 Then 视图不同即不命中,防误用他端点数据
-  const cached = { view: 'hour', preset: '24h', value: { daily: [] } }
-  assert.equal(pointStatsMatches(cached, 'hour', '24h'), true)
-  assert.equal(pointStatsMatches(cached, 'minute', '24h'), false)
-  assert.equal(pointStatsMatches(cached, 'hour', '3d'), false)
-  assert.equal(pointStatsMatches(null, 'hour', '24h'), false)
+  const cached = { view: 'hour', preset: '24h', timeZone: 'Asia/Shanghai', value: { daily: [] } }
+  assert.equal(pointStatsMatches(cached, 'hour', '24h', 'Asia/Shanghai'), true)
+  assert.equal(pointStatsMatches(cached, 'minute', '24h', 'Asia/Shanghai'), false)
+  assert.equal(pointStatsMatches(cached, 'hour', '3d', 'Asia/Shanghai'), false)
+  // R2-U1:宿主时区校正后同挡位不得复用旧时区请求写入的缓存
+  assert.equal(pointStatsMatches(cached, 'hour', '24h', 'UTC'), false)
+  assert.equal(pointStatsMatches(null, 'hour', '24h', 'Asia/Shanghai'), false)
 })
 
 // —— 时/分自定义时间范围:归一语义与预设挡一致(小时 floor 整点桶,分钟 from 对齐 10 分钟桶、to 保原分钟) ——
 
 const CUSTOM_FROM = '2026-03-14T09:45'
 const CUSTOM_TO = '2026-03-15T14:10'
+
+// 墙钟闭区间槽数:按分量差计,与宿主跨度上限同口径
+const hourSlotCount = (range) => {
+  const parts = (key) => {
+    const [year, month, day, hour] = key.split(/[-T]/).map(Number)
+    return [year, month - 1, day, hour]
+  }
+  return (Date.UTC(...parts(range.to)) - Date.UTC(...parts(range.from))) / (60 * 60 * 1000) + 1
+}
+
+test('U1 时段范围闭区间槽数不超过 361:15d 预设与自定义钳制同口径', () => {
+  // Given 15 天预设与超 15 天的自定义段 When 解析 Then 槽数均为 361(含两端桶)
+  assert.equal(hourSlotCount(resolveHourRange('15d', NOW)), 361)
+  assert.equal(hourSlotCount(resolveHourRange('7d', NOW)), 169)
+  assert.equal(hourSlotCount(resolveHourCustomRange('2026-02-20T00:00', CUSTOM_TO)), 361)
+})
 
 test('hour 自定义范围两端 floor 到所在小时桶', () => {
   // Given datetime 输入含分钟偏移 When 解析 Then 两端均取所在小时桶起点(闭区间)
@@ -272,6 +331,20 @@ test('resolvePointQuery 预设挡返回挡位键与滚动窗口请求', () => {
   const minute = resolvePointQuery('minute', '3h', '', '', NOW)
   assert.equal(minute.key, '3h')
   assert.deepEqual(minute.request, resolveMinuteRange('3h', NOW))
+})
+
+test('resolvePointQuery 返回宿主时区供点缓存命中校验,时区变化请求随之变化', () => {
+  // Given 同一时刻两个宿主日历 When 解析 24h 挡 Then 键同但请求与 timeZone 不同
+  const instant = new Date('2026-03-15T18:30:00Z')
+  const utc = resolvePointQuery('hour', '24h', '', '', instant, 'UTC')
+  const shanghai = resolvePointQuery('hour', '24h', '', '', instant, 'Asia/Shanghai')
+  assert.equal(utc.key, shanghai.key)
+  assert.equal(utc.timeZone, 'UTC')
+  assert.equal(shanghai.timeZone, 'Asia/Shanghai')
+  assert.deepEqual(utc.request, { from: '2026-03-14T18', to: '2026-03-15T18' })
+  assert.deepEqual(shanghai.request, { from: '2026-03-15T02', to: '2026-03-16T02' })
+  // 自定义挡同样携带时区,供缓存键拒绝跨时区复用
+  assert.equal(resolvePointQuery('hour', 'custom', CUSTOM_FROM, CUSTOM_TO, instant, 'UTC').timeZone, 'UTC')
 })
 
 test('resolvePointQuery 自定义挡键含归一范围且随范围变化', () => {
@@ -369,27 +442,58 @@ test('zh/en 词典键集完全一致', () => {
   assert.deepEqual(Object.keys(MESSAGES_ZH).sort(), Object.keys(MESSAGES_EN).sort())
 })
 
+test('en 词典值不含 CJK', () => {
+  const cjk = /[\u3400-\u4dbf\u4e00-\u9fff]/
+  for (const [key, value] of Object.entries(MESSAGES_EN)) {
+    assert.doesNotMatch(value, cjk, `en 词典 ${key} 仍含中文`)
+  }
+})
+
+test('zh/en 词典对象源无重复键', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../src/client.js'), 'utf8')
+  const blockOf = (name) => {
+    const marker = `const ${name} = {`
+    const start = source.indexOf(marker) + marker.length
+    assert.ok(start > marker.length, `${name} 词典缺失`)
+    return source.slice(start, source.indexOf('\n}\n', start))
+  }
+  for (const name of ['MESSAGES_ZH', 'MESSAGES_EN']) {
+    const keys = [...blockOf(name).matchAll(/^\s{2}(?:'([^']+)'|([A-Za-z0-9_.$]+)):\s/gm)]
+      .map((match) => match[1] ?? match[2])
+    assert.equal(new Set(keys).size, keys.length, `${name} 存在重复键`)
+  }
+})
+
 test('文案表覆盖 client.js 全部 t 键', () => {
   const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../src/client.js'), 'utf8')
-  const keys = [...source.matchAll(/\bt\('([^']+)'\)/g)].map((match) => match[1])
+  // 带参数的 t 调用(如 t('hudEtaMinutes', {...}))也要覆盖,不能只匹配零参形式
+  const keys = [...source.matchAll(/\bt\('([^']+)'[,)]/g)].map((match) => match[1])
   assert.ok(keys.length >= 10, `应从 client.js 抽到 t 调用,实际 ${keys.length}`)
   for (const key of keys) assert.ok(key in MESSAGES_ZH, `缺少文案键: ${key}`)
 })
 
-test('formatDuration/formatTokensCompact 传 en 翻译器输出官方口径', () => {
+test('formatDuration/formatTokensCompact 输出统一口径', () => {
   const enT = createTranslator(MESSAGES_EN)
   assert.equal(formatDuration(4500, enT), '4.5s')
   assert.equal(formatDuration(162000, enT), '2m42s')
-  assert.equal(formatTokensCompact(12200, enT), '12.2K')
-  assert.equal(formatTokensCompact(5000, enT), '5K')
+  assert.equal(formatTokensCompact(12200), '12.2K')
+  assert.equal(formatTokensCompact(5000), '5.0K')
 })
 
-test('数字格式化千分位与紧凑单位', () => {
+test('带单位的 token 统一三位整数加一位小数,单位到 Q 为止', () => {
   assert.equal(formatTokens(1234567), '1,234,567')
-  assert.equal(formatCompact(999), '999')
-  assert.equal(formatCompact(1234), '1.2k')
-  assert.equal(formatCompact(1234567), '1.2M')
-  assert.equal(formatCompact(2.5e9), '2.5B')
+  assert.equal(formatTokensCompact(999), '999')
+  assert.equal(formatTokensCompact(1234), '1.2K')
+  assert.equal(formatTokensCompact(123456), '123.5K')
+  assert.equal(formatTokensCompact(99999), '100.0K')
+  // 四舍五入到 1000.0 要进位,不能出现 1000.0K
+  assert.equal(formatTokensCompact(999999), '1.0M')
+  assert.equal(formatTokensCompact(425000000), '425.0M')
+  assert.equal(formatTokensCompact(20824000000), '20.8B')
+  assert.equal(formatTokensCompact(134100000000), '134.1B')
+  assert.equal(formatTokensCompact(12.3e12), '12.3T')
+  assert.equal(formatTokensCompact(1.5e15), '1.5Q')
+  assert.equal(formatTokensCompact(9.9e17), '990.0Q')
 })
 
 test('命中率文案零数据为占位符', () => {
@@ -1414,4 +1518,10 @@ test('hasAnomalyNews 折叠提醒判定:有异常日志或写入失败即提醒'
   assert.equal(hasAnomalyNews({ log: [], recordFailures: 0 }), false)
   assert.equal(hasAnomalyNews({}), false)
   assert.equal(hasAnomalyNews(null), false)
+})
+
+test('formatTokensCompact 超出 Q 档时钳在三位整数内', () => {
+  assert.equal(formatTokensCompact(1e18), '999.9Q')
+  assert.equal(formatTokensCompact(-1e21), '-999.9Q')
+  assert.equal(formatTokensCompact(9.99e17), '999.0Q')
 })

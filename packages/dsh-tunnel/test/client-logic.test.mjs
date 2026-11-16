@@ -15,7 +15,7 @@ function loadLogic(navigator) {
   const end = clientSource.indexOf('/* LOGIC-END */')
   assert.ok(start >= 0 && end > start, '缺少 LOGIC 标记')
   const code = clientSource.slice(start, end)
-  return new Function('navigator', code + '\nreturn { accessUrlOf, accessLocalOnly, copyText, createRefreshGate, isPageVisible, PATH_PREFIX, NAME_RE, NAME_HAS_LETTER_RE, ENTRY_PATH, ENTRY_SUBDOMAIN, PORT_MIN, PORT_MAX }')(navigator)
+  return new Function('navigator', code + '\nreturn { accessUrlOf, accessLocalOnly, copyText, createRefreshGate, isPageVisible, entryLabelOf, isEntryLabelConflict, defaultEntryFor, entryHintOf, relativeTime, statusOf, statusTextOf, statusToneOf, statsTextOf, tunnelRowVM, portView, suggestName, tunnelBodyOf, PATH_PREFIX, NAME_RE, NAME_HAS_LETTER_RE, ENTRY_PATH, ENTRY_SUBDOMAIN, PORT_MIN, PORT_MAX }')(navigator)
 }
 
 function constantOf(source, name) {
@@ -62,6 +62,102 @@ test('子域名地址: IP/localhost 入口退回 <名>.localhost 并标注仅本
   const domain = { protocol: 'http:', hostname: 'dsh.example.com', port: '3080', origin: 'http://dsh.example.com:3080' }
   assert.equal(logic.accessLocalOnly({ entry: 'subdomain' }, domain), false)
   assert.equal(logic.accessLocalOnly({ entry: 'path' }, domain), false)
+})
+
+/* 入口域首标签冲突(P2-44): 子域名隧道名等于入口域首标签会把整个 GUI 劫持到隧道目标。
+   服务端以宿主信任面为准;client 侧用 location.hostname 先拦一次,提交按钮同步禁用。 */
+test('入口域首标签: 取 hostname 首段, 无点主机名不产生标签', () => {
+  const logic = loadLogic(undefined)
+  assert.equal(logic.entryLabelOf('dsh.example.com'), 'dsh')
+  assert.equal(logic.entryLabelOf('gui.a.example.com'), 'gui', '多级域名同样取首标签(与 host 侧 firstLabelOf 同构)')
+  assert.equal(logic.entryLabelOf('DSH.Example.com'), 'dsh', '大小写归一')
+  assert.equal(logic.entryLabelOf('localhost'), '', '裸 localhost 没有子域名入口')
+  assert.equal(logic.entryLabelOf(undefined), '')
+  assert.equal(logic.entryLabelOf('127.0.0.1'), '127', '与 host 同构: 纯数字名已被字母规则排除')
+})
+
+test('入口域首标签冲突判定: 只有同名才算冲突', () => {
+  const logic = loadLogic(undefined)
+  assert.equal(logic.isEntryLabelConflict('dsh', 'dsh.example.com'), true)
+  assert.equal(logic.isEntryLabelConflict('app', 'dsh.example.com'), false)
+  assert.equal(logic.isEntryLabelConflict('app2', 'app.example.com'), false, '前缀相同不算')
+  assert.equal(logic.isEntryLabelConflict('dsh', 'localhost'), false)
+  assert.equal(logic.isEntryLabelConflict('', 'dsh.example.com'), false)
+})
+
+test('弹窗入口默认值: 本机访问优先子域名, 远程 IP 选路径', () => {
+  const logic = loadLogic(undefined)
+  assert.equal(logic.defaultEntryFor({ hostname: '127.0.0.1', port: '3080', protocol: 'http:', origin: 'http://127.0.0.1:3080' }), logic.ENTRY_SUBDOMAIN)
+  assert.equal(logic.defaultEntryFor({ hostname: 'localhost', port: '3080', protocol: 'http:', origin: 'http://localhost:3080' }), logic.ENTRY_SUBDOMAIN)
+  assert.equal(logic.defaultEntryFor({ hostname: '10.0.0.5', port: '3080', protocol: 'http:', origin: 'http://10.0.0.5:3080' }), logic.ENTRY_PATH)
+  assert.equal(logic.defaultEntryFor({ hostname: 'dsh.example.com', port: '', protocol: 'https:', origin: 'https://dsh.example.com' }), logic.ENTRY_SUBDOMAIN)
+  assert.match(logic.entryHintOf(logic.ENTRY_SUBDOMAIN, { hostname: '127.0.0.1' }), /仅本机/)
+  assert.match(logic.entryHintOf(logic.ENTRY_PATH, { hostname: '10.0.0.5' }), /手机/)
+})
+
+test('弹窗名称建议: 进程名转 slug 并用端口做后缀, 无字母进程回退 app', () => {
+  const logic = loadLogic(undefined)
+  assert.equal(logic.suggestName(8090, 'collectord.exe'), 'collectord-8090')
+  assert.equal(logic.suggestName(3000, 'My App'), 'my-app-3000')
+  assert.equal(logic.suggestName(5173, '12345'), 'app-5173')
+  const long = logic.suggestName(65535, 'a'.repeat(80))
+  assert.ok(long.length <= 32)
+  assert.match(long, new RegExp('^[a-z0-9-]+-' + 65535 + '$'))
+})
+
+test('提交体: 创建可带名称, 编辑绝不带 name(服务端名不可改)', () => {
+  const logic = loadLogic(undefined)
+  const draft = { name: 'app', targetPort: '8090', entry: 'path' }
+  assert.deepEqual(logic.tunnelBodyOf('create', draft, 'app'), { targetPort: 8090, entry: 'path', name: 'app' })
+  assert.deepEqual(logic.tunnelBodyOf('create', draft, ''), { targetPort: 8090, entry: 'path' })
+  assert.deepEqual(logic.tunnelBodyOf('edit', draft, 'app'), { targetPort: 8090, entry: 'path' })
+})
+
+test('状态模型: 停用优先于路由错误, 路由错误优先于健康探测', () => {
+  const logic = loadLogic(undefined)
+  assert.equal(logic.statusOf({ enabled: false, error: 'x', health: { state: 'online' } }), 'disabled')
+  assert.equal(logic.statusOf({ enabled: true, error: 'x', health: { state: 'online' } }), 'route_error')
+  assert.equal(logic.statusOf({ enabled: true, health: { state: 'online' } }), 'online')
+  assert.equal(logic.statusOf({ enabled: true, health: { state: 'offline' } }), 'offline')
+  assert.equal(logic.statusOf({ enabled: true }), 'unknown')
+  assert.equal(logic.statusTextOf('online'), '在监听')
+  assert.equal(logic.statusToneOf('route_error'), 'danger')
+})
+
+test('运行期统计: 零访问与有访问显示不同文案, 最近访问用相对时间', () => {
+  const logic = loadLogic(undefined)
+  const now = Date.parse('2026-11-15T10:10:00.000Z')
+  assert.equal(logic.statsTextOf(undefined, now), '本次运行暂无访问')
+  assert.equal(logic.statsTextOf({ requests: 0, lastAccessAt: null }, now), '本次运行暂无访问')
+  assert.match(logic.statsTextOf({ requests: 12, lastAccessAt: '2026-11-15T10:09:30.000Z' }, now), /12 次 · 30 秒前/)
+})
+
+test('端口视图: 默认过滤非候选, 搜索进程与端口, 容器转发器排后, 超量折叠', () => {
+  const logic = loadLogic(undefined)
+  const items = [
+    { port: 3000, process: 'node.exe', dev: true, bind: '127.0.0.1' },
+    { port: 8090, process: 'collectord.exe', dev: true, bind: '0.0.0.0' },
+    { port: 8080, process: 'wslrelay.exe', dev: true, bind: '0.0.0.0' },
+    { port: 445, process: 'System', dev: false, bind: '0.0.0.0' },
+  ]
+  const normal = logic.portView(items, { limit: 2 })
+  assert.deepEqual(normal.visible.map((item) => item.port), [3000, 8090])
+  assert.equal(normal.rest.length, 1)
+  assert.equal(normal.total, 3)
+  assert.deepEqual(logic.portView(items, { query: 'collect' }).visible.map((item) => item.port), [8090])
+  assert.deepEqual(logic.portView(items, { query: '3000' }).visible.map((item) => item.port), [3000])
+  assert.deepEqual(logic.portView(items, { showAll: true }).visible.map((item) => item.port), [3000, 8090, 445, 8080])
+})
+
+test('行视图模型: 地址/状态/统计一次派生, 供列表与菜单共用', () => {
+  const logic = loadLogic(undefined)
+  const location = { protocol: 'http:', hostname: '127.0.0.1', port: '3080', origin: 'http://127.0.0.1:3080' }
+  const vm = logic.tunnelRowVM({ name: 'app', entry: 'path', targetPort: 3000, status: 'online', stats: { requests: 2, lastAccessAt: null } }, location, Date.now())
+  assert.equal(vm.url, 'http://127.0.0.1:3080/p/app/')
+  assert.equal(vm.status, 'online')
+  assert.equal(vm.statusText, '在监听')
+  assert.equal(vm.statsText, '本次运行 2 次')
+  assert.equal(vm.localOnly, false)
 })
 
 function fakeDocument(execResult) {

@@ -2,8 +2,6 @@
 // coverage 语义: null/unknown=情况未知,0/complete=确有报告且为零,部分缺失=partial(DATA-15)
 import { fail, pass } from './command.mjs'
 
-const COVERAGE = ['complete', 'partial', 'unknown']
-
 function tokensOf(usage) {
   const input = usage?.inputTokens
   const output = usage?.outputTokens
@@ -48,6 +46,44 @@ export function mergeRunUsage(aggregate, { runId, usage, completeUsage = false }
   next = { ...aggregate, usageLedger: ledger }
   next.runs = { ...aggregate.runs, [runId]: { ...run, tokenTotal, usageCoverage: coverage, unknownUsageCount: unknownCount, knownTokenTotal: knownTotal } }
   return pass({ aggregate: next })
+}
+
+// 跟随期观察:把一次模型调用的用量挂在 Run 上,终态收敛时才并入台账。
+// usage 为 null 表示该次调用没有报用量(coverage 因此不能算 complete)。
+export function noteRunUsage(aggregate, { runId, invocationKey, usage }) {
+  const run = aggregate.runs[runId]
+  if (!run) return fail('NOT_FOUND', `Run 不存在: ${runId}`)
+  if (typeof invocationKey !== 'string' || !invocationKey) return fail('INVALID_ARGUMENT', '用量缺少 invocationKey')
+  const observed = { ...(run.observedUsage ?? {}) }
+  if (Object.hasOwn(observed, invocationKey)) {
+    return JSON.stringify(observed[invocationKey]) === JSON.stringify(usage)
+      ? pass({ aggregate, replayed: true })
+      : fail('INVALID_ARGUMENT', `同 invocationKey 用量不一致: ${invocationKey}`)
+  }
+  observed[invocationKey] = usage
+  return pass({ aggregate: { ...aggregate, runs: { ...aggregate.runs, [runId]: { ...run, observedUsage: observed } } } })
+}
+
+// Run 终态收敛:观察到的逐调用用量并入台账与 tokenTotal,随后清空观察区避免与台账双份。
+// completeUsage=true 表示"确有证据本轮零调用"(如派发在 prompt 受理前即被拒):此时按明确零入账,
+// coverage 才可能落到 complete;否则缺观察项只能算 unknown/partial。
+export function convergeRunUsage(aggregate, runId, { completeUsage = false } = {}) {
+  const run = aggregate.runs[runId]
+  if (!run) return fail('NOT_FOUND', `Run 不存在: ${runId}`)
+  let next = aggregate
+  const observed = Object.entries(run.observedUsage ?? {})
+  for (const [invocationKey, usage] of observed) {
+    const merged = mergeRunUsage(next, { runId, usage: usage === null ? null : { ...usage, invocationKey } })
+    if (!merged.ok) return merged
+    next = merged.result.aggregate
+  }
+  if (completeUsage && observed.length === 0) {
+    const merged = mergeRunUsage(next, { runId, usage: null, completeUsage: true })
+    if (!merged.ok) return merged
+    next = merged.result.aggregate
+  }
+  const { observedUsage, ...rest } = next.runs[runId]
+  return pass({ aggregate: { ...next, runs: { ...next.runs, [runId]: rest } } })
 }
 
 // Task 汇总:全部 Run 并集;unknown 不换算为 0

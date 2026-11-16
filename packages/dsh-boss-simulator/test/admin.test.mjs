@@ -2,6 +2,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
+import { gatedWrite } from './fixtures/write-gate.mjs'
 import { createBoardApi } from '../lib/board.mjs'
 
 function jsonRes() {
@@ -107,7 +108,8 @@ test('POST admin:跨源拒绝 403,非法 action 400(均未创建)', async () => 
   const store = makeStore()
   const { api, createdCount } = adminApi(store)
   const cross = jsonRes()
-  await api.handleAdmin(streamReq({ method: 'POST', headers: { host: 'h', origin: 'http://evil' }, body: { action: 'create', commandId: randomUUID() } }), cross)
+  // 闸门在生产接线层(withRouteGate);直调 handler 不承担跨源判断
+  await gatedWrite(api.handleAdmin)(streamReq({ method: 'POST', headers: { host: 'h', origin: 'http://evil' }, body: { action: 'create', commandId: randomUUID() } }), cross)
   assert.equal(cross.status, 403)
   const badAction = jsonRes()
   await api.handleAdmin(streamReq({ method: 'POST', headers: { host: 'h', origin: 'http://h' }, body: { action: 'prompt', commandId: randomUUID() } }), badAction)

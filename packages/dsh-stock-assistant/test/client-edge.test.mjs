@@ -10,7 +10,7 @@ async function loadClientWithReact() {
   const clock = createTestClock()
   const window = { __ModuleLoader__: { load: entry => { plugin = entry.factory(name => name === 'react' ? React : {}) } } }
   vm.runInNewContext(source, { window, console, fetch: globalThis.fetch, AbortController, URLSearchParams, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, setInterval: clock.setInterval, clearInterval: clock.clearInterval, crypto: globalThis.crypto })
-  return { plugin, clock }
+  return { plugin, clock, window }
 }
 // 测试时钟:定时器只在 advance/until 推进。负载下真实退避(4s retryAfter 缺省)与
 // 11s abort 门不再与用例超时窗口竞速;被杀用例的在飞链也不会以真实定时器形态泄漏
@@ -508,12 +508,12 @@ test('bootstrap: 全能力路由补全', async () => {
   const start = src.indexOf('const CAP_ORDER')
   const end = src.indexOf('const BROWSE_MARKETS')
   const bootstrapRoutes = new Function(`${src.slice(start, end)}; return bootstrapRoutes`)()
-  const adapters = [{ adapterId: 'eastmoney', capabilities: ['quotes', 'kline', 'search', 'catalog'], markets: ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS'] }]
+  const adapters = [{ adapterId: 'eastmoney', capabilities: ['quotes', 'kline', 'trend', 'search', 'catalog'], markets: ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS'] }]
   const providers = [{ id: 'em-default', adapterId: 'eastmoney', enabled: true }]
   const existing = [{ id: 'xshg-quotes', capability: 'quotes', market: 'XSHG', instrument: 'equity', primaryInstanceId: 'em-default', fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true }]
   const routes = bootstrapRoutes({ adapters, providers, routes: existing })
-  assert.equal(routes.length, 20, '5市场×4能力全补齐')
-  for (const cap of ['quotes', 'kline', 'catalog', 'search']) for (const m of ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS']) assert.ok(routes.some(r => r.market === m && r.capability === cap), `${m}/${cap} 存在`)
+  assert.equal(routes.length, 25, '5市场×5能力全补齐')
+  for (const cap of ['quotes', 'kline', 'trend', 'catalog', 'search']) for (const m of ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS']) assert.ok(routes.some(r => r.market === m && r.capability === cap), `${m}/${cap} 存在`)
   assert.equal(routes.find(r => r.market === 'XHKG' && r.capability === 'kline').primaryInstanceId, 'em-default', '主源=启用实例')
   // 多实例: quotes 主源跟随既有 quotes 路由的实例选择
   const adapters2 = [...adapters, { adapterId: 'sina', capabilities: ['quotes', 'catalog'], markets: ['XSHG', 'XSHE'] }]
@@ -522,17 +522,17 @@ test('bootstrap: 全能力路由补全', async () => {
   assert.equal(routes2.find(r => r.market === 'XSHG' && r.capability === 'catalog').primaryInstanceId, 'sn-catalog', '目录优先专属适配器(唯一支持者)')
   // 无启用实例: 返回原样不炸
   assert.equal(bootstrapRoutes({ adapters, providers: [{ id: 'x', adapterId: 'eastmoney', enabled: false }], routes: existing }).length, 1)
-  // 备源上限 1: 多实例支持同市场同能力时只取首个支持者, 否则 schema 拒绝整份配置
+  // 推荐配置只给一个备源(默认值, 不是上限): schema 允许三个, 用户可以自己加
   const adapters3 = [{ adapterId: 'eastmoney', capabilities: ['quotes'], markets: ['XSHG'] }, { adapterId: 'sina', capabilities: ['quotes'], markets: ['XSHG'] }, { adapterId: 'tencent', capabilities: ['quotes'], markets: ['XSHG'] }]
   const providers3 = adapters3.map((a, i) => ({ id: 'p' + i, adapterId: a.adapterId, enabled: true }))
   const routes3 = bootstrapRoutes({ adapters: adapters3, providers: providers3, routes: [] })
   assert.equal(routes3.length, 1)
-  assert.equal(routes3[0].fallbackInstanceIds.length, 1, '备源最多一个')
-  // 只有 quotes/kline 支持备源: 目录与搜索路由恒无备源且不自动切换
+  assert.equal(routes3[0].fallbackInstanceIds.length, 1, '默认只配一个备源')
+  // 只有报价/K线/分时类支持备源: 目录与搜索路由恒无备源且不自动切换
   const adapters4 = [{ adapterId: 'eastmoney', capabilities: ['catalog', 'search'], markets: ['XSHG'] }, { adapterId: 'sina', capabilities: ['catalog'], markets: ['XSHG'] }]
   const providers4 = adapters4.map((a, i) => ({ id: 'q' + i, adapterId: a.adapterId, enabled: true }))
   for (const r of bootstrapRoutes({ adapters: adapters4, providers: providers4, routes: [] })) {
-    if (!['quotes', 'kline'].includes(r.capability)) { assert.deepEqual(r.fallbackInstanceIds, [], `${r.capability} 无备源`); assert.equal(r.failoverMode, 'off', `${r.capability} 不自动切换`) }
+    if (!['quotes', 'kline', 'trend'].includes(r.capability)) { assert.deepEqual(r.fallbackInstanceIds, [], `${r.capability} 无备源`); assert.equal(r.failoverMode, 'off', `${r.capability} 不自动切换`) }
   }
 })
 // 探针失败按目标粒度剔除: 主源不可用提升备源, 备源不可用仅移除备源, 全部不可用才删路由
@@ -777,6 +777,126 @@ test('设置页为需凭据的实例渲染密钥输入', async () => {
   assert.match(html, /type="password"/, '密钥用密码框, 不回显')
   assert.match(html, /保存密钥/, '有保存动作')
   assert.doesNotMatch(html, /保存密钥<\/button><\/div><button[^>]*>清除/, '未配置时没有清除按钮')
+})
+
+// P1-11: 禁用/移除仍被路由引用的实例后, 保存数据源必须提交剪掉悬空引用的草稿路由
+test('P1-11 禁用或移除被引用实例后保存数据源不再带悬空路由', async () => {
+  const { plugin } = await loadClientWithReact()
+  const { routesForProviders, providerChangeDraft, settingsSavePayload } = plugin.__testing
+  const instance = (id, enabled = true) => ({ id, adapterId: 'eastmoney', enabled, credentialRef: null, quotaGroup: 'g', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } })
+  const saved = { providers: [instance('em'), instance('tx')], routes: [
+    { id: 'a', capability: 'quotes', market: 'XSHG', instrument: 'equity', primaryInstanceId: 'em', fallbackInstanceIds: ['tx'], failoverMode: 'network', maxDelaySeconds: null, acceptUnknownDelay: true },
+    { id: 'b', capability: 'kline', market: 'XSHG', instrument: 'equity', primaryInstanceId: 'tx', fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true },
+  ] }
+  const draft = { providers: saved.providers, routes: saved.routes, expectedRevision: 1, checkResults: [], probes: {} }
+  // 关闭 tx: 主源是 tx 的 b 路由被剪掉, a 的备用引用清空且 failoverMode 回落 off
+  const disabled = providerChangeDraft(draft, 'tx', { enabled: false })
+  assert.deepEqual(disabled.routes.map(route => route.id), ['a'])
+  assert.deepEqual(disabled.routes[0].fallbackInstanceIds, [])
+  assert.equal(disabled.routes[0].failoverMode, 'off')
+  const payload = settingsSavePayload('sources', disabled, saved)
+  assert.equal(payload.routes.some(route => route.primaryInstanceId === 'tx' || route.fallbackInstanceIds.includes('tx')), false, '保存载荷不得引用禁用实例')
+  // 移除 tx: 与禁用同样收敛
+  const removed = { providers: saved.providers.filter(p => p.id !== 'tx'), routes: saved.routes }
+  assert.deepEqual(routesForProviders(removed.routes, removed.providers).map(route => route.id), ['a'])
+  // 路由页保存仍提交完整草稿(不受数据源页剪枝影响)
+  assert.deepEqual(JSON.parse(JSON.stringify(settingsSavePayload('routes', draft, saved))), JSON.parse(JSON.stringify({ providers: saved.providers, routes: saved.routes })))
+})
+
+test('一键检查剔掉失效备源后, 其余备源原样保留', async () => {
+  const { plugin } = await loadClientWithReact()
+  const { pruneDeniedTargets } = plugin.__testing
+  const route = { id: 'a', capability: 'quotes', market: 'XSHG', instrument: 'equity', primaryInstanceId: 'em', fallbackInstanceIds: ['tx', 'sina', 'xq'], failoverMode: 'network', maxDelaySeconds: null, acceptUnknownDelay: true }
+  const kept = pruneDeniedTargets([route], new Set(['tx:quotes:XSHG']))
+  assert.deepEqual([...kept[0].fallbackInstanceIds], ['sina', 'xq'], '禁用第一个备源不该把后面的备源一起剪掉')
+  const onlyPrimary = pruneDeniedTargets([route], new Set(['tx:quotes:XSHG', 'sina:quotes:XSHG', 'xq:quotes:XSHG']))
+  assert.equal(onlyPrimary[0].failoverMode, 'off', '没有备源可退时自动切换回落关闭')
+})
+
+test('P2-56 wanted 按 overlay 计算: 设置页停止采集, 浏览/搜索详情仍采集', async () => {
+  const { plugin } = await loadClientWithReact()
+  const messages = []
+  let panel = 'stock-assistant'
+  const runtime = plugin.__testing.createPageRuntime({
+    layout: { panelInfo: { getSnapshot: () => ({ activePanelId: panel }), subscribe: () => () => {} } },
+    bus: { publish: message => messages.push(message), subscribe: () => () => {} },
+    tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) },
+    document: { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} },
+  })
+  assert.equal(messages.at(-1)?.active, true, '列表页采集')
+  runtime.updateView({ overlay: 'settings' })
+  assert.equal(messages.at(-1)?.active, false, '设置弹窗压住列表时停止采集')
+  runtime.updateView({ view: 'browse', overlay: 'detail', detailId: 'XSHG:equity:600519' })
+  assert.equal(messages.at(-1)?.active, true, '浏览打开的详情仍需采集')
+  runtime.updateView({ view: 'search', overlay: null })
+  assert.equal(messages.at(-1)?.active, false, '搜索主视图不采集')
+  panel = null; runtime.updateView({ view: 'list' })
+  assert.equal(messages.at(-1)?.active, false, '面板不在前台不采集')
+  runtime.dispose()
+})
+
+test('P2-60 首屏快照未到时浏览市场不构造半截 data', async () => {
+  const { plugin } = await loadClientWithReact()
+  const runtime = plugin.__testing.createPageRuntime({
+    layout: { panelInfo: { getSnapshot: () => ({ activePanelId: 'stock-assistant' }), subscribe: () => () => {} } },
+    bus: { publish() {}, subscribe: () => () => {} },
+    tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) },
+    document: { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} },
+    fetch: async () => ({ ok: true, json: async () => ({ ok: true, data: { syncing: false, total: 1, items: [{ id: 'XSHG:equity:600519', exchange: 'XSHG', code: '600519', officialName: '贵州茅台' }], overview: { name: '上证指数' } } }) }),
+  })
+  assert.equal(runtime.getSnapshot().data, null)
+  await runtime.loadBrowse('XSHG', 0)
+  const snapshot = runtime.getSnapshot()
+  assert.equal(snapshot.data, null, '没有快照时不能凭空构造 data')
+  assert.equal(snapshot.view.browseRows.length, 1)
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime, layout: {} }))
+  assert.match(html, /正在加载股票工具/, '首屏空态可完整渲染')
+  runtime.dispose()
+})
+
+test('P2-61 浏览市场首次同步中显示等待提示而非空白页', async () => {
+  const { plugin } = await loadClientWithReact()
+  const state = { view: { view: 'browse', overlay: null, browseRows: [], browseSyncing: true, browseMarket: 'XSHG', browseOffset: 0, browseTotal: 0 }, busy: {}, data: { control: { watchlist: { order: [], items: {} }, providers: [], routes: [{ capability: 'catalog', market: 'XSHG' }], preferences: {} }, quotes: {} } }
+  const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadBrowse: () => Promise.resolve() }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
+  assert.match(html, /目录首次同步中/)
+})
+
+test('P2-54 详情标的被移除时渲染空态而不是白屏', async () => {
+  const { plugin } = await loadClientWithReact()
+  const state = { view: { view: 'list', overlay: 'detail', detailId: 'XSHG:equity:600519', sort: 'manual' }, busy: {}, data: { control: { revision: 1, watchlist: { order: [], items: {} }, preferences: {} }, quotes: {} } }
+  const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, openDetail: () => {}, mutate: async () => {}, refresh: async () => {} }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
+  assert.match(html, /选择一只证券查看基础行情/)
+})
+
+test('P2-55 ensureLwc 首次失败后第二次详情可重试加载', async () => {
+  const { plugin, window } = await loadClientWithReact()
+  const doc = { scripts: [], querySelector() { return this.scripts.find(script => script.dataset.lwc) || null }, createElement() { const script = { dataset: {}, listeners: {}, addEventListener(type, fn) { this.listeners[type] = fn }, remove() { doc.scripts = doc.scripts.filter(other => other !== script) } }; return script }, head: { appendChild(script) { doc.scripts.push(script) } } }
+  const first = plugin.__testing.ensureLwc(doc)
+  assert.equal(doc.scripts.length, 1)
+  doc.scripts[0].onerror()
+  await assert.rejects(first, /图表组件不可用/)
+  assert.equal(doc.scripts.length, 0, '失败脚本必须移除, 不能留坏脚本继续等事件')
+  const second = plugin.__testing.ensureLwc(doc)
+  assert.equal(doc.scripts.length, 1, '第二次必须重建脚本')
+  window.LightweightCharts = { createChart() {} }
+  doc.scripts[0].onload()
+  assert.equal(await second, window.LightweightCharts)
+})
+
+test('设置页市场与能力页出现分时来源格, 预算里有分时额度', async () => {
+  const { plugin } = await loadClientWithReact()
+  const provider = { id: 'em-1', adapterId: 'eastmoney', enabled: true, credentialRef: null, quotaGroup: 'free-quote', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: { trend: 30 } } }
+  const routes = ['catalog', 'search', 'quotes', 'kline', 'trend'].map(capability => ({ id: `xhkg-${capability}`, capability, market: 'XHKG', instrument: 'equity', primaryInstanceId: 'em-1', fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true }))
+  const state = { view: { view: 'list', overlay: 'settings', sort: 'manual', alias: '', settingsDraft: { providers: [provider], routes, expectedRevision: 1, checkResults: [], probes: {}, expandedProvider: 'em-1', expandedMarket: 'XHKG', tab: 'routes', colorMode: 'red-up', klineAutoLoad: true } }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', paused: false, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: { colorMode: 'red-up', refreshSeconds: 15 }, providers: [provider], routes }, quotes: {}, adapters: [{ adapterId: 'eastmoney', capabilities: ['quotes', 'catalog', 'search', 'kline', 'trend'], markets: ['XSHG', 'XSHE', 'XHKG'], credential: 'none' }], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
+  const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, api: () => Promise.resolve({}), applySnapshot: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
+  assert.match(html, /分时/, '市场与能力页要有分时来源格')
+  // 预算字段在数据源页, 单独渲染一次
+  state.view.settingsDraft.tab = 'sources'
+  const sources = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
+  assert.match(sources, /分时每分钟上限/, '预算里分时可单独限流')
 })
 
 test('设置页凭据已就绪时给出清除入口', async () => {

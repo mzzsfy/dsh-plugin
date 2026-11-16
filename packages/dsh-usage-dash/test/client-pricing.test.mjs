@@ -7,7 +7,6 @@ const core = new Function(`${CLIENT_BODY}\nreturn { ${DECLARATION_NAMES.join(', 
 
 const {
   MODEL_USAGE_PROJECTION,
-  buildCostItem,
   buildSessionCostItem,
   ensureGlobalDefault,
   normalizePricingRules,
@@ -37,13 +36,13 @@ const usage = (overrides = {}) => ({
 })
 const modelUsage = (hours) => ({ hours })
 
-test('Given 无 routes When buildCostItem Then 不按 */* 猜价而显示占位符', () => {
-  assert.equal(buildCostItem(usage(), [rule('*/*', price(1, 4, 0.02, 0))], prefs, t), '—')
+test('Given 无 routes When buildSessionCostItem Then 不按 */* 猜价而显示占位符', () => {
+  assert.equal(buildSessionCostItem(usage(), null, [rule('*/*', price(1, 4, 0.02, 0))], prefs, t)?.text, '—')
 })
 
-test('Given routes 只有裸模型名 When buildCostItem Then 用两段键命中精确规则', () => {
+test('Given routes 只有裸模型名 When buildSessionCostItem Then 用两段键命中精确规则', () => {
   const rules = [rule('newapi/auto-free', price()), rule('*/*', price(1, 4, 0.02, 0))]
-  assert.equal(buildCostItem(usage({ routes: [{ model: 'newapi/auto-free' }] }), rules, prefs, t), '费用 ≈ ¥0.77')
+  assert.equal(buildSessionCostItem(usage({ routes: [{ model: 'newapi/auto-free' }] }), null, rules, prefs, t)?.text, '费用 ≈ ¥0.77')
 })
 
 test('Given 多级模型名 oc/xx/xx When buildSessionCostItem Then 精确规则按整键命中', () => {

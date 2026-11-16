@@ -1,9 +1,15 @@
 // 业务工具只对唯一管理员入口开放,执行/验收报告通过服务端事件读取而非模型工具直写。
-import { createTask, defineWorkItem, authorizeTask, requestResume, closeTask, confirmResume } from './core/task.mjs'
+import { createTask, defineWorkItem, authorizeTask, requestResume, closeTask, confirmResume, hasActiveRuns, expireStaleRuns } from './core/task.mjs'
 import { createRunService } from './run-service.mjs'
 
+const DELETE_CONFIRM = 'delete'
+
 const ROLE_CAPABILITIES = {
-  admin: new Set(['boss_simulator_create_task', 'boss_simulator_define_workitem', 'boss_simulator_authorize_task', 'boss_simulator_request_resume', 'boss_simulator_query_tasks', 'boss_simulator_dispatch_run', 'boss_simulator_close_task', 'boss_simulator_confirm_resume']),
+  admin: new Set([
+    'boss_simulator_create_task', 'boss_simulator_define_workitem', 'boss_simulator_authorize_task',
+    'boss_simulator_request_resume', 'boss_simulator_query_tasks', 'boss_simulator_dispatch_run',
+    'boss_simulator_close_task', 'boss_simulator_confirm_resume', 'boss_simulator_delete_task',
+  ]),
 }
 
 function assertRole(caller, tool) {
@@ -23,10 +29,12 @@ function updateTask(store, taskId, transition) {
   })
 }
 
-export function createAgentTools(deps) {
-  const { store, now } = deps
+// resolve:使用点取控制运行时(控制室卸载后不得沿用旧运行时)
+export function createAgentTools(resolve) {
   async function handle(tool, args, caller) {
     assertRole(caller, tool)
+    const deps = resolve()
+    const { store, now } = deps
     if (tool === 'boss_simulator_create_task') {
       if (await store.loadAggregate(args.taskId)) throw new Error(`任务已存在: ${args.taskId}`)
       const created = requireOk(createTask({ taskId: args.taskId, title: args.title, projectWorkspaceId: args.projectWorkspaceId, definition: args.definition, priority: args.priority, now }))
@@ -64,7 +72,17 @@ export function createAgentTools(deps) {
       return deps.confirmResume(args)
     }
     if (tool === 'boss_simulator_query_tasks') {
-      return { ok: true, aggregate: await store.loadAggregate(args.taskId) }
+      const aggregate = await store.loadAggregate(args.taskId)
+      // 读面 stale 收敛(纯内存):与看板投影同源,避免同一数据两套事实
+      return { ok: true, aggregate: aggregate === undefined ? aggregate : (expireStaleRuns(aggregate).result?.aggregate ?? aggregate) }
+    }
+    if (tool === 'boss_simulator_delete_task') {
+      if (args.confirm !== DELETE_CONFIRM) throw new Error(`删除任务须显式确认(confirm: ${DELETE_CONFIRM})`)
+      const aggregate = await store.loadAggregate(args.taskId)
+      if (!aggregate) throw new Error(`任务不存在: ${args.taskId}`)
+      if (hasActiveRuns(expireStaleRuns(aggregate).result?.aggregate ?? aggregate)) throw new Error('任务存在未核清 Run,须先停止或强制停止后再删除')
+      await store.deleteAggregate(args.taskId)
+      return { ok: true, taskId: args.taskId, deleted: true }
     }
     throw new Error(`未知工具: ${tool}`)
   }

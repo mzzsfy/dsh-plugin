@@ -8,6 +8,11 @@ import { EventEmitter } from 'node:events'
 
 import { apply } from '../src/index.js'
 
+// 浏览器 client 全部经 api() 以 application/json 发送;写请求默认带 JSON 头,
+// 使业务用例不受共享闸门的 content-type 门影响(守卫差异由专门用例显式覆盖)
+const JSON_HEADERS = { 'content-type': 'application/json' }
+const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+
 // res 桩带事件能力:投影处理器挂 close 事件感知断连,桩须支持 once
 function makeRes() {
   const res = new EventEmitter()
@@ -22,7 +27,7 @@ function makeReq(method, payload, headers) {
   const req = new EventEmitter()
   req.method = method
   req.url = '/api/turn-notify/config'
-  req.headers = { host: '127.0.0.1:3080', ...(headers || {}) }
+  req.headers = { host: '127.0.0.1:3080', ...(WRITE_METHODS.has(method) ? JSON_HEADERS : {}), ...(headers || {}) }
   const data = payload === undefined ? null : Buffer.from(JSON.stringify(payload))
   process.nextTick(() => {
     if (data !== null) req.emit('data', data)
@@ -31,8 +36,6 @@ function makeReq(method, payload, headers) {
   })
   return req
 }
-
-const JSON_HEADERS = { 'content-type': 'application/json' }
 
 function makeSettings() {
   const doc = new Map()
@@ -123,7 +126,178 @@ test('N1 Given 同名会话与无标题会话 When host事件投影 Then 保留�
   assert.equal((await projectionUnits(bare.routes))[0].sessionId, 'no-title')
 })
 
-test('Given 子代理刚结束 When 父会话唤醒回合以 completed 结束 Then 投影无完成通知', async () => {
+// P2-45 归档会话不进入 host 通知链路:权威集合按根会话过滤,未就绪按未知放行
+test('P2-45 Given 根会话已归档 When 回合结束/审批/提问 Then 全部不产生通知;解除归档恢复', async () => {
+  const archived = new Set(['M'])
+  const { ctx, routes, handlers } = makeCtx({ workspaceRegistry: { get archivedSessionIds() { return [...archived] } } })
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(MAIN, turnEnd('completed'))
+  onEvent(MAIN, { type: 'approval/asked', data: { id: 'ap-1', toolName: 'bash' } })
+  onEvent(MAIN, toolCall('ask_user_question'))
+  assert.equal((await projectionUnits(routes)).length, 0, '归档会话不产生任何分类通知')
+  archived.clear()
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(MAIN, turnEnd('completed'))
+  const units = await projectionUnits(routes)
+  assert.equal(units.filter((unit) => unit.category === 'completed').length, 1, '解除归档后恢复通知')
+})
+
+test('P2-45 Given 根会话已归档 When 放开子代理过滤产生子代理事件 Then 按根会话过滤', async () => {
+  const archived = new Set(['M'])
+  const { ctx, routes, handlers } = makeCtx({ workspaceRegistry: { get archivedSessionIds() { return [...archived] } } })
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const config = makeRes()
+  await routes.get('/api/turn-notify/config')(makeReq('POST', { rootsOnly: false }, JSON_HEADERS), config)
+  assert.equal(config.status, 200)
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(CHILD, { type: 'turn/start' })
+  onEvent(CHILD, turnEnd('completed'))
+  const grandchild = { id: 'G', header: { origin: 'subagent', parentSession: 'S', delegationDepth: 2 } }
+  onEvent(grandchild, { type: 'turn/start' })
+  onEvent(grandchild, turnEnd('completed'))
+  assert.equal((await projectionUnits(routes)).length, 0, '直接与多级子代理都归结到已归档根会话')
+})
+
+test('Given rootsOnly=false When 多级子代理完成 Then unit 携带已归结的根会话 id', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const config = makeRes()
+  await routes.get('/api/turn-notify/config')(makeReq('POST', { rootsOnly: false }, JSON_HEADERS), config)
+  assert.equal(config.status, 200)
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(CHILD, { type: 'turn/start' })
+  onEvent(CHILD, turnEnd('completed'))
+  const grandchild = { id: 'G', header: { origin: 'subagent', parentSession: 'S', delegationDepth: 2 } }
+  onEvent(grandchild, { type: 'turn/start' })
+  onEvent(grandchild, turnEnd('completed'))
+  const units = await projectionUnits(routes)
+  const childUnit = units.find((unit) => unit.sessionId === 'S')
+  const grandchildUnit = units.find((unit) => unit.sessionId === 'G')
+  assert.equal(childUnit.rootSessionId, 'M', '直接子代理 unit 必须携带根会话 id')
+  assert.equal(grandchildUnit.rootSessionId, 'M', '多级子代理 unit 必须携带根会话 id')
+})
+
+test('F1 Given 中间子代理已 disposed When 孙代理完成 Then 根 id 仍为根会话且归档过滤按根', async () => {
+  const archived = new Set()
+  const { ctx, routes, handlers } = makeCtx({ workspaceRegistry: { get archivedSessionIds() { return [...archived] } } })
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const config = makeRes()
+  await routes.get('/api/turn-notify/config')(makeReq('POST', { rootsOnly: false }, JSON_HEADERS), config)
+  assert.equal(config.status, 200)
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(CHILD, { type: 'turn/start' })
+  handlers.get('session/disposed')(CHILD)
+  const grandchild = { id: 'G', header: { origin: 'subagent', parentSession: 'S', delegationDepth: 2 } }
+  onEvent(grandchild, { type: 'turn/start' })
+  onEvent(grandchild, turnEnd('completed'))
+  let units = await projectionUnits(routes)
+  const grandchildUnit = units.find((unit) => unit.sessionId === 'G')
+  assert.equal(grandchildUnit.rootSessionId, 'M', '中间会话 disposed 后孙代理仍须归结根会话,不得把 S 当根')
+  archived.add('M')
+  const before = units.length
+  onEvent(grandchild, { type: 'turn/start' })
+  onEvent(grandchild, turnEnd('completed'))
+  units = await projectionUnits(routes)
+  assert.equal(units.length, before, '归档过滤必须按根会话 M,不得按中间会话 S 漏放行')
+})
+
+test('F1 Given 父头缺失且无根缓存 When 子代理完成 Then rootSessionId 为 null 而非中间 id', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const config = makeRes()
+  await routes.get('/api/turn-notify/config')(makeReq('POST', { rootsOnly: false }, JSON_HEADERS), config)
+  assert.equal(config.status, 200)
+  const orphanChild = { id: 'G', header: { origin: 'subagent', parentSession: 'UNSEEN', delegationDepth: 2 } }
+  const onEvent = handlers.get('session/event')
+  onEvent(orphanChild, { type: 'turn/start' })
+  onEvent(orphanChild, turnEnd('completed'))
+  const unit = (await projectionUnits(routes)).find((item) => item.sessionId === 'G')
+  assert.equal(unit.rootSessionId, null, '父头未知时不得回退到中间 id UNSEEN')
+})
+
+test('P2-45 Given 归档服务未就绪 When 回合完成 Then 按未知放行,不把未知当空集误拦', async () => {
+  const { ctx, routes, handlers } = makeCtx({ workspaceRegistry: { get archivedSessionIds() { throw new Error('workspace registry is not started yet') } } })
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(MAIN, turnEnd('completed'))
+  const units = await projectionUnits(routes)
+  assert.equal(units.filter((unit) => unit.category === 'completed').length, 1)
+})
+
+// 会话销毁释放观察账本:同 id 重建时不沿用旧标题封账
+test('Given 会话 disposed 后同 id 重建 When 提取标题 Then 旧标题不残留', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  const onEvent = handlers.get('session/event')
+  onEvent({ id: 'S', header: {} }, { type: 'user/message', data: { content: [{ type: 'text', text: '旧标题' }] } })
+  onEvent({ id: 'S', header: {} }, toolCall('ask_user_question'))
+  let units = await projectionUnits(routes)
+  assert.equal(units[0].session, '旧标题')
+  handlers.get('session/disposed')({ id: 'S', header: {} })
+  onEvent({ id: 'S', header: {} }, { type: 'user/message', data: { content: [{ type: 'text', text: '新标题' }] } })
+  onEvent({ id: 'S', header: {} }, toolCall('ask_user_question'))
+  units = await projectionUnits(routes)
+  assert.equal(units.at(-1).session, '新标题', 'disposed 后标题封账状态必须释放')
+})
+
+test('Given 会话 disposed 后同 id 新回合 When 统计尾部 Then 旧 tokens 不残留', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(MAIN, { type: 'assistant/message', data: { usage: { inputTokens: 100, outputTokens: 0 }, message: { content: [] } } })
+  handlers.get('session/disposed')({ id: 'M', header: {} })
+  onEvent(MAIN, { type: 'assistant/message', data: { usage: { inputTokens: 50, outputTokens: 0 }, message: { content: [] } } })
+  onEvent(MAIN, turnEnd('completed'))
+  const unit = (await projectionUnits(routes)).find((item) => item.category === 'completed')
+  assert.equal(unit.tokens, 50, 'disposed 后 assistant 尾部账本必须释放')
+})
+
+test('T1 Given 子代理被销毁 When 父会话同回合以 completed 结束 Then 收尾结算且仍通知', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(MAIN, toolCall('subagent'))
+  onEvent(CHILD, { type: 'turn/start' })
+  handlers.get('session/disposed')(CHILD)
+  onEvent(MAIN, turnEnd('completed'))
+  const units = await projectionUnits(routes)
+  assert.equal(units.filter((unit) => unit.category === 'completed').length, 1, '销毁的子代理必须删除自身 childActive 并结算父回合委托,父 completed 不得被压 1 小时')
+})
+
+test('T1 Given 一个子代理被销毁另一个仍运行 When 父会话回合结束 Then 仍等待未收尾子代理', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const onEvent = handlers.get('session/event')
+  const CHILD2 = { id: 'S2', header: { origin: 'subagent', parentSession: 'M', delegationDepth: 1 } }
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(MAIN, toolCall('subagent'))
+  onEvent(CHILD, { type: 'turn/start' })
+  onEvent(MAIN, toolCall('subagent'))
+  onEvent(CHILD2, { type: 'turn/start' })
+  handlers.get('session/disposed')(CHILD)
+  onEvent(MAIN, turnEnd('completed'))
+  const units = await projectionUnits(routes)
+  assert.equal(units.filter((unit) => unit.category === 'completed').length, 0, '仅清理被销毁子代理自身条目,仍在运行的子代理继续压制完成通知')
+})
+
+test('子代理刚结束 When 父会话唤醒回合以 completed 结束 Then 投影无完成通知', async () => {
   const { ctx, routes, handlers } = makeCtx()
   apply(ctx)
   await disableDurationFilter(routes)

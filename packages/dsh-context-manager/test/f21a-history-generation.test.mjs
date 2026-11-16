@@ -310,6 +310,7 @@ function mountOverlay() {
       inject: (name, register) => register(),
       register: (options, component) => registered.push({ options, component }),
     },
+    inject: () => {},
   })
   const entry = registered.find((item) => item.options.id === 'context-manager-history')
   assert.ok(entry, '未注册历史浮层插槽')

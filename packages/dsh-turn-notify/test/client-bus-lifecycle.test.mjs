@@ -57,8 +57,7 @@ function fixture(name, { manual = false } = {}) {
     const mod = definitions.get(`@mzzsfy/${name}`).factory(module => module === 'react' ? react : tools)
     return { apply() {
       const cleanups = []
-      const effect = (fn, tag) => {
-        if (tag === 'rs-workflow: session-aware flow view') return
+      const effect = (fn) => {
         const off = fn()
         if (typeof off === 'function') cleanups.push(off)
       }
@@ -92,7 +91,7 @@ function fixture(name, { manual = false } = {}) {
     change() { now += 1000; socket().ready(); socket().frame({ type: 'message', plugin: `@mzzsfy/${name}`, payload: null }) },
     advance() { now += 1000; for (const [id, timer] of [...timers]) if (timer.delay <= 1000) { timers.delete(id); timer.fn() } },
     get subscribed() { return socket().sent.filter(item => item.type === 'subscribe').at(-1)?.plugins.includes(`@mzzsfy/${name}`) === true },
-    get workCount() { return name === 'dsh-rs-workflow' ? [...timers.values()].filter(timer => timer.delay === 1000).length : requests.filter(request => !request.path.endsWith('/sounds')).length },
+    get workCount() { return requests.filter(request => !request.path.endsWith('/sounds')).length },
     drain() { for (const [id, timer] of [...timers]) { if (timer.delay === 1000) { timers.delete(id); timer.fn() } } },
   }
 }
@@ -132,14 +131,14 @@ for (const name of ['dsh-turn-notify', 'dsh-usage-panel']) {
   })
 }
 
-for (const name of ['dsh-turn-notify', 'dsh-usage-panel', 'dsh-rs-workflow']) {
+for (const name of ['dsh-turn-notify', 'dsh-usage-panel']) {
   for (const first of [0, 1]) {
     test(`Given ${name} 同 factory A+B When 先卸载${first === 0 ? 'A' : 'B'} Then 存活实例继续单次工作且最后退出停工并可再激活`, async () => {
       const f = fixture(name), generation = f.factory(), owners = [generation.apply(), generation.apply()]
       try {
         f.connect(); await flush()
         assert.equal(f.workCount, 1, '并存 ctx 共用一次快照或合并广播')
-        if (name !== 'dsh-rs-workflow') assert.equal(f.shown.length, 1, '同一通知只呈现一次')
+        assert.equal(f.shown.length, 1, '同一通知只呈现一次')
         f.drain()
         owners[first]()
         assert.equal(f.subscribed, true, '仍有活跃 ctx 时必须保留接收空间')
@@ -153,7 +152,7 @@ for (const name of ['dsh-turn-notify', 'dsh-usage-panel', 'dsh-rs-workflow']) {
         try {
           f.connect(); await flush()
           assert.equal(f.subscribed, true, '同 factory 再激活恢复订阅')
-          assert.equal(f.workCount, name === 'dsh-rs-workflow' ? 1 : before + 2)
+          assert.equal(f.workCount, before + 2)
         } finally { disposeAgain() }
       } finally { for (const dispose of owners.reverse()) dispose() }
     })
@@ -172,7 +171,7 @@ for (const name of ['dsh-turn-notify', 'dsh-usage-panel', 'dsh-rs-workflow']) {
     } finally { disposeA(); disposeB() }
   })
 
-  if (name !== 'dsh-rs-workflow') test(`Given ${name} A快照在途且B活跃 When A卸载 Then 请求继续有效且B不重复首拉`, async () => {
+  test(`Given ${name} A快照在途且B活跃 When A卸载 Then 请求继续有效且B不重复首拉`, async () => {
     const f = fixture(name), generation = f.factory(), disposeA = generation.apply()
     f.hold(); f.connect()
     const request = f.requests.find(item => !item.path.endsWith('/sounds')), disposeB = generation.apply()

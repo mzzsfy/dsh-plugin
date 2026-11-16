@@ -3,17 +3,21 @@
 // 对象内,跨命令存活——实测孤儿形态会被滞后清理扫掉,必须常驻持有)。
 // 宿主退出即按同参重启并更新 live.json(新 boot 新 token);STOP 文件存在则退出。
 // 用法:node scripts/compat/boot-keep.mjs --daemon --version <v> [--only 包,包] [--port N]
-//   [--llm-port N](echo 模拟器端口,seed 与探活用,默认 18123) [--host-dir PATH]
+//   [--work-root DIR](独立工位目录,默认 .compat) [--llm-port N](echo 模拟器端口,seed 与探活用,默认 18123) [--host-dir PATH]
 //   [--refuse-port-owner](端口被占即拒绝清理) [--keep-sessions](夹具轮跳过净启动清会话)
 import { spawn } from 'node:child_process'
 import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { isSemver } from './window.mjs'
 import { buildProfile, enumeratePackages } from './profile.mjs'
+import { repointBridgeFromHost } from './run.mjs'
+import { compatEnv } from './env.mjs'
 import { COMPAT_ROOT, DEFAULT_PORT, killPortOwner, log } from './lib.mjs'
+import { BOOT_TIMEOUT_MS, KeeperStop, READY_POLL_MS, awaitEchoReady, awaitHostReady, stopRequestedBy } from './boot-ready.mjs'
 
-const BOOT_TIMEOUT_MS = 150 * 1000
-const READY_POLL_MS = 1500
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+const KEEPER_STARTED_AT = Date.now()
 const WATCH_POLL_MS = 5000
 
 // gateway LLM 链路的 echo 路由 seed:宿主重启会重写 profile cordis.patch.yml,
@@ -100,16 +104,12 @@ function ensureGatewaySeed(patchPath, logFn, { gateway = false, think = false, l
       '            name: Echo Tool Model',
       '            input:',
       '              - text',
-      '          - id: echo-model-call',
-      '            name: Echo Call Model',
-      '            input:',
-      '              - text',
       '',
     ].join('\n')
     // 幂等补 think/tool 模型行(宿主重启重写 patch 丢扩展行;流式思考断言依赖
     // -think 后缀,工具链断言依赖 -tool 后缀)。重读防与上方 seed 写盘互抹
     const afterSeed = readFileSync(patchPath, 'utf8')
-    if ((think || gateway) && !(afterSeed.includes('echo-model-tool') && afterSeed.includes('echo-model-call')) && afterSeed.includes(MODEL_TAIL)) {
+    if ((think || gateway) && !afterSeed.includes('echo-model-tool') && afterSeed.includes(MODEL_TAIL)) {
       writeFileSync(patchPath, afterSeed.replace(MODEL_TAIL, EXT_BLOCK), 'utf8')
       logFn('[daemon] gateway think/tool model rows injected')
     }
@@ -121,19 +121,28 @@ function ensureGatewaySeed(patchPath, logFn, { gateway = false, think = false, l
 }
 
 function parseArgs(argv) {
-  const args = { port: DEFAULT_PORT }
-  for (let i = 0; i < argv.length; i++) {
+  const args = { port: DEFAULT_PORT, refusePortOwner: true }
+  let i = 0
+  const valueOf = (flag) => {
+    const value = argv[++i]
+    if (value === undefined || value.startsWith('--')) throw new Error(`${flag} 缺参数值`)
+    return value
+  }
+  for (i = 0; i < argv.length; i++) {
     const map = {
-      '--version': () => { args.version = argv[++i] },
-      '--port': () => { args.port = Number(argv[++i]) },
-      '--llm-port': () => { args.llmPort = Number(argv[++i]) },
-      '--host-dir': () => { args.hostDir = argv[++i] },
+      '--version': () => { args.version = valueOf('--version') },
+      '--port': () => { args.port = Number(valueOf('--port')) },
+      '--llm-port': () => { args.llmPort = Number(valueOf('--llm-port')) },
+      '--host-dir': () => { args.hostDir = valueOf('--host-dir') },
+      '--work-root': () => { args.workRoot = valueOf('--work-root') },
       '--daemon': () => { args.daemon = true },
       '--refuse-port-owner': () => { args.refusePortOwner = true },
+      // 只有显式 opt-in 才允许清理端口占用者;默认拒绝,防误杀生产 3080/人工实例
+      '--allow-port-owner-kill': () => { args.refusePortOwner = false },
       // 会话夹具轮(#5/#6 类需要伪造会话跨重启存活)跳过净启动清理
       '--keep-sessions': () => { args.keepSessions = true },
       '--only': () => {
-        const short = argv[++i]
+        const short = valueOf('--only')
         args.only = [...(args.only ?? []), ...short.split(',').map((s) => s.trim()).filter(Boolean)]
       },
     }
@@ -146,30 +155,17 @@ function parseArgs(argv) {
     handler()
   }
   if (!args.version || !isSemver(args.version)) throw new Error(`--version 缺失或非法: ${args.version}`)
+  if (!Number.isInteger(args.port) || args.port < 9291 || args.port > 9310) {
+    throw new Error(`--port 须在 9291-9310 隔离段(拒绝生产 3080/人工 9191): ${args.port}`)
+  }
   return args
 }
 
 function sleep(ms) { return new Promise((done) => setTimeout(done, ms)) }
+let activeChild = null
 
-// echo-upstream 探活:gateway seed 场景下宿主先于 echo 就绪会让 provider 首轮
-// 注册落空(NO_ADAPTER 空转),每轮宿主 spawn 前必须确认 llmPort 控制面就绪。
-// 只探活不代启——echo 生命周期归外部(run.mjs/人工)管,boot-keep 只守住顺序
-const ECHO_PROBE_TIMEOUT_MS = 30 * 1000
-const ECHO_PROBE_POLL_MS = 1000
-async function awaitEchoReady(llmPort) {
-  const url = `http://127.0.0.1:${llmPort}/control/requests`
-  const deadline = Date.now() + ECHO_PROBE_TIMEOUT_MS
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(2000) })
-      // 断言控制面响应体形态({requests,lastRequestId}):端口被无关服务占且 200 时防假绿
-      const body = await res.json().catch(() => null)
-      if (res.ok && body && Array.isArray(body.requests)) { log(`[daemon] echo 就绪 ${url}`); return }
-    } catch { /* 未就绪 */ }
-    await sleep(ECHO_PROBE_POLL_MS)
-  }
-  throw new Error(`echo 未就绪(${url},${ECHO_PROBE_TIMEOUT_MS / 1000}s):宿主先起会 NO_ADAPTER 空转,先起 echo-upstream 再启动 boot-keep`)
-}
+// echo-upstream 探活与就绪轮询的 STOP 语义在 boot-ready.mjs:两处都必须能即时
+// 中止,否则 keep-stop 的 KEEPER_STOP_TIMEOUT_MS 会先到并强杀 keeper
 
 function canBind(p) {
   return new Promise((resolve) => {
@@ -182,9 +178,16 @@ function canBind(p) {
   })
 }
 
-const args = parseArgs(process.argv.slice(2))
+let args
+try {
+  args = parseArgs(process.argv.slice(2))
+} catch (error) {
+  console.error(`[compat] 参数错误: ${error.message}`)
+  process.exit(1)
+}
 const { version, port } = args
-const workDir = join(COMPAT_ROOT, version)
+const workRoot = args.workRoot ? resolve(args.workRoot) : COMPAT_ROOT
+const workDir = join(workRoot, version)
 const hostDir = args.hostDir ? resolve(args.hostDir) : join(workDir, 'dsh-host')
 const stopFlag = join(workDir, 'boot-keep.stop')
 const binPath = join(hostDir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
@@ -206,9 +209,12 @@ function acquireKeeperLock() {
     if (alive) throw new Error(`工作目录已被另一 keeper 持有(pid ${holder.pid},锁 ${keeperLockPath});确认无误后删除锁文件可强制接管`)
     log(`[daemon] 清理陈旧 keeper 锁(持有者 pid ${holder?.pid} 已不存在)`)
   }
-  writeFileSync(keeperLockPath, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }), 'utf8')
+  // hostDir 入锁:keep-stop 强杀后据此识别"指进本工位宿主闭包"的根桥重指
+  writeFileSync(keeperLockPath, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), hostDir }), 'utf8')
 }
 acquireKeeperLock()
+// 净空放在 bin/桥校验与 keeper 锁之后:第二个 keeper 不能先清空运行中 keeper 的数据再失败退出
+rmSync(join(workDir, 'data'), { recursive: true, force: true })
 
 // 幂等 profile:bundles 形态与工作副本桥都齐时跳过重建(pnpm install 分钟级,逐包轮同闭包形态复用)
 // enumeratePackages 返回的已是 @mzzsfy 全名,此处禁止再拼 scope
@@ -222,19 +228,38 @@ const linkBase = join(workDir, 'home', 'profiles', 'web', 'node_modules', '@mzzs
 const expectShape = [...new Set(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dshmarket', ...wantedBundles])]
 const reuseManifest = existsSync(profileManifestPath) ? JSON.parse(readFileSync(profileManifestPath, 'utf8')) : null
 const reuseShapeOk = reuseManifest?.dsh?.profile?.bundles?.join('|') === expectShape.join('|')
-const reuseLinksOk = wantedBundles.every((name) => existsSync(join(linkBase, name.replace('@mzzsfy/', ''))))
+const reuseLinksOk = (() => {
+  // profile 复用必须验证全部 @mzzsfy 依赖行都有链接,而不只是本轮 wantedBundles:
+  // 单包轮会遗留其他包的旧链接/旧声明,只查本轮会让半残 profile 被当成可复用。
+  const declared = Object.keys(reuseManifest?.dependencies ?? {}).filter((name) => name.startsWith('@mzzsfy/'))
+  return declared.length > 0 && declared.every((name) => existsSync(join(linkBase, name.replace('@mzzsfy/', ''))))
+    && wantedBundles.every((name) => existsSync(join(linkBase, name.replace('@mzzsfy/', ''))))
+})()
 const profileReuseReady = existsSync(profileManifestPath) && reuseShapeOk && reuseLinksOk
-let profile
-if (profileReuseReady) {
-  profile = { homeDir: join(workDir, 'home'), binPath, bundleNames: wantedBundles }
-  log(`[daemon] ${version} profile 复用 bundles=${profile.bundleNames.length}`)
-} else {
+let profile = null
+// 在 try/finally 内调用:安装阶段收到 STOP 由 buildProfile 的 stop 口中止(抛 STOPPED),
+// keeper 走正常收尾,不会等外部 15s 强杀后把锁与半装 profile 留场
+async function ensureProfile() {
+  if (profileReuseReady) {
+    const reused = { homeDir: join(workDir, 'home'), binPath, bundleNames: wantedBundles }
+    log(`[daemon] ${version} profile 复用 bundles=${reused.bundleNames.length}`)
+    return reused
+  }
   log(`[daemon] profile 复用未命中: manifest=${existsSync(profileManifestPath)} shape=${reuseShapeOk} links=${reuseLinksOk}(per-link=${wantedBundles.map((n) => `${n}:${existsSync(join(linkBase, n.replace('@mzzsfy/', '')))}`).join(',')}) 期望(${expectShape.length})=${expectShape.join('|')} 实际(${reuseManifest?.dsh?.profile?.bundles?.length})=${reuseManifest?.dsh?.profile?.bundles?.join('|')}`)
-  profile = await buildProfile({ version, workRoot: COMPAT_ROOT, hostDir, only: args.only ?? [] })
-  log(`[daemon] ${version} profile 构建 bundles=${profile.bundleNames.length}`)
+  const built = await buildProfile({
+    version,
+    workRoot,
+    hostDir,
+    only: args.only ?? [],
+    stop: () => stopRequestedBy({ stopFlag, signalRequested: () => stopRequested }),
+  })
+  log(`[daemon] ${version} profile 构建 bundles=${built.bundleNames.length}`)
+  return built
 }
 
 async function bootOnce() {
+  // STOP 可能在上轮收尾后立刻到达:净删 live.json 之前先认,避免空转一轮再被杀
+  if (stopRequestedBy({ stopFlag, signalRequested: () => stopRequested })) throw new KeeperStop()
   // 陈旧 live.json 会在就绪前误导读取方(死 token 401 / 旧 bundles),每轮 spawn 前净删
   rmSync(join(workDir, 'live.json'), { force: true })
   if (!(await canBind(port))) {
@@ -256,70 +281,98 @@ async function bootOnce() {
   })
   // 探活绑意图(--only 含 gateway)而非 seed 返回值:seed 的 catch 吞错返回 []
   // 时守卫若跟着 seed 走会静默旁路,恰是 NO_ADAPTER 最可能场景
-  if (wantedShort.includes('dsh-llm-pi-gateway')) await awaitEchoReady(args.llmPort ?? 18123)
-  const bootLog = createWriteStream(join(workDir, 'boot-l3.log'), { flags: 'w' })
+  const stopDeps = { stopFlag, signalRequested: () => stopRequested }
+  if (wantedShort.includes('dsh-llm-pi-gateway')) await awaitEchoReady(args.llmPort ?? 18123, stopDeps)
+  const bootLogPath = join(workDir, 'boot-l3.log')
+  const bootLog = createWriteStream(bootLogPath, { flags: 'w' })
+  // 启动时间取 spawn 前:等就绪后写会晚于真实启动,keep-stop 的 pid 校验会误拒
+  const childStartedAt = Date.now()
   const child = spawn(process.execPath, [binPath, 'web', '--no-open', '--port', String(port)], {
     cwd: profile.homeDir,
-    env: {
-      ...process.env,
+    env: compatEnv({
       DSH_HOME: profile.homeDir,
       // 逐包数据目录隔离:缺一会写到生产 ~/.dsh(测试不是只读操作,测试任务会被
       // 生产调度器拾取、账号 Key 明文落生产文件)。新增带数据目录的包时在此追加
       DSH_CRON_BOARD_DATA_DIR: join(workDir, 'data', 'cron-board'),
       DSH_USAGE_PANEL_DATA_DIR: join(workDir, 'data', 'usage-panel'),
       DSH_HISTORY_CACHE_DIR: join(workDir, 'data', 'context-manager-history'),
-      DSH_RS_WORKFLOW_DATA_DIR: join(workDir, 'data', 'rs-workflow'),
-      DSH_RS_WORKFLOW_PRESET_ROOT: join(workDir, 'data', 'rs-workflow-presets'),
       // gateway LLM 链路凭据:apiKeyEnv 引用名 ECHO_KEY 走进程 env 通道(run.mjs 同款)
       ECHO_KEY: 'echo-compat',
-    },
+    }),
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   })
   child.stdout.pipe(bootLog)
   child.stderr.pipe(bootLog)
+  activeChild = child
   log(`[daemon] 宿主 spawn pid=${child.pid}`)
   const base = `http://127.0.0.1:${port}`
-  const deadline = Date.now() + BOOT_TIMEOUT_MS
   let token = null
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`宿主早退 code=${child.exitCode},日志 ${join(workDir, 'boot-l3.log')}`)
-    try {
-      const text = readFileSync(join(workDir, 'boot-l3.log'), 'utf8')
-      const hits = [...text.matchAll(/token=([A-Za-z0-9_-]+)/g)]
-      if (hits.length > 0) token = hits.at(-1)[1]
-    } catch { /* 日志未落 */ }
-    if (token !== null) {
-      try {
-        const res = await fetch(`${base}/?token=${token}`, { redirect: 'manual', signal: AbortSignal.timeout(4000) })
-        if (res.status === 200 || (res.status >= 300 && res.status < 400)) {
-          writeFileSync(join(workDir, 'live.json'), JSON.stringify({
-            port, token, pid: child.pid, mode: 'daemon', bundles: profile.bundleNames, homeDir: profile.homeDir, seeded,
-          }, null, 2), 'utf8')
-          log(`[daemon] 就绪:${base}/?token=${token} pid=${child.pid}`)
-          return child
-        }
-      } catch { /* 前端未就绪 */ }
-    }
-    await sleep(READY_POLL_MS)
+  try {
+    // 就绪轮询消费 STOP/信号:迟到退出会被 keep-stop 强杀,跳过 finally 的根桥还原
+    token = await awaitHostReady({
+      child,
+      base,
+      bootLogPath,
+      ...stopDeps,
+      timeoutMs: BOOT_TIMEOUT_MS,
+      pollMs: READY_POLL_MS,
+    })
+  } catch (error) {
+    child.kill()
+    throw error
   }
-  child.kill()
-  throw new Error(`boot 超时未就绪,日志 ${join(workDir, 'boot-l3.log')}`)
+  writeFileSync(join(workDir, 'live.json'), JSON.stringify({
+    port, token, pid: child.pid, keeperPid: process.pid, keeperStartedAt: KEEPER_STARTED_AT, hostStartedAt: childStartedAt, mode: 'daemon', bundles: profile.bundleNames, homeDir: profile.homeDir, hostDir, seeded,
+  }, null, 2), 'utf8')
+  log(`[daemon] 就绪:${base}/?token=${token} pid=${child.pid}`)
+  return child
 }
 
-let child = await bootOnce()
-while (true) {
-  if (existsSync(stopFlag)) {
-    log('[daemon] STOP 标记,退出(杀宿主)')
-    try { child.kill() } catch { /* 已退 */ }
-    await sleep(2000)
-    try { child.kill('SIGKILL') } catch { /* 已退 */ }
-    rmSync(stopFlag, { force: true })
-    rmSync(keeperLockPath, { force: true })
-    process.exit(0)
-  }
-  await sleep(WATCH_POLL_MS)
-  if (child.exitCode === null) continue
-  log(`[daemon] 宿主退出 code=${child.exitCode},重启`)
+let restoreBridge = null
+let child = null
+let stopRequested = false
+// keeper 自己收信号时必须走 finally:还原根桥、删两把锁;否则 CI 超时杀进程会污染根 node_modules
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.once(signal, () => {
+    stopRequested = true
+    try { activeChild?.kill() } catch { /* 已退 */ }
+    try { child?.kill() } catch { /* 已退 */ }
+  })
+}
+try {
+  // STOP 可能在 profile 构建/桥重指之间到达:重指前先认,避免刚拿到根桥锁就被强杀
+  if (stopRequestedBy({ stopFlag, signalRequested: () => stopRequested })) throw new KeeperStop()
+  profile = await ensureProfile()
+  // 根桥生命周期归 keeper:run.mjs 收尾会还原根桥,复用工位前必须由本进程重指并持有锁,
+  // 直到 STOP 再还原;否则插件 import 的宿主 API 会与实际运行的宿主代际错位。
+  restoreBridge = repointBridgeFromHost(hostDir, { workRoot })
   child = await bootOnce()
+  while (!stopRequested) {
+    if (existsSync(stopFlag)) {
+      log('[daemon] STOP 标记,退出(杀宿主)')
+      try { child.kill() } catch { /* 已退 */ }
+      await sleep(2000)
+      try { child.kill('SIGKILL') } catch { /* 已退 */ }
+      break
+    }
+    await sleep(WATCH_POLL_MS)
+    if (child.exitCode === null) continue
+    log(`[daemon] 宿主退出 code=${child.exitCode},重启`)
+    child = await bootOnce()
+  }
+  if (stopRequested) log('[daemon] 收到终止信号,收尾')
+} catch (error) {
+  // STOP 是正常终止:finally 会还原根桥并清锁,不得按失败上报(keep-stop 等的是退出本身)
+  if (error instanceof KeeperStop || error?.code === 'STOPPED') log(`[daemon] ${error.message},收尾`)
+  else {
+    console.error(`[compat] boot-keep 失败: ${error.message}`)
+    process.exitCode = 1
+  }
+} finally {
+  try { if (activeChild && activeChild.exitCode === null) activeChild.kill('SIGKILL') } catch { /* 已退 */ }
+  try { if (child && child.exitCode === null) child.kill('SIGKILL') } catch { /* 已退 */ }
+  restoreBridge?.()
+  rmSync(keeperLockPath, { force: true })
+  rmSync(stopFlag, { force: true })
 }

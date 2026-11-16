@@ -40,12 +40,18 @@ test('分时时间标签优先用来源给的时钟, 缺失给空串', async () 
   assert.equal(candleTimeText({}), '')
 })
 
-test('列表悬停信息给出今日高低、今开昨收与全部标记', async () => {
+test('列表悬停信息给出今日高低、今开昨收、全部标记与持仓盈亏', async () => {
   const { quoteTipLines } = (await loadClient()).plugin.__testing
-  const lines = quoteTipLines({ quote: { high: 10.5, low: 9.8, open: 10, previousClose: 9.9 }, marks: [{ id: 'a', kind: 'cost', price: 9.9 }, { id: 'b', kind: 'target', price: 11 }], scale: 2 })
-  assert.deepEqual([...lines], ['今高 10.50　今低 9.80', '今开 10.00　昨收 9.90', '成本 9.90', '卖价 11.00'])
+  const rows = quoteTipLines({ quote: { high: 10.5, low: 9.8, open: 10, previousClose: 9.9, last: 10.2 }, marks: [{ id: 'a', kind: 'cost', price: 9.9 }, { id: 'b', kind: 'target', price: 11 }], scale: 2 })
+  assert.deepEqual([...rows.map(row => row.text)], ['今高 10.50　今低 9.80', '今开 10.00　昨收 9.90', '成本 9.90', '卖价 11.00', '盈亏 +3.03%　每股 +0.30'])
+  assert.equal(rows.at(-1).tone, ' ssb-up', '盈亏带涨跌方向色')
+  // 没有成本就不占位
+  assert.equal(quoteTipLines({ quote: { last: 10 }, marks: [], scale: 2 }).some(row => /盈亏/.test(row.text)), false)
+  // 有成本没现价(停牌/盘前)给占位符而不是 +0.00%
+  const stale = quoteTipLines({ quote: {}, marks: [{ id: 'a', kind: 'cost', price: 9.9 }], scale: 2 })
+  assert.match(stale.at(-1).text, /盈亏 —　每股 —/)
   const missing = quoteTipLines({ quote: {}, marks: [], scale: 2 })
-  assert.deepEqual([...missing], ['今高 —　今低 —', '今开 —　昨收 —'], '缺字段给破折号, 不能把 null 当 0')
+  assert.deepEqual([...missing.map(row => row.text)], ['今高 —　今低 —', '今开 —　昨收 —'], '缺字段给破折号, 不能把 null 当 0')
 })
 
 test('标记线常驻可见, 但不参与纵轴缩放', async () => {

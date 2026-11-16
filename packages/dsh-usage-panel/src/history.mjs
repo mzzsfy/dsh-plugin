@@ -77,6 +77,16 @@ export function appendPoint(store, seqKey, t, v, now) {
   }
 }
 
+// 读数转数值:null/undefined/空串/布尔一律视为缺失,避免 Number(null)=0 伪造成真实读数
+function readingNumber(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : NaN
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : NaN
+  }
+  return NaN
+}
+
 // 读数 -> 快照取样:额度窗口按 label 映射,值优先 remaining(消耗口径)回落 utilization 百分点;
 // 余额账号单序列取 remaining 回落 total。
 export function readingToSnapshots(reading) {
@@ -87,8 +97,8 @@ export function readingToSnapshots(reading) {
       .map((win) => {
         const suffix = labelToSuffix(win && win.label)
         if (suffix === null) return null
-        const hasRemaining = win.remaining !== null && win.remaining !== undefined && Number.isFinite(Number(win.remaining))
-        const value = hasRemaining ? Number(win.remaining) : Number(win.utilization)
+        const remaining = readingNumber(win.remaining)
+        const value = Number.isFinite(remaining) ? remaining : readingNumber(win.utilization)
         return Number.isFinite(value) ? { suffix, value, tier: SEQUENCE_TIERS[suffix] } : null
       })
       .filter(Boolean)
@@ -97,8 +107,8 @@ export function readingToSnapshots(reading) {
     const entries = Array.isArray(reading.entries) ? reading.entries : []
     const entry = entries[0]
     if (!entry) return []
-    const hasRemaining = entry.remaining !== null && entry.remaining !== undefined && Number.isFinite(Number(entry.remaining))
-    const value = hasRemaining ? Number(entry.remaining) : Number(entry.total)
+    const remaining = readingNumber(entry.remaining)
+    const value = Number.isFinite(remaining) ? remaining : readingNumber(entry.total)
     return Number.isFinite(value) ? [{ suffix: 'balance', value, tier: SEQUENCE_TIERS.balance }] : []
   }
   return []

@@ -42,7 +42,7 @@
  *   - link 期间 dsh-plugin list 显示的是依赖行 semver,不是工作副本版本。
  */
 import {spawnSync} from 'node:child_process'
-import {cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, writeFileSync} from 'node:fs'
+import {cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {dirname, join, resolve} from 'node:path'
 import {fileURLToPath} from 'node:url'
@@ -99,9 +99,12 @@ function readProfileManifest() {
  * nvm 布局 = <bin 目录>/node_modules/@deepseek-ai/dsh)→ profile node_modules →
  * ~/.dsh/node_modules。全部读不到返回 null,hostMin 校验跳过(不阻塞主流程)。
  */
+let cachedHostVersion
 function hostVersion() {
+  // 逐包调用会重复 spawn where/which;宿主版本在一次进程内不变,缓存首次结果
+  if (cachedHostVersion !== undefined) return cachedHostVersion
   const candidates = []
-  const which = spawnSync(process.platform === 'win32' ? 'where dsh' : 'which dsh', {encoding: 'utf8', shell: true})
+  const which = spawnSync(process.platform === 'win32' ? 'where' : 'which', ['dsh'], {encoding: 'utf8'})
   if (which.status === 0) {
     const binPath = which.stdout.trim().split(/\r?\n/)[0]
     if (binPath) candidates.push(join(dirname(binPath), 'node_modules', '@deepseek-ai', 'dsh'))
@@ -112,9 +115,11 @@ function hostVersion() {
   )
   for (const base of candidates) {
     try {
-      return JSON.parse(readFileSync(join(base, 'package.json'), 'utf8')).version
+      cachedHostVersion = JSON.parse(readFileSync(join(base, 'package.json'), 'utf8')).version
+      return cachedHostVersion
     } catch { /* 下一候选 */ }
   }
+  cachedHostVersion = null
   return null
 }
 
@@ -169,6 +174,22 @@ function fileSpec(dir) {
  * pnpm 该配置只认精确版本并集(^ ~ * 均拒绝),故每包一行精确 latest。
  * 每次运行全量重写,新发版本重跑即替换,清单永不过期。返回是否有变更。
  */
+function replaceReleaseAgeExcludeSection(raw, section) {
+  // ^ 必须多行锚定:键位于文件首行时没有前置 \n,旧正则匹配不到会把整段追加到
+  // 末尾形成重复键。段 = 键行 + 缩进列表项 + 空行,遇到下一顶层键即停;
+  // 空行必须一并消费,否则每次重写都会多叠一层换行,永远不收敛。
+  const sectionPattern = /^minimumReleaseAgeExclude:[^\n]*(?:\n(?:[ \t].*)?)*/gm
+  const hasSection = /^minimumReleaseAgeExclude:/m.test(raw)
+  if (!hasSection) return raw.replace(/\s*$/, `\n${section}`)
+  let replaced = false
+  return raw.replace(sectionPattern, () => {
+    // 历史重复键一并收敛:只保留首个位置的新段
+    if (replaced) return ''
+    replaced = true
+    return section
+  })
+}
+
 function syncReleaseAgeExclude(packages, latests) {
   if (!existsSync(workspaceYaml)) return false
   const lines = []
@@ -183,9 +204,7 @@ function syncReleaseAgeExclude(packages, latests) {
   }
   const section = `minimumReleaseAgeExclude:\n${lines.join('\n')}\n`
   const raw = readFileSync(workspaceYaml, 'utf8').replace(/^\uFEFF/, '')
-  const next = /\nminimumReleaseAgeExclude:/.test(raw)
-    ? raw.replace(/\nminimumReleaseAgeExclude:[\s\S]*?(?=\n\w+:|$)/, `\n${section}`)
-    : raw.replace(/\s*$/, `\n${section}`)
+  const next = replaceReleaseAgeExcludeSection(raw, section)
   if (next === raw) {
     console.log('OK   minimumReleaseAgeExclude 已是最新,无需更新')
     return false
@@ -361,10 +380,44 @@ function pruneRepoOrphans(packages) {
   return true
 }
 
+/**
+ * hostMin 不满足的包从 profile 彻底出层:删除依赖行、装载层条目与本仓库 junction。
+ * 只摘 usable 会让旧链接/旧声明继续被宿主加载,等于绕过 hostMin。
+ */
+function pruneBlockedPackages(blocked) {
+  const manifest = readProfileManifest()
+  manifest.dependencies = manifest.dependencies || {}
+  const plugins = [...(manifest.dsh?.profile?.bundles ?? [])]
+  let changed = false
+  for (const dir of blocked) {
+    const key = SCOPE + dir
+    if (manifest.dependencies[key] !== undefined) {
+      console.log(`FIX  ${key}: hostMin 不满足,删除依赖行 ${manifest.dependencies[key]}`)
+      delete manifest.dependencies[key]
+      changed = true
+    }
+    if (plugins.includes(key)) {
+      plugins.splice(plugins.indexOf(key), 1)
+      console.log(`FIX  ${key}: hostMin 不满足,移出 dsh.profile.bundles`)
+      changed = true
+    }
+    const junction = junctionPath(dir)
+    if (readJunctionTarget(junction) !== null) {
+      rmSync(junction, {recursive: true, force: true})
+      console.log(`FIX  ${key}: hostMin 不满足,已卸 junction`)
+      changed = true
+    }
+  }
+  if (!changed) return false
+  manifest.dsh = {...manifest.dsh, profile: {...manifest.dsh?.profile, bundles: plugins}}
+  writeFileSync(profileManifest, JSON.stringify(manifest, null, 2) + '\n')
+  return true
+}
+
 function pnpmInstall(allowFresh) {
   const args = allowFresh ? ['install', '--config.minimum-release-age=0'] : ['install']
   console.log(`$ pnpm ${args.join(' ')}(profile 内)`)
-  const r = spawnSync('pnpm', args, {cwd: profileRoot, encoding: 'utf8', shell: true})
+  const r = spawnSync(['pnpm', ...args].join(' '), {cwd: profileRoot, encoding: 'utf8', shell: true})
   if (r.status !== 0) console.error(`FAIL pnpm install 非零退出:\n${r.stderr || '(无输出;被 minimumReleaseAge 拦截时可加 --allow-fresh)'}`)
   return r.status === 0
 }
@@ -383,6 +436,29 @@ function externalDeps(packages) {
     }
   }
   return wanted
+}
+
+/**
+ * 同层 @mzzsfy 包锚点:消费方 host 半区静态 import '@mzzsfy/dsh-common-tools/host',
+ * Node 自仓库 realpath 逐级向上解析,根 node_modules 是唯一稳定锚点;包内 node_modules
+ * 处于 profile pnpm 与插件安装流程的重建/剪除路径上,不得承担解析。
+ * 已指向本仓库对应目录的链接跳过;其余形态(registry 实体、旧链接)替换为 junction。
+ */
+function ensureScopeLinks(packages) {
+  const rootModules = join(repoRoot, 'node_modules')
+  let repaired = 0
+  for (const dir of packages) {
+    const linkPath = join(rootModules, SCOPE + dir)
+    const expected = resolve(join(repoRoot, 'packages', dir))
+    const current = readJunctionTarget(linkPath)
+    if (current !== null && resolve(current).toLowerCase() === expected.toLowerCase()) continue
+    // 悬空链接 existsSync 跟随目标返回 false,须按链接形态识别后清理,否则重建 EEXIST
+    if (current !== null || existsSync(linkPath)) rmSync(linkPath, {recursive: true, force: true})
+    mkdirSync(dirname(linkPath), {recursive: true})
+    symlinkSync(expected, linkPath, process.platform === 'win32' ? 'junction' : 'dir')
+    repaired += 1
+  }
+  console.log(`OK   同层锚点: ${packages.length} 个 @mzzsfy 包${repaired > 0 ? `,修正 ${repaired}` : ''}`)
 }
 
 /**
@@ -408,7 +484,7 @@ function ensureRootBridge(packages) {
     const specs = missing.map(([dep, range]) => `${dep}@${range}`)
     // Windows 经 cmd 执行:复合 range 的空格与 || 会被当作命令分隔符,逐项加引号
     const args = specs.map((spec) => (process.platform === 'win32' ? `"${spec}"` : spec))
-    const r = spawnSync(npmCmd(), ['install', '--omit=dev', '--omit=peer', '--no-save', '--no-package-lock', '--no-audit', '--no-fund', '--legacy-peer-deps', ...args], {cwd: staging, encoding: 'utf8', shell: true})
+    const r = spawnSync([npmCmd(), 'install', '--omit=dev', '--omit=peer', '--no-save', '--no-package-lock', '--no-audit', '--no-fund', '--legacy-peer-deps', ...args].join(' '), {cwd: staging, encoding: 'utf8', shell: true})
     if (r.status !== 0) {
       console.error(`FAIL 根解析桥: 外部依赖安装失败\n${r.stderr}`)
       return false
@@ -471,8 +547,16 @@ function mountJunction(name) {
   }
   const linkPath = junctionPath(name)
   mkdirSync(dirname(linkPath), {recursive: true})
-  if (existsSync(linkPath)) rmSync(linkPath, {recursive: true, force: true})
-  const run = spawnSync('cmd', ['/c', 'mklink', '/J', linkPath, sourcePath], {encoding: 'utf8'})
+  // 悬空 junction 的 existsSync 跟随目标恒 false;不按链接形态清理会让 symlinkSync
+  // 抛 EEXIST、mklink 拒绝已存在路径,重跑永远无法自愈
+  if (readJunctionTarget(linkPath) !== null || existsSync(linkPath)) rmSync(linkPath, {recursive: true, force: true})
+  // 优先原生 junction:不走 cmd 解析,路径中的 & | ^ % 不会被当命令分隔符
+  try {
+    symlinkSync(sourcePath, linkPath, 'junction')
+    console.log(`OK   ${name}: ${linkPath} -> ${sourcePath}`)
+    return true
+  } catch { /* 权限/文件系统不支持时退回 mklink,路径逐项加引号 */ }
+  const run = spawnSync('cmd', ['/c', 'mklink', '/J', `"${linkPath}"`, `"${sourcePath}"`], {encoding: 'utf8'})
   if (run.status !== 0) {
     console.error(`FAIL ${name}: mklink 失败\n${run.stderr}`)
     return false
@@ -491,7 +575,7 @@ function readJunctionTarget(linkPath) {
 }
 
 /** 终态校验:依赖行、挂载指向、(卸链时的)安装版本逐项比对,任一不符即整体失败 */
-function verifyAll(packages, latests, unlink, scope) {
+function verifyAll(packages, latests, unlink, scope, {unpublishedUnlinked = new Set()} = {}) {
   const manifest = readProfileManifest()
   const bundles = manifest.dsh?.profile?.bundles ?? []
   const disabled = marketDisabled()
@@ -526,10 +610,13 @@ function verifyAll(packages, latests, unlink, scope) {
       }
       continue
     }
-    const latest = latests[dir] !== undefined ? latests[dir] : onlineLatest(key)
-    const want = latest === null ? fileSpec(dir) : `^${latest}`
-    const dep = manifest.dependencies[key]
-    if (dep !== want) failures.push(`${key}: 依赖行 ${dep ?? '(缺声明)'} 应为 ${want}`)
+    // 卸链模式只验证物理链接移除;依赖行归 pnpm 恢复,线上版本前进不构成失败
+    if (!unlink) {
+      const latest = latests[dir] !== undefined ? latests[dir] : onlineLatest(key)
+      const want = latest === null ? fileSpec(dir) : `^${latest}`
+      const dep = manifest.dependencies[key]
+      if (dep !== want) failures.push(`${key}: 依赖行 ${dep ?? '(缺声明)'} 应为 ${want}`)
+    }
     // 市场否决是额外否决:禁用包的合法终态是"已装未载";与装载层互搏才是失败
     const vetoedByMarket = disabled.has(key)
     if (vetoedByMarket) vetoed += 1
@@ -543,12 +630,11 @@ function verifyAll(packages, latests, unlink, scope) {
       }
       const manifestPath = join(phys, 'package.json')
       if (!existsSync(manifestPath)) {
+        // 未发布包没有 registry 版本可恢复:卸链时已移除其 file: 依赖行,node_modules 缺失是预期终态
+        if (unpublishedUnlinked.has(dir)) continue
         failures.push(`${key}: node_modules 未安装`)
         continue
       }
-      const installed = JSON.parse(readFileSync(manifestPath, 'utf8').replace(/^\uFEFF/, '')).version
-      // 未发布包(latest=null)无线上版本可比:依赖行已按 file 协议校验,安装版本不比对
-      if (latest !== null && installed !== latest) failures.push(`${key}: 安装版本 ${installed} 应为线上 ${latest}`)
       continue
     }
     const target = existsSync(phys) ? readJunctionTarget(phys) : null
@@ -596,15 +682,21 @@ for (const name of names) {
 // 宿主版本底线前置:不满足 dsh.hostMin 的包摘出本次范围(不写依赖行不挂载),
 // 其余包继续;全被摘出即无事可做
 const usable = names.filter((name) => meetsHostMin(name))
-if (usable.length === 0) {
-  console.error('所有目标包均未过 hostMin 校验,终止')
-  process.exit(1)
-}
+// hostMin 拒绝是失败而非跳过:其余包继续链接,但终态退出码必须非零。
+// 不能在此提前 return:被拒包在 profile 里的旧依赖行/装载条目/junction 必须先清干净,
+// 否则"拒绝"只挡住了本次写操作,旧链接仍会被宿主加载。
+if (usable.length === 0) console.error('所有目标包均未过 hostMin 校验,仅执行残留清理')
+if (usable.length !== names.length) process.exitCode = 1
 
 let latests = {}
 if (!unlink) {
-  // 单包模式只归一指定包,不被清单内其他未发布包(线上查询 404)阻断;all 仍全量归一
-  const scope = target === 'all' ? packages : usable
+  // hostMin 不满足的包必须从 profile 彻底出层:只摘 usable 会在旧链接/依赖行/装载层里
+  // 留下"声明不支持却仍可加载"的状态;先清残留,再对可用包做归一。
+  const blocked = names.filter((name) => !usable.includes(name))
+  const blockedChanged = blocked.length > 0 ? pruneBlockedPackages(blocked) : false
+  // 单包模式只归一指定包,不被清单内其他未发布包(线上查询 404)阻断;all 同样只归一
+  // 通过 hostMin 的包,未过校验的包不得写依赖行/装载层(否则宿主以未验证代际加载)
+  const scope = usable
   const normalized = normalizeDeps(scope)
   latests = normalized.latests
   // 孤儿清理在装载层对账前执行:改名/删除包的残留行出层后,bundles 对账不再见到它们
@@ -614,7 +706,7 @@ if (!unlink) {
   // 豁免清单是全 profile 级策略,仅在 all 模式全量重写(只豁免各包线上最新版——
   // 历史版本早已过宽限期)
   const excludeChanged = target === 'all' ? syncReleaseAgeExclude(packages, latests) : false
-  if (normalized.changed || orphanChanged || excludeChanged) {
+  if (normalized.changed || orphanChanged || excludeChanged || blockedChanged) {
     if (!pnpmInstall(allowFresh)) {
       console.error('FAIL 依赖行已写入但安装失败,终态不保证;处理后同参数重跑本脚本')
       process.exitCode = 1
@@ -628,21 +720,40 @@ if (!unlink) {
   }
 }
 
+const unpublishedUnlinked = new Set()
 if (unlink) {
   syncDevHmr(false)
   for (const name of names) {
+    const lib = isLibPackage(name)
+    // 未发布包的依赖行是 file: 指向本仓库:pnpm install 会按它重新建 junction。
+    // 卸链必须同时移除该依赖行与装载条目,否则"恢复 registry 版本"不可能成立;
+    // junction 已被手工清掉时同样要清残留依赖行,不能只 SKIP。
+    const manifest = readProfileManifest()
+    const key = SCOPE + name
+    const spec = manifest.dependencies?.[key]
+    let removedUnpublished = false
+    if (typeof spec === 'string' && /^file:/.test(spec)) {
+      delete manifest.dependencies[key]
+      manifest.dsh = {...manifest.dsh, profile: {...manifest.dsh?.profile, bundles: (manifest.dsh?.profile?.bundles ?? []).filter((item) => item !== key)}}
+      writeFileSync(profileManifest, JSON.stringify(manifest, null, 2) + '\n')
+      unpublishedUnlinked.add(name)
+      removedUnpublished = true
+    }
     if (!existsSync(junctionPath(name))) {
-      console.log(`SKIP ${name}: 未挂链接`)
+      console.log(`SKIP ${name}: 未挂链接${removedUnpublished ? '(已清理未发布 file: 依赖行与装载条目)' : ''}`)
       continue
     }
-    const lib = isLibPackage(name)
     rmSync(junctionPath(name), {recursive: true, force: true})
-    const run = spawnSync('pnpm', ['install'], {cwd: profileRoot, encoding: 'utf8', shell: true})
-    const done = lib ? '已卸链接,顶层不留实体,dsh fallback 启动接管' : '已卸链接并恢复 registry 版本'
+    const run = spawnSync('pnpm install', {cwd: profileRoot, encoding: 'utf8', shell: true})
+    const done = lib ? '已卸链接,顶层不留实体,dsh fallback 启动接管'
+      : removedUnpublished ? '已卸链接并移除未发布包 file: 依赖行(无 registry 版本可恢复)'
+      : '已卸链接并恢复 registry 版本'
     console.log(`${run.status === 0 ? 'OK  ' : 'FAIL'} ${name}: ${done}`)
   }
 } else {
   syncDevHmr(true)
+  // 同层锚点先于根桥:消费方 host 半区静态 import 在模块解析期即需要它
+  ensureScopeLinks(packages)
   // 根桥先于挂载:挂上 junction 的那一刻,工作副本的外部依赖解析就必须已经可达;
   // 根桥不全即不挂载,终态停在"依赖未就绪"而不是"看起来 link 了"
   const bridgeReady = ensureRootBridge(packages)
@@ -650,5 +761,5 @@ if (unlink) {
   else process.exitCode = 1
 }
 
-verifyAll(packages, latests, unlink, usable)
+verifyAll(packages, latests, unlink, usable, {unpublishedUnlinked})
 console.log(`\n提醒: 依赖图变化的 pnpm install / dsh plugin add 之后须重跑本脚本;根 node_modules 被重建(根目录 npm/pnpm install)后同样须重跑——包内 node_modules 已不参与外部依赖解析。增量 install 不动 junction,重跑幂等。`)

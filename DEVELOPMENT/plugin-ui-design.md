@@ -128,7 +128,19 @@ L2 全屏页面:
 - **pill 组**:容器 `<pfx>-bg-muted` + radius-sm + padding 2-4;选项高 28(普通 pill)/30(导航 tab,参考 `.tn-tab`);选中 accent 实底 + `--dsw-alias-bg-base` 文字,或 accent-wash 底 + accent 文字(包内二选一)。
 - **悬浮提示**:鼠标悬停出现的提示统一用公共依赖 `@mzzsfy/dsh-common-tools/client` 导出的 `Tooltip`(视觉 `.dct-tip`,由 dsh-usage-dash 悬浮窗迁移而来):`bg-layer-2` 底 + 1px border-l2 + radius-md + shadow-lv3 + 12px/1.5 + padding 10/12 + max-width 420 + 8px 箭头 + 0.12s 透明度过渡。消费方只传 `anchor`(`{kind:'point',x,y}` 指针跟随或 `{kind:'rect',left,top,width,height}` 元素锚点)、内容与可选 `panelSelector` 裁剪边界;禁止各包再写定位算法或自定义提示外观。图表十字线等高频跟随提示可保留专用定位,但视觉参数必须与 `.dct-tip` 一致;dsh-usage-dash 的 `.ud-tip` 是公共提示的迁移来源,其图表浮层保留专用实现,改动任一侧须同步另一侧。
 - **空态**:一行说明(14px text-sub)+ 一个主操作按钮,居中,上下留白 24px;不插图不造插画。加载态用骨架条(不含文案)或纯"加载中…"文案,二者不可混排;禁止空白。
-- **错误与 toast**:错误文案 text 色不飘红,红只给图标 / 边框 / 操作按钮;toast 底色 `var(--dsw-alias-toast-bg)`,文案 `var(--dsw-alias-toast-label)`。
+- **错误与 toast**:错误文案 text 色不飘红,红只给图标 / 边框 / 操作按钮。toast 由公共依赖 `@mzzsfy/dsh-common-tools/client` 统一渲染,形态经 `appearance` 选择,五种形态共用同一堆叠容器(top 40、水平居中、栈上限 4、6 秒自动消失),只改视觉密度与强调方式:
+
+  | 形态 | 底色 | 描边与强调 | 密度 |
+  |---|---|---|---|
+  | `toast`(默认) | `--dsw-alias-toast-bg` | 左侧 4px 状态色边,无图标 | 14/22,对齐宿主原生 toast |
+  | `panel` | `bg-layer-1` | 1px `border-l2` + 左侧 4px 状态色边 + `shadow-lv3` + 左侧 16px 状态图标 | 14/22 |
+  | `minimal` | `bg-layer-1` | 无描边无阴影,只留左侧 2px 状态色边,无图标 | 12/18、padding 6/10、radius-sm、max-width 480 |
+  | `accent` | 状态色 14% 掺 `bg-layer-1` | 整圈 1px 状态色描边 + 24px 状态色图标徽章,无左侧竖线 | 14/22、radius-md、字重 500 |
+  | `progress` | `bg-layer-1` | 1px `border-l2` + 底部 3px 状态色条(左侧不重复状态色) + 左侧 16px 状态图标 | 14/22、radius-md |
+
+  形态之间必须靠结构与图标拉开肉眼可辨的差异,不能只靠 1px 边的深浅或 1px 字号:图标的有无、徽章与否、竖线还是底部条是首选区分点。图标为 16px 描边 SVG(`currentColor` 取 `--dct-tone`),四种 `kind` 各一份轮廓,由 toast 组件统一渲染,消费方不得自绘。
+
+  实现口径:`--dct-tone` 是 toast 包内的间接令牌,按 `kind` 取 ok / warn / danger 三个语义槽位,`info` 取 `brand-primary`;accent 的 wash 派生式为 `color-mix(in srgb, var(--dct-tone) 14%, var(--dct-panel-bg))`,图标徽章用 `color-mix(in srgb, var(--dct-tone) 12%, transparent)`。**状态色入底色只有 `accent` 一种形态允许**,其余形态底色必须是中性槽位,文案颜色任何形态都不改。底部状态条只在条目带展示期时消退(`--dct-hold-ms` + `dsh-toast--countdown`),常驻条目与 `prefers-reduced-motion` 下停在满格。新增形态必须同批更新本表与 `packages/dsh-common-tools/兼容性测试.md` 的 D14。
 - **折叠**:头部整行可点,chevron 14px;展开内容顶部 8px,说明 12px text-dim。
 - **禁用**:统一 opacity 0.5 + cursor not-allowed,不换色相(开关、按钮、输入一致)。
 

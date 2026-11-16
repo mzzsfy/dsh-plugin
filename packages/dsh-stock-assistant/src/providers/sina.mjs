@@ -102,10 +102,12 @@ export const sina = {
       if (!match) continue
       const providerSymbol = match[1], security = symbols.get(providerSymbol)
       if (!security) continue
+      // 停牌/无值行来源返回空串: 不记 seen, 由 errors 记 NO_DATA; 不拖垮同批其它证券。
+      // 只有非空行字段不足才是来源结构异常
+      if (match[2].trim() === '') continue
       if (seen.has(providerSymbol)) throw new StockError('BAD_PAYLOAD', '报价身份冲突', 502)
       seen.add(providerSymbol)
       const f = match[2].split(','), kind = kindOf(providerSymbol)
-      // 停牌行来源返回空串,按无值处理而不是伪造零价
       if (f.length < MIN_FIELDS[kind]) throw new StockError('BAD_PAYLOAD', '来源字段数量异常', 502)
       const mapped = FIELD_MAP[kind](f)
       items.push(normalizeQuote({

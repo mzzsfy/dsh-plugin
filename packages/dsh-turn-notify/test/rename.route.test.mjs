@@ -6,6 +6,7 @@ import { busStub, resetBusStub } from './_mocks.common-tools.mjs'
 
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import { readFileSync } from 'node:fs'
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -16,11 +17,15 @@ process.env.USERPROFILE = homeRoot
 process.env.HOME = homeRoot
 process.env.DSH_HOME = join(homeRoot, '.dsh')
 const { apply } = await import('../src/index.js')
+const hostSource = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8')
 
 test.after(async () => { await rm(homeRoot, { recursive: true, force: true }) })
 
 const soundsDir = join(homeRoot, '.dsh', 'dsh-turn-notify', 'sounds')
 const JSON_HEADERS = { 'content-type': 'application/json' }
+// 浏览器 client 全部经 api() 以 application/json 发送;写请求默认带 JSON 头,
+// 使业务用例不受共享闸门的 content-type 门影响(守卫差异由专门用例显式覆盖)
+const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 
 function makeRes() {
   return {
@@ -41,7 +46,7 @@ function makeReq(method, payload, headers, url) {
   const req = new EventEmitter()
   req.method = method
   req.url = url || '/api/turn-notify/sound'
-  req.headers = { host: '127.0.0.1:3080', ...(headers || {}) }
+  req.headers = { host: '127.0.0.1:3080', ...(WRITE_METHODS.has(method) ? JSON_HEADERS : {}), ...(headers || {}) }
   const data = payload === undefined ? null : Buffer.from(JSON.stringify(payload))
   process.nextTick(() => {
     if (data !== null) req.emit('data', data)
@@ -130,6 +135,25 @@ test('重命名主路径:文件名不变,展示名落索引,映射引用不动,�
   await routes.get('/api/turn-notify/sound')(makeReq('GET', undefined, undefined, '/api/turn-notify/sound?id=snd-abc'), got)
   assert.equal(got.status, 200)
   assert.deepEqual(got.raw, Buffer.from([1, 2, 3]))
+})
+
+test('索引写入先写临时文件再 rename:目标完整且不留临时文件', async () => {
+  await resetSounds()
+  await seedSound('snd-atomic', 'wav')
+  const { ctx, routes } = makeCtx()
+  apply(ctx)
+  const res = makeRes()
+  await routes.get('/api/turn-notify/sound')(makeReq('PUT', { id: 'snd-atomic', name: '原子名' }, JSON_HEADERS), res)
+  assert.equal(res.status, 200)
+  const names = await listNames()
+  assert.deepEqual(names.filter(name => name.endsWith('.tmp')), [], '临时文件必须已被 rename 消费,不残留')
+  // 目标文件任何时刻都是完整 JSON:读取侧不会读到半截索引而丢光展示名
+  assert.deepEqual(await readIndex(), { 'snd-atomic': '原子名' })
+})
+
+test('索引写入实现契约:临时名含进程/随机段,经 rename 原子替换,不直接写目标', () => {
+  assert.match(hostSource, /soundIndexPath \+ '\.' \+ process\.pid \+ '\.[\s\S]+?randomUUID\(\)[\s\S]+?rename\(tempPath, soundIndexPath\)/, '索引写入必须是临时文件 + rename')
+  assert.doesNotMatch(hostSource, /writeFile\(soundIndexPath,/, '索引不得直接写目标,崩溃/并发会留下半截 JSON 丢光展示名')
 })
 
 test('重命名为当前展示名:幂等成功,索引与文件不动', async () => {

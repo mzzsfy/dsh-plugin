@@ -14,11 +14,14 @@
       "patch": "./cordis.patch.yml"
     },
     "client": {
-      "platform": "web"
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ]
     },
     "compatibility": {
       "dshReleases": {
-        "0.2.0-rc.1": "compatible",
+        "0.2.0-rc.1": "unknown",
         "0.2.0-rc.2": "compatible",
         "0.2.1-alpha.1": "unknown",
         "0.2.1-alpha.2": "compatible",
@@ -32,11 +35,10 @@
         "0.2.2-rc.3": "compatible"
       }
     },
-    "hostMin": "0.2.0-rc.1"
+    "hostMin": "0.2.0-rc.2"
   },
   "scripts": {
-    "test": "node test/run.mjs",
-    "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
+    "test": "node test/run.mjs"
   },
   "publishConfig": {
     "access": "public",
@@ -52,7 +54,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-tools": ">=0.2.0-rc.2",
-    "@deepseek-ai/dsh-api-terminal-controller": "0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-alpha.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5 || 0.2.2-alpha.3 || 0.2.2-rc.1 || 0.2.2-rc.2 || 0.2.2-rc.3",
+    "@deepseek-ai/dsh-api-terminal-controller": ">=0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-sidebar-terminal": ">=0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-sidebar-right": ">=0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-tool": ">=0.2.0-rc.2"
@@ -60,7 +62,10 @@
   "files": [
     "src",
     "test",
+    "!test/evidence",
+    "!test/**/*.log",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "兼容性测试.md"
   ]
 }

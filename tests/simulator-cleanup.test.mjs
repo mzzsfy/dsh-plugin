@@ -1,9 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  collectHostPlan,
   collectSimulatorPlan,
   isSimulatorPortCommandLine,
+  planHostCleanup,
+  planKeeperCleanup,
   planSimulatorCleanup,
+  processStartTime,
   terminateTargets,
 } from '../scripts/compat/simulator-cleanup.mjs'
 
@@ -30,13 +34,53 @@ test('命令行端口匹配锚定整数端口', () => {
 })
 
 test('live.json 有 simulatorPid 时只精确终止该 pid', () => {
+  const startedAt = 1_700_000_000_000
   const plan = planSimulatorCleanup(
-    { simulatorPid: 4242, simulatorPort: 5000 },
-    { sweep: true, processes: [{ pid: 111, commandLine: 'node scripts/echo-upstream/cli.mjs --port 5000' }] },
+    { simulatorPid: 4242, simulatorPort: 5000, simulatorStartedAt: startedAt },
+    { sweep: true, startTime: startedAt + 500, commandLine: simulatorLine() },
   )
   assert.equal(plan.mode, 'pid')
   assert.deepEqual(plan.targets, [{ pid: 4242, via: 'simulatorPid' }])
   assert.equal(plan.warning, null)
+})
+
+test('simulatorPid 启动时间不匹配时拒绝终止(pid 复用)', () => {
+  const plan = planSimulatorCleanup(
+    { simulatorPid: 4242, simulatorStartedAt: 1_700_000_000_000 },
+    { startTime: 1_700_000_000_000 + 20 * 60 * 1000 },
+  )
+  assert.deepEqual(plan.targets, [])
+  assert.equal(plan.refused, true)
+  assert.match(plan.warning, /启动时间不匹配/)
+})
+
+test('simulatorPid 缺启动时间记录时拒绝终止(旧 live.json 不可校验)', () => {
+  const plan = planSimulatorCleanup({ simulatorPid: 4242 }, { startTime: 1_700_000_000_000 })
+  assert.deepEqual(plan.targets, [])
+  assert.equal(plan.refused, true)
+  assert.match(plan.warning, /缺 simulatorStartedAt/)
+})
+
+test('宿主目标:启动时间与命令行同时匹配才终止;进程已退出视为达成', () => {
+  const startedAt = 1_700_000_000_000
+  const live = { pid: 77, port: 9297, hostStartedAt: startedAt }
+  const matched = planHostCleanup(live, {
+    startTime: startedAt - 200,
+    commandLine: 'node C:\\dsh\\lib\\bin.js web --no-open --port 9297',
+  })
+  assert.deepEqual(matched.targets, [{ pid: 77, via: 'host' }])
+  const exited = planHostCleanup(live, { startTime: null })
+  assert.deepEqual(exited.targets, [])
+  assert.equal(exited.refused, false)
+  const reused = planHostCleanup(live, { startTime: startedAt + 20 * 60 * 1000 })
+  assert.equal(reused.refused, true)
+  const wrongCommand = planHostCleanup(live, {
+    startTime: startedAt,
+    commandLine: 'node C:\\other\\server.js --port 9297',
+  })
+  assert.deepEqual(wrongCommand.targets, [])
+  assert.equal(wrongCommand.refused, true)
+  assert.match(wrongCommand.warning, /命令行不匹配/)
 })
 
 test('缺 pid 时按 simulatorPort 匹配命令行端口', () => {
@@ -88,14 +132,19 @@ test('两者都缺时默认不扫全机;显式 --sweep 才扫描且排除自身'
   assert.deepEqual(swept.targets, [{ pid: 111, via: 'sweep' }])
 })
 
-test('collectSimulatorPlan:有 pid 时不触碰全机进程表', () => {
+test('collectSimulatorPlan:有 pid 时只按该 pid 查一次进程表,不扫监听', () => {
   let called = 0
+  const startedAt = 1_700_000_000_000
   const plan = collectSimulatorPlan(
-    { simulatorPid: 42 },
-    { listProcesses: () => { called++; return [] }, listOwners: () => { called++; return [] } },
+    { simulatorPid: 42, simulatorStartedAt: startedAt },
+    {
+      listProcesses: () => { called++; return [{ pid: 42, commandLine: simulatorLine() }] },
+      listOwners: () => { called++; return [] },
+      startTimeOf: () => startedAt,
+    },
   )
   assert.deepEqual(plan.targets, [{ pid: 42, via: 'simulatorPid' }])
-  assert.equal(called, 0)
+  assert.equal(called, 1)
 
   let queriedPort = null
   collectSimulatorPlan(
@@ -103,6 +152,32 @@ test('collectSimulatorPlan:有 pid 时不触碰全机进程表', () => {
     { listProcesses: () => [], listOwners: (port) => { queriedPort = port; return [] } },
   )
   assert.equal(queriedPort, 5000)
+})
+
+test('processStartTime:非法 pid 不查询', () => {
+  let called = 0
+  const result = processStartTime(Number.NaN, { spawn: () => { called++; return { status: 0 } } })
+  assert.equal(result, null)
+  assert.equal(called, 0)
+})
+
+test('collectHostPlan:按单 pid 查询启动时间,并用进程表命令行二次校验', () => {
+  let queried = null
+  const plan = collectHostPlan(
+    { pid: 88, port: 9297, hostStartedAt: 1_700_000_000_000 },
+    {
+      startTimeOf: (pid) => { queried = pid; return 1_700_000_000_500 },
+      listProcesses: () => [{ pid: 88, commandLine: 'node C:\\dsh\\lib\\bin.js web --port 9297' }],
+    },
+  )
+  assert.equal(queried, 88)
+  assert.deepEqual(plan.targets, [{ pid: 88, via: 'host' }])
+})
+
+test('旧 live.json 无启动时间但进程已退出时视为已达成,不阻塞清理', () => {
+  const plan = collectHostPlan({ pid: 90, port: 9297 }, { startTimeOf: () => null, listProcesses: () => [] })
+  assert.deepEqual(plan.targets, [])
+  assert.equal(plan.refused, false)
 })
 
 test('终止命令按平台选择 taskkill / kill', () => {
@@ -171,4 +246,17 @@ test('非法 pid 目标直接判失败,不下发终止命令', () => {
   assert.equal(called, 0)
   assert.equal(result.ok, false)
   assert.match(result.failures[0].detail, /非法 pid/)
+})
+
+test('keeper 目标必须核对启动时间与 boot-keep 命令行,防 pid 复用误杀', () => {
+  const live = { keeperPid: 4242, keeperStartedAt: 1_000_000 }
+  assert.deepEqual(planKeeperCleanup(live, { startTime: null }).targets, [])
+  assert.equal(planKeeperCleanup(live, { startTime: null }).refused, false)
+  const mismatch = planKeeperCleanup(live, { startTime: 1_000_000, commandLine: 'node unrelated.js' })
+  assert.equal(mismatch.refused, true)
+  assert.deepEqual(mismatch.targets, [])
+  const stale = planKeeperCleanup(live, { startTime: 1_000_000 + 11 * 60 * 1000, commandLine: 'node scripts/compat/boot-keep.mjs --daemon' })
+  assert.equal(stale.refused, true)
+  const ok = planKeeperCleanup(live, { startTime: 1_000_000, commandLine: 'node scripts/compat/boot-keep.mjs --daemon' })
+  assert.deepEqual(ok.targets, [{ pid: 4242, via: 'keeper' }])
 })

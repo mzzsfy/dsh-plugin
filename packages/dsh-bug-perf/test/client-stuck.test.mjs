@@ -425,8 +425,41 @@ test('停滞_样式注入_带插件标记', () => {
   assert.equal(styles[0].attrs['data-plugin'], '@mzzsfy/dsh-bug-perf')
 })
 
-// Given 宿主重建删掉了本插件样式, When 再次安装, Then 样式重新注入且不叠加定时器
-test('停滞_样式被删后重装_重新注入', () => {
+// Given 设置卡片样式已先注入(同一 data-plugin 归属标记), When 安装停滞兜底, Then 停滞样式仍按独占标记注入
+test('停滞_设置样式先注入_停滞样式仍注入', () => {
+  const page = fakePage()
+  const settingsStyle = fakeNode('style')
+  settingsStyle.setAttribute('data-plugin', '@mzzsfy/dsh-bug-perf')
+  settingsStyle.setAttribute('data-style', 'settings')
+  settingsStyle.textContent = '.bp-card{display:block}'
+  page.doc.head.appendChild(settingsStyle)
+  const plugin = loadPlugin()
+  const clock = fakeClock()
+  plugin.__test.installStuckSession({ win: page.win, options: OPTIONS, clock, connection: fakeConnection() })
+  const styles = page.doc.head.children.filter((node) => node.tag === 'style')
+  assert.equal(styles.length, 2)
+  const stuck = styles.find((node) => node.attrs['data-style'] === 'stuck')
+  assert.ok(stuck !== undefined)
+  assert.equal(stuck.attrs.id, 'dsh-bug-perf-stuck-style')
+  assert.match(stuck.textContent, /\.bp-stuck\{/)
+  // 停滞提示条能拿到配色与定位,不是裸 div
+  clock.advance(2000 * 40)
+  const notice = noticeOf(page)
+  assert.ok(notice !== null)
+  assert.equal(notice.className, 'bp-stuck')
+})
+
+// Given 停滞样式已在位, When 再次安装, Then 不重复注入
+test('停滞_样式重复安装_不叠加', () => {
+  const page = fakePage()
+  const { plugin, clock } = install({ page })
+  plugin.__test.installStuckSession({ win: page.win, options: OPTIONS, clock, connection: fakeConnection() })
+  const styles = page.doc.head.children.filter((node) => node.tag === 'style')
+  assert.equal(styles.length, 1)
+})
+
+// Given 停滞样式已被宿主删除但补丁仍持有安装标记, When 重复安装, Then 先判重, 不越权创建无人释放的样式
+test('停滞_样式被删后重复安装_不越权注入', () => {
   const page = fakePage()
   const { plugin, clock } = install({ page })
   page.doc.head.children = []
@@ -434,6 +467,5 @@ test('停滞_样式被删后重装_重新注入', () => {
   assert.equal(second.installed, false)
   assert.equal(second.reason, 'already installed')
   const styles = page.doc.head.children.filter((node) => node.tag === 'style')
-  assert.equal(styles.length, 1)
-  assert.equal(styles[0].attrs['data-plugin'], '@mzzsfy/dsh-bug-perf')
+  assert.equal(styles.length, 0)
 })

@@ -7,8 +7,17 @@ import { join } from 'node:path'
 // 扫描日志必须落在临时目录,否则测试会写进真实 home
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'keep-working-test-'))
 
-import { resolveConfig } from '../src/config.mjs'
-import { listFreshByDirectory, scanSettled, scanStoredSessions } from '../src/scan.mjs'
+import { DEFAULTS, resolveConfig } from '../src/config.mjs'
+import {
+  createTraceThrottle,
+  listFreshByDirectory,
+  nextScanRetryMs,
+  pendingInbox,
+  SCAN_RETRY_MAX_MS,
+  SCAN_RETRY_MIN_MS,
+  scanSettled,
+  scanStoredSessions,
+} from '../src/scan.mjs'
 
 const TURN = 3
 const NOW = 10_000_000
@@ -37,6 +46,8 @@ const inboxSpliced = (seq, target, inserted, start = 0, removedCount = 0) =>
 const presented = (seq, turn) =>
   event(seq, 'deliverables/presented', { turn, callId: `p-${seq}`, files: [{ path: 'out.md' }] })
 
+const textOf = (entry) => entry.message.content.map((block) => block.text).join('')
+
 const openTail = [
   turnStart(1, TURN),
   userMessage(2),
@@ -63,13 +74,31 @@ const closedTail = [
   turnEnd(4, TURN, { kind: 'completed' }),
 ]
 
-function createHarness({ records, archived = [], goals, resumeFails = false, registryThrows = false } = {}) {
+function createHarness({
+  records,
+  archived = [],
+  goals,
+  resumeFails = false,
+  resumeFailures = {},
+  resumeNoAgent = false,
+  observeFailures = {},
+  sendFailures = {},
+  registryThrows = false,
+  onObserve,
+  archivedRead,
+} = {}) {
   const resumed = []
   const sent = []
   const agentsById = new Map()
+  let noAgentRemaining = typeof resumeNoAgent === 'number' ? resumeNoAgent : (resumeNoAgent ? Infinity : 0)
   const query = {
     listSessions: async () => records,
-    observeSession: async (id) => {
+    observeSession: async (id, options) => {
+      onObserve?.(id, options)
+      if ((observeFailures[id] ?? 0) > 0) {
+        observeFailures[id] -= 1
+        throw new Error(`observe failed: ${id}`)
+      }
       const record = records.find((item) => item.header.id === id)
       return {
         header: record.header,
@@ -84,7 +113,7 @@ function createHarness({ records, archived = [], goals, resumeFails = false, reg
       if (name === 'goals') return goals
       if (name === 'workspaceRegistry') {
         if (registryThrows) throw new Error('workspace registry is not started yet')
-        return { archivedSessionIds: archived }
+        return { archivedSessionIds: archivedRead === undefined ? archived : archivedRead() }
       }
       return undefined
     },
@@ -92,13 +121,33 @@ function createHarness({ records, archived = [], goals, resumeFails = false, reg
       get: (id) => agentsById.get(id),
       resume: async ({ resumeSessionId }) => {
         if (resumeFails) throw new Error('resume failed')
+        if ((resumeFailures[resumeSessionId] ?? 0) > 0) {
+          resumeFailures[resumeSessionId] -= 1
+          throw new Error(`resume failed: ${resumeSessionId}`)
+        }
         resumed.push(resumeSessionId)
+        if (noAgentRemaining > 0) {
+          noAgentRemaining -= 1
+          return { agent: undefined }
+        }
         agentsById.set(resumeSessionId, {
           id: resumeSessionId,
           session: { id: resumeSessionId },
           inbox: { nextTurn: [] },
-          followup: (message) => sent.push({ id: resumeSessionId, message, via: 'followup' }),
-          steer: (message) => sent.push({ id: resumeSessionId, message, via: 'steer' }),
+          followup: (message) => {
+            if ((sendFailures[resumeSessionId] ?? 0) > 0) {
+              sendFailures[resumeSessionId] -= 1
+              throw new Error(`send failed: ${resumeSessionId}`)
+            }
+            sent.push({ id: resumeSessionId, message, via: 'followup' })
+          },
+          steer: (message) => {
+            if ((sendFailures[resumeSessionId] ?? 0) > 0) {
+              sendFailures[resumeSessionId] -= 1
+              throw new Error(`send failed: ${resumeSessionId}`)
+            }
+            sent.push({ id: resumeSessionId, message, via: 'steer' })
+          },
         })
         return { agent: agentsById.get(resumeSessionId) }
       },
@@ -415,7 +464,7 @@ test('没闭合即使已输出 TASK_DONE:仍恢复中断', async () => {
   })
   assert.equal(result.resumed, 1)
   assert.equal(h.sent.length, 1)
-  assert.match(h.sent[0].message.content[0].text, /结果未知/)
+  assert.equal(h.sent[0].message.content[0].text, DEFAULTS.restartText, '重启恢复用独立文案')
 })
 
 test('未闭合即使已有 present:仍恢复中断', async () => {
@@ -430,7 +479,7 @@ test('未闭合即使已有 present:仍恢复中断', async () => {
   })
   assert.equal(result.resumed, 1)
   assert.equal(h.sent.length, 1)
-  assert.match(h.sent[0].message.content[0].text, /结果未知/)
+  assert.equal(h.sent[0].message.content[0].text, DEFAULTS.restartText, '重启恢复用独立文案')
 })
 
 test('interrupted 即使已输出 TASK_DONE:仍恢复中断', async () => {
@@ -450,7 +499,7 @@ test('interrupted 即使已输出 TASK_DONE:仍恢复中断', async () => {
   })
   assert.equal(result.resumed, 1)
   assert.equal(h.sent.length, 1)
-  assert.match(h.sent[0].message.content[0].text, /结果未知/)
+  assert.equal(h.sent[0].message.content[0].text, DEFAULTS.restartText, '重启恢复用独立文案')
 })
 
 test('宿主重启取消即使已输出 TASK_DONE:仍恢复中断', async () => {
@@ -470,6 +519,76 @@ test('宿主重启取消即使已输出 TASK_DONE:仍恢复中断', async () => 
   })
   assert.equal(result.resumed, 1)
   assert.equal(h.sent.length, 1)
+})
+
+test('重启恢复文案可单独配置,且不吞掉截断 / 空回合的专项文案', async () => {
+  const interrupted = [
+    turnStart(1, TURN),
+    userMessage(2),
+    assistant(3, TURN, '话说到一半'),
+    turnEnd(4, TURN, { kind: 'interrupted' }),
+  ]
+  const truncated = [
+    turnStart(1, TURN),
+    userMessage(2),
+    assistant(3, TURN, '话说到一半'),
+    turnEnd(4, TURN, { kind: 'max-tokens' }),
+  ]
+  const custom = resolveConfig({}, { restartText: '继续,dsh 刚重启' })
+
+  const interruptedRun = createHarness({ records: [record('s1', interrupted)] })
+  await scanStoredSessions({
+    ctx: interruptedRun.ctx,
+    config: custom,
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.equal(interruptedRun.sent[0].message.content[0].text, '继续,dsh 刚重启')
+
+  const truncatedRun = createHarness({ records: [record('s1', truncated)] })
+  await scanStoredSessions({
+    ctx: truncatedRun.ctx,
+    config: custom,
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.equal(truncatedRun.sent[0].message.content[0].text, DEFAULTS.continueTextMaxTokens)
+})
+
+test('冷启动错误回合:默认重试,开启区分永久错误后只跳过请求结构错误', async () => {
+  const errorTail = (code, message) => [
+    turnStart(1, TURN),
+    userMessage(2),
+    turnEnd(3, TURN, { kind: 'error', error: { code, message } }),
+  ]
+  const scan = async (tail, config) => {
+    const h = createHarness({ records: [record('s1', tail)] })
+    const result = await scanStoredSessions({
+      ctx: h.ctx,
+      config,
+      createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+      now: () => NOW,
+      scanDirectory: () => undefined,
+    })
+    return { result, h }
+  }
+
+  const defaults = await scan(errorTail('CONTEXT_WINDOW_EXCEEDED', 'the request failed'), resolveConfig())
+  assert.equal(defaults.result.resumed, 1, '默认全部重试')
+  assert.equal(defaults.h.sent.length, 1)
+
+  const structured = await scan(
+    errorTail('CONTEXT_WINDOW_EXCEEDED', 'the request failed'),
+    resolveConfig({ classify: true }),
+  )
+  assert.equal(structured.result.resumed, 0, '请求结构错误在开启区分后不恢复')
+  assert.equal(structured.h.sent.length, 0)
+
+  const upstream = await scan(errorTail('AUTH', 'invalid api key'), resolveConfig({ classify: true }))
+  assert.equal(upstream.result.resumed, 1, '鉴权属上游级错误,即使开启区分仍重试')
+  assert.equal(upstream.h.sent.length, 1)
 })
 
 test('最近 10 条消息里有 present 的会话不恢复', async () => {
@@ -623,6 +742,17 @@ test('正常结束但仍有排队消息的会话被恢复,恢复消息插队发�
     assert.equal(h.sent[0].via, 'steer', '排队消息存在时必须插队,不能追加到 next-turn 队尾')
     assert.equal(h.sent[0].message.content[0].text, '继续')
   }
+})
+
+test('pendingInbox 删除事件不刷新最后入队时间', () => {
+  const queued = queuedMessage(1)
+  const events = [
+    { seq: 1, time: 1_000, type: 'agent/inbox/spliced', data: { target: 'next-turn', start: 0, removedCount: 0, inserted: [queued] } },
+    { seq: 2, time: 2_000, type: 'agent/inbox/spliced', data: { target: 'next-turn', start: 0, removedCount: 1, inserted: [] } },
+  ]
+  const inbox = pendingInbox(events)
+  assert.equal(inbox.count, 0)
+  assert.equal(inbox.lastAt, 1_000, '删除事件不能刷新 lastAt')
 })
 
 test('未闭合回合带排队消息时同样插队恢复', async () => {
@@ -819,6 +949,88 @@ test('物化失败不阻断后续会话', async () => {
   assert.equal(result.resumed, 0)
 })
 
+const blockedTail = [
+  turnStart(1, TURN),
+  userMessage(2),
+  assistant(3, TURN, '做到一半'),
+  turnEnd(4, TURN, { kind: 'blocked' }),
+]
+
+test('宿主预检拒绝(blocked)按中断恢复', async () => {
+  const h = createHarness({ records: [record('s1', blockedTail)] })
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.deepEqual(h.resumed, ['s1'])
+  assert.equal(result.resumed, 1)
+  assert.match(h.sent[0].message.content[0].text, /dsh已重启/)
+})
+
+test('blocked 但末行已结案:不恢复', async () => {
+  const tail = [
+    turnStart(1, TURN),
+    userMessage(2),
+    assistant(3, TURN, '结论\nTASK_DONE'),
+    turnEnd(4, TURN, { kind: 'blocked' }),
+  ]
+  const h = createHarness({ records: [record('s1', tail)] })
+  await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.deepEqual(h.resumed, [])
+  assert.equal(h.sent.length, 0)
+})
+
+test('预检拒绝落下的 blocked 目标重新武装,不再补消息', async () => {
+  const resumedGoals = []
+  const goals = {
+    get: () => ({
+      id: 'g1',
+      revision: 2,
+      phase: 'blocked',
+      activation: 'disarmed',
+      blockedReason: { code: 'prompt-rejected', message: 'Goal round was rejected before entering its step.' },
+    }),
+    resume: (agent, ref) => resumedGoals.push({ agent: agent.id, ref }),
+  }
+  const h = createHarness({ records: [record('s1', blockedTail)], goals })
+  await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig({ resumeGoals: true }),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.deepEqual(resumedGoals, [{ agent: 's1', ref: { id: 'g1', revision: 2 } }])
+  assert.equal(h.sent.length, 0, '交回 driver 后不得再补消息')
+})
+
+test('非预检拒绝的 blocked 目标不接管', async () => {
+  const resumedGoals = []
+  const goals = {
+    get: () => ({ id: 'g1', revision: 2, phase: 'blocked', blockedReason: { code: 'needs-input', message: '缺凭据' } }),
+    resume: (agent, ref) => resumedGoals.push({ agent: agent.id, ref }),
+  }
+  const h = createHarness({ records: [record('s1', blockedTail)], goals })
+  await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig({ resumeGoals: true }),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.deepEqual(resumedGoals, [])
+  assert.equal(h.sent.length, 1, '模型自述受阻不是预检拒绝,按普通中断续跑')
+})
+
 test('goal 失活时重新武装', async () => {
   const resumedGoals = []
   const goals = {
@@ -891,6 +1103,21 @@ test('归档集合未就绪时本轮不恢复', async () => {
   assert.equal(result.resumed, 0)
   assert.equal(result.complete, false)
   assert.deepEqual(h.resumed, [])
+})
+
+test('归档集合字段缺失时按未知处理,不当作空集', async () => {
+  const h = createHarness({ records: [record('s1', danglingTail)] })
+  const base = h.ctx.get.bind(h.ctx)
+  h.ctx.get = (name) => (name === 'workspaceRegistry' ? {} : base(name))
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.equal(result.resumed, 0, '未就绪的集合不是空集,不能恢复')
+  assert.equal(result.complete, false)
 })
 
 test('目录扫描按修改时间筛出近期会话', async () => {
@@ -971,6 +1198,34 @@ test('空回合恢复开关关闭时重启扫描不补发', async () => {
   }
 })
 
+test('关闭结案强制后重启扫描不再补 present 提醒', async () => {
+  const writeSilentTail = [
+    turnStart(1, TURN),
+    userMessage(2),
+    event(3, 'tool/call', { turn: TURN, step: 1, callId: 'c-1', name: 'write', arguments: '{}' }),
+    turnEnd(4, TURN, { kind: 'completed' }),
+  ]
+  for (const [label, overrides, expected] of [
+    ['默认', {}, 1],
+    ['关闭强制且关闭空回合', { enforceClosure: false, resumeSilentTurns: false }, 0],
+    ['关闭强制但开空回合', { enforceClosure: false }, 1],
+  ]) {
+    const h = createHarness({ records: [record('s-write-silent', writeSilentTail)] })
+    const result = await scanStoredSessions({
+      ctx: h.ctx,
+      config: resolveConfig(overrides),
+      createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+      now: () => NOW,
+      scanDirectory: () => undefined,
+    })
+    assert.equal(result.resumed, expected, label)
+    assert.equal(h.sent.length, expected, label)
+    if (label === '关闭强制但开空回合') {
+      assert.equal(textOf(h.sent[0]), DEFAULTS.continueTextSilent, '不得再发结案提醒文案')
+    }
+  }
+})
+
 test('第零代与多代际产物都能被目录扫描识别', async () => {
   const home = mkdtempSync(join(tmpdir(), 'keep-working-gen-'))
   const workspace = join(home, 'sessions', 'ws')
@@ -996,4 +1251,461 @@ test('第零代与多代际产物都能被目录扫描识别', async () => {
     if (previous === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previous
   }
+})
+
+test('目录冷启动识别 import-* 与裸 UUID 主会话', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'keep-working-import-'))
+  const ids = ['import-20261114-abc', '550e8400-e29b-41d4-a716-446655440000']
+  const nowSeconds = NOW / 1000
+  for (const id of ids) {
+    const dir = join(home, 'sessions', 'ws', id)
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, 'session.v4.jsonl.zstd')
+    writeFileSync(file, 'x')
+    utimesSync(file, nowSeconds, nowSeconds)
+  }
+  const h = createHarness({ records: ids.map((id) => record(id, danglingTail)) })
+  const base = h.ctx.get.bind(h.ctx)
+  h.ctx.get = (name) => (name === 'sessionPersistence'
+    ? { stat: async (id) => ({ header: { id }, eventCount: 1 }) }
+    : base(name))
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  try {
+    const result = await scanStoredSessions({
+      ctx: h.ctx,
+      config: resolveConfig(),
+      createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+      now: () => NOW,
+    })
+    assert.equal(result.source, 'directory')
+    assert.deepEqual(h.resumed.sort(), [...ids].sort())
+  } finally {
+    if (previous === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previous
+  }
+})
+
+test('非会话产物不参与代际筛选,不遮蔽真实产物', () => {
+  const home = mkdtempSync(join(tmpdir(), 'keep-working-artifact-'))
+  const nowSeconds = NOW / 1000
+  const make = (sessionId, fileName) => {
+    const dir = join(home, 'sessions', 'ws', sessionId)
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, fileName)
+    writeFileSync(file, 'x')
+    utimesSync(file, nowSeconds, nowSeconds)
+  }
+  // 只有迁移中间产物的目录不构成候选
+  make('session-temp-only', 'session.jsonl.tmp-1')
+  make('session-real', 'session.jsonl.zstd')
+  make('session-real', 'session.jsonl.tmp-1')
+
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  try {
+    const found = listFreshByDirectory(resolveConfig(), NOW)
+    assert.deepEqual(found.items.map((item) => item.id), ['session-real'])
+    assert.match(found.items[0].path, /session\.jsonl\.zstd$/)
+  } finally {
+    if (previous === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previous
+  }
+})
+
+test('待接管项先复核归档集合:已归档会话不得被补投', async () => {
+  const h = createHarness({ records: [], archived: ['s1'] })
+  const agent = {
+    id: 's1',
+    session: { id: 's1' },
+    inbox: { nextTurn: [] },
+    followup: () => { throw new Error('已归档会话不得 followup') },
+    steer: () => { throw new Error('已归档会话不得 steer') },
+  }
+  h.agentsById.set('s1', agent)
+  const pendingTakeovers = new Map([
+    ['s1', { sessionId: 's1', agent, inbox: { count: 0 }, verdict: 'resume:interrupted' }],
+  ])
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+    pendingTakeovers,
+  })
+  assert.equal(result.resumed, 0)
+  assert.equal(pendingTakeovers.has('s1'), false, '已归档待接管项必须丢弃')
+  assert.equal(h.sent.length, 0)
+})
+
+test('待接管项按新代结案开关重判:不补结案提醒,空回合照常恢复', async () => {
+  for (const [resumeSilentTurns, expected] of [
+    [true, 1],
+    [false, 0],
+  ]) {
+    const h = createHarness({ records: [] })
+    const sent = []
+    const agent = {
+      id: 's1',
+      session: { id: 's1' },
+      inbox: { nextTurn: [] },
+      followup: (message) => sent.push(message),
+    }
+    h.agentsById.set('s1', agent)
+    const pendingTakeovers = new Map([
+      ['s1', { sessionId: 's1', agent, inbox: { count: 0 }, verdict: 'resume:closure' }],
+    ])
+    const result = await scanStoredSessions({
+      ctx: h.ctx,
+      config: resolveConfig({ enforceClosure: false, resumeSilentTurns }),
+      createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+      now: () => NOW,
+      scanDirectory: () => undefined,
+      pendingTakeovers,
+    })
+    assert.equal(result.resumed, expected, `resumeSilentTurns=${resumeSilentTurns}`)
+    assert.equal(sent.length, expected)
+    assert.equal(pendingTakeovers.has('s1'), false)
+    if (expected === 1) {
+      assert.equal(sent[0].content.map((block) => block.text).join(''), DEFAULTS.continueTextSilent, '不得再发结案提醒文案')
+    }
+  }
+})
+
+test('归档集合在观察期间变化时,物化前复核并跳过', async () => {
+  const archived = []
+  const h = createHarness({
+    records: [record('s1', danglingTail)],
+    archived,
+    onObserve: (id) => archived.push(id),
+  })
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.equal(result.resumed, 0)
+  assert.deepEqual(h.resumed, [], '观察后已归档的会话不得物化恢复')
+  assert.equal(h.sent.length, 0)
+})
+
+test('物化前归档集合复核失败时跳过且下一轮可重试', async () => {
+  let reads = 0
+  const h = createHarness({
+    records: [record('s1', danglingTail)],
+    archivedRead: () => {
+      reads += 1
+      if (reads === 2) throw new Error('workspace registry is not started yet')
+      return []
+    },
+  })
+  const seen = new Set()
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+    seen,
+  })
+  assert.equal(result.resumed, 0)
+  assert.equal(result.complete, false, '复核失败不能宣称本轮扫完')
+  assert.equal(seen.has('s1'), false, '未裁决的会话不能被跨轮去重吞掉')
+
+  const retry = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+    seen,
+  })
+  assert.equal(retry.resumed, 1, '权威集合恢复后应能重试成功')
+})
+
+test('扫描重试间隔从 1s 指数退避到 60s', () => {
+  let delay = SCAN_RETRY_MIN_MS
+  const delays = []
+  for (let index = 0; index < 8; index += 1) {
+    delays.push(delay)
+    delay = nextScanRetryMs(delay)
+  }
+  assert.deepEqual(delays.slice(0, 7), [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 60_000])
+  assert.equal(delay, SCAN_RETRY_MAX_MS, '退避封顶后保持 60s')
+})
+
+test('重复扫描日志按最小间隔降频', () => {
+  const allow = createTraceThrottle(60_000)
+  assert.equal(allow('扫描开始', 1_000), true)
+  assert.equal(allow('扫描开始', 30_000), false, '间隔内重复内容不写')
+  assert.equal(allow('已归档 2 个', 30_001), true, '不同内容不受影响')
+  assert.equal(allow('扫描开始', 61_000), true, '超过间隔后恢复一次')
+})
+
+test('单会话读取失败:本轮标未完成且下一轮重试成功', async () => {
+  const h = createHarness({
+    records: [record('s1', danglingTail), record('s2', danglingTail)],
+    observeFailures: { s1: 1 },
+  })
+  const seen = new Set()
+  const first = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+    seen,
+  })
+  assert.equal(first.resumed, 1, '另一个会话照常恢复')
+  assert.equal(first.complete, false, '单会话失败不得宣称本轮扫完')
+  assert.equal(seen.has('s1'), false, '失败会话必须回到待重试集合')
+
+  const retry = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+    seen,
+  })
+  assert.equal(retry.resumed, 1, '下一轮重试成功')
+  assert.deepEqual(h.resumed, ['s2', 's1'])
+})
+
+test('扫描 observeSession 传 projectionMode:none 与 AbortSignal,投影失败下一轮重试', async () => {
+  const controller = new AbortController()
+  let observedOptions
+  const h = createHarness({
+    records: [record('s1', danglingTail)],
+    observeFailures: { s1: 1 },
+    onObserve: (_id, options) => { observedOptions = options },
+  })
+  const seen = new Set()
+  const first = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+    signal: controller.signal,
+    seen,
+  })
+  assert.deepEqual(observedOptions, { projectionMode: 'none', signal: controller.signal })
+  assert.equal(first.resumed, 0)
+  assert.equal(first.complete, false, '投影失败不能宣称本轮扫完')
+  assert.equal(seen.has('s1'), false, '投影失败会话必须下一轮重试')
+
+  const retry = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+    signal: controller.signal,
+    seen,
+  })
+  assert.equal(retry.resumed, 1)
+})
+
+test('物化未得到 live agent 视为失败:本轮不完成且下一轮重试', async () => {
+  const h = createHarness({ records: [record('s1', danglingTail)], resumeNoAgent: 1 })
+  const seen = new Set()
+  const first = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+    seen,
+  })
+  assert.equal(first.resumed, 0)
+  assert.equal(first.complete, false)
+  assert.equal(seen.has('s1'), false)
+  assert.deepEqual(h.resumed, ['s1'], 'resume 已调用但未得到 agent,仍算失败')
+
+  const retry = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+    seen,
+  })
+  assert.equal(retry.resumed, 1)
+  assert.equal(h.sent.length, 1)
+})
+
+test('冷启动会话已被客户端打开(空闲 live agent):补恢复消息且不重复物化', async () => {
+  // 崩溃后浏览器重连会打开上次的会话并物化 agent;打开不等于接管,中断的回合仍要续跑
+  const h = createHarness({ records: [record('s1', danglingTail)] })
+  const sent = []
+  h.agentsById.set('s1', {
+    id: 's1',
+    session: { id: 's1' },
+    status: 'idle',
+    inbox: { nextTurn: [] },
+    followup: (message) => sent.push({ via: 'followup', message }),
+    steer: (message) => sent.push({ via: 'steer', message }),
+  })
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.equal(result.resumed, 1)
+  assert.deepEqual(h.resumed, [], '已 live 的会话不得再 resume')
+  assert.equal(sent.length, 1, '空闲 live agent 必须收到恢复消息')
+  assert.equal(sent[0].via, 'followup')
+})
+
+test('候选会话正在跑回合:不判定也不补消息', async () => {
+  let observed = 0
+  const h = createHarness({ records: [record('s1', danglingTail)], onObserve: () => { observed += 1 } })
+  h.agentsById.set('s1', {
+    id: 's1',
+    session: { id: 's1' },
+    status: 'running',
+    inbox: { nextTurn: [] },
+    followup: () => { throw new Error('must not followup a running session') },
+    steer: () => { throw new Error('must not steer a running session') },
+  })
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.equal(result.resumed, 0)
+  assert.equal(observed, 0, '正在跑回合的会话不进入判定')
+})
+
+test('判定期间客户端打开会话:空闲则复用 live agent 补消息', async () => {
+  let h
+  const sent = []
+  h = createHarness({
+    records: [record('s1', danglingTail)],
+    onObserve: () => {
+      h.agentsById.set('s1', {
+        id: 's1',
+        session: { id: 's1' },
+        status: 'idle',
+        inbox: { nextTurn: [] },
+        followup: (message) => sent.push({ via: 'followup', message }),
+        steer: (message) => sent.push({ via: 'steer', message }),
+      })
+    },
+  })
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.equal(result.resumed, 1)
+  assert.deepEqual(h.resumed, [])
+  assert.equal(sent.length, 1)
+})
+
+test('判定期间会话进入运行:不得补消息', async () => {
+  let h
+  h = createHarness({
+    records: [record('s1', danglingTail)],
+    onObserve: () => {
+      h.agentsById.set('s1', {
+        id: 's1',
+        session: { id: 's1' },
+        status: 'running',
+        inbox: { nextTurn: [] },
+        followup: () => { throw new Error('must not followup a running session') },
+        steer: () => { throw new Error('must not steer a running session') },
+      })
+    },
+  })
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.equal(result.resumed, 0)
+  assert.equal(h.sent.length, 0)
+})
+
+test('scan 在途失效:isActive 变为 false 后不再物化恢复', async () => {
+  let active = true
+  const h = createHarness({
+    records: [record('s1', danglingTail)],
+    onObserve: () => { active = false },
+  })
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+    isActive: () => active,
+  })
+  assert.equal(result.cancelled, true)
+  assert.deepEqual(h.resumed, [])
+})
+
+test('scan 在途失效:AbortSignal 触发后停止后续会话', async () => {
+  const abort = new AbortController()
+  const h = createHarness({
+    records: [record('s1', danglingTail), record('s2', danglingTail)],
+    onObserve: () => abort.abort(),
+  })
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+    signal: abort.signal,
+  })
+  assert.equal(result.cancelled, true)
+  assert.deepEqual(h.resumed, [])
+})
+
+test('投递 followup 短暂失败:live agent 保留待重排并下一轮重试', async () => {
+  const h = createHarness({
+    records: [record('s1', danglingTail)],
+    sendFailures: { s1: 1 },
+  })
+  const pendingTakeovers = new Map()
+  const seen = new Set()
+  const first = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+    pendingTakeovers,
+    seen,
+  })
+  assert.equal(first.resumed, 0)
+  assert.equal(first.complete, false, '本次投递失败不能宣称扫完')
+  assert.equal(pendingTakeovers.has('s1'), true, '失败投递必须保留待重排')
+  assert.equal(h.sent.length, 0)
+
+  const retry = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+    pendingTakeovers,
+    seen,
+  })
+  assert.equal(retry.resumed, 1)
+  assert.equal(h.sent.length, 1, '下一轮必须重试同一条恢复消息')
+  assert.equal(pendingTakeovers.has('s1'), false)
 })

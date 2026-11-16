@@ -38,13 +38,15 @@ before(async () => {
   })
   // 浏览器渠道按环境选择: CI 用 playwright 内置 chromium(workflow 装配, Google
   // 不发 Linux arm64 系统版, amd64 预装的系统 Chrome 是环境差异不是契约);
-  // 本地与 amd64 缺省走系统 Chrome, DSH_BROWSER_CHANNEL=chromium 置空渠道。
-  // 走 persistent context 显式提供 user-data-dir: 聚合器把 HOME/USERPROFILE 重定向
-  // 到一次性 home 后, branded Chrome 判定数据目录形态失败并拒绝 DevTools 调试
+  // 本地与 amd64 缺省走系统 Chrome, PLAYWRIGHT_BROWSER_CHANNEL=chromium 走内置
+  // 完整 Chromium。不能置空 channel: Playwright 1.63 在 headless 下会优先找
+  // chromium-headless-shell, 而缓存可能只恢复完整 Chromium。
+  // 变量不能带 DSH_ 前缀:aggregate-tests 的隔离环境会剔除全部 DSH_*/STOCK_* 变量,
+  // CI 的渠道选择因此到不了子进程。
   const profile = mkdtempSync(join(tmpdir(), 'select-browser-profile-'))
   context = await chromium.launchPersistentContext(profile, {
     headless: true,
-    channel: process.env.DSH_BROWSER_CHANNEL === 'chromium' ? undefined : 'chrome',
+    channel: process.env.PLAYWRIGHT_BROWSER_CHANNEL === 'chromium' ? 'chromium' : 'chrome',
     viewport: { width: 1280, height: 900 },
     locale: 'zh-CN',
     // branded Chrome 按 HOME/USERPROFILE 判定数据目录形态, 聚合器重定向后
@@ -124,6 +126,12 @@ test('键盘打开与选择, Escape 只关菜单不关设置弹窗', async () =>
   }, ['[aria-label="刷新间隔"]', '15秒'])
   const pending = takePreferenceResponse()
   await page.keyboard.press('ArrowDown')
+  // ArrowDown 的 active 更新是 React 另一次提交;慢架构上紧跟 Enter 会读回旧 active(15秒)
+  await page.waitForFunction(([triggerSel, optionLabel]) => {
+    const trigger = document.querySelector(triggerSel)
+    const active = trigger?.getAttribute('aria-activedescendant')
+    return active !== null && document.getElementById(active)?.textContent?.trim() === optionLabel
+  }, ['[aria-label="刷新间隔"]', '30秒'])
   await page.keyboard.press('Enter')
   const response = await pending
   assert.equal(response.status(), 200)
@@ -155,4 +163,143 @@ test('点击菜单外关闭下拉, 设置弹窗保持打开', async () => {
   await page.locator('.ssb-settings h3').first().click()
   await listbox.waitFor({ state: 'hidden', timeout: 1000 })
   await page.getByRole('dialog', { name: '设置' }).waitFor({ state: 'visible' })
+})
+
+// K4 交互: 夹具只注册 tushare, 默认实例引用的 eastmoney 等适配器已不存在 —— 下拉必须显示失效值
+// 而不是静默显示第一个选项; 切到 tushare 后保存数据源, 草稿路由按 tushare 的能力矩阵剪枝,
+// 不再提交服务端必拒的 kline/搜索/外市场引用(其余未注册实例先移除, 否则服务端契约本身就该拒)。
+test('适配器下拉显示失效值, 切换后保存按新能力剪枝', async () => {
+  // 上一个用例结束时设置弹窗仍开着且草稿跨会话保留(基线版本已过期); 重载拿到干净运行时
+  const dialog = page.getByRole('dialog', { name: '设置' })
+  await page.reload()
+  await page.waitForSelector('.ssb-root')
+  await page.getByRole('button', { name: '更多操作' }).click()
+  await page.getByRole('button', { name: '设置', exact: true }).click()
+  await page.getByRole('tab', { name: '数据源' }).click()
+  // 夹具未注册的适配器实例先移除: 它们与本次剪枝无关, 留着会让服务端按 INVALID_ADAPTER 整次拒绝
+  for (const id of ['sn-backup', 'tx-backup', 'xq-backup']) {
+    const card = page.locator('.ssb-provider').filter({ hasText: id })
+    await card.locator('.ssb-provider-toggle').click()
+    await card.getByRole('button', { name: '移除' }).click()
+    await card.waitFor({ state: 'detached' })
+  }
+  const card = page.locator('.ssb-provider').first()
+  const providerId = (await card.locator('.ssb-provider-id').innerText()).trim()
+  await card.locator('.ssb-provider-toggle').click()
+  const trigger = page.getByRole('combobox', { name: '适配器' })
+  assert.match(await trigger.innerText(), /eastmoney（不可用）/, '未注册的适配器值必须显示为异常项')
+  await trigger.click()
+  const listbox = page.getByRole('listbox', { name: '适配器' })
+  await listbox.waitFor({ state: 'visible' })
+  assert.equal(await listbox.getByRole('option', { name: 'eastmoney（不可用）' }).getAttribute('aria-disabled'), 'true')
+  await listbox.getByRole('option', { name: 'tushare' }).click()
+  await listbox.waitFor({ state: 'hidden', timeout: 1000 })
+  assert.match(await trigger.innerText(), /tushare/)
+  const pending = page.waitForResponse(response => response.url().includes('/api/stock-assistant/configuration') && response.request().method() === 'POST')
+  await page.getByRole('button', { name: '保存数据源' }).click()
+  const response = await pending
+  const body = await response.json()
+  assert.equal(response.status(), 200, JSON.stringify(body))
+  assert.equal(body.ok, true)
+  const savedControl = (await page.evaluate(async () => (await fetch('/api/stock-assistant/snapshot')).json())).data.control
+  assert.equal(savedControl.providers.find(provider => provider.id === providerId).adapterId, 'tushare')
+  const capabilities = ['catalog', 'quotes', 'calendar'], markets = ['XSHG', 'XSHE']
+  const foreign = savedControl.routes.filter(route => route.primaryInstanceId === providerId).filter(route => !capabilities.includes(route.capability) || !markets.includes(route.market))
+  assert.deepEqual(foreign, [], '切到 tushare 后不得留下 kline/搜索/外市场路由')
+  assert.equal(errors.length, 0)
+  await page.getByRole('button', { name: '关闭' }).click()
+  await dialog.waitFor({ state: 'hidden' })
+})
+
+async function openSettings() {
+  await page.reload()
+  await page.waitForSelector('.ssb-root')
+  await page.getByRole('button', { name: '更多操作' }).click()
+  await page.getByRole('button', { name: '设置', exact: true }).click()
+  await page.getByRole('tab', { name: '数据源' }).click()
+  await page.getByRole('dialog', { name: '设置' }).waitFor({ state: 'visible' })
+}
+
+const assertBannerAboveOverlay = async () => {
+  const banner = page.locator('.ssb-banner.ssb-error')
+  await banner.waitFor({ state: 'visible' })
+  const box = await banner.boundingBox()
+  assert.ok(box, '错误横幅必须有可点击区域')
+  const hit = await page.evaluate(([x, y]) => document.elementFromPoint(x, y)?.closest('.ssb-banner.ssb-error') !== null, [box.x + box.width / 2, box.y + box.height / 2])
+  assert.equal(hit, true, '设置浮层打开时错误横幅必须位于浮层之上, 409/500 不能被遮住')
+  assert.equal(await page.getByRole('dialog', { name: '设置' }).isVisible(), true)
+}
+
+// S2: 设置浮层 z-index 60 不能盖住保存错误横幅(409 真实由服务端返回)
+test('S2 保存配置 409 时错误横幅位于浮层之上', async () => {
+  await openSettings()
+  const revision = await page.evaluate(async () => (await (await fetch('/api/stock-assistant/snapshot')).json()).data.control.revision)
+  const bumped = await page.evaluate(async expectedRevision => {
+    const response = await fetch('/api/stock-assistant/preferences', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operationId: crypto.randomUUID(), expectedRevision, patch: { refreshSeconds: 60 } }) })
+    return response.status
+  }, revision)
+  assert.equal(bumped, 200)
+  const pending = page.waitForResponse(response => response.url().includes('/api/stock-assistant/configuration') && response.request().method() === 'POST')
+  await page.getByRole('button', { name: '保存数据源' }).click()
+  assert.equal((await pending).status(), 409)
+  assert.match(await page.locator('.ssb-banner.ssb-error').innerText(), /数据已被其他页面修改/)
+  await assertBannerAboveOverlay()
+  assert.equal(errors.length, 0)
+})
+
+test('S2 保存配置 500 时错误横幅可见', async () => {
+  await openSettings()
+  const route = '**/api/stock-assistant/configuration'
+  await page.route(route, handler => handler.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ ok: false, error: { code: 'STORAGE_WRITE_FAILED', message: '保存失败，原数据未更改' } }) }))
+  try {
+    await page.getByRole('button', { name: '保存数据源' }).click()
+    await page.locator('.ssb-banner.ssb-error').waitFor({ state: 'visible' })
+    assert.match(await page.locator('.ssb-banner.ssb-error').innerText(), /保存失败，原数据未更改/)
+    await assertBannerAboveOverlay()
+    assert.equal(errors.length, 0)
+  } finally { await page.unroute(route) }
+})
+
+test('目录同步部分失败时给出错误 toast', async () => {
+  await openSettings()
+  await page.getByRole('tab', { name: '市场与能力' }).click()
+  const route = '**/api/stock-assistant/catalog-sync'
+  await page.route(route, handler => handler.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({ ok: true, data: [{ capability: 'catalog', ok: true, count: 1 }, { capability: 'calendar', ok: false, error: { code: 'NO_ROUTE', message: '未配置该市场的数据来源' } }] }),
+  }))
+  try {
+    await page.getByRole('button', { name: '同步沪 A' }).click()
+    await page.getByText('未配置该市场的数据来源').waitFor({ state: 'visible' })
+    assert.equal(errors.length, 0)
+  } finally { await page.unroute(route) }
+})
+
+test('凭据保存失败时在实例卡内提示', async () => {
+  await page.reload()
+  await page.waitForSelector('.ssb-root')
+  const configured = await page.evaluate(async () => {
+    const snapshot = (await (await fetch('/api/stock-assistant/snapshot')).json()).data
+    const provider = { ...snapshot.control.providers[0], credentialRef: 'DSH_STOCK_TUSHARE_TOKEN' }
+    const response = await fetch('/api/stock-assistant/configuration', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operationId: crypto.randomUUID(), expectedRevision: snapshot.control.revision, providers: [provider], routes: [] }) })
+    return response.status
+  })
+  assert.equal(configured, 200)
+  await page.reload()
+  await page.waitForSelector('.ssb-root')
+  await page.getByRole('button', { name: '更多操作' }).click()
+  await page.getByRole('button', { name: '设置', exact: true }).click()
+  await page.getByRole('tab', { name: '数据源' }).click()
+  const card = page.locator('.ssb-provider').first()
+  await card.locator('.ssb-provider-toggle').click()
+  const input = card.locator('.ssb-credential input[type="password"]')
+  await input.waitFor({ state: 'visible' })
+  const route = '**/api/stock-assistant/credential'
+  await page.route(route, handler => handler.fulfill({ status: 422, contentType: 'application/json', body: JSON.stringify({ ok: false, error: { code: 'INVALID_CREDENTIAL', message: '凭据校验失败' } }) }))
+  try {
+    await input.fill('bad-secret')
+    await card.getByRole('button', { name: '保存密钥' }).click()
+    await card.locator('[role="status"]', { hasText: '凭据校验失败' }).waitFor({ state: 'visible' })
+    assert.equal(errors.length, 0)
+  } finally { await page.unroute(route) }
 })

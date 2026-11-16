@@ -222,3 +222,116 @@ test('Given 会话不存在或已删除 When 跟随 Then 不重连直接停止',
   }
 })
 
+test('Given 已消费事件 When 流断开重连 Then 新订阅带上最后消费的 seq', async () => {
+  const f = setup()
+  f.store.loadAggregate = async () => ({ now: () => 100, runs: { r1: { sessionId: 's1', state: 'running', recordedAt: 100 } } })
+  const cursors = []
+  let round = 0
+  const followers = createRunFollowers({
+    store: f.store,
+    sessionAdapter: {
+      async *followSessionEvents(_sessionId, _signal, options) {
+        cursors.push(options.afterSeq)
+        round += 1
+        if (round === 1) {
+          yield { type: 'assistant/message', seq: 2, time: 100, data: { turn: 1 } }
+          yield { type: 'assistant/message', seq: 5, time: 200, data: { turn: 1 } }
+        }
+      },
+    },
+    retryMs: 1000,
+    wait: async () => { if (cursors.length > 1) throw new Error('stop') },
+  })
+  await followers.follow('t1', 's1')
+  assert.deepEqual(cursors, [-1, 5], '重连从最后消费的 seq 之后继续')
+})
+
+test('Given 无新事件 When 重连 Then 游标不前移', async () => {
+  const f = setup()
+  f.store.loadAggregate = async () => ({ now: () => 100, runs: { r1: { sessionId: 's1', state: 'running', recordedAt: 100 } } })
+  const cursors = []
+  const waits = []
+  const followers = createRunFollowers({
+    store: f.store,
+    sessionAdapter: { async *followSessionEvents(_sessionId, _signal, options) { cursors.push(options.afterSeq) } },
+    retryMs: 1000,
+    wait: async (ms) => { waits.push(ms); if (waits.length > 1) throw new Error('stop') },
+  })
+  await followers.follow('t1', 's1')
+  assert.deepEqual(cursors, [-1, -1])
+  assert.equal(waits.length, 2)
+})
+
+test('Given 在飞 Run 超过失联阈值无事件 When 流收尾 Then 按已断收敛并停止跟随', async () => {
+  const errors = []
+  const waits = []
+  let state = { now: () => 100 + 24 * 60 * 60 * 1000, runs: { r1: { runId: 'r1', sessionId: 's1', state: 'running', recordedAt: 100 } } }
+  const followers = createRunFollowers({
+    store: {
+      async loadAggregate() { return state },
+      async updateAggregate(_id, fn) { state = fn(state); return state },
+    },
+    sessionAdapter: { async *followSessionEvents() {} },
+    retryMs: 1000,
+    onError: error => errors.push(error),
+    wait: async (ms) => { waits.push(ms); throw new Error('stop') },
+  })
+  await followers.follow('t1', 's1')
+  assert.equal(state.runs.r1.state, 'interrupted')
+  assert.equal(state.runs.r1.stopObserved, 'unreachable')
+  assert.deepEqual(waits, [], '失联收敛后不再重连')
+  assert.match(errors[0], /失联阈值/)
+})
+
+
+// ── R2 复检:节流未落盘的工具事件时间也算活体证据(内存观测先于落盘) ──────────
+test('Given 工具事件落在心跳节流窗口内 When 流收尾判失联 Then 按内存观测时间判活不收敛', async () => {
+  const errors = []
+  const waitStops = []
+  let state = {
+    taskId: 't1', now: () => 900101, definitionRevision: 1,
+    control: { executionEpoch: 1, state: 'active' },
+    workItems: { w1: {} },
+    // 首个心跳(100)已落盘,工具事件(120100)落在 180s 节流窗口内没有立刻落盘
+    runs: { r1: { runId: 'r1', sessionId: 's1', requestId: 'rpc1', state: 'running', executionEpoch: 1, definitionRevision: 1, startedAt: 1, lastEventAt: 1 } },
+    reports: {}, sessions: {}, businessState: 'implementing',
+  }
+  const events = [
+    { type: 'turn/start', seq: 0, time: 90, data: { turn: 1 } },
+    { type: 'user/message', seq: 1, time: 100, data: { id: 'user1', role: 'user', content: [{ type: 'text', text: '任务' }], source: { kind: 'user', rpcId: 'rpc1' } } },
+    { type: 'tool/call', seq: 2, time: 100 + 120 * 1000, data: { turn: 1, toolName: 'bash' } },
+  ]
+  const followers = createRunFollowers({
+    store: {
+      async loadAggregate() { return state },
+      async updateAggregate(_id, fn) { state = fn(state); return state },
+    },
+    sessionAdapter: { async *followSessionEvents() { yield* events } },
+    retryMs: 1000,
+    onError: error => errors.push(error),
+    wait: async (ms) => { waitStops.push(ms); throw new Error('stop') },
+  })
+  await followers.follow('t1', 's1')
+  assert.equal(state.runs.r1.state, 'running', '距真实工具事件 13 分钟不得判失联')
+  assert.equal(state.runs.r1.stopObserved, undefined)
+  assert.equal(errors.some((message) => message.includes('失联阈值')), false)
+  await followers.dispose()
+})
+
+// ── B1:会话不可达时立刻收敛落盘,不留 active/unknown 占槽 ─────────────────────
+test('Given 会话已删除且仍有在飞 Run When follower 放弃跟随 Then 立即按已断收敛', async () => {
+  const f = setup()
+  const errors = []
+  const followers = createRunFollowers({
+    store: f.store,
+    sessionAdapter: { async *followSessionEvents() { throw Object.assign(new Error('session deleted'), { code: 'SESSION_DELETED' }) } },
+    retryMs: 1,
+    onError: (error) => errors.push(error),
+    wait: async () => { throw new Error('stop') },
+  })
+  await followers.follow('t1', 's1')
+  assert.equal(f.current.runs.r1.state, 'interrupted', '会话没了就不该再等失联阈值')
+  assert.equal(f.current.runs.r1.stopObserved, 'unreachable')
+  assert.match(errors[0], /会话不存在或已删除/)
+  await followers.dispose()
+})

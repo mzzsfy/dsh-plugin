@@ -21,6 +21,7 @@ function requireOf(missing) {
   return name => {
     if (name === missing) throw new Error(`client-modules: require('${name}') ${MODULE_TABLE_MISS}`)
     if (name === 'react') return { createElement: () => null }
+    if (name === '@mzzsfy/dsh-common-tools/client') return {}
     if (name === 'react-dom/client') return {}
     throw new Error(`unexpected require: ${name}`)
   }
@@ -49,17 +50,14 @@ test('react 缺失时干净禁用且显式报错,不静默', () => {
   assert.ok(errors[0].includes('react'), '诊断信息须指明缺失模块')
 })
 
-test('react-dom/client 缺失时同样干净禁用且显式报错', () => {
+test('react-dom/client 不是本面板依赖:模块表缺失也不影响装载(宿主负责渲染)', () => {
   const plugin = boot()
-  const errors = []
-  const original = console.error
-  console.error = (...args) => errors.push(args.join(' '))
-  try {
-    const noop = plugin.factory(requireOf('react-dom/client'))
-    assert.deepEqual(Object.keys(noop).sort(), ['apply', 'inject'])
-  } finally {
-    console.error = original
+  const requireWithoutReactDom = name => {
+    if (name === 'react-dom/client') throw new Error('react-dom/client 不应被 require')
+    if (name === 'react') return { createElement: () => null }
+    if (name === '@mzzsfy/dsh-common-tools/client') return {}
+    throw new Error(`unexpected require: ${name}`)
   }
-  assert.equal(errors.length, 1)
-  assert.ok(errors[0].includes('react-dom/client'), '诊断信息须指明缺失模块')
+  const loaded = plugin.factory(requireWithoutReactDom)
+  assert.deepEqual(Object.keys(loaded).sort(), ['apply', 'inject'])
 })

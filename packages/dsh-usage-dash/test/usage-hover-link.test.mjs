@@ -89,6 +89,17 @@ test('模型行悬停回调联动模型,未知节点不误触发', () => {
   assert.deepEqual(calls, ['p/a', null])
 })
 
+test('模型行第一行显示估算总费用,第三行显示每百万均价', () => {
+  const { ModelUsage } = load(['ModelUsage'])
+  const models = [{ model: 'p/a', tokens: 17_000_000_000, cost: 509.54 }]
+  const tree = render(ModelUsage, { models, colorFor: () => 'currentColor', costCurrency: '¥' })
+  const tokensNode = nodes(tree).find((node) => node.props?.className === 'ud-model-tokens')
+  const metaNode = nodes(tree).find((node) => node.props?.className === 'ud-model-meta')
+  assert.match(tokensNode.children[0], /≈ ¥509\.54/)
+  assert.doesNotMatch(tokensNode.children[0], /\/M/)
+  assert.match(metaNode.children[0], /¥0\.030\/M/)
+})
+
 test('无联动回调时图例与模型行仍可渲染,不抛错', () => {
   const { Legend, ModelUsage } = load(['Legend', 'ModelUsage'])
   const models = [{ model: 'p/a', tokens: 10 }]

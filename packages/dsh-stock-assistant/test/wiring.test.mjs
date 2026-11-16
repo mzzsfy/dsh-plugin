@@ -63,7 +63,8 @@ test('代际淘汰的请求不许落地, 退避到点也要再查一次', () => 
   assert.ok(count(/if \(seq !== klineSeq\) return undefined/g) >= 2, '成功与失败两条路径都要查代际')
   must(/if \(state\.klineKey !== key\) throw e/, '切走之后不该再为废弃的 key 落错误')
   // 退避等待期间可能已经有同 key 的新请求, 到点了就不能再打一枪
-  must(/setTimeout\(resolve, delayMs\)\)\.then\(\(\) => \{[\s\S]{0,200}seq !== klineSeq/, '退避到点前必须查代际')
+  must(/klineDelay\(delayMs\)\.then\(\(\) => \{[\s\S]{0,200}seq !== klineSeq/, '退避到点前必须查代际')
+  must(/klineSeq\+\+;[\s\S]{0,400}klineRetryTimers/, 'dispose 要递增代际并清掉退避定时器')
   must(/setKlineError\(item\.id, liveRef\.current\.period/, '报错要用当前周期, 不是首帧的')
 })
 
@@ -159,4 +160,10 @@ test('全屏浮层层级高于宿主侧栏拖拽手柄', () => {
   const overlay = /\.ssb-overlay\s*\{[^}]*z-index:\s*(\d+)/.exec(client)
   assert.ok(overlay, '浮层必须显式声明层级')
   assert.ok(Number(overlay[1]) > 11, `浮层层级 ${overlay[1]} 必须高于宿主手柄 11`)
+})
+
+test('数据源保存声明保留路由草稿, 路由页保存提交整份草稿', () => {
+  // 数据源页只提交实例: 若调用处不声明 keepRoutes, 市场/能力页里改了一半的路由会被整份草稿清空
+  must(/runtime\.configuration\(providersOnly, \{ keepRoutes: true \}\)/, '数据源页保存必须声明保留路由草稿')
+  must(/runtime\.configuration\(routesOnly\)/, '路由页保存提交整份草稿')
 })

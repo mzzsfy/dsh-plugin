@@ -4,23 +4,30 @@
 // 两个入口都要挂:adapter 的公开 `stream(options)` 是直接派发点;pi-ai 的
 // PreparedCall.stream 闭包直接调 `this.streamWithSnapshot`,绕过公开入口。
 // 只包其中一个会漏掉对应路径(实测 pi-ai 走 prepared call)。
-// 默认生效,行卸载后透传;与其它同样改写该方法的包链式叠加——读当前方法作
-// original,不假定自己是最外层。同一原型只包一层,重装只更新活性。
+// 剔除前提有两条,缺一不可:调用方给的活性(执行器已接管终端,见 apply-state)
+// 且本次请求的 tools 里确有 `shell`——只看前者会把「子代理工具集仅保留 pwsh」
+// 这类请求里的唯一终端也剔掉。行卸载后透传;与其它同样改写该方法的包链式
+// 叠加——读当前方法作 original,不假定自己是最外层。同一原型只包一层,重装
+// 只更新活性。
 
 const PATCHED = new WeakMap()
 
 const ENTRY_METHODS = ['stream', 'streamWithSnapshot']
 
+// 被隐藏的官方工具名与取而代之的本包工具名
 export const SHADOWED_TOOL_NAME = 'pwsh'
+export const SHADOWING_TOOL_NAME = 'shell'
 
 /**
  * 从请求 tools 剔除 pwsh。
  * @param {Array<{name: string}>|undefined} tools
- * @returns {Array<{name: string}>|undefined} 无命中时返回原引用
+ * @returns {Array<{name: string}>|undefined} 无命中、或同批没有 shell 时返回原引用
  */
 export function hideShadowedPwsh(tools) {
   if (!Array.isArray(tools) || tools.length === 0) return tools
   if (!tools.some((tool) => tool?.name === SHADOWED_TOOL_NAME)) return tools
+  // 没有 shell 就没有替代终端:原样保留 pwsh
+  if (!tools.some((tool) => tool?.name === SHADOWING_TOOL_NAME)) return tools
   return tools.filter((tool) => tool?.name !== SHADOWED_TOOL_NAME)
 }
 
@@ -30,7 +37,10 @@ function patchEntry(owner, name, state) {
   owner[name] = function (...args) {
     const options = args[0]
     if (!state.isActive() || options === null || typeof options !== 'object') return original.apply(this, args)
-    args[0] = { ...options, tools: hideShadowedPwsh(options.tools) }
+    const tools = hideShadowedPwsh(options.tools)
+    // 无命中时 hideShadowedPwsh 原引用返回:请求对象零拷贝(热路径每请求一次)
+    if (tools === options.tools) return original.apply(this, args)
+    args[0] = { ...options, tools }
     return original.apply(this, args)
   }
   return true

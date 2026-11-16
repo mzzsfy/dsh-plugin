@@ -42,6 +42,13 @@ export function createTaskStore(handle, { now = Date.now, onChange = () => {} } 
       .map(([, record]) => withClock(record))
   }
 
+  // 删除任务记录:面板放弃任务的唯一删除入口,写入后同样广播失效
+  async function deleteAggregate(taskId) {
+    const removed = await handle.delete(`task/${taskId}`)
+    if (removed) onChange()
+    return removed
+  }
+
   async function loadControl() {
     return withClock((await loadRecord('control')) ?? createGlobalControl(now))
   }
@@ -52,7 +59,7 @@ export function createTaskStore(handle, { now = Date.now, onChange = () => {} } 
     return loadControl()
   }
 
-  return { loadAggregate, saveAggregate, updateAggregate, listAggregates, loadControl, updateControl }
+  return { loadAggregate, saveAggregate, updateAggregate, deleteAggregate, listAggregates, loadControl, updateControl }
 }
 
 function withoutClock(record) {
@@ -75,11 +82,6 @@ export async function updateControlRecord(handle, fn, initial) {
 // 设置记录 RMW:与控制记录同款 missing-key 兜底
 export async function updateSettingsRecord(handle, fn, initial) {
   return updateKeyWithSeed(handle, 'settings', fn, initial)
-}
-
-// 索引类小记录的同款 missing-key 兜底首写
-export async function updateIndexRecord(handle, fn, initial) {
-  return updateKeyWithSeed(handle, 'taskIndex', fn, initial)
 }
 
 // 管理员绑定记录:面板管理员入口的幂等依据;missing/未设视为无绑定

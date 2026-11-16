@@ -58,8 +58,8 @@ test('S7 web 行写路径接受 env/distro 字段并落盘', async () => {
   const ctx = { logger: { warn: () => {} } }
   const settings = { describe: () => [{ ns: SECTION_NS, value: section }], replace: async (ns, next) => { replaced.push({ ns, next }) } }
   const faces = buildFaces(ctx, settings)
-  const next = await faces.updateConfig({})
-  const wsl = next.shells.find((entry) => entry.id === 'w')
+  const { resolved } = await faces.updateConfig({ shells: section.shells, default: section.default, deny: section.deny })
+  const wsl = resolved.shells.find((entry) => entry.id === 'w')
   assert.equal(wsl.distro, 'Debian')
   assert.deepEqual(wsl.env, { LANG: 'C.UTF-8' })
   assert.equal(replaced[0].ns, SECTION_NS)

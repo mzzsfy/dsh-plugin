@@ -90,3 +90,50 @@ test('store:数据文件损坏时备份 .bak 并拒绝写入,他集合不受影�
   assert.equal(reopened.jobs.list().length, 1)
   void store
 })
+
+test('store:合法 JSON 但非数组同属损坏,备份 .bak 并拒绝写入防覆盖', async (t) => {
+  // Given jobs.json 是合法 JSON 对象(旧实现只认数组,会静默留空并在下次写覆盖)
+  const { dir } = await makeStore(t)
+  const { readFile, writeFile } = await import('node:fs/promises')
+  const original = '{"name":"旧数据"}'
+  await writeFile(join(dir, 'jobs.json'), original, 'utf8')
+  const reopened = await createStore({ dir })
+  // When 重开实例后尝试写入 jobs
+  await assert.rejects(() => reopened.jobs.create({ name: 'j', kind: 'shell', command: 'x', schedule: '* * * * *', enabled: true, timeoutMs: 1000 }))
+  // Then 原文件被完整备份,内容未丢
+  assert.equal(await readFile(join(dir, 'jobs.json.bak'), 'utf8'), original)
+})
+
+test('store:配置版本与运行时版本分离,运行回填不推进 updatedAt', async (t) => {
+  // Given 一个任务,记录配置版本基线
+  const { store } = await makeStore(t)
+  const created = await store.jobs.create({ name: 'j', kind: 'shell', command: 'x', schedule: '* * * * *', enabled: true, timeoutMs: 1000 })
+  const baseline = created.updatedAt
+  // When 调度/执行回填 nextRunAt/lastStatus
+  await store.jobs.updateRuntime(created.id, { nextRunAt: 1750000000000, lastRunAt: 1750000000000, lastStatus: 'success' })
+  // Then 运行字段生效但配置版本基线不动
+  assert.equal(store.jobs.get(created.id).lastStatus, 'success')
+  assert.equal(store.jobs.get(created.id).updatedAt, baseline)
+  assert.equal(typeof store.jobs.get(created.id).runtimeUpdatedAt, 'number')
+  // When 携带原基线保存编辑
+  const outcome = await store.jobs.updateIf(created.id, baseline, { name: '改名' })
+  // Then CAS 受理(运行回填不产生 409)
+  assert.equal(outcome.ok, true)
+  assert.equal(outcome.row.name, '改名')
+  assert.ok(outcome.row.updatedAt > baseline, '配置写必须推进配置版本')
+})
+
+test('store:updateIf 在临界区内比较并写入,并发同基线仅一个成功', async (t) => {
+  // Given 同一配置版本基线
+  const { store } = await makeStore(t)
+  const created = await store.jobs.create({ name: 'j', kind: 'shell', command: 'x', schedule: '* * * * *', enabled: true, timeoutMs: 1000 })
+  // When 两个 CAS 更新并发提交
+  const [first, second] = await Promise.all([
+    store.jobs.updateIf(created.id, created.updatedAt, { name: 'A' }),
+    store.jobs.updateIf(created.id, created.updatedAt, { name: 'B' }),
+  ])
+  // Then 恰一个成功、另一个冲突,最终值属于成功方
+  assert.deepEqual([first.ok, second.ok].sort(), [false, true])
+  assert.equal([first, second].find((item) => item.ok).row.name, store.jobs.get(created.id).name)
+  assert.equal([first, second].find((item) => !item.ok).reason, 'conflict')
+})

@@ -4,6 +4,7 @@ import { setupCommonTools, createChangeNotifier } from '@mzzsfy/dsh-common-tools
 import { createApplication } from './application.mjs'
 import { registerRoutes } from './routes.mjs'
 import { serveVendor, VENDOR_PREFIX, vendorReadable } from './serve-vendor.mjs'
+import { withHostGate } from './route-gate.mjs'
 export async function apply(ctx) {
   if (typeof ctx.webServer?.register !== 'function' || typeof ctx.webServer?.registerUpgrade !== 'function' || typeof ctx.storageDomain?.open !== 'function') {
     ctx.logger?.warn?.('股票工具已禁用：缺少webServer或storageDomain能力')
@@ -25,8 +26,11 @@ export async function apply(ctx) {
     notifier = createChangeNotifier(() => bus.publish({ type: 'invalidate', serverEpoch: application.snapshot().serverEpoch, snapshotSeq: application.snapshot().snapshotSeq }))
     unsubscribe = bus.subscribe(message => { if (message?.type === 'watch-demand') application.demand(message) })
     stopRoutes = registerRoutes(ctx.webServer, application, ctx)
-    // 注册异常仅告警: client ensureLwc 失败同样走降级路径
-    try { ctx.webServer.register({ kind: 'prefix', path: VENDOR_PREFIX, handler: serveVendor }) } catch (e) { ctx.logger?.warn?.('图表组件路由注册失败,详情将降级为数字详情') }
+    // vendor 路由与业务路由同规: 必须登记 effect disposer(禁用/热重载时注销), 且首行回问宿主闸门。
+    // 注册异常仅告警: client ensureLwc 失败同样走降级路径。
+    ctx.effect(() => {
+      try { return ctx.webServer.register({ kind: 'prefix', path: VENDOR_PREFIX, handler: withHostGate(ctx, serveVendor) }) } catch (e) { ctx.logger?.warn?.('图表组件路由注册失败,详情将降级为数字详情'); return () => {} }
+    }, 'stock-assistant vendor route')
   } catch (e) {
     // 失败原因先落日志再清理: 清理自身抛错不能盖掉原始原因。
     // 数据域的 invalid-record 只有表/键有用, 记录值不能进日志。

@@ -253,7 +253,7 @@ function createHarness({ envRow = ENV_ROW, plaintext = 'value' } = {}) {
     const respond = (payload) => ({ ok: true, status: 200, json: async () => payload })
     if (method === 'GET' && target === API + 'envs') return respond({ items: envRow ? [envRow] : [] })
     if (method === 'GET' && target === API + 'jobs') return respond({ items: [] })
-    if (method === 'GET' && target === API + 'status') return respond({ scheduler: { active: 0, queued: 0 }, serverTzOffset: 8, ui: { sidebarTab: false } })
+    if (method === 'GET' && target === API + 'status') return respond({ scheduler: { active: 0, queued: 0 }, serverTzOffset: 8, ui: { sidebarTab: false, showAutomationTasks: false } })
     if (method === 'GET' && target === API + 'envs/' + envRow.id) {
       if (plaintext === 'fail') throw new Error('读取失败')
       if (plaintext === 'deferred') return plaintextControl.promise
@@ -412,4 +412,17 @@ test('F11-d 迟到明文不覆盖用户草稿:草稿值原样提交', async (t) 
   const patches = patchCalls(calls)
   assert.equal(patches.length, 1, '应发出一条 PATCH')
   assert.equal(patches[0].body.value, 'user-draft', '提交的是用户草稿而非迟到明文')
+})
+
+test('F11-e 源码门禁:明文门控的三个提交前提仍在实现里', () => {
+  // 行为用例只锁当前路径;源码门禁锁实现形态,防被等价重构悄悄放宽:
+  // 1) 明文到达前禁提交 2) 明文失败禁提交 3) 值未被修改则不携带 value
+  assert.match(CLIENT_SRC, /const submitBlocked = editing && \(!plaintextReady \|\| plaintextFailed\)/,
+    '提交门必须同时拦「未就绪」与「读取失败」')
+  assert.match(CLIENT_SRC, /const valueSubmittable = !editing \|\| \(plaintextReady && !plaintextFailed && valueDirtyRef\.current\)/,
+    '值字段提交必须同时要求就绪、未失败、用户已改动')
+  assert.match(CLIENT_SRC, /value: valueSubmittable \? form\.value : undefined/,
+    '不可提交时必须以 undefined 省略 value(掩码值不得进 PATCH)')
+  assert.match(CLIENT_SRC, /if \(patch\.value !== undefined\) valueDirtyRef\.current = true/,
+    '只有用户改写 value 才置 dirty,迟到回填不得置位')
 })

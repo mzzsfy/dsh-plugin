@@ -1,31 +1,28 @@
 (() => {
-// 隧道看板 client 半区:隧道列表/添加/删除 + 设置页插件卡片(侧边栏注入开关)。
-// 无构建:createElement + 一次性样式注入;IIFE 书挡,顶层零词法声明(经典 script 全局词法环境跨 bundle 共享)。
-// 开关一律 tu-switch(规约 switch 形态);全局面板与 better-sidebar tab 形态仲裁与 cron-board 同构。
+// 设置页「穿透隧道」分区: 已开放列表 + 本机端口发现 + 创建/编辑弹窗。
+// 无构建: createElement + 一次性样式注入; IIFE 书挡, 顶层零词法声明。
 
 /* LOGIC-BEGIN */
 const API_PREFIX = '/api/tunnel'
-const PANEL_ID = 'tunnel'
-const PANEL_LABEL = '穿透隧道'
-const TAB_ID = 'tunnel:board'
-const TAB_ORDER = 47
+const SECTION_ID = 'tunnel'
+const SECTION_LABEL = '穿透隧道'
+const SECTION_ORDER = 47
 const COPY_FLASH_MS = 1200
 const REQUEST_TIMEOUT_MS = 15 * 1000
+const PROBE_DEBOUNCE_MS = 350
 const PORT_MIN = 1
 const PORT_MAX = 65535
+const PORT_LIMIT = 8
 const PATH_PREFIX = '/p/'
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/
 const NAME_HAS_LETTER_RE = /[a-z]/
 const ENTRY_PATH = 'path'
 const ENTRY_SUBDOMAIN = 'subdomain'
-const MODE_PANEL = 'panel'
-const MODE_TAB = 'tab'
 const ENTRY_LABELS = { path: '路径', subdomain: '子域名' }
 const EMPTY_ROW = { name: '', targetPort: '', entry: ENTRY_PATH }
 const LOCAL_HOST_RE = /^(?:localhost|(?:\d{1,3}\.){3}\d{1,3}|\[[0-9a-f:]+\])$/i
+const LOOPBACK_HOST_RE = /^(?:localhost|127(?:\.\d{1,3}){3}|\[?::1\]?)$/i
 
-// 访问地址派生: 路径模式走同源前缀; 子域名模式在 IP/localhost 入口下只能退回
-// <name>.localhost(仅本机可解析, 浏览器/系统普遍支持 *.localhost 回环)
 function accessUrlOf(row, location) {
   if (row.entry !== ENTRY_SUBDOMAIN) return location.origin + PATH_PREFIX + row.name + '/'
   const port = location.port === '' ? '' : ':' + location.port
@@ -33,17 +30,137 @@ function accessUrlOf(row, location) {
   return location.protocol + '//' + row.name + '.' + base + port + '/'
 }
 
-// 子域名入口在纯 IP 访问下只对本机生效, 需要显式提示
 function accessLocalOnly(row, location) {
   return row.entry === ENTRY_SUBDOMAIN && LOCAL_HOST_RE.test(location.hostname)
 }
 
-function formatCreatedAt(iso) {
-  if (typeof iso !== 'string' || iso === '') return '-'
-  const parsed = new Date(iso)
-  if (Number.isNaN(parsed.getTime())) return '-'
-  const pad = (value) => String(value).padStart(2, '0')
-  return pad(parsed.getMonth() + 1) + '-' + pad(parsed.getDate()) + ' ' + pad(parsed.getHours()) + ':' + pad(parsed.getMinutes())
+function entryLabelOf(hostname) {
+  const host = String(hostname ?? '').toLowerCase()
+  const at = host.indexOf('.')
+  return at === -1 ? '' : host.slice(0, at)
+}
+
+function isEntryLabelConflict(name, hostname) {
+  const label = entryLabelOf(hostname)
+  return label !== '' && name === label
+}
+
+function isLoopbackHost(hostname) {
+  return LOOPBACK_HOST_RE.test(String(hostname ?? ''))
+}
+
+// 本机访问优先子域名(应用零改造); 远程 IP 只能路径入口; 真域名优先子域名。
+function defaultEntryFor(location) {
+  const hostname = String(location?.hostname ?? '')
+  if (isLoopbackHost(hostname)) return ENTRY_SUBDOMAIN
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(hostname) || hostname.startsWith('[')) return ENTRY_PATH
+  return ENTRY_SUBDOMAIN
+}
+
+function entryHintOf(entry, location) {
+  const hostname = String(location?.hostname ?? '')
+  if (entry === ENTRY_SUBDOMAIN) {
+    return isLoopbackHost(hostname)
+      ? '仅本机可访问; 目标应用无需改 base, 手机/其他设备请改用路径入口'
+      : '需 *.域名 泛解析; 目标应用按根路径运行, 无需改 base'
+  }
+  return isLoopbackHost(hostname)
+    ? '同源 /p/<名>/ 子路径; 目标应用需支持 base, 否则可能白屏'
+    : '手机/其他设备可访问; 目标应用需支持子路径 base, 否则可能白屏'
+}
+
+function relativeTime(now, iso) {
+  if (typeof iso !== 'string' || iso === '') return '—'
+  const value = new Date(iso).getTime()
+  if (!Number.isFinite(value)) return '—'
+  const seconds = Math.max(0, Math.floor((now - value) / 1000))
+  if (seconds < 10) return '刚刚'
+  if (seconds < 60) return seconds + ' 秒前'
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return minutes + ' 分钟前'
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return hours + ' 小时前'
+  return Math.floor(hours / 24) + ' 天前'
+}
+
+function statusOf(row) {
+  if (row?.status !== undefined) return row.status
+  if (row?.enabled === false) return 'disabled'
+  if (row?.error !== undefined) return 'route_error'
+  if (row?.health?.state === 'online') return 'online'
+  if (row?.health?.state === 'offline') return 'offline'
+  return 'unknown'
+}
+
+const STATUS_TEXT = {
+  online: '在监听',
+  offline: '目标未在监听',
+  disabled: '已停用',
+  route_error: '无法开放',
+  unknown: '未检测',
+}
+const STATUS_TONE = { online: 'ok', offline: 'warn', disabled: 'dim', route_error: 'danger', unknown: 'dim' }
+const statusTextOf = (status) => STATUS_TEXT[status] ?? STATUS_TEXT.unknown
+const statusToneOf = (status) => STATUS_TONE[status] ?? STATUS_TONE.unknown
+
+function statsTextOf(stats, now) {
+  if (stats === undefined || stats === null) return '本次运行暂无访问'
+  const count = Number.isInteger(stats.requests) ? stats.requests : 0
+  if (count === 0) return '本次运行暂无访问'
+  const last = stats.lastAccessAt === null ? '' : ' · ' + relativeTime(now, stats.lastAccessAt)
+  return '本次运行 ' + count + ' 次' + last
+}
+
+function tunnelRowVM(row, location, now) {
+  const status = statusOf(row)
+  return {
+    url: accessUrlOf(row, location),
+    status,
+    statusText: statusTextOf(status),
+    statusTone: statusToneOf(status),
+    statsText: statsTextOf(row.stats, now),
+    localOnly: accessLocalOnly(row, location),
+  }
+}
+
+// 端口视图: 默认只显示候选, 搜索端口/进程/绑定地址, 容器转发器排到最后。
+function portView(items, options = {}) {
+  const query = String(options.query ?? '').trim().toLowerCase()
+  const showAll = options.showAll === true
+  const limit = Number.isInteger(options.limit) && options.limit > 0 ? options.limit : PORT_LIMIT
+  const matches = (item) => {
+    if (!showAll && item.dev !== true) return false
+    if (query === '') return true
+    return String(item.port).includes(query)
+      || String(item.process ?? '').toLowerCase().includes(query)
+      || String(item.bind ?? '').toLowerCase().includes(query)
+  }
+  const rank = (item) => {
+    const process = String(item.process ?? '').toLowerCase()
+    if (/wslrelay|docker|vmmem/.test(process)) return 2
+    return item.dev === true ? 0 : 1
+  }
+  const sorted = (Array.isArray(items) ? items : []).filter(matches)
+    .sort((left, right) => rank(left) - rank(right) || left.port - right.port)
+  return { visible: sorted.slice(0, limit), rest: sorted.slice(limit), total: sorted.length }
+}
+
+function tunnelBodyOf(mode, draft, name) {
+  const body = { targetPort: Number(draft.targetPort), entry: draft.entry }
+  if (mode === 'create' && name !== '') body.name = name
+  return body
+}
+
+function suggestName(port, processName) {
+  const base = String(processName ?? '')
+    .replace(/\.[^.]+$/, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  const safe = NAME_HAS_LETTER_RE.test(base) ? base : 'app'
+  const suffix = '-' + port
+  const clipped = safe.slice(0, 32 - suffix.length).replace(/-+$/g, '') || 'app'
+  return clipped + suffix
 }
 
 function formatCreatedAtFull(iso) {
@@ -52,7 +169,6 @@ function formatCreatedAtFull(iso) {
   return Number.isNaN(parsed.getTime()) ? '' : parsed.toLocaleString()
 }
 
-// 剪贴板降级: 非安全上下文(内网 http)无 navigator.clipboard, 退回 execCommand
 function copyViaSelection(document, text) {
   const area = document.createElement('textarea')
   area.value = text
@@ -81,8 +197,6 @@ async function copyText(text, document) {
   return copyViaSelection(document, text)
 }
 
-// 可见性门控: 页面/容器不可见期间的刷新请求只记脏, 恢复可见补拉一次
-// (后台 tab 不再随每次 publish 打请求; readVisible 由调用方注入, 纯逻辑可测)
 function createRefreshGate(readVisible, run) {
   let pending = false
   return {
@@ -94,139 +208,150 @@ function createRefreshGate(readVisible, run) {
       run()
       return true
     },
-    // 可见性恢复时补拉; 无脏标记或仍不可见即不动, 幂等
     flush() {
-      if (!pending || !readVisible()) return false
-      pending = false
-      run()
-      return true
+      if (pending && readVisible()) {
+        pending = false
+        run()
+        return true
+      }
+      return false
     },
     get pending() { return pending },
   }
 }
 
 function isPageVisible(document) {
-  return document?.visibilityState !== 'hidden'
+  return document === undefined || document.visibilityState !== 'hidden'
 }
 /* LOGIC-END */
 
 /* SBUILD-BEGIN */
-const STYLE = `
-/* 组件令牌层(形制对齐 dsh-im / cron-board):宿主 dsw-alias 定义在 body 作用域, tu- 令牌必须在 body 声明才能解析到主题值;
-   直接引用宿主语义别名, 禁止字面 fallback(暗色主题漏色, 规范见 DEVELOPMENT/plugin-ui-design.md) */
-body{
---tu-bg:var(--dsw-alias-bg-layer-1);
---tu-bg-sub:var(--dsw-alias-bg-layer-2);
---tu-bg-muted:var(--dsw-alias-bg-module-platform);
---tu-card:var(--dsw-alias-bg-layer-1);
---tu-card-border:var(--dsw-alias-border-l2);
---tu-border:var(--dsw-alias-border-l2);
---tu-border-strong:var(--dsw-alias-border-l3);
---tu-text:var(--dsw-alias-label-primary);
---tu-text-sub:var(--dsw-alias-label-secondary);
---tu-text-dim:var(--dsw-alias-label-tertiary);
---tu-accent:var(--dsw-alias-brand-primary);
---tu-accent-deep:var(--dsw-alias-button-primary-hover);
---tu-accent-wash:color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent);
---tu-danger:var(--dsw-alias-state-error-primary);
---tu-warn:var(--dsw-alias-state-warn-primary);
---tu-hover:var(--dsw-alias-interactive-bg-hover);
---tu-hover-danger:var(--dsw-alias-interactive-bg-hover-danger);
---tu-mask:var(--dsw-alias-bg-mask-1);
---tu-radius-sm:var(--dsw-radius-sm);--tu-radius-md:var(--dsw-radius-md);--tu-radius-lg:var(--dsw-radius-lg);
---tu-space-1:4px;--tu-space-2:6px;--tu-space-3:8px;--tu-space-4:12px;--tu-space-5:16px;--tu-space-6:24px;
---tu-font-sm:12px;--tu-font-md:13px;--tu-font-base:14px;--tu-font-title:16px;--tu-font-page:20px;
---tu-control-h:32px;
-}
-.tu-panel{display:flex;flex-direction:column;gap:var(--tu-space-5);min-width:0;max-width:1080px;margin:0 auto;width:100%;color:var(--tu-text);font-size:var(--tu-font-md);line-height:20px;container-type:inline-size}
-.tu-main{flex:1;min-height:0;display:flex;flex-direction:column;overflow:auto;padding:var(--tu-space-6);background:var(--tu-bg)}
-.tu-page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}
-.tu-page-title{font-size:var(--tu-font-page);font-weight:500;line-height:28px;margin:0}
-.tu-page-desc{margin:4px 0 0;font-size:var(--tu-font-md);line-height:20px;color:var(--tu-text-sub)}
-.tu-page-actions{display:flex;align-items:center;gap:8px}
-.tu-toolbar{display:flex;align-items:center;gap:var(--tu-space-3);flex-wrap:wrap;min-height:32px;padding-bottom:12px;border-bottom:.5px solid var(--tu-border)}
-.tu-spacer{flex:1}
-.tu-button{min-height:var(--tu-control-h);display:inline-flex;align-items:center;justify-content:center;gap:6px;border:1px solid var(--tu-border-strong);border-radius:var(--tu-radius-sm);padding:0 14px;font:inherit;font-size:var(--tu-font-md);font-weight:500;background:transparent;color:var(--tu-text);cursor:pointer;transition:border-color .15s,background .15s,color .15s}
-.tu-button:hover:not(:disabled){border-color:var(--tu-border-strong);background:var(--tu-hover)}
-.tu-button:disabled{cursor:not-allowed;opacity:.5}
-.tu-button--primary{background:var(--tu-accent);border-color:var(--tu-accent);color:var(--dsw-alias-bg-base)}
-.tu-button--primary:hover:not(:disabled){background:var(--tu-accent-deep);border-color:var(--tu-accent-deep)}
-.tu-button--danger{color:var(--tu-danger);border-color:transparent}
-.tu-button--danger:hover:not(:disabled){border-color:transparent;background:var(--tu-hover-danger);color:var(--tu-danger)}
-.tu-button--sm{min-height:28px;padding:0 10px;font-size:var(--tu-font-sm);white-space:nowrap}
-.tu-button--ghost{border-color:transparent;color:var(--tu-text-sub)}
-.tu-button--ghost:hover:not(:disabled){color:var(--tu-text);background:var(--tu-hover)}
-.tu-button:focus-visible,.tu-icon:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
-.tu-meta{font-size:var(--tu-font-sm);color:var(--tu-text-sub)}
-.tu-rows{display:flex;flex-direction:column;border:.5px solid var(--tu-border);border-radius:var(--tu-radius-md);overflow-x:auto;overflow-y:hidden;background:var(--tu-bg)}
-.tu-rows-head{display:grid;grid-template-columns:minmax(140px,1.2fr) minmax(160px,1.6fr) 64px 120px 188px;gap:12px;align-items:center;padding:10px 16px;border-bottom:.5px solid var(--tu-border);font-size:var(--tu-font-sm);color:var(--tu-text-dim);background:var(--tu-bg-sub);min-width:720px}
-.tu-row{display:grid;grid-template-columns:minmax(140px,1.2fr) minmax(160px,1.6fr) 64px 120px 188px;gap:12px;align-items:center;padding:10px 16px;border-bottom:.5px solid var(--tu-border);transition:background .15s;min-width:720px}
-.tu-row:last-child{border-bottom:none}
+const STYLE_ID = 'dsh-tunnel-style'
+const CSS = `
+.tu-set{
+  --tu-bg:var(--dsw-alias-bg-base);
+  --tu-bg-sub:var(--dsw-alias-bg-layer-2);
+  --tu-text:var(--dsw-alias-label-primary);
+  --tu-text-sub:var(--dsw-alias-label-secondary);
+  --tu-text-dim:var(--dsw-alias-label-tertiary);
+  --tu-border:var(--dsw-alias-border-l4);
+  --tu-border-2:var(--dsw-alias-border-l2);
+  --tu-hover:var(--dsw-alias-bg-hover);
+  --tu-ok:var(--dsw-alias-state-success-primary);
+  --tu-warn:var(--dsw-alias-state-warn-primary);
+  --tu-danger:var(--dsw-alias-state-error-primary);
+  --tu-business:var(--dsw-alias-state-business-primary);
+  --tu-radius:8px;
+  --tu-space-1:4px;
+  --tu-space-2:8px;
+  --tu-space-3:12px;
+  --tu-space-4:16px;
+  --tu-space-5:24px;
+  max-width:560px;display:flex;flex-direction:column;gap:var(--tu-space-4);font-size:14px;line-height:22px;color:var(--tu-text);container-type:inline-size;container-name:tu-set}
+
+.tu-set-head{display:flex;align-items:flex-start;justify-content:space-between;gap:var(--tu-space-3)}
+.tu-set-head__title{margin:0;font-size:18px;line-height:26px;font-weight:600}
+.tu-set-head__desc{margin:var(--tu-space-1) 0 0;color:var(--tu-text-sub);font-size:13px;line-height:20px}
+.tu-set-head__actions{display:flex;align-items:center;gap:var(--tu-space-2);flex:0 0 auto}
+.tu-card{background:var(--tu-bg-sub);border:.5px solid var(--tu-border);border-radius:var(--tu-radius);overflow:visible}
+.tu-card__head{display:flex;align-items:center;gap:var(--tu-space-2);min-height:44px;padding:0 var(--tu-space-4);border-bottom:.5px solid var(--tu-border)}
+.tu-card__title{margin:0;font-size:14px;font-weight:600;white-space:nowrap}
+.tu-card__meta{margin-left:auto;color:var(--tu-text-dim);font-size:12px;white-space:nowrap}
+.tu-card__actions{display:flex;align-items:center;gap:var(--tu-space-2)}
+.tu-list{display:flex;flex-direction:column}
+.tu-row{padding:var(--tu-space-3) var(--tu-space-4);border-bottom:.5px solid var(--tu-border);position:relative}
+.tu-row:last-child{border-bottom:0}
 .tu-row:hover{background:var(--tu-hover)}
-.tu-row__main{display:flex;align-items:center;gap:8px;min-width:0}
-.tu-name{font-size:var(--tu-font-base);font-weight:500;color:var(--tu-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tu-badge{min-height:20px;display:inline-flex;align-items:center;padding:0 8px;border-radius:999px;color:var(--tu-text-sub);background:var(--tu-bg-muted);font-size:11px;white-space:nowrap;flex:none}
-.tu-badge--warn{color:var(--tu-warn);background:color-mix(in srgb,var(--tu-warn) 10%,transparent)}
-.tu-code{font-family:var(--ds-font-family-code);font-size:var(--tu-font-sm);color:var(--tu-text-sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
-.tu-link{border:none;background:transparent;padding:0;font:inherit;cursor:pointer;color:var(--tu-accent);text-decoration:underline;text-underline-offset:3px}
-.tu-link:hover{color:var(--tu-accent-deep)}
-.tu-actions{display:flex;align-items:center;justify-content:flex-end;gap:4px;margin-left:auto;opacity:.8}
-.tu-row:hover .tu-actions,.tu-row:focus-within .tu-actions{opacity:1}
-.tu-icon{min-height:28px;border:none;background:transparent;color:var(--tu-text-sub);cursor:pointer;font-size:var(--tu-font-sm);padding:0 8px;border-radius:var(--tu-radius-sm);transition:background .15s,color .15s}
-.tu-icon:hover{background:var(--tu-hover);color:var(--tu-text)}
-.tu-empty{display:flex;flex-direction:column;align-items:center;gap:12px;font-size:var(--tu-font-base);color:var(--tu-text-sub);padding:24px 0;text-align:center}
-.tu-error{font-size:var(--tu-font-sm);color:var(--tu-text);background:var(--tu-bg-sub);border:1px solid color-mix(in srgb,var(--tu-danger) 40%,transparent);border-left:3px solid var(--tu-danger);border-radius:var(--tu-radius-sm);padding:8px 12px}
-.tu-switch{position:relative;display:inline-flex;align-items:center;cursor:pointer;gap:var(--tu-space-2)}
-.tu-switch input[type="checkbox"] { position:absolute;opacity:0;width:1px;height:1px }
-.tu-switch__track{width:34px;height:19px;border-radius:999px;background:var(--tu-bg-muted);position:relative;transition:background .15s;flex:none}
-.tu-switch__thumb{position:absolute;top:3px;left:3px;width:13px;height:13px;border-radius:50%;background:var(--dsw-alias-bg-base);transition:left .15s;box-shadow:0 1px 2px color-mix(in srgb, var(--dsw-alias-label-primary) 30%, transparent)}
-.tu-switch input[type="checkbox"]:checked + .tu-switch__track{background:var(--tu-accent)}
-.tu-switch input[type="checkbox"]:checked + .tu-switch__track .tu-switch__thumb{left:18px}
-.tu-switch input[type="checkbox"]:focus-visible + .tu-switch__track{outline:2px solid color-mix(in srgb, var(--tu-accent) 70%, var(--dsw-alias-bg-base));outline-offset:1px}
-.tu-switch input[type="checkbox"]:disabled + .tu-switch__track{opacity:.4;cursor:not-allowed}
-.tu-switch:not(:has(input[type="checkbox"]:disabled)):hover .tu-switch__track{background:var(--tu-accent-deep);opacity:.85}
-.tu-switch input[type="checkbox"]:checked:not(:disabled) + .tu-switch__track:hover{background:var(--tu-accent-deep)}
-/* 设置>插件页卡片(tu-pc):镜像官方 PluginCard 形制, 数值与令牌直取官方 CSS Module;
-   官方壳未导出, slot 契约声明卡片外观归插件自持, 同页同 dsw-alias 令牌即同观感(含深色主题) */
-.tu-pc{border:.5px solid var(--dsw-alias-border-l4);background:var(--dsw-alias-bg-layer-3);border-radius:16px;list-style:none;transition:border-color .16s,background .16s}
-.tu-pc:hover{border-color:var(--dsw-alias-label-dimmed)}
-.tu-pc--open{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-label-dimmed)}
-.tu-pc__head{appearance:none;width:100%;font:inherit;color:inherit;text-align:left;cursor:pointer;background:0 0;border:0;border-radius:12px;align-items:center;gap:12px;padding:14px 16px;display:flex}
-.tu-pc__head:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}
-.tu-pc__text{flex-direction:column;flex:1;gap:4px;min-width:0;display:flex}
-.tu-pc__name{color:var(--dsw-alias-label-primary);font-size:15px;font-weight:600;line-height:1.4}
-.tu-pc__desc{color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:1.5}
-.tu-pc__chevron{color:var(--dsw-alias-label-tertiary);flex:none;display:inline-flex;transition:transform .16s}
-.tu-pc--open .tu-pc__chevron{transform:rotate(180deg)}
-.tu-pc__body{border-top:.5px solid var(--dsw-alias-border-l2);margin:0 16px;padding-bottom:8px}
-.tu-pc__row{gap:6px;padding:12px 0;display:grid}
-.tu-pc__rowLine{color:var(--dsw-alias-label-primary);justify-content:space-between;align-items:flex-start;gap:16px;font-size:13px;line-height:1.5;display:flex}
-.tu-pc__rowLabel{flex:1;min-width:0}
-.tu-pc__hint{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
-.tu-modal-mask{position:fixed;inset:0;background:var(--tu-mask);display:flex;align-items:center;justify-content:center;z-index:60;animation:tu-fade-in .16s ease-out}
-.tu-modal{background:var(--tu-bg);color:var(--tu-text);border-radius:var(--tu-radius-lg);padding:var(--tu-space-6);max-width:520px;width:min(520px,94vw);max-height:90vh;overflow:auto;display:flex;flex-direction:column;gap:14px;box-shadow:var(--dsw-shadow-lv3);animation:tu-pop-in .2s ease-out}
-@keyframes tu-fade-in{from{opacity:0}to{opacity:1}}
-@keyframes tu-pop-in{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}
-@media (prefers-reduced-motion: reduce){.tu-modal-mask,.tu-modal{animation:none}.tu-row,.tu-button,.tu-icon,.tu-switch__track,.tu-pc,.tu-pc__chevron{transition:none}}
-.tu-modal-head{display:flex;align-items:center;justify-content:space-between;gap:var(--tu-space-3);padding-bottom:var(--tu-space-3);border-bottom:.5px solid var(--tu-border)}
-.tu-modal-title{font-size:16px;font-weight:600;line-height:24px}
-.tu-modal-body{display:flex;flex-direction:column;gap:var(--tu-space-4)}
-.tu-seg{display:inline-flex;gap:2px;background:var(--tu-bg-muted);border-radius:var(--tu-radius-sm);padding:2px;width:fit-content}
-.tu-seg__opt{border:none;background:transparent;border-radius:calc(var(--tu-radius-sm) - 2px);padding:0 12px;height:28px;font:inherit;font-size:var(--tu-font-md);font-weight:500;color:var(--tu-text-sub);cursor:pointer;line-height:20px;white-space:nowrap;transition:background .15s,color .15s}
-.tu-seg__opt:hover{color:var(--tu-text)}
-.tu-seg__opt--on{background:var(--tu-accent);color:var(--dsw-alias-bg-base);font-weight:600}
-.tu-seg__opt--on:hover{color:var(--dsw-alias-bg-base)}
-.tu-seg__opt:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
-.tu-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--tu-space-4)}
-.tu-field{display:flex;flex-direction:column;gap:6px;font-size:var(--tu-font-sm);min-width:0;color:var(--tu-text-sub)}
+.tu-row__head{display:flex;align-items:center;gap:var(--tu-space-2);min-width:0}
+.tu-row__name{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tu-row__port{color:var(--tu-text-dim);font-variant-numeric:tabular-nums;font-size:12px;white-space:nowrap}
+.tu-row__actions{margin-left:auto;display:flex;align-items:center;gap:var(--tu-space-1);flex:0 0 auto}
+.tu-row__url{display:block;margin-top:var(--tu-space-1);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;line-height:18px;color:var(--tu-business);text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tu-row__url:hover{text-decoration:underline}
+.tu-row__url--disabled{color:var(--tu-text-dim);cursor:not-allowed}
+.tu-row__url--disabled:hover{text-decoration:none}
+.tu-row__meta{display:flex;align-items:center;gap:var(--tu-space-1);margin-top:2px;color:var(--tu-text-dim);font-size:12px;line-height:18px;flex-wrap:wrap}
+.tu-row__error{margin-top:2px;color:var(--tu-danger);font-size:12px;line-height:18px;overflow-wrap:anywhere}
+.tu-dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;background:var(--tu-text-dim)}
+.tu-dot--ok{background:var(--tu-ok)}
+.tu-dot--warn{background:var(--tu-warn)}
+.tu-dot--danger{background:var(--tu-danger)}
+.tu-badge{display:inline-flex;align-items:center;padding:0 6px;border-radius:4px;background:var(--tu-bg);border:.5px solid var(--tu-border-2);color:var(--tu-text-sub);font-size:11px;line-height:18px;white-space:nowrap}
+.tu-badge--ok{color:var(--tu-ok);border-color:color-mix(in srgb, var(--tu-ok) 35%, transparent)}
+.tu-badge--warn{color:var(--tu-warn);border-color:color-mix(in srgb, var(--tu-warn) 35%, transparent)}
+.tu-badge--danger{color:var(--tu-danger);border-color:color-mix(in srgb, var(--tu-danger) 35%, transparent)}
+.tu-button{display:inline-flex;align-items:center;justify-content:center;height:32px;padding:0 10px;border:.5px solid var(--tu-border-2);border-radius:6px;background:var(--tu-bg);color:var(--tu-text);font:inherit;font-size:12px;cursor:pointer;text-decoration:none;white-space:nowrap}
+.tu-button:hover{background:var(--tu-hover)}
+.tu-button:focus-visible,.tu-icon-btn:focus-visible,.tu-switch input[type="checkbox"]:focus-visible + .tu-switch__track{outline:2px solid var(--tu-business);outline-offset:1px}
+.tu-button--primary{background:var(--tu-business);border-color:var(--tu-business);color:#fff}
+.tu-button--primary:hover{filter:brightness(.95);background:var(--tu-business)}
+.tu-button--sm{height:28px;padding:0 8px}
+.tu-button--ghost{border-color:transparent;background:transparent;color:var(--tu-text-sub)}
+.tu-button--ghost:hover{background:var(--tu-hover);color:var(--tu-text)}
+.tu-button--danger{color:var(--tu-danger);border-color:color-mix(in srgb, var(--tu-danger) 35%, transparent)}
+.tu-button--danger:hover{background:color-mix(in srgb, var(--tu-danger) 10%, transparent)}
+.tu-button:disabled{opacity:.45;cursor:not-allowed}
+.tu-icon-btn{width:28px;height:28px;border:0;border-radius:6px;background:transparent;color:var(--tu-text-sub);font:inherit;font-size:18px;line-height:1;cursor:pointer;display:inline-flex;align-items:center;justify-content:center}
+.tu-icon-btn:hover{background:var(--tu-hover);color:var(--tu-text)}
+.tu-menu{position:absolute;right:var(--tu-space-4);top:40px;z-index:5;min-width:150px;padding:var(--tu-space-1);background:var(--tu-bg);border:.5px solid var(--tu-border-2);border-radius:6px;box-shadow:var(--dsw-shadow-lv3,0 8px 24px rgba(0,0,0,.12))}
+.tu-menu__item{display:block;width:100%;padding:7px 10px;border:0;border-radius:4px;background:transparent;color:var(--tu-text);font:inherit;font-size:13px;text-align:left;cursor:pointer;white-space:nowrap}
+.tu-menu__item:hover{background:var(--tu-hover)}
+.tu-menu__item--danger{color:var(--tu-danger)}
+.tu-menu__item--armed{background:var(--tu-danger);color:#fff}
+.tu-menu__item--armed:hover{background:var(--tu-danger);color:#fff}
+.tu-empty{padding:var(--tu-space-5) var(--tu-space-4);color:var(--tu-text-dim);font-size:13px;text-align:center}
+.tu-empty__actions{margin-top:var(--tu-space-3)}
+.tu-notice{display:flex;gap:var(--tu-space-2);padding:10px 12px;border-left:2px solid var(--tu-warn);background:color-mix(in srgb, var(--tu-warn) 8%, transparent);color:var(--tu-text);font-size:13px;line-height:20px;border-radius:4px}
+.tu-notice--danger{border-left-color:var(--tu-danger);background:color-mix(in srgb, var(--tu-danger) 8%, transparent)}
+.tu-notice--muted{border-left-color:var(--tu-border-2);background:var(--tu-bg-sub);color:var(--tu-text-sub)}
+.tu-port{display:flex;align-items:center;gap:var(--tu-space-2);padding:9px var(--tu-space-4);border-bottom:.5px solid var(--tu-border);min-width:0}
+.tu-port:last-child{border-bottom:0}
+.tu-port__port{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;font-variant-numeric:tabular-nums;color:var(--tu-text);min-width:52px}
+.tu-port__proc{color:var(--tu-text-sub);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px}
+.tu-port__bind{color:var(--tu-text-dim);font-size:12px;white-space:nowrap}
+.tu-port__actions{margin-left:auto;display:flex;align-items:center;gap:var(--tu-space-1)}
+.tu-card__filter{display:flex;align-items:center;gap:var(--tu-space-2);padding:var(--tu-space-2) var(--tu-space-4);border-bottom:.5px solid var(--tu-border)}
+.tu-input{height:30px;min-width:0;padding:0 8px;border:.5px solid var(--tu-border-2);border-radius:6px;background:var(--tu-bg);color:var(--tu-text);font:inherit;font-size:13px;box-sizing:border-box}
+.tu-input:focus{outline:2px solid var(--tu-business);outline-offset:1px}
+.tu-input--search{flex:1}
+.tu-card__more{padding:var(--tu-space-2) var(--tu-space-4);border-top:.5px solid var(--tu-border);text-align:center}
+.tu-switch{display:inline-flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap;color:var(--tu-text-sub);font-size:12px}
+.tu-switch input[type="checkbox"]{position:absolute;opacity:0;width:1px;height:1px;margin:0}
+.tu-switch__track{width:28px;height:16px;border-radius:8px;background:var(--tu-border-2);position:relative;transition:background .15s}
+.tu-switch__thumb{position:absolute;left:2px;top:2px;width:12px;height:12px;border-radius:50%;background:#fff;transition:transform .15s}
+.tu-switch input[type="checkbox"]:checked + .tu-switch__track{background:var(--tu-business)}
+.tu-switch input[type="checkbox"]:checked + .tu-switch__track .tu-switch__thumb{transform:translateX(12px)}
+.tu-switch input[type="checkbox"]:disabled + .tu-switch__track{opacity:.45}
+.tu-switch:not(:has(input[type="checkbox"]:disabled)):hover .tu-switch__track{filter:brightness(.96)}
+.tu-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--tu-space-3)}
+.tu-field{display:flex;flex-direction:column;gap:6px;min-width:0}
 .tu-field--wide{grid-column:1 / -1}
-.tu-field input[type="text"],.tu-field input[type="number"]{min-height:32px;border:1px solid var(--tu-border-strong);border-radius:var(--tu-radius-sm);padding:0 10px;font:inherit;font-size:var(--tu-font-base);background:var(--tu-bg);color:var(--tu-text);min-width:0;transition:border-color .15s,box-shadow .15s}
-.tu-field input:focus{outline:none;border-color:var(--tu-accent);box-shadow:0 0 0 2px var(--tu-accent-wash)}
-.tu-hint{font-size:var(--tu-font-sm);line-height:18px;color:var(--tu-text-dim)}
-@media (max-width: 560px){
-.tu-grid{grid-template-columns:1fr}
-.tu-modal{max-height:92vh}
-.tu-main{padding:var(--tu-space-4)}
+.tu-field__label{font-size:13px;color:var(--tu-text)}
+.tu-hint{color:var(--tu-text-dim);font-size:12px;line-height:18px}
+.tu-error{color:var(--tu-danger);font-size:12px;line-height:18px}
+.tu-ok{color:var(--tu-ok);font-size:12px;line-height:18px}
+.tu-pill-group{display:flex;gap:var(--tu-space-2);flex-wrap:wrap}
+.tu-pill{height:30px;padding:0 10px;border:.5px solid var(--tu-border-2);border-radius:6px;background:var(--tu-bg);color:var(--tu-text-sub);font:inherit;font-size:12px;cursor:pointer}
+.tu-pill--active{border-color:var(--tu-business);background:color-mix(in srgb, var(--tu-business) 10%, transparent);color:var(--tu-text)}
+.tu-modal{position:fixed;inset:0;z-index:100;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.28);padding:var(--tu-space-4)}
+.tu-modal__box{width:min(440px,100%);max-height:90vh;overflow:auto;background:var(--tu-bg);border:.5px solid var(--tu-border-2);border-radius:var(--tu-radius);box-shadow:0 16px 48px rgba(0,0,0,.2)}
+.tu-modal__head{display:flex;align-items:center;justify-content:space-between;padding:var(--tu-space-3) var(--tu-space-4);border-bottom:.5px solid var(--tu-border)}
+.tu-modal__title{margin:0;font-size:15px;font-weight:600}
+.tu-modal__body{padding:var(--tu-space-4);display:flex;flex-direction:column;gap:var(--tu-space-3)}
+.tu-modal__foot{display:flex;justify-content:flex-end;gap:var(--tu-space-2);padding:var(--tu-space-3) var(--tu-space-4);border-top:.5px solid var(--tu-border)}
+.tu-skeleton{padding:var(--tu-space-4)}
+.tu-skeleton__line{height:12px;margin-bottom:10px;border-radius:4px;background:var(--tu-border)}
+.tu-skeleton__line:nth-child(2){width:70%}
+.tu-skeleton__line:nth-child(3){width:45%}
+@container tu-set (max-width:520px){
+  .tu-grid{grid-template-columns:1fr}
+  .tu-row__head{flex-wrap:wrap}
+  .tu-row__actions{margin-left:0;width:100%;justify-content:flex-end}
+  .tu-port__proc{max-width:90px}
+}
+@container tu-set (max-width:380px){
+  .tu-card--ports .tu-card__head{flex-wrap:wrap;row-gap:6px}
+  .tu-card--ports .tu-card__actions{margin-left:0;width:100%;justify-content:flex-end}
 }
 `
 /* SBUILD-END */
@@ -239,8 +364,7 @@ function noopFactory() {
 if (typeof window !== 'undefined' && window.__ModuleLoader__) {
   window.__ModuleLoader__.load({ id: '@mzzsfy/dsh-tunnel', factory })
 
-  // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染;插件未就绪时入队, 由其启动时排空
-  const NAV_ICON = { 'dsh-tunnel': 'globe' }
+  const NAV_ICON = { '穿透隧道': 'globe', 'dsh-tunnel': 'globe' }
   if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
   else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
   else window.__navicIconQueue = [NAV_ICON]
@@ -255,440 +379,456 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     }
     const tools = require('@mzzsfy/dsh-common-tools/client')
     const { useState, useEffect, useRef, useCallback } = React
-    const h = (type, props, ...children) => React.createElement(type, props ?? null, ...children)
-
-    // 数据请求:统一 envelope, error 透传中文业务文案
-    async function request(method, endpoint, body) {
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
-      let response
-      try {
-        response = await fetch(API_PREFIX + endpoint, {
-          method,
-          signal: controller.signal,
-          headers: body === undefined ? undefined : { 'content-type': 'application/json' },
-          body: body === undefined ? undefined : JSON.stringify(body),
-        })
-      } catch (error) {
-        return { ok: false, error: controller.signal.aborted ? '请求超时' : String(error && error.message || error) }
-      } finally {
-        clearTimeout(timer)
-      }
-      let json = null
-      try { json = await response.json() } catch { json = null }
-      if (!response.ok) return { ok: false, error: json && json.error ? json.error : '请求失败(' + response.status + ')' }
-      return { ok: true, data: json }
-    }
+    const h = (type, props, ...children) => React.createElement(type, props || null, ...children)
 
     function ensureStyle(document) {
-      const existing = document.querySelector('style[data-plugin="@mzzsfy/dsh-tunnel"]')
-      if (existing) return
-      const style = document.createElement('style')
-      style.id = 'dsh-tunnel-style'
-      // 官方契约:插件自注样式必须自带 data-plugin, 否则任意后续插件材质化时
-      // claimStyles 会把它归属给该插件, 其 HMR 重建即整批误删本插件样式
+      let style = document.getElementById(STYLE_ID)
+      if (style !== null) {
+        if (style.textContent !== CSS) style.textContent = CSS
+        style.setAttribute('data-plugin', '@mzzsfy/dsh-tunnel')
+        return
+      }
+      style = document.createElement('style')
+      style.id = STYLE_ID
       style.setAttribute('data-plugin', '@mzzsfy/dsh-tunnel')
-      style.textContent = STYLE
+      style.textContent = CSS
       document.head.appendChild(style)
     }
 
-    // 规约 switch:input 锚定状态选择器, 视觉由 track+thumb 呈现
+    async function request(method, endpoint, body) {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+      try {
+        const init = { method, headers: {}, signal: controller.signal }
+        if (method !== 'GET' && method !== 'HEAD') {
+          init.headers['content-type'] = 'application/json'
+          if (body !== undefined) init.body = JSON.stringify(body)
+        }
+        const response = await fetch(API_PREFIX + endpoint, init)
+        let data = null
+        try { data = await response.json() } catch { data = null }
+        if (!response.ok) return { ok: false, error: data?.error ?? '请求失败(' + response.status + ')' }
+        return { ok: true, data: data ?? {} }
+      } catch (error) {
+        return { ok: false, error: error?.name === 'AbortError' ? '请求超时' : '网络请求失败' }
+      } finally {
+        clearTimeout(timer)
+      }
+    }
+
     function switchToggle(props) {
       return h('label', { className: 'tu-switch' },
-        h('input', { type: 'checkbox', checked: props.checked, disabled: props.disabled, onChange: props.onChange,
-          'aria-label': props.ariaLabel }),
+        h('input', { type: 'checkbox', checked: props.checked, disabled: props.disabled, onChange: props.onChange, 'aria-label': props.label }),
         h('span', { className: 'tu-switch__track' }, h('span', { className: 'tu-switch__thumb' })),
-        props.label ? h('span', { className: 'tu-meta' }, props.label) : null)
+        props.label ? h('span', null, props.label) : null)
     }
 
     function Modal({ title, onClose, children }) {
-      const bodyRef = useRef(null)
+      const boxRef = useRef(null)
       useEffect(() => {
-        const onKey = (event) => { if (event.key === 'Escape') onClose() }
-        document.addEventListener('keydown', onKey)
-        const first = bodyRef.current && bodyRef.current.querySelector('input, textarea')
-        if (first) first.focus()
-        return () => document.removeEventListener('keydown', onKey)
-      }, [])
-      return h('div', { className: 'tu-modal-mask', onClick: (event) => { if (event.target === event.currentTarget) onClose() } },
-        h('div', { className: 'tu-modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
-          h('div', { className: 'tu-modal-head' },
-            h('span', { className: 'tu-modal-title' }, title),
-            h('button', { className: 'tu-icon', 'aria-label': '关闭', onClick: onClose }, '✕')),
-          h('div', { className: 'tu-modal-body', ref: bodyRef }, children)))
+        const previous = document.activeElement
+        const box = boxRef.current
+        const focusable = () => Array.from(box?.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') ?? [])
+        const preferred = box?.querySelector('input:not([disabled]), select:not([disabled]), textarea:not([disabled])')
+        if (preferred) preferred.focus()
+        else focusable()[0]?.focus()
+        const onKey = (event) => {
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            event.stopImmediatePropagation()
+            event.stopPropagation()
+            onClose()
+            return
+          }
+          if (event.key !== 'Tab' || box === null) return
+          const items = focusable()
+          if (items.length === 0) return
+          const first = items[0]
+          const last = items[items.length - 1]
+          if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
+          else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+        }
+        document.addEventListener('keydown', onKey, true)
+        return () => {
+          document.removeEventListener('keydown', onKey, true)
+          previous?.focus?.()
+        }
+      }, [onClose])
+      return h('div', { className: 'tu-modal', onMouseDown: (event) => { if (event.target === event.currentTarget) onClose() } },
+        h('div', { ref: boxRef, className: 'tu-modal__box', role: 'dialog', 'aria-modal': 'true', 'aria-label': title, tabIndex: -1 },
+          h('div', { className: 'tu-modal__head' },
+            h('h3', { className: 'tu-modal__title' }, title),
+            h('button', { type: 'button', className: 'tu-icon-btn', 'aria-label': '关闭', onClick: onClose }, '×')),
+          children))
     }
 
     function PillGroup({ options, value, onChange }) {
-      return h('div', { className: 'tu-seg' },
+      return h('div', { className: 'tu-pill-group', role: 'radiogroup' },
         options.map((option) => h('button', {
           key: option.value,
           type: 'button',
-          className: 'tu-seg__opt' + (option.value === value ? ' tu-seg__opt--on' : ''),
+          role: 'radio',
+          'aria-checked': value === option.value,
+          className: 'tu-pill' + (value === option.value ? ' tu-pill--active' : ''),
           onClick: () => onChange(option.value),
         }, option.label)))
     }
 
-    // —— 隧道列表面板 ——
-    function TunnelRow({ row, onRemove, busy }) {
-      const [copied, setCopied] = useState(false)
-      const url = accessUrlOf(row, window.location)
-      const localOnly = accessLocalOnly(row, window.location)
-      const copy = async () => {
-        if (await copyText(url, document)) {
-          setCopied(true)
-          setTimeout(() => setCopied(false), COPY_FLASH_MS)
-        }
-      }
-      return h('div', { className: 'tu-row' },
-        h('span', { className: 'tu-row__main' },
-          h('span', { className: 'tu-name' }, row.name),
-          h('span', { className: 'tu-badge' }, ENTRY_LABELS[row.entry] ?? row.entry),
-          row.active === false ? h('span', { className: 'tu-badge tu-badge--warn', title: row.error ?? '' }, '未激活') : null,
-          localOnly ? h('span', { className: 'tu-badge tu-badge--warn', title: '子域名入口在 IP 访问下仅本机可解析' }, '仅本机') : null,
-        ),
-        h('span', { className: 'tu-code', title: url }, row.entry === ENTRY_SUBDOMAIN ? row.name + '.*' : PATH_PREFIX + row.name),
-        h('span', { className: 'tu-code' }, ':' + row.targetPort),
-        h('span', { className: 'tu-meta', title: formatCreatedAtFull(row.createdAt) }, formatCreatedAt(row.createdAt)),
-        h('span', { className: 'tu-actions' },
-          h('button', { type: 'button', className: 'tu-button tu-button--sm tu-button--ghost', title: '点击复制 ' + url, 'aria-label': '复制 ' + row.name + ' 的访问地址', onClick: copy },
-            copied ? '已复制' : '复制地址'),
-          h('button', { type: 'button', className: 'tu-button tu-button--sm tu-button--danger', 'aria-label': '删除隧道 ' + row.name,
-            disabled: busy, onClick: () => onRemove(row) }, '删除')))
-    }
-
-    function AddTunnelModal({ onClose, onAdded }) {
-      const [draft, setDraft] = useState(EMPTY_ROW)
-      const [error, setError] = useState('')
-      const [busy, setBusy] = useState(false)
-      const patch = (part) => setDraft((prev) => ({ ...prev, ...part }))
-      const submit = async () => {
-        setBusy(true)
-        setError('')
-        const body = { name: draft.name.trim(), targetPort: Number(draft.targetPort), entry: draft.entry }
-        const outcome = await request('POST', '/tunnels', body)
-        setBusy(false)
-        if (!outcome.ok) { setError(outcome.error); return }
-        onAdded()
-      }
-      const trimmedName = draft.name.trim()
-      const nameOk = NAME_RE.test(trimmedName) && NAME_HAS_LETTER_RE.test(trimmedName)
-      const portValue = Number(draft.targetPort)
-      const portOk = Number.isInteger(portValue) && portValue >= PORT_MIN && portValue <= PORT_MAX
-      return h(Modal, { title: '添加隧道', onClose },
-        h('div', { className: 'tu-grid' },
-          h('div', { className: 'tu-field' },
-            h('span', null, '隧道名'),
-            h('input', { type: 'text', value: draft.name, placeholder: '小写字母/数字/连字符, ≤32 位',
-              onChange: (event) => patch({ name: event.target.value }) }),
-            h('span', { className: 'tu-hint' }, '至少含一个字母(纯数字会与纯 IP 访问的首段冲突); 并避开 dsh 入口域名首标签(如 dsh)')),
-          h('div', { className: 'tu-field' },
-            h('span', null, '目标端口'),
-            h('input', { type: 'number', value: draft.targetPort, placeholder: PORT_MIN + '..' + PORT_MAX,
-              onChange: (event) => patch({ targetPort: event.target.value }) }),
-            h('span', { className: 'tu-hint' }, '本机应用监听端口')),
-          h('div', { className: 'tu-field tu-field--wide' },
-            h('span', null, '入口形态'),
-            h(PillGroup, {
-              options: [{ label: ENTRY_LABELS.path + ' (/p/<名>)', value: ENTRY_PATH },
-                { label: ENTRY_LABELS.subdomain + ' (<名>.*)', value: ENTRY_SUBDOMAIN }],
-              value: draft.entry,
-              onChange: (entry) => patch({ entry }),
-            }),
-            h('span', { className: 'tu-hint' }, draft.entry === ENTRY_SUBDOMAIN
-              ? '全路径透传, WebSocket 任意路径可用, 需泛解析域名或 <名>.localhost 访问'
-              : '子路径部署, 目标应用需支持 base 参数(vite --base / jupyter base_url 等); WebSocket 同样可用。与 dsh 同源, cookie 敏感的应用优先用子域名'))),
-        error ? h('div', { className: 'tu-error' }, error) : null,
-        h('div', { className: 'tu-actions' },
-          h('button', { type: 'button', className: 'tu-button', onClick: onClose }, '取消'),
-          h('button', { type: 'button', className: 'tu-button tu-button--primary',
-            disabled: busy || !nameOk || !portOk, onClick: submit }, '创建')))
-    }
-
-    function TunnelPanel({ bus }) {
+    function useTunnelData(bus) {
       const [rows, setRows] = useState(null)
+      const [lanOrigin, setLanOrigin] = useState('')
       const [error, setError] = useState('')
-      const [showAdd, setShowAdd] = useState(false)
-      const [busyName, setBusyName] = useState('')
-      const rootRef = useRef(null)
-      const nodeVisibleRef = useRef(true)
+      const [probing, setProbing] = useState(false)
       const aliveRef = useRef(true)
       const gateRef = useRef(null)
+      const startedRef = useRef(false)
       const load = useCallback(async () => {
-        const listOutcome = await request('GET', '/tunnels')
+        setProbing(true)
+        const [listOutcome, statusOutcome] = await Promise.all([
+          request('GET', '/tunnels?probe=1'),
+          request('GET', '/status'),
+        ])
         if (!aliveRef.current) return
-        // 成功即清错误: 瞬态失败(如插件重载期刷新)恢复后错误条不滞留
-        if (listOutcome.ok) { setRows(listOutcome.data.items); setError('') }
-        else setError(listOutcome.error)
+        setProbing(false)
+        if (listOutcome.ok) {
+          setRows(listOutcome.data.items)
+          setError('')
+        } else setError(listOutcome.error)
+        if (statusOutcome.ok && typeof statusOutcome.data.lanOrigin === 'string') setLanOrigin(statusOutcome.data.lanOrigin)
       }, [])
       const reload = useCallback(() => gateRef.current?.request(), [])
       useEffect(() => {
         aliveRef.current = true
+        startedRef.current = false
         const snapshot = tools.createSnapshotRefresh(load)
-        // 闸门认 snapshot.refresh 为执行体: 突发事件仍由公共工具合并
-        const gate = createRefreshGate(() => isPageVisible(document) && nodeVisibleRef.current, snapshot.refresh)
+        const gate = createRefreshGate(() => isPageVisible(document), snapshot.refresh)
         gateRef.current = gate
-        const unsubscribe = bus.subscribe(() => gate.request(), { onReset: () => gate.request() })
-        const onVisibility = () => { if (isPageVisible(document)) gate.flush() }
+        const unsubscribe = bus.subscribe(() => gate.request(), {
+          onReset: () => { startedRef.current = true; gate.request() },
+        })
+        const onVisibility = () => gate.flush()
         document.addEventListener('visibilitychange', onVisibility)
-        // 首拉不依赖总线: 总线未就绪/无事件时看板也必须能出数据; 后续增量走推送
-        gate.request()
+        if (!startedRef.current) gate.request()
         return () => {
           aliveRef.current = false
-          gateRef.current = null
-          snapshot.dispose()
           unsubscribe()
           document.removeEventListener('visibilitychange', onVisibility)
+          snapshot.dispose?.()
+          gateRef.current = null
         }
       }, [bus, load])
-      // 容器级可见性: 非激活 tab 常以 0 尺寸/隐藏容器挂着, 只靠页面级会永远判可见
+      return { rows, lanOrigin, error, probing, reload }
+    }
+
+    function SetHead({ onAdd }) {
+      return h('header', { className: 'tu-set-head' },
+        h('div', null,
+          h('h2', { className: 'tu-set-head__title' }, SECTION_LABEL),
+          h('p', { className: 'tu-set-head__desc' }, '把本机正在跑的服务临时变成一条链接, 给浏览器、手机或其他设备用。')),
+        h('div', { className: 'tu-set-head__actions' },
+          h('button', { type: 'button', className: 'tu-button tu-button--primary', onClick: onAdd }, '手动添加')))
+    }
+
+    function Notice({ tone = 'warn', children }) {
+      return h('div', { className: 'tu-notice' + (tone === 'danger' ? ' tu-notice--danger' : tone === 'muted' ? ' tu-notice--muted' : ''), role: tone === 'danger' ? 'alert' : undefined }, children)
+    }
+
+    function copyWithFlash(text, onDone) {
+      copyText(text, document).then((ok) => {
+        if (ok) onDone?.('已复制')
+      })
+    }
+
+    function TunnelRow({ row, now, lanOrigin, onEdit, onToggle, onRemove }) {
+      const [menuOpen, setMenuOpen] = useState(false)
+      const [armed, setArmed] = useState(false)
+      const [flash, setFlash] = useState('')
+      const rootRef = useRef(null)
       useEffect(() => {
-        const node = rootRef.current
-        if (!node || typeof IntersectionObserver === 'undefined') return
-        const observer = new IntersectionObserver((entries) => {
-          nodeVisibleRef.current = entries.some((entry) => entry.isIntersecting)
-          if (nodeVisibleRef.current) gateRef.current?.flush()
-        })
-        observer.observe(node)
-        return () => observer.disconnect()
-      }, [])
-      const remove = async (row) => {
-        if (!window.confirm('删除隧道 ' + row.name + '?')) return
-        setBusyName(row.name)
-        const outcome = await request('DELETE', '/tunnels/' + encodeURIComponent(row.name))
-        setBusyName('')
-        if (!outcome.ok) setError(outcome.error)
-        else reload()
-      }
-      return h('div', { className: 'tu-panel', ref: rootRef },
-        h('header', { className: 'tu-page-head' },
-          h('div', null,
-            h('h1', { className: 'tu-page-title' }, '穿透隧道'),
-            h('p', { className: 'tu-page-desc' }, '把本机端口映射为路径或子域名入口,供浏览器与外部服务访问。'),
-          ),
-          h('div', { className: 'tu-page-actions' },
-            h('button', { type: 'button', className: 'tu-button tu-button--primary', onClick: () => setShowAdd(true) }, '添加隧道')),
-        ),
-        h('div', { className: 'tu-toolbar' },
-          h('span', { className: 'tu-meta' }, rows ? '共 ' + rows.length + ' 条隧道' : '加载中…'),
-        ),
-        error ? h('div', { className: 'tu-error' }, error) : null,
-        rows && rows.length === 0 ? h('div', { className: 'tu-empty' },
-          h('span', null, '还没有隧道。创建一个,把本机服务暴露给浏览器。'),
-          h('button', { type: 'button', className: 'tu-button tu-button--primary', onClick: () => setShowAdd(true) }, '添加隧道')) : null,
-        rows && rows.length > 0 ? h('div', { className: 'tu-rows' },
-          h('div', { className: 'tu-rows-head' },
-            h('span', null, '名称'),
-            h('span', null, '入口'),
-            h('span', null, '端口'),
-            h('span', null, '创建时间'),
-            h('span', { style: { textAlign: 'right' } }, '操作')),
-          rows.map((row) => h(TunnelRow, { key: row.name, row, busy: busyName === row.name, onRemove: remove }))) : null,
-        showAdd ? h(AddTunnelModal, { onClose: () => setShowAdd(false), onAdded: () => { setShowAdd(false); reload() } }) : null)
-    }
-
-    // —— 挂载:全局面板(main keyed + sidebar.panellist)与 better-sidebar tab 形态仲裁 ——
-    // 侧栏行与中央面板均由宿主渲染, 禁 DOM 刮取;仲裁仅由偏好驱动(设计 §3.2)
-
-    const CARD_TITLE = '穿透隧道'
-    const CARD_DESC = '手动管理穿透隧道: 路径/子域名双入口, 列表与增删, ai 使用开关'
-    const CARD_TOGGLE_LABEL = '看板移入 better-sidebar 侧边栏'
-    const CARD_AI_LABEL = '允许 ai 使用隧道工具'
-    const CARD_AI_HINT = '关闭后 ai 无法调用 tunnel_open/tunnel_list/tunnel_close, 看板与 REST 管理不受影响。'
-    const CHEVRON_DOWN = () => h('svg', { viewBox: '0 0 14 14', width: 14, height: 14, fill: 'none',
-      stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true' },
-      h('path', { d: 'm3.5 5.5 3.5 3.5 3.5-3.5' }))
-
-    // 面板图标:panellist 渲染契约组件与侧边栏 tab 图标共用, 宿主传 { size, active }
-    function PanelIcon({ size }) {
-      return h('svg', { viewBox: '0 0 16 16', width: size, height: size, fill: 'none',
-        stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true' },
-        h('circle', { cx: 7, cy: 7, r: 4.5 }),
-        h('path', { d: 'm10.5 10.5 3 3' }))
-    }
-
-    function registerMainPanel(ctx, bus) {
-      return ctx.effect(() => {
-        const injectDisposers = []
-        injectDisposers.push(ctx.slots.inject('main', () => ctx.slots.register({
-          name: 'main',
-          key: PANEL_ID,
-        }, () => h('div', { className: 'tu-main' }, h(TunnelPanel, { bus })))))
-        injectDisposers.push(ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
-          name: 'sidebar.panellist',
-          id: PANEL_ID,
-          label: PANEL_LABEL,
-        }, (iconProps) => h(PanelIcon, iconProps))))
-        return () => { for (const dispose of injectDisposers) dispose() }
-      }, 'dsh-tunnel main panel')
-    }
-
-    // better-sidebar tab:注册即单实例(single);只注册不主动打开,
-    // 打开由用户从侧边栏目录手动进入
-    function registerBoardTab(ctx, service, bus) {
-      return ctx.effect(() => {
-        return service.registerTab({
-          id: TAB_ID,
-          title: PANEL_LABEL,
-          icon: (size) => h(PanelIcon, { size }),
-          order: TAB_ORDER,
-          single: true,
-          component: (props) => h('div', { className: 'tu-main' }, h(TunnelPanel, { bus })),
-        })
-      }, 'dsh-tunnel sidebar tab')
-    }
-
-    // 设置>插件页卡片:官方 PluginCard 形制;better-sidebar 在场可切换, 否则仅展示禁用态
-    function TunnelPluginCard({ ctx }) {
-      const [sidebarOn, setSidebarOn] = useState(null)
-      const [aiOn, setAiOn] = useState(null)
-      const [busyKey, setBusyKey] = useState('')
-      const [open, setOpen] = useState(false)
-      // 渲染时重探服务在场:better-sidebar 晚于设置页装载时, 重渲染自动纠正禁用态
-      const sidebarReady = ctx.get('betterSidebar') !== undefined
-      useEffect(() => {
-        let alive = true
-        request('GET', '/status').then((outcome) => {
-          if (!alive || !outcome.ok || !outcome.data || !outcome.data.ui) return
-          setSidebarOn(outcome.data.ui.sidebarTab === true)
-          setAiOn(outcome.data.ui.aiTools !== false)
-        })
-        return () => { alive = false }
-      }, [])
-      const flip = async (key, current) => {
-        if (busyKey !== '' || current === null) return
-        if (key === 'sidebarTab' && !sidebarReady) return
-        setBusyKey(key)
-        const outcome = await request('POST', '/ui-settings', { [key]: !current })
-        if (outcome.ok && outcome.data && outcome.data.ui) {
-          setSidebarOn(outcome.data.ui.sidebarTab === true)
-          setAiOn(outcome.data.ui.aiTools !== false)
-        } else {
-          console.warn('[dsh-tunnel] 偏好写入失败: ' + ((outcome.data && outcome.data.error) || outcome.error || '未知'))
+        if (!menuOpen) return undefined
+        const close = (event) => {
+          if (rootRef.current !== null && rootRef.current.contains?.(event.target)) return
+          setMenuOpen(false)
+          setArmed(false)
         }
-        setBusyKey('')
+        const onKey = (event) => { if (event.key === 'Escape') { setMenuOpen(false); setArmed(false) } }
+        document.addEventListener('mousedown', close)
+        document.addEventListener('keydown', onKey)
+        return () => {
+          document.removeEventListener('mousedown', close)
+          document.removeEventListener('keydown', onKey)
+        }
+      }, [menuOpen])
+      const vm = tunnelRowVM(row, window.location, now)
+      const url = vm.url
+      const urlDisabled = row.enabled === false || vm.status === 'route_error'
+      const tone = vm.statusTone
+      const lanUrl = row.entry === ENTRY_PATH && lanOrigin !== '' && isLoopbackHost(window.location.hostname)
+        ? lanOrigin + PATH_PREFIX + row.name + '/'
+        : ''
+      const copy = (text) => copyWithFlash(text, (text) => {
+        setFlash(text)
+        setTimeout(() => setFlash(''), COPY_FLASH_MS)
+      })
+      const closeMenu = () => { setMenuOpen(false); setArmed(false) }
+      return h('div', { className: 'tu-row', ref: rootRef },
+        h('div', { className: 'tu-row__head' },
+          h('span', { className: 'tu-dot tu-dot--' + tone, 'aria-hidden': 'true' }),
+          h('span', { className: 'tu-row__name', title: row.name }, row.name),
+          h('span', { className: 'tu-badge' }, ENTRY_LABELS[row.entry] ?? row.entry),
+          h('span', { className: 'tu-row__port' }, ':' + row.targetPort),
+          h('div', { className: 'tu-row__actions' },
+            urlDisabled
+              ? h('button', { type: 'button', className: 'tu-button tu-button--sm', disabled: true, title: vm.statusText }, '打开')
+              : h('a', { className: 'tu-button tu-button--sm tu-button--primary', href: url, target: '_blank', rel: 'noreferrer' }, '打开'),
+            h('button', { type: 'button', className: 'tu-button tu-button--sm tu-button--ghost', onClick: () => copy(url) }, flash || '复制'),
+            h('button', { type: 'button', className: 'tu-icon-btn', 'aria-haspopup': 'menu', 'aria-expanded': menuOpen, 'aria-label': '更多操作', onClick: () => setMenuOpen(!menuOpen) }, '⋯'),
+            menuOpen ? h('div', { className: 'tu-menu', role: 'menu' },
+              h('button', { type: 'button', className: 'tu-menu__item', role: 'menuitem', onClick: () => { copy(url); closeMenu() } }, '复制地址'),
+              lanUrl !== '' ? h('button', { type: 'button', className: 'tu-menu__item', role: 'menuitem', onClick: () => { copy(lanUrl); closeMenu() } }, '复制局域网地址') : null,
+              h('button', { type: 'button', className: 'tu-menu__item', role: 'menuitem', onClick: () => { onEdit(row); closeMenu() } }, '编辑'),
+              h('button', { type: 'button', className: 'tu-menu__item', role: 'menuitem', onClick: () => { onToggle(row); closeMenu() } }, row.enabled === false ? '启用' : '停用'),
+              h('button', {
+                type: 'button',
+                className: 'tu-menu__item tu-menu__item--danger' + (armed ? ' tu-menu__item--armed' : ''),
+                role: 'menuitem',
+                onClick: () => { if (!armed) { setArmed(true); return } onRemove(row); closeMenu() },
+              }, armed ? '确认删除' : '删除')) : null)),
+        urlDisabled
+          ? h('span', { className: 'tu-row__url tu-row__url--disabled', title: url }, url)
+          : h('a', { className: 'tu-row__url', href: url, target: '_blank', rel: 'noreferrer', title: url }, url),
+        h('div', { className: 'tu-row__meta' },
+          h('span', null, vm.statusText),
+          h('span', null, '·'),
+          h('span', null, vm.statsText),
+          vm.localOnly ? h('span', { className: 'tu-badge' }, '仅本机') : null),
+        row.error !== undefined ? h('div', { className: 'tu-row__error', role: 'alert' }, row.error) : null)
+    }
+
+    function EmptyTunnel({ onAdd }) {
+      return h('div', { className: 'tu-empty' },
+        h('div', null, '还没有开放任何端口。从下方本机服务选择一个, 或手动添加。'),
+        h('div', { className: 'tu-empty__actions' },
+          h('button', { type: 'button', className: 'tu-button', onClick: onAdd }, '手动添加隧道')))
+    }
+
+    function TunnelCard({ rows, now, lanOrigin, error, probing, reload, onAdd, onEdit, onToggle, onRemove }) {
+      const list = rows ?? []
+      const online = list.filter((row) => statusOf(row) === 'online').length
+      return h('section', { className: 'tu-card', 'aria-label': '已开放隧道' },
+        h('div', { className: 'tu-card__head' },
+          h('h3', { className: 'tu-card__title' }, '已开放隧道'),
+          h('span', { className: 'tu-card__meta' }, list.length + ' 条' + (list.length > 0 ? ' · ' + online + ' 个在监听' : '')),
+          h('div', { className: 'tu-card__actions' },
+            h('button', { type: 'button', className: 'tu-button tu-button--sm tu-button--ghost', disabled: probing, onClick: reload }, probing ? '检测中…' : '刷新'))),
+        error !== '' ? h('div', { style: { padding: '12px 16px 0' } }, h(Notice, { tone: 'danger' }, error)) : null,
+        rows === null ? h('div', { className: 'tu-skeleton' },
+          h('div', { className: 'tu-skeleton__line' }),
+          h('div', { className: 'tu-skeleton__line' }),
+          h('div', { className: 'tu-skeleton__line' }))
+          : list.length === 0 ? h(EmptyTunnel, { onAdd })
+            : h('div', { className: 'tu-list' }, list.map((row) => h(TunnelRow, {
+              key: row.name,
+              row,
+              now,
+              lanOrigin,
+              onEdit,
+              onToggle,
+              onRemove,
+            }))))
+    }
+
+    function PortRow({ item, onOpen }) {
+      return h('div', { className: 'tu-port' },
+        h('span', { className: 'tu-port__port' }, ':' + item.port),
+        h('span', { className: 'tu-port__proc', title: item.process ?? '' }, item.process ?? '未知进程'),
+        h('span', { className: 'tu-port__bind' }, item.bind ?? ''),
+        h('div', { className: 'tu-port__actions' },
+          item.tunnelNames?.length > 0
+            ? h('span', { className: 'tu-badge tu-badge--ok', title: item.tunnelNames.join(', ') }, '已开放')
+            : h('button', { type: 'button', className: 'tu-button tu-button--sm', onClick: () => onOpen(item) }, '开放')))
+    }
+
+    function PortsCard({ onOpen, refreshKey }) {
+      const [expanded, setExpanded] = useState(false)
+      const [ports, setPorts] = useState(null)
+      const [supported, setSupported] = useState(true)
+      const [reason, setReason] = useState('')
+      const [scannedAt, setScannedAt] = useState('')
+      const [query, setQuery] = useState('')
+      const [showAll, setShowAll] = useState(false)
+      const [limit, setLimit] = useState(PORT_LIMIT)
+      const [error, setError] = useState('')
+      const [busy, setBusy] = useState(false)
+      const aliveRef = useRef(true)
+      const loadSeqRef = useRef(0)
+      useEffect(() => () => { aliveRef.current = false }, [])
+      const load = useCallback(async (refresh = false) => {
+        const seq = ++loadSeqRef.current
+        setBusy(true)
+        const outcome = await request('GET', '/ports?all=' + (showAll ? '1' : '0') + (refresh ? '&refresh=1' : ''))
+        if (!aliveRef.current || seq !== loadSeqRef.current) return
+        setBusy(false)
+        if (!outcome.ok) { setError(outcome.error); return }
+        setError('')
+        setSupported(outcome.data.supported !== false)
+        setReason(outcome.data.reason ?? '')
+        setScannedAt(outcome.data.scannedAt ?? '')
+        setPorts(Array.isArray(outcome.data.items) ? outcome.data.items : [])
+      }, [showAll])
+      useEffect(() => { if (expanded) load() }, [expanded, load]) // 展开与范围变化都按当前筛选重扫
+      useEffect(() => { if (expanded && ports !== null) load(true) }, [refreshKey]) // 隧道增删改后同步“已开放”标记
+      const view = portView(ports ?? [], { query, showAll, limit })
+      return h('section', { className: 'tu-card tu-card--ports', 'aria-label': '本机服务' },
+        h('div', { className: 'tu-card__head' },
+          h('button', {
+            type: 'button',
+            className: 'tu-button tu-button--ghost tu-button--sm',
+            'aria-expanded': expanded,
+            'aria-label': expanded ? '收起本机服务' : '展开本机服务',
+            onClick: () => setExpanded(!expanded),
+          }, expanded ? '▾' : '▸'),
+          h('h3', { className: 'tu-card__title' }, '本机服务'),
+          h('span', { className: 'tu-card__meta' }, ports === null ? '展开后扫描' : view.total + ' 个端口'),
+          h('div', { className: 'tu-card__actions' },
+            h(switchToggle, { checked: showAll, onChange: (event) => setShowAll(event.target.checked), label: '显示全部' }),
+            h('button', { type: 'button', className: 'tu-button tu-button--sm tu-button--ghost', disabled: busy, onClick: () => load(true) }, busy ? '扫描中…' : '重新扫描'))),
+        expanded ? h('div', null,
+          error !== '' ? h('div', { style: { padding: '8px 16px' } }, h(Notice, { tone: 'danger' }, error)) : null,
+          supported === false ? h('div', { style: { padding: '8px 16px' } }, h(Notice, { tone: 'muted' }, reason || '当前平台无法自动发现, 请手动添加。')) : null,
+          h('div', { className: 'tu-card__filter' },
+            h('input', { type: 'search', className: 'tu-input tu-input--search', placeholder: '过滤端口 / 进程 / 地址', 'aria-label': '过滤端口', value: query, onChange: (event) => setQuery(event.target.value) }),
+            h('span', { className: 'tu-card__meta' }, scannedAt === '' ? '' : '扫描于 ' + new Date(scannedAt).toLocaleTimeString())),
+          ports === null ? h('div', { className: 'tu-skeleton' }, h('div', { className: 'tu-skeleton__line' }), h('div', { className: 'tu-skeleton__line' }))
+            : view.visible.length === 0 ? h('div', { className: 'tu-empty' }, '没有匹配的端口。')
+              : h('div', { className: 'tu-list' }, view.visible.map((item) => h(PortRow, { key: item.port, item, onOpen }))),
+          view.rest.length > 0 ? h('div', { className: 'tu-card__more' },
+            h('button', { type: 'button', className: 'tu-button tu-button--sm tu-button--ghost', onClick: () => setLimit(50) }, '展开其余 ' + view.rest.length + ' 个')) : null)
+          : null)
+    }
+
+    function TunnelDialog({ mode, row, portItem, onClose, onSaved }) {
+      const initial = row ?? { name: '', targetPort: portItem?.port ?? '', entry: defaultEntryFor(window.location) }
+      const [draft, setDraft] = useState(initial)
+      const [nameTouched, setNameTouched] = useState(mode === 'edit')
+      const [error, setError] = useState('')
+      const [busy, setBusy] = useState(false)
+      const [probe, setProbe] = useState(null)
+      const selectedProcess = portItem?.process ?? null
+      const patch = (part) => setDraft((prev) => ({ ...prev, ...part }))
+      useEffect(() => {
+        if (mode !== 'create' || nameTouched) return
+        const port = Number(draft.targetPort)
+        if (!Number.isInteger(port)) return
+        setDraft((prev) => ({ ...prev, name: suggestName(port, selectedProcess) }))
+      }, [draft.targetPort, mode, nameTouched, selectedProcess])
+      useEffect(() => {
+        const port = Number(draft.targetPort)
+        if (!Number.isInteger(port) || port < PORT_MIN || port > PORT_MAX) { setProbe(null); return undefined }
+        let alive = true
+        const timer = setTimeout(async () => {
+          const outcome = await request('GET', '/probe?port=' + port)
+          if (!alive || !outcome.ok) return
+          setProbe(outcome.data)
+        }, PROBE_DEBOUNCE_MS)
+        return () => { alive = false; clearTimeout(timer) }
+      }, [draft.targetPort])
+      const trimmedName = draft.name.trim()
+      const nameOk = trimmedName === '' || (NAME_RE.test(trimmedName) && NAME_HAS_LETTER_RE.test(trimmedName))
+      const portValue = Number(draft.targetPort)
+      const portOk = Number.isInteger(portValue) && portValue >= PORT_MIN && portValue <= PORT_MAX
+      const entryConflict = draft.entry === ENTRY_SUBDOMAIN && trimmedName !== '' && isEntryLabelConflict(trimmedName, window.location.hostname)
+      const submit = async () => {
+        setBusy(true)
+        setError('')
+        const body = tunnelBodyOf(mode, draft, trimmedName)
+        const outcome = mode === 'create'
+          ? await request('POST', '/tunnels', body)
+          : await request('PATCH', '/tunnels/' + encodeURIComponent(row.name), body)
+        setBusy(false)
+        if (!outcome.ok) { setError(outcome.error); return }
+        onSaved()
       }
-      return h('li', { className: 'tu-pc' + (open ? ' tu-pc--open' : '') },
-        h('button', { type: 'button', className: 'tu-pc__head', 'aria-expanded': open,
-          'aria-label': (open ? '折叠' : '展开') + ': ' + CARD_TITLE, onClick: () => setOpen(!open) },
-          h('span', { className: 'tu-pc__text' },
-            h('span', { className: 'tu-pc__name' }, CARD_TITLE),
-            h('span', { className: 'tu-pc__desc' }, CARD_DESC)),
-          h('span', { className: 'tu-pc__chevron' }, h(CHEVRON_DOWN))),
-        open ? h('div', { className: 'tu-pc__body' },
-          h('div', { className: 'tu-pc__row' },
-            h('div', { className: 'tu-pc__rowLine' },
-              h('span', { className: 'tu-pc__rowLabel' }, CARD_AI_LABEL),
-              switchToggle({
-                checked: aiOn === true,
-                disabled: busyKey !== '' || aiOn === null,
-                onChange: () => flip('aiTools', aiOn),
-                ariaLabel: CARD_AI_LABEL,
-              })),
-            h('p', { className: 'tu-pc__hint' }, CARD_AI_HINT)),
-          h('div', { className: 'tu-pc__row' },
-            h('div', { className: 'tu-pc__rowLine' },
-              h('span', { className: 'tu-pc__rowLabel' }, CARD_TOGGLE_LABEL),
-              switchToggle({
-                checked: sidebarOn === true,
-                disabled: busyKey !== '' || sidebarOn === null || !sidebarReady,
-                onChange: () => flip('sidebarTab', sidebarOn),
-                ariaLabel: CARD_TOGGLE_LABEL,
-              })),
-            h('p', { className: 'tu-pc__hint' },
-              sidebarReady ? '开启后看板以侧边栏页签呈现,关闭时使用全局面板。' : '需已装载 better-sidebar 后方可切换;未装载时看板始终使用全局面板。'))) : null)
+      return h(Modal, { title: mode === 'create' ? '添加隧道' : '编辑隧道', onClose },
+        h('div', { className: 'tu-modal__body' },
+          h('div', { className: 'tu-field' },
+            h('label', { className: 'tu-field__label', htmlFor: 'tu-tunnel-port' }, '目标端口'),
+            h('input', { id: 'tu-tunnel-port', type: 'number', className: 'tu-input', value: draft.targetPort, placeholder: PORT_MIN + '..' + PORT_MAX, onChange: (event) => patch({ targetPort: event.target.value }) }),
+            probe === null ? h('span', { className: 'tu-hint' }, '本机应用监听端口') : h('span', { className: probe.listening ? 'tu-ok' : 'tu-hint' }, probe.listening ? '端口在监听' : '端口未在监听, 可稍后启动')),
+          h('div', { className: 'tu-field' },
+            h('label', { className: 'tu-field__label', htmlFor: 'tu-tunnel-name' }, '隧道名'),
+            h('input', { id: 'tu-tunnel-name', type: 'text', className: 'tu-input', value: draft.name, placeholder: '留空自动生成 app-<端口>', disabled: mode === 'edit', onChange: (event) => { setNameTouched(true); patch({ name: event.target.value }) } }),
+            h('span', { className: 'tu-hint' }, mode === 'edit' ? '名称即地址, 创建后不可修改' : '小写字母/数字/连字符, 留空自动生成')),
+          h('div', { className: 'tu-field tu-field--wide' },
+            h('span', { className: 'tu-field__label' }, '入口形态'),
+            h(PillGroup, {
+              options: [{ label: '路径 /p/<名>', value: ENTRY_PATH }, { label: '子域名 <名>.*', value: ENTRY_SUBDOMAIN }],
+              value: draft.entry,
+              onChange: (entry) => patch({ entry }),
+            }),
+            h('span', { className: 'tu-hint' }, entryHintOf(draft.entry, window.location))),
+          mode === 'edit' ? h('span', { className: 'tu-hint' }, '修改目标端口或入口会短暂断开当前连接; 入口变化会改变访问地址。') : null,
+          error !== '' ? h('div', { className: 'tu-error', role: 'alert' }, error) : null,
+          entryConflict ? h('div', { className: 'tu-error' }, '隧道名与入口域首标签冲突(' + entryLabelOf(window.location.hostname) + '): 该名字会劫持整个入口, 请换名') : null),
+        h('div', { className: 'tu-modal__foot' },
+          h('button', { type: 'button', className: 'tu-button', onClick: onClose }, '取消'),
+          h('button', { type: 'button', className: 'tu-button tu-button--primary', disabled: busy || !nameOk || !portOk || entryConflict, onClick: submit }, busy ? '提交中…' : (mode === 'create' ? '创建' : '保存'))))
+    }
+
+    function TunnelSettingsApp({ bus }) {
+      const data = useTunnelData(bus)
+      const [dialog, setDialog] = useState(null)
+      const [portsVersion, setPortsVersion] = useState(0)
+      const [actionError, setActionError] = useState('')
+      const now = Date.now()
+      const afterChange = () => {
+        setActionError('')
+        setPortsVersion((value) => value + 1)
+        data.reload()
+      }
+      const update = async (row, patch) => {
+        const outcome = await request('PATCH', '/tunnels/' + encodeURIComponent(row.name), patch)
+        if (outcome.ok) afterChange()
+        else setActionError(outcome.error)
+      }
+      const remove = async (row) => {
+        const outcome = await request('DELETE', '/tunnels/' + encodeURIComponent(row.name))
+        if (outcome.ok) afterChange()
+        else setActionError(outcome.error)
+      }
+      return h('section', { className: 'tu-set' },
+        h(SetHead, { onAdd: () => setDialog({ mode: 'create' }) }),
+        h(TunnelCard, {
+          rows: data.rows,
+          now,
+          lanOrigin: data.lanOrigin,
+          error: data.error || actionError,
+          probing: data.probing,
+          reload: data.reload,
+          onAdd: () => setDialog({ mode: 'create' }),
+          onEdit: (row) => setDialog({ mode: 'edit', row }),
+          onToggle: (row) => update(row, { enabled: row.enabled === false }),
+          onRemove: remove,
+        }),
+        h(PortsCard, { onOpen: (item) => setDialog({ mode: 'create', portItem: item }), refreshKey: portsVersion }),
+        dialog === null ? null : h(TunnelDialog, {
+          mode: dialog.mode,
+          row: dialog.row,
+          portItem: dialog.portItem,
+          onClose: () => setDialog(null),
+          onSaved: () => { setDialog(null); afterChange() },
+        }))
     }
 
     return {
-      // slots 供面板与设置卡片挂载(缺失则 fiber 未激活, 即干净禁用)
       inject: ['slots'],
       apply(ctx) {
         const bus = tools.setupCommonTools(ctx)
         ensureStyle(document)
-        // 挂载权交给用户:默认注册全局面板;偏好开启且侧边栏服务在场才移入扩展槽。
-        // 形态仲裁收敛成状态机: currentMode 是唯一事实, reconcile 是唯一变更入口
-        let currentSidebar = ctx.get('betterSidebar')
-        let sidebarTabOn = false
-        let currentMode = null
-        let tabDisposer = null
-        let panelDisposer = null
-        const desiredMode = () => (sidebarTabOn && currentSidebar !== undefined ? MODE_TAB : MODE_PANEL)
-        // 先装新后卸旧: 装载失败时旧形态仍在, 不出现双无窗口; 成功才切换事实并回收旧形态。
-        // 代价是同一 tick 内两种形态短暂并存, 宿主按渲染批次取快照, 用户侧不可见
-        const reconcile = () => {
-          const target = desiredMode()
-          if (target === currentMode) return
-          if (target === MODE_TAB) {
-            const disposeTab = registerBoardTab(ctx, currentSidebar, bus)
-            const previousPanel = panelDisposer
-            tabDisposer = disposeTab
-            panelDisposer = null
-            currentMode = MODE_TAB
-            if (previousPanel) previousPanel()
-            return
-          }
-          const disposePanel = registerMainPanel(ctx, bus)
-          const previousTab = tabDisposer
-          panelDisposer = disposePanel
-          tabDisposer = null
-          currentMode = MODE_PANEL
-          if (previousTab) previousTab()
-        }
-        // 偏好仲裁数据源:订阅总线刷新(ui-settings 变更即 publish),不再周期轮询
-        let prefAlive = true
-        const syncPref = async () => {
-          // 无侧边栏服务时形态恒为全局面板, 偏好读取无意义: 省掉每次 publish 的 /status
-          if (currentSidebar === undefined) return
-          try {
-            const outcome = await request('GET', '/status')
-            if (!prefAlive) return
-            const next = outcome.ok && outcome.data && outcome.data.ui ? outcome.data.ui.sidebarTab === true : false
-            if (next !== sidebarTabOn) {
-              const previous = sidebarTabOn
-              sidebarTabOn = next
-              try {
-                reconcile()
-              } catch (error) {
-                // 形态切换失败回滚偏好, 下轮事件重试, 避免入口消失后卡死
-                sidebarTabOn = previous
-                console.warn('[dsh-tunnel] 看板形态切换失败:', error)
-              }
-            }
-          } catch { /* 刷新失败保形态不变, 下轮事件重试 */ }
-        }
-        const prefRefresh = tools.createSnapshotRefresh(syncPref)
-        const unsubscribePref = bus.subscribe(prefRefresh.refresh, { onReset: prefRefresh.refresh })
-        ctx.effect(() => () => {
-          prefAlive = false
-          prefRefresh.dispose()
-          unsubscribePref()
-          currentMode = null
-          if (tabDisposer) tabDisposer()
-          if (panelDisposer) panelDisposer()
-          tabDisposer = null
-          panelDisposer = null
-        }, 'dsh-tunnel mount arbitration')
-        // 设置>插件页卡片:key 配对 ns, 宿主按 describe 命名空间分发;effect 随 fiber 回收。
-        // 0.1.7-rc.1+ 该槽被宿主移除, 卡片换形注册进插件管理页包详情配置槽(plugins.bundle.config,
-        // key = 包名);两代槽位并存注册:inject 是声明生命周期效应, 错误世代宿主永不声明该槽,
-        // 回调挂起不执行, 零成本
-        ctx.effect(() => ctx.slots.inject('settings.plugin.item', function* () {
-          yield ctx.slots.register(
-            { name: 'settings.plugin.item', key: PANEL_ID, label: PANEL_LABEL },
-            () => h(TunnelPluginCard, { ctx }),
-          )
-        }), 'dsh-tunnel settings card')
-        ctx.effect(() => ctx.slots.inject('plugins.bundle.config', function* () {
-          yield ctx.slots.register(
-            { name: 'plugins.bundle.config', key: '@mzzsfy/dsh-tunnel' },
-            () => h(TunnelPluginCard, { ctx }),
-          )
-        }), 'dsh-tunnel plugin manager card')
-        ctx.inject(['betterSidebar'], (bsCtx) => {
-          currentSidebar = bsCtx.betterSidebar
-          syncPref()
-          reconcile()
-        })
-        reconcile()
+        ctx.slots.inject('settings.section', () => ctx.slots.register(
+          { name: 'settings.section', id: SECTION_ID, order: SECTION_ORDER, label: SECTION_LABEL },
+          () => h(TunnelSettingsApp, { bus }),
+        ))
       },
     }
   }

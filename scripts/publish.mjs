@@ -87,6 +87,7 @@ function runNpm(args, cwd, opts = {}) {
     encoding: 'utf8',
     shell: isWin,
     stdio: opts.stdio ?? 'pipe',
+    ...(opts.timeoutMs === undefined ? {} : { timeout: opts.timeoutMs }),
   })
   if (r.error) fail(`命令启动失败: ${display}(${r.error.message})`)
   return r
@@ -151,7 +152,7 @@ function nextVersion(version, kind) {
 
 /** 线上版本;未发布返回 null;非 E404 失败直接中止,防网络故障被当成未发布 */
 function onlineVersion(name) {
-  const r = runNpm(['view', name, 'version', '--registry', REGISTRY])
+  const r = runNpm(['view', name, 'version', '--registry', REGISTRY], undefined, { timeoutMs: 60 * 1000 })
   if (r.status === 0) return r.stdout.trim()
   if (/E404/.test(r.stderr || '')) return null
   fail(`查询 ${name} 线上版本失败(非 E404,可能是网络问题),中止以避免误判:\n${r.stderr}`)
@@ -194,9 +195,9 @@ function ensureTag(pkgName, version, opts, commit = undefined) {
   }
 }
 
-/** 发布工件的临时目录(系统临时目录下按包名隔离),失败时保留供人工核对 */
-function publishArtifactsDir(packageName) {
-  const dir = join(tmpdir(), 'dsh-plugin-publish', tagSafe(packageName))
+/** 发布工件的临时目录(系统临时目录下按包名+版本隔离),失败时保留供人工核对 */
+function publishArtifactsDir(packageName, version) {
+  const dir = join(tmpdir(), 'dsh-plugin-publish', tagSafe(packageName), version)
   mkdirSync(dir, { recursive: true })
   return dir
 }
@@ -275,7 +276,7 @@ function publishOne(dirName, opts) {
   if (opts.skipTest) {
     console.log('SKIP  测试(--skip-test)')
   } else if (hasPackageTest) {
-    const r = runNpm(['test'], pkgDir, { stdio: 'inherit' })
+    const r = runNpm(['test'], pkgDir, { stdio: 'inherit', timeoutMs: 30 * 60 * 1000 })
     if (r.status !== 0) fail(`${name} 测试未通过,中止发布`)
   } else {
     console.log('SKIP  测试(包未定义 test script)')
@@ -297,7 +298,9 @@ function publishOne(dirName, opts) {
   const manifestDirty = spawnSync('git', ['status', '--porcelain', '--', `packages/${dirName}`], { cwd: repoRoot, encoding: 'utf8' })
   if (manifestDirty.status === 0 && manifestDirty.stdout.trim() !== '') {
     const c = run('git', ['add', `packages/${dirName}`], repoRoot)
-    const cm = c.status === 0 ? run('git', ['commit', '-m', `chore(${dirName}): 发版版本号 ${version}`], repoRoot) : { status: 1 }
+    // 限定 pathspec:git commit 无 pathspec 会连同调用者预暂存的无关改动一起提交,
+    // 版本提交必须只含发布包目录,其余暂存内容保持原状
+    const cm = c.status === 0 ? run('git', ['commit', '-m', `chore(${dirName}): 发版版本号 ${version}`, '--', `packages/${dirName}`], repoRoot) : { status: 1 }
     if (cm.status !== 0) {
       fail(`版本号提交失败,中止发布(请手动 git commit packages/${dirName} 后重跑)`)
     }
@@ -311,8 +314,8 @@ function publishOne(dirName, opts) {
 
   // 打包同一份 tarball 再发布:记录 commit、文件清单与 SHA-512 integrity 到临时目录
   // release.json,发布内容与源码提交的绑定证据落盘(registry 同版本回读不能替代内容相等)
-  const artifactsDir = publishArtifactsDir(name)
-  const pack = runNpm(['pack', '--ignore-scripts', '--pack-destination', artifactsDir], pkgDir)
+  const artifactsDir = publishArtifactsDir(name, version)
+  const pack = runNpm(['pack', '--ignore-scripts', '--pack-destination', artifactsDir], pkgDir, { timeoutMs: 10 * 60 * 1000 })
   if (pack.status !== 0) fail(`npm pack 失败,中止发布(打包内容不可证):\n${pack.stderr}`)
   const tarball = join(artifactsDir, `${name.replace('@', '').replace('/', '-')}-${version}.tgz`)
   if (!existsSync(tarball)) fail(`npm pack 产物缺失: ${tarball}`)
@@ -346,7 +349,7 @@ function publishOne(dirName, opts) {
   const pub = runNpm(['publish', tarball, '--registry', REGISTRY, '--access', 'public'], pkgDir, { stdio: 'inherit' })
   if (pub.status !== 0) fail('发布失败(npm publish 非零退出,交互输出见上;浏览器认证中断可直接重跑本脚本自愈)')
 
-  const readback = runNpm(['view', name, 'version', '--registry', REGISTRY])
+  const readback = runNpm(['view', name, 'version', '--registry', REGISTRY], undefined, { timeoutMs: 60 * 1000 })
   if (readback.status === 0 && readback.stdout.trim() === version) console.log(`OK    ${name}@${version} 已上线`)
   else console.log(`OK    ${name}@${version} 发布成功(CDN 传播中,registry 稍后可见)`)
 
@@ -355,6 +358,34 @@ function publishOne(dirName, opts) {
 
 const opts = parseArgs(process.argv.slice(2))
 if (opts.dryRun) console.log('dry-run 模式:不会发布、不会改版本、不会打 tag')
+
+/** all 模式发布顺序:@mzzsfy 依赖先于消费方;成环直接中止,不按目录序硬发 */
+function topoSortPackages(dirs) {
+  const dirByName = new Map()
+  const depsByDir = new Map()
+  for (const dir of PACKAGES) {
+    const manifest = JSON.parse(readFileSync(join(repoRoot, 'packages', dir, 'package.json'), 'utf8'))
+    dirByName.set(manifest.name, dir)
+    depsByDir.set(dir, [])
+  }
+  for (const dir of PACKAGES) {
+    const manifest = JSON.parse(readFileSync(join(repoRoot, 'packages', dir, 'package.json'), 'utf8'))
+    depsByDir.set(dir, Object.keys(manifest.dependencies ?? {}).filter((name) => dirByName.has(name)).map((name) => dirByName.get(name)))
+  }
+  const state = new Map()
+  const order = []
+  const visit = (dir, stack) => {
+    const mark = state.get(dir) ?? 0
+    if (mark === 1) fail(`@mzzsfy 依赖成环,无法确定发布顺序: ${stack.concat(dir).join(' -> ')}`)
+    if (mark === 2) return
+    state.set(dir, 1)
+    for (const dep of depsByDir.get(dir)) visit(dep, stack.concat(dir))
+    state.set(dir, 2)
+    order.push(dir)
+  }
+  for (const dir of dirs) visit(dir, [])
+  return order
+}
 
 /** 单包目标只执行包测试;all 目标先执行全仓聚合测试,之后逐包测试。 */
 function aggregateGate() {
@@ -365,6 +396,13 @@ function aggregateGate() {
       : 'dry-run:单包发布只运行目标包测试,不运行全仓聚合门')
     return
   }
+  if (opts.skipTest) console.log('WARN  --skip-test:聚合门与目标包测试将跳过,公共依赖检查仍会执行')
+  // 公共依赖不变量:单包发布与全量发布都必须先过(消费方依赖范围/external/装载行一致);
+  // --skip-test 只跳过测试,不得绕过该门。
+  console.log('  $ node scripts/check-common-tools.mjs')
+  const common = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'check-common-tools.mjs')], { cwd: repoRoot, stdio: 'inherit', windowsHide: true })
+  if (common.error) fail(`公共依赖检查启动失败: ${common.error.message}`)
+  if (common.status !== 0) fail(`公共依赖检查未通过(exit ${common.status}),中止发布`)
   if (opts.skipTest) {
     console.log('WARN  --skip-test:测试已显式跳过,发布未经测试验证')
     return
@@ -390,6 +428,8 @@ function aggregateGate() {
 }
 
 aggregateGate()
-for (const name of opts.targets) publishOne(name, opts)
+const publishOrder = opts.target === 'all' ? topoSortPackages(opts.targets) : opts.targets
+if (opts.target === 'all') console.log(`发布顺序(依赖优先): ${publishOrder.join(', ')}`)
+for (const name of publishOrder) publishOne(name, opts)
 console.log('\n完成')
 process.exitCode = exitCode

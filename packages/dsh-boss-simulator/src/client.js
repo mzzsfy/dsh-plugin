@@ -25,7 +25,10 @@ window.__ModuleLoader__.load({
     ]
     const FILTERS = [['all', '全部'], ['active', '进行中'], ['pending', '待处理'], ['done', '已结束']]
     const CONTROL = { active: '可执行', stopping: '中断中', paused: '已暂停', reconciling: '恢复核对中' }
-    const RUN = { prepared: '尚未开始', submitted: '已提交', running: '运行中', settled: '已结束', interrupted: '已中断', rejected: '已拒绝', unknown: '待核对' }
+    // 服务端 reportDiagnostic.kind → 看板文案;迟到报告额外标注可否采纳
+const DIAGNOSTIC = { late_report: '迟到报告', invalid_report: '报告不符合契约', report_rejected: '报告被状态机拒绝' }
+
+const RUN = { prepared: '尚未开始', submitted: '已提交', running: '运行中', settled: '已结束', interrupted: '已中断', rejected: '已拒绝', unknown: '待核对' }
     const PHASE = { implement: '实施', fix: '修复', accept: '独立验收', integrate: '整合' }
     const WORK = { planned: '待开始', executing: '执行中', awaitingReview: '待验收', accepted: '已通过', blocked: '受阻', withdrawn: '已撤销' }
     const VERDICT = { ready_for_review: '提交验收', needs_help: '需要协助', pass: '验收通过', issues: '发现问题' }
@@ -60,6 +63,7 @@ window.__ModuleLoader__.load({
 .bs-view{min-height:32px;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--dsw-alias-label-secondary);font-size:13px;border-radius:0;padding:0 2px;cursor:pointer}
 .bs-view[aria-selected="true"]{color:var(--dsw-alias-label-primary);border-bottom-color:var(--dsw-alias-brand-primary);font-weight:600}
 .bs-workspace{display:grid;grid-template-columns:minmax(0,1fr) clamp(320px,38%,420px);gap:16px;flex:1;min-height:0;min-width:0}
+.bs-workspace--single{grid-template-columns:minmax(0,1fr)}
 .bs-content{display:flex;flex-direction:column;gap:10px;min-width:0;min-height:0;overflow:auto;padding-bottom:8px}
 .bs-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .bs-search{flex:1 1 220px;min-width:0;min-height:32px;border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);padding:6px 10px;font-size:13px;line-height:20px;background:var(--dsw-alias-bg-base);color:inherit}
@@ -85,7 +89,7 @@ window.__ModuleLoader__.load({
 .bs-status--warn{background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent);color:var(--dsw-alias-state-warn-primary)}
 .bs-status--danger{background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent);color:var(--dsw-alias-state-error-primary)}
 .bs-empty{font-size:13px;line-height:21px;color:var(--dsw-alias-label-secondary);padding:8px 2px;margin:0}
-.bs-empty-state{display:flex;flex-direction:column;gap:10px;align-items:flex-start;border:1px dashed var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);padding:24px}
+.bs-empty-state{display:flex;flex-direction:column;gap:10px;align-items:flex-start;border:1px dashed var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);padding:24px;max-width:720px}
 .bs-empty-state h3{margin:0;font-size:16px;line-height:24px}
 .bs-empty-state p{margin:0;font-size:13px;line-height:21px;color:var(--dsw-alias-label-secondary);max-width:56ch}
 .bs-detail{border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);padding:12px;display:flex;flex-direction:column;gap:10px;background:var(--dsw-alias-bg-base);min-width:0;max-height:100%;overflow:auto}
@@ -144,7 +148,6 @@ window.__ModuleLoader__.load({
       const result = [CONTROL[task.controlState] ?? '控制状态待核对']
       if (task.stopDetail === 'requesting') result.push('中断中')
       if (task.stopDetail === 'unconfirmed') result.push('停止结果待确认')
-      if (task.pendingCancel) result.push('取消处理中')
       return result
     }
     function modelText(run) { return run.actualModel ? run.actualModel : '模型待核对' }
@@ -364,6 +367,9 @@ window.__ModuleLoader__.load({
       const [refreshing, setRefreshing] = useState(false)
       const [backend, setBackend] = useState('unknown')
       const [confirmDispatch, setConfirmDispatch] = useState(false)
+      // 强制停止与删除都是不可逆动作:各需二次点击确认,不做默认显式按钮
+      const [confirmForceStop, setConfirmForceStop] = useState(null)
+      const [confirmDelete, setConfirmDelete] = useState(null)
       function updateFirstMessage(value) {
         try {
           if (value.draft) sessionStorage.setItem(FIRST_MESSAGE_KEY, JSON.stringify(value))
@@ -592,9 +598,34 @@ window.__ModuleLoader__.load({
         setNotice('正在提交中断请求。')
         try {
           const result = await api.post('interrupt', { ...body, commandId: commandId() })
-          setNotice(result.status === 'accepted' || result.accepted ? '已提交中断，等待服务端确认。' : '中断结果待核对；未确认前不视为已暂停。')
+          setNotice(result.forceStopped
+            ? '已按会话不可达强制停止：在途 Run 记为中断，停止证据标记为未核对。'
+            : result.status === 'accepted' || result.accepted ? '已提交中断，等待服务端确认。' : '中断结果待核对；未确认前不视为已暂停。')
         } catch (error) { setNotice(`中断结果未知：${error.message ?? error}。不会自动重试。`) }
-        finally { setWriting(false); refresh() }
+        finally { setWriting(false); setConfirmForceStop(null); refresh() }
+      }
+      async function forceStop(taskId) {
+        if (writing) return
+        setWriting(true)
+        setNotice('正在强制停止。')
+        try {
+          await api.post('interrupt', { taskId, confirm: 'force-stop', confirmTaskId: taskId, reason: 'unreachable_session', commandId: commandId() })
+          setNotice('已强制停止：在途 Run 记为中断，停止证据标记为未核对。')
+        } catch (error) { setNotice(`强制停止失败：${error.message ?? error}`) }
+        finally { setWriting(false); setConfirmForceStop(null); refresh() }
+      }
+      async function deleteTask(taskId) {
+        if (writing) return
+        setWriting(true)
+        setNotice('正在删除任务。')
+        try {
+          await api.post('task', { action: 'delete', taskId, confirm: 'delete' })
+          setConfirmDelete(null)
+          setNotice('任务记录已删除（含执行记录、报告与用量台账）；宿主会话与其历史不受影响。')
+          if (selected === taskId) closeDetail()
+          refresh()
+        } catch (error) { setNotice(`删除失败：${error.message ?? error}`) }
+        finally { setWriting(false) }
       }
       async function createTask(form) {
         if (backend === 'legacy') { setNotice('宿主仍在运行旧版后端：重启 dsh 后才能新建任务'); return }
@@ -628,19 +659,20 @@ window.__ModuleLoader__.load({
         } catch (error) { setNotice(`授权失败：${error.message ?? error}`) }
         finally { setWriting(false) }
       }
-      async function dispatchTask(task, phase) {
+      async function dispatchTask(task) {
         if (writing) return
         if (backend === 'legacy') { setNotice('宿主仍在运行旧版后端：重启 dsh 后才能派发'); return }
+        const target = detail?.taskId === task.taskId ? (detail.nextDispatch ?? null) : null
+        if (!target) { setNotice('当前没有可推进的子项：待实施与待验收项均已处理。'); setConfirmDispatch(false); return }
         setWriting(true)
-        const accepting = phase === 'accept'
+        const accepting = target.phase === 'accept'
         setNotice(accepting ? '正在派发独立验收。' : '正在派发实施。')
         try {
-          const workItemId = detail?.taskId === task.taskId ? (detail.workItems?.[0]?.workItemId ?? 'w1') : 'w1'
           const result = await api.post('task', {
             action: 'dispatch',
             taskId: task.taskId,
-            workItemId,
-            phase,
+            workItemId: target.workItemId,
+            phase: target.phase,
             content: `${accepting ? '独立验收任务' : '实施任务'}：${task.title}`,
           })
           setConfirmDispatch(false)
@@ -655,6 +687,8 @@ window.__ModuleLoader__.load({
         returnFocus.current = event?.currentTarget ?? null
         setDetailError(null)
         setConfirmDispatch(false)
+        setConfirmForceStop(null)
+        setConfirmDelete(null)
         setSelected(task.taskId)
         setView('tasks')
       }
@@ -663,6 +697,8 @@ window.__ModuleLoader__.load({
         setSelected(null)
         setDetail(null)
         setConfirmDispatch(false)
+        setConfirmForceStop(null)
+        setConfirmDelete(null)
         requestAnimationFrame(() => {
           const original = returnFocus.current
           const replacement = [...(rootRef.current?.querySelectorAll('.bs-row__open') ?? [])].find((node) => node.getAttribute('aria-label')?.endsWith(`，${taskId}`))
@@ -725,6 +761,12 @@ window.__ModuleLoader__.load({
       const visibleRows = filter === 'all' ? filtered : filtered.filter((task) => groupStates[filter]?.includes(task.businessState))
       const counts = Object.fromEntries(GROUPS.map((group) => [group.key, filtered.filter((task) => group.states.includes(task.businessState)).length]))
 
+      const diagnosticText = (diagnostic) => {
+        const head = `${DIAGNOSTIC[diagnostic.kind] ?? '报告诊断'}：${diagnostic.message}`
+        if (diagnostic.kind !== 'late_report') return head
+        return `${head}${diagnostic.adoptable ? '（内容完整，可人工采纳）' : '（不可自动采纳）'}`
+      }
+
       function renderRun(task, run) {
         const started = Boolean(run.startedAt)
         const open = run.state === 'running' && started
@@ -732,7 +774,11 @@ window.__ModuleLoader__.load({
         return h('article', { className: 'bs-run', key: `${task.taskId}:${run.runId}`, 'data-run-id': run.runId },
           h('div', { className: 'bs-run__head' }, h('strong', null, `${run.runId} · ${PHASE[run.phase] ?? '阶段待核对'} · 第 ${run.attemptOrdinal ?? 1} 次`), h('span', { className: `bs-status${open ? ' bs-status--warn' : ''}` }, RUN[run.state] ?? '状态待核对')),
           h('div', { className: 'bs-run__seg' }, started ? h('span', null, `开始 ${new Date(run.startedAt).toLocaleString()}`) : h('span', null, '尚未开始'), run.endedAt ? h('span', null, `结束 ${new Date(run.endedAt).toLocaleString()}`) : open ? h('span', null, '运行中') : null, seconds !== null ? h('span', null, `墙钟 ${seconds} 秒`) : null, h('span', null, modelText(run)), h('span', null, tokenText(run.tokenTotal, run.usageCoverage))),
+          run.stopObserved === 'pending' ? h('span', { className: 'bs-status bs-status--warn' }, '停止未核对') : null,
+          run.stopObserved === 'unreachable' ? h('span', { className: 'bs-status bs-status--warn' }, '停止未核对：会话不可达') : null,
           run.dispatchError ? h('span', { className: 'bs-banner__error' }, `派发失败：${run.dispatchError}`) : null,
+          run.usageDiagnostic ? h('span', { className: 'bs-banner__error' }, `用量未能并入台账：${run.usageDiagnostic.message}`) : null,
+          run.reportDiagnostic ? h('span', { className: run.reportDiagnostic.adoptable ? 'bs-status bs-status--warn' : 'bs-banner__error' }, diagnosticText(run.reportDiagnostic)) : null,
           h('div', { className: 'bs-run__head' }, h('span', { className: 'bs-setting-note' }, run.sessionId ? `会话 ${run.sessionId}` : '会话记录不可用'), h('button', { className: 'bs-btn', disabled: !accessibleSessions.has(run.sessionId), title: accessibleSessions.has(run.sessionId) ? '打开已有会话，不创建或发送消息' : '会话不可用；保留历史引用', onClick: () => openSession(run.sessionId) }, accessibleSessions.has(run.sessionId) ? '打开会话' : '会话不可用')),
         )
       }
@@ -746,18 +792,30 @@ window.__ModuleLoader__.load({
         // 派发只在详情已就绪时给出:summary 没有 runs,不能据此判断执行槽是否空闲
         const detailReady = detail?.taskId === selected
         const idle = detailReady && activeRunCount === 0
-        const canImplement = idle && ['ready', 'implementing'].includes(value.businessState) && value.authorized !== false
-        const canAccept = idle && value.businessState === 'awaiting_acceptance' && value.authorized !== false
+        // 推进目标由服务端在详情里给出:按子项派生态选择,不盲取第一个子项
+        const target = detailReady ? (detail.nextDispatch ?? null) : null
+        const canImplement = idle && target?.phase === 'implement' && value.authorized !== false
+        const canAccept = idle && target?.phase === 'accept' && value.authorized !== false
         const canDispatch = canImplement || canAccept
-        const dispatchPhase = canAccept ? 'accept' : 'implement'
+        const targetLabel = target ? `${target.workItemId}（${PHASE[target.phase] ?? '阶段待核对'}）` : ''
+        // 停止未确认(会话不可达/核对失败)时给出强制出口;删除是放弃任务的唯一出口
+        const stopUnconfirmed = activeRunCount > 0 && (value.controlState === 'stopping' || value.stopDetail === 'unconfirmed')
+        const canDelete = detailReady && idle && !['completed', 'cancelled'].includes(value.businessState)
         return h('aside', { ref: detailRef, className: 'bs-detail', role: detailModal ? 'dialog' : undefined, 'aria-modal': detailModal ? 'true' : undefined, 'aria-labelledby': 'bs-task-detail-title', 'data-modality': narrow ? 'mobile' : 'panel' },
           h('div', { className: 'bs-detail__head' }, h('h2', { className: 'bs-detail__title', id: 'bs-task-detail-title', tabIndex: -1, ref: detailTitle }, value.title), h('button', { className: 'bs-btn', onClick: closeDetail }, '关闭')),
           h('div', { className: 'bs-detail__actions' },
             canAuthorize ? h('button', { className: 'bs-btn bs-btn--primary', disabled: writing, onClick: () => authorizeTask(value.taskId) }, '授权') : null,
             canDispatch && !confirmDispatch ? h('button', { className: 'bs-btn bs-btn--primary', disabled: writing, onClick: () => setConfirmDispatch(true) }, canAccept ? '派发独立验收' : '派发实施') : null,
-            canDispatch && confirmDispatch ? h(React.Fragment, null, h('button', { className: 'bs-btn bs-btn--primary', disabled: writing, onClick: () => dispatchTask(value, dispatchPhase) }, writing ? '正在派发' : canAccept ? '确认派发验收，开始消耗模型' : '确认派发，开始消耗模型'), h('button', { className: 'bs-btn', disabled: writing, onClick: () => setConfirmDispatch(false) }, '先不派发')) : null,
+            canDispatch && confirmDispatch ? h(React.Fragment, null, h('button', { className: 'bs-btn bs-btn--primary', disabled: writing, onClick: () => dispatchTask(value) }, writing ? '正在派发' : canAccept ? `确认派发验收（${targetLabel}），开始消耗模型` : `确认派发实施（${targetLabel}），开始消耗模型`), h('button', { className: 'bs-btn', disabled: writing, onClick: () => setConfirmDispatch(false) }, '先不派发')) : null,
             activeRunCount > 0 ? h('button', { className: 'bs-btn bs-btn--danger', disabled: writing, onClick: () => stop({ taskId: value.taskId }) }, '中断') : null,
+            stopUnconfirmed && confirmForceStop !== value.taskId ? h('button', { className: 'bs-btn bs-btn--danger', disabled: writing, onClick: () => setConfirmForceStop(value.taskId) }, '强制停止') : null,
+            stopUnconfirmed && confirmForceStop === value.taskId ? h(React.Fragment, null, h('button', { className: 'bs-btn bs-btn--danger', disabled: writing, onClick: () => forceStop(value.taskId) }, '再次点击确认强制停止'), h('button', { className: 'bs-btn', disabled: writing, onClick: () => setConfirmForceStop(null) }, '取消')) : null,
+            canDelete && confirmDelete !== value.taskId ? h('button', { className: 'bs-btn', disabled: writing, title: '只删除本看板的任务记录；宿主会话与其历史保留', onClick: () => setConfirmDelete(value.taskId) }, '删除任务') : null,
+            canDelete && confirmDelete === value.taskId ? h('p', { className: 'bs-setting-note' }, '删除只移除本看板的任务记录（执行记录、报告与用量台账）；宿主会话与其历史保留。') : null,
+            canDelete && confirmDelete === value.taskId ? h(React.Fragment, null, h('button', { className: 'bs-btn bs-btn--danger', disabled: writing, onClick: () => deleteTask(value.taskId) }, '确认删除任务记录'), h('button', { className: 'bs-btn', disabled: writing, onClick: () => setConfirmDelete(null) }, '取消')) : null,
           ),
+          (value.stopErrors ?? []).length ? h('p', { className: 'bs-banner__error', role: 'status' }, `停止核对失败：${value.stopErrors.map((error) => error.message ?? error).join('；')}。会话不可达时可强制停止。`) : null,
+          value.controlState === 'stopping' ? h('p', { className: 'bs-setting-note' }, '停止尚未确认；旧会话可能仍在执行时，派发与结案会继续保持拒绝。') : null,
           detailError ? h('p', { className: 'bs-banner__error', role: 'alert' }, `任务记录不可用：${detailError}`) : null,
           detail?.taskId !== selected && !detailError ? h('p', { className: 'bs-empty' }, '正在读取任务详情…') : null,
           h('div', { className: 'bs-detail__body' },
@@ -855,7 +913,7 @@ window.__ModuleLoader__.load({
         h('div', { className: 'bs-views', role: 'tablist', 'aria-label': '视图' },
           ...['tasks', 'assistant'].map((key) => h('button', { key, className: 'bs-view', role: 'tab', 'aria-selected': view === key, onClick: () => setView(key) }, key === 'tasks' ? '任务' : '助手')),
         ),
-        view === 'assistant' ? renderAssistant() : view === 'settings' ? renderSettings() : h('div', { className: 'bs-workspace' },
+        view === 'assistant' ? renderAssistant() : view === 'settings' ? renderSettings() : h('div', { className: 'bs-workspace' + (selected ? '' : ' bs-workspace--single') },
           h('div', { className: 'bs-content' },
             h('div', { className: 'bs-toolbar', role: 'group', 'aria-label': '按状态筛选' },
               ...FILTERS.map(([key, label]) => h('button', { key, className: 'bs-pill', 'aria-pressed': filter === key, onClick: () => setFilter(key) }, label, key === 'all' ? h('span', { className: 'bs-pill__count' }, String(filtered.length)) : h('span', { className: 'bs-pill__count' }, String(counts[key] ?? 0)))),

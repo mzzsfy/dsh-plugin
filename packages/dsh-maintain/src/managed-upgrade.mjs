@@ -106,7 +106,7 @@ export async function validateCandidate({ slot, candidatePackage, env, nodePath 
 }
 
 export async function performManagedUpgrade({ layout, runningPackage, targetVersion, registryBase, env,
-  install = installCandidate, validate, beforeSwitch, activate = activateInstallation, onPhase = () => {}, activePackages = [], operationId = randomUUID(), nodePath, npmCli }) {
+  install = installCandidate, validate, beforeSwitch, activate = activateInstallation, onPhase = () => {}, onOutput = () => {}, activePackages = [], operationId = randomUUID(), nodePath, npmCli, previousVersion = null }) {
   if (!parseSemver(targetVersion)) throw new Error('必须指定合法精确版本')
   if (typeof validate !== 'function' || typeof beforeSwitch !== 'function') throw new Error('缺少隔离验证或提交前门控')
   await mkdir(layout.root, { recursive: true })
@@ -119,7 +119,7 @@ export async function performManagedUpgrade({ layout, runningPackage, targetVers
   let keepLock = false
   let switched = false
   const state = {
-    operationId, targetVersion, prefix: layout.prefix, originalPackage: layout.originalPackage,
+    operationId, targetVersion, previousVersion, prefix: layout.prefix, originalPackage: layout.originalPackage,
     runningPackage, phase: 'accepted', startedAt: Date.now(), bin: layout.bin,
   }
   const phase = async value => { state.phase = value; await saveManagedState(layout, state); onPhase({ ...state }) }
@@ -131,7 +131,7 @@ export async function performManagedUpgrade({ layout, runningPackage, targetVers
     await phase('installing')
     const candidateEnv = env ?? createCandidateEnvironment(layout)
     state.candidateHome = candidateEnv.HOME
-    const result = await install({ slot, version: targetVersion, registryBase, env: candidateEnv, nodePath, npmCli })
+    const result = await install({ slot, version: targetVersion, registryBase, env: candidateEnv, nodePath, npmCli, onOutput })
     if (!result.ok) {
       keepLock = result.timedOut === true || result.stillRunning === true
       throw new Error(result.stderrTail || result.stdoutTail || 'npm安装失败')
@@ -150,6 +150,7 @@ export async function performManagedUpgrade({ layout, runningPackage, targetVers
     state.slot = slot === layout.a ? 'a' : 'b'
     state.targetPackage = pkg
     state.phase = 'awaiting-restart'
+    state.switchedAt = Date.now()
     await saveManagedState(layout, state)
     onPhase({ ...state })
     const activated = await activate(layout, pkg, { runningPackage })
@@ -159,9 +160,12 @@ export async function performManagedUpgrade({ layout, runningPackage, targetVers
     keepLock ||= switched || error.indeterminate === true || error.stillRunning === true || error.timedOut === true || error.rollbackFailed === true
     state.phase = keepLock ? 'indeterminate' : 'failed'
     state.error = error.message
-    try { await saveManagedState(layout, state); onPhase({ ...state }) } catch { keepLock = true }
+    try { await saveManagedState(layout, state); onPhase({ ...state }) } catch { keepLock = true; state.phase = 'indeterminate' }
     error.operationId = operationId
     error.switched = switched
+    // 状态不确定(超时/仍在运行/回滚失败/阶段落盘失败)统一标记,调用方据此强制退出宿主:
+    // 旧进程不能带着未知磁盘状态继续提供升级入口
+    error.indeterminate = keepLock
     throw error
   } finally {
     await handle.close()

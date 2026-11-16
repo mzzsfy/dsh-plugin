@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 
 import { createTaskStore } from '../lib/store.mjs'
 import { createTask } from '../lib/core/task.mjs'
-import { registerControl, getControlRuntime, setControlRuntime } from '../lib/control.mjs'
+import { registerControl } from '../lib/control.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const read = path => readFileSync(join(root, path), 'utf8')
@@ -81,6 +81,7 @@ test('Given 控制室装配 When 路由/工具写入聚合 Then onChange 经 sto
   let changes = 0
   const disposers = []
   let opening = null
+  let provided = null
   const table = tableFixture()
   const services = {
     storageDomain: { open: async () => ({ table: () => table, close() {} }) },
@@ -94,12 +95,14 @@ test('Given 控制室装配 When 路由/工具写入聚合 Then onChange 经 sto
       }
     },
     effect(effect) { if (typeof effect === 'function') { const dispose = effect(); if (typeof dispose === 'function') disposers.push(dispose) } },
-    provide() {}, on() {},
+    // 控制运行时只经 ctx 服务发布,由 fiber 负责撤销
+    provide(name, value) { provided = value; return () => { if (provided === value) provided = null } },
+    on() {},
   }
   try {
     registerControl(ctx, { onChange: () => { changes += 1 } })
     await opening
-    const runtime = getControlRuntime()
+    const runtime = provided
     assert.ok(runtime?.store, '控制室运行时未装配')
     const task = createTask({ taskId: 't1', title: '任务', projectWorkspaceId: 'ws1', definition: { goal: '目标' }, now: () => 100 }).result
     await runtime.store.saveAggregate(task)
@@ -107,7 +110,7 @@ test('Given 控制室装配 When 路由/工具写入聚合 Then onChange 经 sto
     await runtime.store.loadAggregate('t1')
     assert.equal(changes, 1)
   } finally {
-    setControlRuntime(null)
     disposers.reverse().forEach(dispose => dispose())
+    assert.equal(provided, null, '控制室卸载后服务随之撤销')
   }
 })

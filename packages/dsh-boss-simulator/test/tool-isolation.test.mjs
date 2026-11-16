@@ -8,7 +8,6 @@ import { registerControl } from '../lib/control.mjs'
 import { registerToolRow } from '../lib/tools-row.mjs'
 
 const store = { loadControl: async () => ({ globalStopped: false }), loadAggregate: async () => null }
-
 test('控制室装配不得向全局工具面注册业务工具', async () => {
   const registered = []
   const disposers = []
@@ -47,13 +46,29 @@ test('真实宿主scope仅受管agent继承业务schema且释放后消失', asyn
   const root = new Context()
   new SystemPrompt(root, {})
   new ToolRuntime(root, {})
+  // 0.2.2 的 assemble 在有工具时必须能解析到执行器;本用例只断言工具名可见性,
+  // 用最小执行器桩代替真实执行面,避免测试依赖宿主是否内置默认执行器。
+  if (typeof root.tools.setExecutor === 'function') {
+    root.tools.setExecutor({
+      sections: [],
+      describe: (definitions) => ({
+        schemas: definitions.map((definition) => ({
+          name: definition.name,
+          description: definition.description,
+          parameters: definition.parameters,
+        })),
+      }),
+    })
+  }
   const ordinary = {}
   const preset = {}
   const admin = {}
   const ordinaryScope = createScope(root, ordinary)
   const presetScope = createScope(root, preset)
   const adminScope = createScope(root, admin, { parent: preset })
-  const release = registerToolRow(presetScope.ctx, { store, now: () => 0 })
+  // 控制室装配后经 ctx 服务发布控制运行时;工具行在使用点取
+  const runtimeDisposer = root.provide('bossSimulatorControl', { store, now: () => 0 })
+  const release = registerToolRow(presetScope.ctx)
   try {
     assert.deepEqual(root.tools.schemas().map((tool) => tool.name), [])
     assert.deepEqual((await root.systemPrompt.assemble({ scope: ordinary })).tools.map((tool) => tool.name), [])
@@ -61,6 +76,7 @@ test('真实宿主scope仅受管agent继承业务schema且释放后消失', asyn
     release()
     assert.deepEqual((await root.systemPrompt.assemble({ scope: admin })).tools.map((tool) => tool.name), [])
   } finally {
+    runtimeDisposer()
     await adminScope.dispose()
     await ordinaryScope.dispose()
     await presetScope.dispose()

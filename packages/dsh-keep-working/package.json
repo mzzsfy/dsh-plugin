@@ -25,8 +25,7 @@
     }
   },
   "scripts": {
-    "test": "node --test \"test/*.test.mjs\"",
-    "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
+    "test": "node --test \"test/*.test.mjs\""
   },
   "publishConfig": {
     "access": "public",
@@ -41,12 +40,14 @@
     "node": ">=22"
   },
   "peerDependencies": {
+    "@deepseek-ai/dsh-llm": ">=0.1.5-rc.2",
     "@deepseek-ai/schemastery": ">=3.18.0"
   },
   "files": [
     "src",
     "test",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "兼容性测试.md"
   ]
 }

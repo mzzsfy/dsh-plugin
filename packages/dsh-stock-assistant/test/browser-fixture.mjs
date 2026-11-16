@@ -8,7 +8,7 @@ import { makeSecurity, normalizeQuote } from '../src/market-model.mjs'
 const securities = [makeSecurity('XSHG', '600519', '贵州茅台', { cnspell: 'gzmt' }), makeSecurity('XSHE', '000001', '平安银行', { cnspell: 'payh' }), makeSecurity('XSHG', '601318', '中国平安', { cnspell: 'zgpa' })]
 const fake = {
   descriptor: { adapterId: 'tushare', capabilities: ['catalog', 'quotes', 'calendar'], markets: ['XSHG', 'XSHE'], instruments: ['equity'], maxQuoteBatch: 20 },
-  async probe() { return { status: 'ready' } },
+  async probe(request) { return { status: 'ready', capability: request.capability } },
   async catalog(req) { return { items: securities.filter(s => s.exchange === req.market), complete: true } },
   async calendar(req) { return { items: [{ date: new Date().toISOString().slice(0, 10), exchange: req.market, isOpen: true }] } },
   async quotes(req, ctx) { return { items: req.securities.map(s => normalizeQuote({ securityId: s.id, providerInstanceId: req.providerInstanceId, adapterId: 'tushare', providerSymbol: s.code, last: s.code === '600519' ? '1428.00' : '12.16', previousClose: s.code === '600519' ? '1400.00' : '12.40', open: '12.40', high: '12.56', low: '12.10', volume: '135600', amount: '1648896.00', quoteAt: new Date().toISOString(), receivedAt: ctx.now(), delayKind: 'unknown', delaySeconds: null })) } },

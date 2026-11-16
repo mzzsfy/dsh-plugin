@@ -164,6 +164,52 @@ test('未知命令入口不改，切换失败保持原link', async t => {
   assert.equal(await readFile(entryPath, 'utf8'), 'custom unrelated launcher')
 })
 
+// F4:win32 shim 入口是实体文件,直接写目标在升级/回滚半途崩溃会留下截断的 dsh.cmd/dsh.ps1。
+// 写入口必须 temp+rename:成功覆盖已存在目标并保留 mode;任一步失败旧入口保持完整、临时文件不残留。
+async function shimEntryFixture(t) {
+  const dir = await mkdtemp(join(tmpdir(), 'maintain-shim-entry-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const path = join(dir, 'dsh.cmd')
+  const before = '@"%dp0%node.exe" "%dp0%node_modules\\@deepseek-ai\\dsh\\lib\\bin.js" %*\r\n'
+  const after = '@"%dp0%node.exe" "%dp0%node_modules\\@deepseek-ai\\dsh\\dsh_link\\lib\\bin.js" %*\r\n'
+  await writeFile(path, before)
+  const api = await import('../src/managed-layout.mjs')
+  const change = { path, kind: 'file', before, after, mode: 0o100755, managed: false }
+  return { dir, path, before, after, api, change }
+}
+
+test('F4:win32 shim 写入口以临时文件+rename 覆盖旧文件并保留 mode', async (t) => {
+  const { dir, path, after, api, change } = await shimEntryFixture(t)
+  let seenMode = null
+  const captureWrite = async (file, content, options) => {
+    seenMode = options?.mode
+    await writeFile(file, content, options)
+  }
+  await api.writeEntry(change, false, 'win32', { writeFileImpl: captureWrite })
+  assert.equal(await readFile(path, 'utf8'), after, 'rename 必须覆盖已存在目标')
+  assert.equal(seenMode, 0o100755, '临时文件必须带原入口 mode')
+  assert.deepEqual(await readdir(dir), ['dsh.cmd'], '临时文件不得残留')
+})
+
+test('F4:win32 shim 写临时文件半途失败时旧入口原样保留', async (t) => {
+  const { dir, path, before, api, change } = await shimEntryFixture(t)
+  const crashingWrite = async (file, content, options) => {
+    await writeFile(file, 'TRUNCATED', options)
+    throw new Error('simulated crash')
+  }
+  await assert.rejects(api.writeEntry(change, false, 'win32', { writeFileImpl: crashingWrite }), /simulated crash/)
+  assert.equal(await readFile(path, 'utf8'), before, '崩溃不得留下半截 shim')
+  assert.deepEqual(await readdir(dir), ['dsh.cmd'], '失败后临时文件必须清理')
+})
+
+test('F4:win32 shim rename 失败时旧入口原样保留', async (t) => {
+  const { dir, path, before, api, change } = await shimEntryFixture(t)
+  const failingRename = async () => { throw new Error('simulated rename failure') }
+  await assert.rejects(api.writeEntry(change, false, 'win32', { renameImpl: failingRename }), /simulated rename failure/)
+  assert.equal(await readFile(path, 'utf8'), before, 'rename 失败不得破坏旧入口')
+  assert.deepEqual(await readdir(dir), ['dsh.cmd'], '失败后临时文件必须清理')
+})
+
 test('实体dsh_link和备用目录symlink禁止删除，不跟随链接清理其它树', async t => {
   const f = await fixture(t)
   const other = join(f.prefix, 'untouched')
