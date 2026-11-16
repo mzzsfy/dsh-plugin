@@ -84,7 +84,7 @@ const isRuleShaped = (rule) =>
   !!rule && typeof rule === 'object' && typeof rule.model === 'string'
   && (rule.unit === undefined || rule.unit === UNIT_PER_MILLION)
   && !!rule.price && typeof rule.price === 'object' && !Array.isArray(rule.price)
-  && Array.isArray(rule.conditions)
+  && (rule.conditions === undefined || rule.conditions === null || Array.isArray(rule.conditions))
 
 // 规则表归一:同模型至多一条无条件默认价(保留首条,与 matchPrice 同档取首条一致),
 // 条件规则升到默认价前;全通配组恒最后,防全局兜底抢在具体模型规则前。
@@ -156,7 +156,8 @@ export const matchPrice = (rules, model, timestamp) => {
     if (!ruleSegments) continue
     const tier = matchTier(ruleSegments, requestSegments)
     if (tier === null || tier >= bestTier) continue
-    if (!rule.conditions.every((condition) => conditionMatches(condition, date))) continue
+    const conditions = Array.isArray(rule.conditions) ? rule.conditions : []
+    if (!conditions.every((condition) => conditionMatches(condition, date))) continue
     bestTier = tier
     bestPrice = rule.price
   }

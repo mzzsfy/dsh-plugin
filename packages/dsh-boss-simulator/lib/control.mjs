@@ -8,14 +8,10 @@ import { createRunService, createExecutionGate } from './run-service.mjs'
 import { presetDefinitions } from './presets.mjs'
 import { createTaskStore, updateSettingsRecord, loadAdminBinding, updateAdminBindingRecord } from './store.mjs'
 import { createSettings } from './core/settings.mjs'
-import { withHostGate } from './route-gate.mjs'
+import { withRouteGate } from './route-gate.mjs'
 
 const TASK_TABLE_SCHEMA = z.any()
 const DOMAIN_SPEC = defineDomain({ name: 'boss_simulator', version: 1, tables: { kv: domainTable(TASK_TABLE_SCHEMA) } })
-
-let controlRuntime = null
-export function setControlRuntime(runtime) { controlRuntime = runtime }
-export function getControlRuntime() { return controlRuntime }
 
 // onChange:看板写路径成功后的失效信号(由插件 apply 注入公共总线发布),业务模块不感知通道
 export function registerControl(ctx, { onChange = () => {} } = {}) {
@@ -71,28 +67,31 @@ export function registerControl(ctx, { onChange = () => {} } = {}) {
       drive: driveRef,
       now: () => Date.now(),
     })
-    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/board', handler: withHostGate(ctx, api.handleBoard) }), 'boss-simulator board')
-    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/admin', handler: withHostGate(ctx, api.handleAdmin) }), 'boss-simulator admin')
-    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/interrupt', handler: withHostGate(ctx, api.handleInterrupt) }), 'boss-simulator interrupt')
-    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/settings', handler: withHostGate(ctx, api.handleSettings) }), 'boss-simulator settings')
-    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/drive', handler: withHostGate(ctx, api.handleDrive) }), 'boss-simulator drive')
-    // 人类操作入口:创建/授权/派发与工作区候选,与管理员工具共用同一状态机
+    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/board', handler: withRouteGate(ctx, api.handleBoard) }), 'boss-simulator board')
+    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/admin', handler: withRouteGate(ctx, api.handleAdmin) }), 'boss-simulator admin')
+    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/interrupt', handler: withRouteGate(ctx, api.handleInterrupt) }), 'boss-simulator interrupt')
+    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/settings', handler: withRouteGate(ctx, api.handleSettings) }), 'boss-simulator settings')
+    // 人类操作入口:创建/授权/派发/删除与工作区候选,与管理员工具共用同一状态机
     const taskApi = createTaskApi({ store, drive: driveRef, listWorkspaces: () => listWorkspaces(), now: () => Date.now() })
-    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/workspaces', handler: withHostGate(ctx, taskApi.handleWorkspaces) }), 'boss-simulator workspaces')
-    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/task', handler: withHostGate(ctx, taskApi.handleTask) }), 'boss-simulator task')
+    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/workspaces', handler: withRouteGate(ctx, taskApi.handleWorkspaces) }), 'boss-simulator workspaces')
+    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/task', handler: withRouteGate(ctx, taskApi.handleTask) }), 'boss-simulator task')
     const runtime = {
-      store, now: () => Date.now(), withExecution: driveRef.withExecution,
+      store, now: () => Date.now(), withExecution: (...args) => driveRef.withExecution(...args),
       get sessionAdapter() { return driveRef.sessionAdapter },
       followRuns: (...args) => driveRef.followRuns?.(...args),
       confirmResume: args => createRunService(runtime).confirmResume(args),
     }
     driveRef.dispatch = args => createRunService(runtime).dispatch(args)
-    setControlRuntime(runtime)
-    try {
-      ctx.provide('bossSimulatorControl', { store })
-    } catch (error) {
-      console.warn('[boss-simulator] provide bossSimulatorControl failed:', String(error?.message ?? error))
-    }
+    // 控制运行时只经 ctx 服务发布:行卸载即随 fiber 撤销,不存在模块级悬挂引用。
+    // 工具行在使用点 ctx.get 取,不在 apply 时刻缓存(缓存会在重载后指向已关闭的存储域)。
+    ctx.effect(() => {
+      try {
+        return ctx.provide('bossSimulatorControl', runtime)
+      } catch (error) {
+        console.warn('[boss-simulator] provide bossSimulatorControl failed:', String(error?.message ?? error))
+        return () => {}
+      }
+    }, 'boss-simulator control runtime')
     ctx.inject(['agentPresets'], (presetScope) => {
       const registry = presetScope.agentPresets ?? presetScope
       const register = async () => {

@@ -51,9 +51,25 @@ test('东财 kline klt 周期映射 101/102/103 与 lmt/fqt', async () => {
   assert.ok(log[2].includes('klt=103'))
 })
 
+test('东财 kline 拒绝分时周期(分时已独立成能力)', async () => {
+  await assert.rejects(() => eastmoney.kline(KLINE_REQ('XSHG', '600519', 'trend'), klineCtx([{}])), e => e.code === 'INVALID_PARAM')
+})
+
+test('东财 probe 按能力探各自端点: trend 走 trends2 而不是行情接口', async () => {
+  const log = []
+  const ctx = klineCtx([{ data: { trends: ['2026-10-30 09:30,11.53,11.53,11.53,11.53,11523,13286019.00,11.530'], preClose: 11.54 } }], log)
+  const result = await eastmoney.probe({ capability: 'trend', market: 'XSHG', instrument: 'equity' }, ctx)
+  assert.equal(result.status, 'ready')
+  assert.equal(result.capability, 'trend', '返回的能力必须与探的能力一致, 否则上层会把冒充当就绪')
+  assert.ok(log.some(url => /trends2/.test(url)), '分时探针必须打分时端点')
+  const klog = []
+  await eastmoney.probe({ capability: 'kline', market: 'XSHG', instrument: 'equity' }, klineCtx([{ data: { klines: [CSV_OK], preKPrice: '11.31', dktotal: 250 } }], klog))
+  assert.ok(klog.some(url => /kline\/get/.test(url)))
+})
+
 test('东财 trend trends2 8列含avg与preClose', async () => {
   const ctx = klineCtx([{ data: { trends: ['2026-10-30 09:30,11.53,11.53,11.53,11.53,11523,13286019.00,11.530', '2026-10-30 09:31,11.54,11.54,11.54,11.54,8000,9200000.00,11.531'], preClose: 11.54 } }])
-  const result = await eastmoney.kline(KLINE_REQ('XSHE', '000001', 'trend'), ctx)
+  const result = await eastmoney.trend(KLINE_REQ('XSHE', '000001', 'trend'), ctx)
   assert.equal(result.candles.length, 2)
   assert.deepEqual({ time: result.candles[0].time, avg: result.candles[0].avg, open: result.candles[0].open }, { time: '09:30', avg: 11.53, open: 11.53 })
   // 横轴时刻按市场时区(沪深/Asia/Shanghai)换算成 Unix 秒:09:30 → 01:30Z;缺 at 时客户端才有自造轴的回退
@@ -63,6 +79,20 @@ test('东财 trend trends2 8列含avg与preClose', async () => {
   assert.equal(result.candles[0].volume, 1152300)
   assert.equal(result.candles[1].volume, 800000)
   assert.equal(result.preClose, 11.54)
+})
+
+test('P2-64 东财 trend 美股同样按代码表兜底修正 secid', async () => {
+  const log = []
+  const suggestBody = { QuotationCodeTable: { Data: [{ Code: 'BABA', Name: '阿里巴巴', MktNum: '106', JYS: 'NYSE', QuoteID: '106.BABA', Classify: 'UsStock' }] } }
+  const trendOk = { data: { trends: ['2026-10-30 09:30,90.10,90.10,90.10,90.10,1000,9010.00,90.100'], preClose: 89.80 } }
+  const bodies = [url => url.includes('trends2') ? { data: null } : suggestBody, url => url.includes('trends2') ? trendOk : suggestBody]
+  const ctx = klineCtx(bodies, log)
+  const result = await eastmoney.trend(KLINE_REQ('XNAS', 'BABA', 'trend'), ctx)
+  assert.ok(log[0].includes('secid=105.BABA'), '先按默认市场试')
+  assert.ok(log.some(url => url.includes('searchapi')), 'data:null 后查询代码表')
+  assert.ok(log.at(-1).includes('secid=106.BABA'), '按修正后的 secid 重试分时')
+  assert.equal(result.candles.length, 1)
+  assert.equal(ctx.usSymbols.get('US:BABA').mktNum, '106')
 })
 
 test('东财 kline 列数不足与乱序重复 BAD_PAYLOAD', async () => {
@@ -125,8 +155,10 @@ test('腾讯 kline 键名漂移兜底(只给 qfqweek 键)', async () => {
   assert.equal(result.candles[0].close, 1392)
 })
 
-test('腾讯 kline trend 拒绝与乱序拒绝', async () => {
-  await assert.rejects(() => tencent.kline(KLINE_REQ('XSHG', '600519', 'trend'), tencentKlineCtx({})), e => e.code === 'UNSUPPORTED_CAPABILITY')
+test('腾讯能力矩阵含分时, 畸形周期与乱序行仍拒绝', async () => {
+  assert.equal(tencent.descriptor.capabilities.includes('trend'), true, '东财不可用时分时要能落到腾讯')
+  // 能力矩阵是闸门, 适配器自身也要挡住: 带 undefined 周期的畸形上游请求比本地报错难排查
+  await assert.rejects(() => tencent.kline(KLINE_REQ('XSHG', '600519', 'trend'), tencentKlineCtx({})), e => e.code === 'INVALID_PARAM')
   const ctx = tencentKlineCtx({ data: { sz000001: { day: [['2026-10-29', '11.30', '11.54', '11.55', '11.29', '1993504'], ['2026-10-28', '11', '11', '11', '11', '1']] } } })
   await assert.rejects(() => tencent.kline(KLINE_REQ('XSHE', '000001'), ctx), e => e.code === 'BAD_PAYLOAD')
 })
@@ -151,6 +183,32 @@ test('腾讯 kline 美股 JYS 映射 suffix 正确拼入', async () => {
   amex.usSymbols.set('US:SPY', { mktNum: '107', jys: 'AMEX', at: 1 })
   await tencent.kline(KLINE_REQ('XNAS', 'SPY'), amex)
   assert.ok(log.at(-1).includes('param=usSPY,day'))
+})
+
+// ---- 分时备源: 东财推不动时落到腾讯 ----
+
+const tencentTrendCtx = body => ({ now: () => 100, signal: new AbortController().signal, fetch: async () => ({ ok: true, json: async () => body }) })
+const TREND_REQ = { providerInstanceId: 'tc', securityId: 'XSHG:equity:600519', market: 'XSHG', code: '600519' }
+
+test('腾讯分时: 时刻/量换算/昨收, 畸形行丢弃', async () => {
+  const body = { code: 0, data: { sh600519: { data: { date: '20261116', data: ['0930 1426.30 189 26957070.00', '0931 1431.37 998 142677800.25', '0932 12.0.0 10 100'] }, qt: { sh600519: ['1', '贵州茅台', '600519', '1453.90', '1435.26'] } } } }
+  const result = await tencent.trend(TREND_REQ, tencentTrendCtx(body))
+  assert.equal(result.candles.length, 2, '解析不出价格的那行丢掉, 不画假点')
+  assert.equal(result.candles[0].time, '09:30')
+  assert.equal(result.candles[0].close, 1426.3)
+  assert.deepEqual([result.candles[0].open, result.candles[0].high, result.candles[0].low], [1426.3, 1426.3, 1426.3], '分时没有开高低, 填成同一价')
+  assert.equal(result.candles[0].volume, 18900, '手 → 股, 与日K/详情同口径')
+  assert.equal(result.candles[0].amount, 26957070)
+  assert.equal(result.candles[0].at, Math.floor(Date.parse('2026-11-16T01:30:00Z') / 1000), '北京时间换算成 Unix 秒')
+  assert.equal(result.preClose, 1435.26, 'qt[4]=昨收')
+})
+
+test('腾讯分时不覆盖美股', async () => {
+  await assert.rejects(() => tencent.trend({ ...TREND_REQ, market: 'XNAS', code: 'AAPL' }, tencentTrendCtx({})), error => error.code === 'UNSUPPORTED_CAPABILITY')
+})
+
+test('腾讯分时空数据 NO_DATA', async () => {
+  await assert.rejects(() => tencent.trend(TREND_REQ, tencentTrendCtx({ code: 0, data: { sh600519: { data: { date: '20261116', data: [] } } } })), error => error.code === 'NO_DATA')
 })
 
 const security = makeSecurity('XSHG', '600519', '贵州茅台')

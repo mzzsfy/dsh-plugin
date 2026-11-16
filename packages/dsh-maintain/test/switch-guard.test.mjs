@@ -18,12 +18,17 @@ test('switch 状态选择器禁止裸 input 锚定(防误伤同 label 其他 inp
   assert.equal(bare, null, `裸 input 状态选择器: ${bare}`)
 })
 
-test('checkbox 仅允许出现在 switchToggle 工厂内,禁止裸 checkbox 直出', () => {
+test('checkbox 仅允许出现在 switchToggle 与白名单勾选组件内,禁止其他裸 checkbox', () => {
   const occurrences = [...source.matchAll(/type: 'checkbox'/g)].map((match) => match.index)
-  assert.equal(occurrences.length, 1, `checkbox 字面量出现 ${occurrences.length} 次`)
+  assert.equal(occurrences.length, 2, `checkbox 字面量出现 ${occurrences.length} 次`)
   const factoryStart = source.indexOf('function switchToggle')
   const factoryEnd = source.indexOf('}', source.indexOf('__thumb', factoryStart))
-  assert.ok(occurrences[0] > factoryStart && occurrences[0] < factoryEnd, 'checkbox 字面量不在 switchToggle 工厂内')
+  const whitelistStart = source.indexOf('function WhitelistPicker')
+  const whitelistEnd = source.indexOf('// 安装入口可用性', whitelistStart)
+  const switchOccurrence = occurrences.find((index) => index > factoryStart && index < factoryEnd)
+  const whitelistOccurrence = occurrences.find((index) => index > whitelistStart && index < whitelistEnd)
+  assert.ok(switchOccurrence !== undefined, 'switch checkbox 必须在 switchToggle 工厂内')
+  assert.ok(whitelistOccurrence !== undefined, '白名单 checkbox 必须在 WhitelistPicker 内')
 })
 
 test('switchToggle 产出顺序为 input 在前 track 在后', () => {

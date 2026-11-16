@@ -1,14 +1,15 @@
-// PKG-1 核心:BDD 覆盖 DATA-01/02/03/04/09/10/11/15 与生命周期停止/恢复/取消/定义失效
+// PKG-1 核心:BDD 覆盖 DATA-01/02/04/09/10/11/15 与生命周期停止/恢复/定义失效/失联收敛
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { applyCommand, applyEnvelope, actionKeyOf, ERROR_CODES } from '../lib/core/command.mjs'
+import { applyEnvelope, ERROR_CODES } from '../lib/core/command.mjs'
 import {
   createTask, defineWorkItem, authorizeTask, reviseDefinition, checkExecutionPermission,
   recordRun, submitReport, markSessionExecutor, closeTask, stopTask, confirmStopped,
-  requestResume, confirmResume, requestCancel, resolveDependencyBlock, replaceWorkItem,
+  requestResume, confirmResume, replaceWorkItem, effectiveAcceptance, dependencyAccepted,
+  expireStaleRuns, isStaleRun, RUN_STALE_MS, hasActiveRuns,
 } from '../lib/core/task.mjs'
-import { createGlobalControl, stopAll } from '../lib/core/global-control.mjs'
+import { createGlobalControl, stopAll, resumeAll } from '../lib/core/global-control.mjs'
 
 let clock = 1_000
 const now = () => { clock += 1; return clock }
@@ -34,12 +35,12 @@ async function makeReadyTask() {
   return auth.result.aggregate
 }
 
-function dispatchRun(agg, { runId = 'r1', phase = 'implement', actorRole = 'executor', sessionId = 's1' } = {}) {
+function dispatchRun(agg, { runId = 'r1', workItemId = 'w1', phase = 'implement', actorRole = 'executor', sessionId = 's1' } = {}) {
   const control = { globalStopped: false, globalStopGeneration: 0 }
-  const perm = checkExecutionPermission(agg, control, { workItemId: 'w1', phase, actorRole })
+  const perm = checkExecutionPermission(agg, control, { workItemId, phase, actorRole })
   assert.ok(perm.ok, perm.message)
   const rec = recordRun(agg, {
-    runId, workItemId: 'w1', phase, actorRole, sessionId, requestId: `req-${runId}`,
+    runId, workItemId, phase, actorRole, sessionId, requestId: `req-${runId}`,
     slotKey: perm.result.slotKey, globalControl: control,
   })
   assert.ok(rec.ok, rec.message)
@@ -60,17 +61,6 @@ test('DATA-01/02: 命令信封幂等与 IDEMPOTENCY_CONFLICT', () => {
   const conflict = applyEnvelope(first.result.state, { commandId: 'c1', payloadHash: 'h2' }, () => ({}))
   assert.equal(conflict.ok, false)
   assert.equal(conflict.code, ERROR_CODES.IDEMPOTENCY_CONFLICT)
-})
-
-test('DATA-03: 同 cause/actionKey 换命令 ID 重放返回原结果', () => {
-  const created = createTask({ taskId: 't1', title: 't', projectWorkspaceId: 'w', definition: { goal: 'g' }, now })
-  const agg = created.result
-  const effect = (a) => ({ aggregate: { ...a, touched: true }, result: 'R1' })
-  const first = applyCommand(agg, { causeId: 'notice1', actionKey: actionKeyOf(['t1', 'w1', 'implement']), payloadHash: 'p1' }, effect)
-  assert.equal(first.ok, true)
-  const replay = applyCommand(first.result.aggregate, { causeId: 'notice1', actionKey: actionKeyOf(['t1', 'w1', 'implement']), payloadHash: 'p1' }, effect)
-  assert.equal(replay.result.replayed, true)
-  assert.deepEqual(replay.result.result, 'R1')
 })
 
 test('DATA-04: 不同 cause 争同一执行槽至多一个有效 Run', async () => {
@@ -156,6 +146,34 @@ test('DATA-11: 全局停止同 commandId 不重复提升,新 commandId 使旧单
   assert.equal(denied.code, ERROR_CODES.TASK_PAUSED)
 })
 
+// ── B6:全局停止可解除,新任务恢复派发;recordRun 不再留不可达的自动放行 ──────
+test('B6: 全局停止经 resumeAll 解除后新任务可派发,同命令幂等', async () => {
+  let control = createGlobalControl(now)
+  control = stopAll(control, { commandId: 'stop-b6', payloadHash: 'p' }).result.state
+  assert.equal(control.globalStopped, true)
+  const created = createTask({ taskId: 't-b6', title: '新任务', projectWorkspaceId: 'w-b6', definition: { goal: 'g' }, now })
+  let agg = defineWorkItem(created.result, { workItemId: 'w1', title: '子项' }).result.aggregate
+  agg = authorizeTask(agg, { sourceMessageRef: { sessionId: 's', messageId: 'm' } }).result.aggregate
+  const denied = checkExecutionPermission(agg, control, { workItemId: 'w1', phase: 'implement', actorRole: 'executor' })
+  assert.equal(denied.code, ERROR_CODES.TASK_PAUSED)
+  // 许可检查拒绝后 recordRun 不得暗中提升放行代次(旧自动放行分支在许可之后不可达,已删除)
+  const recorded = recordRun(agg, {
+    runId: 'r-b6', workItemId: 'w1', phase: 'implement', actorRole: 'executor',
+    sessionId: 's-b6', requestId: 'req-b6', slotKey: 'slot-b6', globalControl: control,
+  })
+  assert.ok(recorded.ok, recorded.message)
+  assert.equal(recorded.result.aggregate.control.allowedGlobalGeneration, 0)
+  const resumed = resumeAll(control, { commandId: 'resume-b6', payloadHash: 'p' })
+  assert.ok(resumed.ok, resumed.message)
+  assert.equal(resumed.result.state.globalStopped, false)
+  assert.equal(resumed.result.result.globalStopGeneration, control.globalStopGeneration, '解除不新增停止代次')
+  const allowed = checkExecutionPermission(agg, resumed.result.state, { workItemId: 'w1', phase: 'implement', actorRole: 'executor' })
+  assert.ok(allowed.ok, allowed.message)
+  const replay = resumeAll(resumed.result.state, { commandId: 'resume-b6', payloadHash: 'p' })
+  assert.equal(replay.result.replayed, true)
+  assert.equal(replay.result.result.globalStopGeneration, resumed.result.result.globalStopGeneration)
+})
+
 test('DATA-15: usageCoverage 语义字段存在于 Run 记录', async () => {
   let agg = await makeReadyTask()
   agg = dispatchRun(agg, { runId: 'r1' })
@@ -181,35 +199,6 @@ test('LIFE: 定义失效停止在途,新授权回 ready,控制暂停不自动解
   assert.equal(reauth.result.aggregate.control.state, 'paused', '新授权不清控制暂停')
 })
 
-test('LIFE-14: 依赖解除恢复业务状态,不解除控制暂停', async () => {
-  let agg = await makeReadyTask()
-  agg = stopTask(agg.result ? agg.result.aggregate : agg).result.aggregate ?? agg
-  // 直接构造 blocked(依赖缺失)+paused
-  agg = { ...agg, businessState: 'blocked', block: { reason: 'dependency_missing', blockedFrom: 'ready', invalidatesAuthorization: false } }
-  const resolved = resolveDependencyBlock(agg)
-  assert.ok(resolved.ok, resolved.message)
-  assert.equal(resolved.result.aggregate.businessState, 'ready')
-  assert.equal(resolved.result.aggregate.control.state, 'paused')
-})
-
-test('LIFE-17: pendingCancel 期间恢复拒绝,停止确认原子 cancelled+paused', async () => {
-  let agg = await makeReadyTask()
-  agg = dispatchRun(agg, { runId: 'r1' })
-  const cancel = requestCancel(agg, { sourceMessageRef: { sessionId: 's', messageId: 'm3' } })
-  assert.ok(cancel.ok, cancel.message)
-  agg = cancel.result.aggregate
-  assert.equal(agg.control.pendingCancel !== null, true)
-  assert.equal(agg.control.state, 'stopping')
-  const resume = requestResume(agg, { resumeIntentId: 'ri1', sourceMessageRef: {}, expectedExecutionEpoch: agg.control.executionEpoch, globalStopGeneration: 0 })
-  assert.equal(resume.ok, false)
-  const confirmed = confirmStopped(agg)
-  assert.ok(confirmed.ok, confirmed.message)
-  agg = confirmed.result.aggregate
-  assert.equal(agg.businessState, 'cancelled')
-  assert.equal(agg.control.state, 'paused')
-  assert.equal(agg.control.pendingCancel, null)
-})
-
 test('停止→恢复核对→确认放行:新 epoch 与当前全局代次单项许可', async () => {
   let agg = await makeReadyTask()
   const stopped = stopTask(agg)
@@ -228,6 +217,69 @@ test('停止→恢复核对→确认放行:新 epoch 与当前全局代次单项
 })
 
 // ── F05: 依赖准入与判环 ─────────────────────────────────────────────────────
+test('Given 实施后又修复 When 依赖项用旧 pass 准入 Then 拒绝;重新验收后放行', async () => {
+  let agg = await makeReadyTask()
+  agg = defineWorkItem(agg, { workItemId: 'w2', title: '后继项', requiredCriterionIds: ['c1'], dependencyWorkItemIds: ['w1'] }).result.aggregate
+  // w1 实施 → 独立验收 pass(artRevision=1)
+  agg = dispatchRun(agg, { runId: 'impl1', sessionId: 's-impl-1' })
+  agg = submitReport(agg, { reportId: 'rep-impl-1', runId: 'impl1', summary: '实施', verdict: 'ready_for_review' }).result.aggregate
+  agg = dispatchRun(agg, { runId: 'review1', phase: 'accept', actorRole: 'reviewer', sessionId: 's-review-1' })
+  agg = submitReport(agg, { reportId: 'rep-review-1', runId: 'review1', summary: '通过', verdict: 'pass', coveredCriterionIds: ['c1'] }).result.aggregate
+  assert.equal(dependencyAccepted(agg, 'w1'), true)
+  const control = { globalStopped: false, globalStopGeneration: 0 }
+  assert.equal(checkExecutionPermission(agg, control, { workItemId: 'w2', phase: 'implement', actorRole: 'executor' }).ok, true)
+  // 再执行一次修复(artRevision=2):旧 pass 变成陈旧验收
+  agg = dispatchRun(agg, { runId: 'fix1', phase: 'fix', sessionId: 's-fix-1' })
+  agg = submitReport(agg, { reportId: 'rep-fix-1', runId: 'fix1', summary: '修复', verdict: 'ready_for_review' }).result.aggregate
+  assert.equal(dependencyAccepted(agg, 'w1'), false, '旧产物代次的 pass 不算有效验收')
+  assert.equal(effectiveAcceptance(agg, agg.reports['rep-review-1']), false)
+  const blocked = checkExecutionPermission(agg, control, { workItemId: 'w2', phase: 'implement', actorRole: 'executor' })
+  assert.equal(blocked.ok, false)
+  assert.equal(blocked.code, ERROR_CODES.DEPENDENCY_BLOCKED)
+  assert.equal(closeTask(agg, { passReportId: 'rep-review-1' }).ok, false, '结案与准入同一判据')
+  // 对当前产物重新独立验收后放行
+  agg = dispatchRun(agg, { runId: 'review2', phase: 'accept', actorRole: 'reviewer', sessionId: 's-review-2' })
+  agg = submitReport(agg, { reportId: 'rep-review-2', runId: 'review2', summary: '复审通过', verdict: 'pass', coveredCriterionIds: ['c1'] }).result.aggregate
+  assert.equal(dependencyAccepted(agg, 'w1'), true)
+  assert.equal(effectiveAcceptance(agg, agg.reports['rep-review-2']), true)
+  assert.equal(checkExecutionPermission(agg, control, { workItemId: 'w2', phase: 'implement', actorRole: 'executor' }).ok, true)
+})
+
+test('Given 无时钟注入 When 失联判定 Then 不猜测为已断', () => {
+  const run = { runId: 'r1', state: 'running', recordedAt: 0 }
+  assert.equal(isStaleRun(run, {}), false)
+  assert.equal(isStaleRun(run, { now: RUN_STALE_MS + 1 }), true)
+  assert.equal(isStaleRun({ ...run, lastEventAt: RUN_STALE_MS }, { now: RUN_STALE_MS + 1 }), false)
+  assert.equal(isStaleRun({ ...run, state: 'settled' }, { now: RUN_STALE_MS + 1 }), false)
+})
+
+test('Given 失联 Run When 收敛 Then 只收敛在飞 Run 且清空执行槽', async () => {
+  let agg = await makeReadyTask()
+  agg = dispatchRun(agg, { runId: 'r1', sessionId: 's1' })
+  agg = { ...agg, runs: { ...agg.runs, r1: { ...agg.runs.r1, state: 'running', recordedAt: 0, lastEventAt: 1 }, r2: { ...agg.runs.r1, runId: 'r2', state: 'settled' } } }
+  const expired = expireStaleRuns(agg, { now: RUN_STALE_MS + 2 })
+  assert.ok(expired.ok)
+  assert.deepEqual(expired.result.expired, ['r1'])
+  assert.equal(expired.result.aggregate.runs.r1.state, 'interrupted')
+  assert.equal(expired.result.aggregate.runs.r1.stopObserved, 'unreachable')
+  assert.equal(expired.result.aggregate.runs.r2.state, 'settled')
+  assert.equal(hasActiveRuns(expired.result.aggregate), false)
+  const fresh = expireStaleRuns(agg, { now: 2 })
+  assert.deepEqual(fresh.result.expired, [])
+})
+
+test('Given 失联 Run 有已观察用量 When 收敛 Then 用量并入台账不丢失', async () => {
+  let agg = await makeReadyTask()
+  agg = dispatchRun(agg, { runId: 'r1', sessionId: 's1' })
+  agg = { ...agg, runs: { ...agg.runs, r1: { ...agg.runs.r1, state: 'running', recordedAt: 0, lastEventAt: 1, observedUsage: { 's1:3': { inputTokens: 100, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0, model: 'm' } } } } }
+  const expired = expireStaleRuns(agg, { now: RUN_STALE_MS + 2 })
+  const run = expired.result.aggregate.runs.r1
+  assert.equal(run.tokenTotal, 120)
+  assert.equal(run.usageCoverage, 'complete')
+  assert.equal(run.observedUsage, undefined)
+  assert.equal(expired.result.aggregate.usageLedger['s1:3'].tokens, 120)
+})
+
 test('F05: 缺失/未验收依赖拒绝派发;依赖验收后放行', async () => {
   let agg = await makeReadyTask()
   // 依赖引用可前向声明(缺失不拒定义),但派发时拒绝
@@ -268,4 +320,150 @@ test('F05: 合法菱形可定义,真回边拒绝', async () => {
   const p2 = defineWorkItem(agg, { workItemId: 'p2', title: '环二', requiredCriterionIds: ['c1'], dependencyWorkItemIds: ['p1'] })
   assert.equal(p2.ok, false, 'p2→p1→p2 闭环在第二条定义时判环拒绝')
   assert.equal(p2.code, 'DEPENDENCY_BLOCKED')
+})
+
+// ── R11 终态 Run 的 endedAt:启动过记收口时刻,从未启动显式 null ──────────────
+test('Given 失联 Run 已有 startedAt When 收敛 Then endedAt 为收口观测时刻(非 undefined)', async () => {
+  let agg = await makeReadyTask()
+  agg = dispatchRun(agg, { runId: 'r1', sessionId: 's1' })
+  agg = { ...agg, runs: { ...agg.runs, r1: { ...agg.runs.r1, state: 'running', startedAt: 500, lastEventAt: 600 } } }
+  const at = RUN_STALE_MS + 700
+  const expired = expireStaleRuns(agg, { now: at })
+  const run = expired.result.aggregate.runs.r1
+  assert.equal(run.endedAt, at, '收口时刻须可读,否则墙钟与"已结束"状态自相矛盾')
+  assert.equal(Object.hasOwn(run, 'endedAt'), true, '键必须存在(undefined 落盘会整键消失)')
+})
+
+test('Given 失联 Run 从未启动 When 收敛 Then endedAt 显式为 null', async () => {
+  let agg = await makeReadyTask()
+  agg = dispatchRun(agg, { runId: 'r1', sessionId: 's1' })
+  agg = { ...agg, runs: { ...agg.runs, r1: { ...agg.runs.r1, state: 'prepared', startedAt: undefined, lastEventAt: 1 } } }
+  const expired = expireStaleRuns(agg, { now: RUN_STALE_MS + 2 })
+  assert.equal(expired.result.aggregate.runs.r1.endedAt, null)
+  assert.equal(Object.hasOwn(expired.result.aggregate.runs.r1, 'endedAt'), true)
+})
+
+// ── B4:已有效验收的子项不得重复实施(重复实施会推进产物代次、作废验收) ──────
+test('B4: 已有效验收 When 再次派发 implement Then 显式拒绝', async () => {
+  let agg = await makeReadyTask()
+  agg = dispatchRun(agg, { runId: 'impl', phase: 'implement', actorRole: 'executor', sessionId: 's1' })
+  agg = dispatchRun(agg, { runId: 'rev', phase: 'accept', actorRole: 'reviewer', sessionId: 's2' })
+  const reviewed = submitReport(agg, { reportId: 'pass1', runId: 'rev', verdict: 'pass', summary: '通过', coveredCriterionIds: ['c1'], issues: [], evidence: ['e'] })
+  assert.ok(reviewed.ok, reviewed.message)
+  agg = reviewed.result.aggregate
+  assert.ok(acceptedReportForProbe(agg), '前置:子项应有有效验收')
+  const again = checkExecutionPermission(agg, { globalStopped: false, globalStopGeneration: 0 }, { workItemId: 'w1', phase: 'implement', actorRole: 'executor' })
+  assert.equal(again.ok, false)
+  assert.equal(again.code, ERROR_CODES.INVALID_ARGUMENT)
+  assert.match(again.message, /已.*验收.*无需重复实施/)
+})
+
+function acceptedReportForProbe(agg) {
+  return Object.values(agg.reports).some((report) => effectiveAcceptance(agg, report))
+}
+
+// ── W2:workItem 依赖类型、存在性与撤回校验 ──────────────────────────────────
+test('W2: 依赖须为字符串数组且存在未撤回,replace 不得依赖已撤回项', async () => {
+  let agg = await makeReadyTask()
+  const stringDeps = defineWorkItem(agg, { workItemId: 'w2', title: '字符串依赖', dependencyWorkItemIds: 'w1' })
+  assert.equal(stringDeps.ok, false)
+  assert.equal(stringDeps.code, ERROR_CODES.INVALID_ARGUMENT)
+  assert.match(stringDeps.message, /字符串数组/)
+  const forward = defineWorkItem(agg, { workItemId: 'w2', title: '前向声明', dependencyWorkItemIds: ['later'] })
+  assert.ok(forward.ok, '定义阶段允许前向声明依赖(F05 契约)')
+  const replaced = replaceWorkItem(agg, { oldWorkItemId: 'w1', newWorkItemId: 'w3', title: '替代项', reason: '范围调整' })
+  assert.ok(replaced.ok, replaced.message)
+  agg = replaced.result.aggregate
+  const missing = replaceWorkItem(agg, {
+    oldWorkItemId: 'w3', newWorkItemId: 'w6', title: '缺失依赖的替代', dependencyWorkItemIds: ['nope'], reason: 'r1',
+  })
+  assert.equal(missing.ok, false)
+  assert.equal(missing.code, ERROR_CODES.INVALID_ARGUMENT)
+  assert.match(missing.message, /不存在/)
+  const withdrawn = defineWorkItem(agg, { workItemId: 'w4', title: '撤回依赖', dependencyWorkItemIds: ['w1'] })
+  assert.equal(withdrawn.ok, false)
+  assert.equal(withdrawn.code, ERROR_CODES.INVALID_ARGUMENT)
+  assert.match(withdrawn.message, /已撤回/)
+  const replaceWithWithdrawn = replaceWorkItem(agg, {
+    oldWorkItemId: 'w3', newWorkItemId: 'w5', title: '带撤回依赖的替代', dependencyWorkItemIds: ['w1'], reason: 'r2',
+  })
+  assert.equal(replaceWithWithdrawn.ok, false)
+  assert.equal(replaceWithWithdrawn.code, ERROR_CODES.INVALID_ARGUMENT)
+  assert.match(replaceWithWithdrawn.message, /已撤回/)
+})
+
+// ── W6:resumeIntent 同 ID 指纹冲突 ──────────────────────────────────────────
+test('W6: resumeIntent 同 ID 同内容重放,异 source 冲突', async () => {
+  const agg = await makeReadyTask()
+  const args = {
+    resumeIntentId: 'ri-w6', sourceMessageRef: { sessionId: 's', messageId: 'm1' },
+    expectedExecutionEpoch: agg.control.executionEpoch, globalStopGeneration: 0,
+  }
+  const first = requestResume(agg, args)
+  assert.ok(first.ok, first.message)
+  const revision = first.result.aggregate.recordRevision
+  const replay = requestResume(first.result.aggregate, args)
+  assert.ok(replay.ok, replay.message)
+  assert.equal(replay.result.replayed, true)
+  assert.equal(replay.result.aggregate.recordRevision, revision, '同内容重放不得改写记录')
+  const conflict = requestResume(first.result.aggregate, { ...args, sourceMessageRef: { sessionId: 's', messageId: 'm2' } })
+  assert.equal(conflict.ok, false)
+  assert.equal(conflict.code, ERROR_CODES.IDEMPOTENCY_CONFLICT)
+})
+
+// ── W3-3:结案收敛恢复意图与控制面,completed 不可再恢复 ──────────────────────
+test('W3-3: 结案作废恢复意图并收敛控制态,终态拒绝 request/confirm resume', async () => {
+  let agg = await makeReadyTask()
+  agg = dispatchRun(agg, { runId: 'impl', sessionId: 's-impl' })
+  agg = submitReport(agg, { reportId: 'rep-impl', runId: 'impl', verdict: 'ready_for_review', summary: '交付', coveredCriterionIds: ['c1'], issues: [], evidence: [] }).result.aggregate
+  agg = dispatchRun(agg, { runId: 'rev', phase: 'accept', actorRole: 'reviewer', sessionId: 's-rev' })
+  agg = submitReport(agg, { reportId: 'pass1', runId: 'rev', verdict: 'pass', summary: '通过', coveredCriterionIds: ['c1'], issues: [], evidence: [] }).result.aggregate
+  const requested = requestResume(agg, {
+    resumeIntentId: 'ri1', sourceMessageRef: { sessionId: 's', messageId: 'm' },
+    expectedExecutionEpoch: agg.control.executionEpoch, globalStopGeneration: 0,
+  })
+  assert.ok(requested.ok, requested.message)
+  agg = requested.result.aggregate
+  assert.equal(agg.resumeIntents.ri1.status, 'pending')
+  assert.equal(agg.control.state, 'active', '活动任务的恢复意图只登记,不改控制态')
+  const closed = closeTask(agg, { passReportId: 'pass1', conclusion: '验收通过' })
+  assert.ok(closed.ok, closed.message)
+  const done = closed.result.aggregate
+  assert.equal(done.businessState, 'completed')
+  assert.equal(done.control.state, 'paused')
+  assert.equal(done.control.stopDetail, null)
+  assert.equal(done.control.resumeIntentId, null)
+  assert.equal(done.resumeIntents.ri1.status, 'void', '结案须作废待恢复意图')
+  const revived = confirmResume(done, { resumeIntentId: 'ri1', globalStopGeneration: 0 })
+  assert.equal(revived.ok, false, 'completed 不得被旧意图恢复')
+  assert.match(revived.message, /终态/)
+  const lateRequest = requestResume(done, {
+    resumeIntentId: 'ri2', sourceMessageRef: { sessionId: 's', messageId: 'm2' },
+    expectedExecutionEpoch: done.control.executionEpoch, globalStopGeneration: 0,
+  })
+  assert.equal(lateRequest.ok, false, 'completed 不得再登记恢复意图')
+  assert.match(lateRequest.message, /终态/)
+})
+
+// ── B4:replace 后结案只要求未撤回项;撤回项不得派发 ──────────────────────────
+test('B4: 替代后结案只要求未撤回项,撤回项拒绝派发', async () => {
+  let agg = await makeReadyTask()
+  const replaced = replaceWorkItem(agg, {
+    oldWorkItemId: 'w1', newWorkItemId: 'w2', title: '替代项', requiredCriterionIds: ['c1'], reason: '范围调整',
+  })
+  assert.ok(replaced.ok, replaced.message)
+  agg = replaced.result.aggregate
+  const control = { globalStopped: false, globalStopGeneration: 0 }
+  const denied = checkExecutionPermission(agg, control, { workItemId: 'w1', phase: 'implement', actorRole: 'executor' })
+  assert.equal(denied.ok, false, '撤回项不得通过派发许可')
+  assert.equal(denied.code, ERROR_CODES.INVALID_ARGUMENT)
+  assert.match(denied.message, /已撤回/)
+  agg = dispatchRun(agg, { runId: 'impl2', workItemId: 'w2', sessionId: 's-impl' })
+  agg = submitReport(agg, { reportId: 'rep-impl2', runId: 'impl2', verdict: 'ready_for_review', summary: '交付', coveredCriterionIds: ['c1'], issues: [], evidence: [] }).result.aggregate
+  agg = dispatchRun(agg, { runId: 'rev2', workItemId: 'w2', phase: 'accept', actorRole: 'reviewer', sessionId: 's-review' })
+  const pass = submitReport(agg, { reportId: 'pass2', runId: 'rev2', verdict: 'pass', summary: '通过', coveredCriterionIds: ['c1'], issues: [], evidence: [] })
+  assert.ok(pass.ok, pass.message)
+  const closed = closeTask(pass.result.aggregate, { passReportId: 'pass2' })
+  assert.ok(closed.ok, closed.message)
+  assert.equal(closed.result.aggregate.businessState, 'completed')
 })

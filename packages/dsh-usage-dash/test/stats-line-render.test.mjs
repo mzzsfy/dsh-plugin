@@ -15,24 +15,72 @@ const stepNode = (outputTokens, decodeMs) => ({
   usage: { outputTokens },
 })
 
+// 面板组件在整源求值区之外(组件区),以字符串 type 作为可识别桩锁开合与数据透传,
+// 面板内容由 cost-breakdown 纯函数测试覆盖
+const COST_POPOVER = 'cost-popover'
+const COST_BODY = 'cost-body'
+
 function render(options = {}) {
-  const { prefs = on, lang = 'zh', pricing = rules, target = {}, speedTarget = null, nodes = [], capture = {}, recentSpeed = undefined } = options
+  const { prefs = on, lang = 'zh', pricing = rules, target = {}, speedTarget = null, nodes = [], capture = {}, recentSpeed = undefined, useSessions = undefined, sessionId = 'sess-1' } = options
   const value = Object.hasOwn(options, 'value') ? options.value : usage
   const source = CLIENT_BODY.match(/const StatsLineAppended = React\.memo\(([\s\S]*?)\n    \}\)/)?.[1] + '\n}'
-  let stateIndex = 0
   const React = { Fragment: 'fragment', useId: () => ':test:' }
   const h = (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity).filter((x) => x != null && x !== false) })
-  const useState = (init) => [stateIndex++ === 1 ? pricing : typeof init === 'function' ? init() : init, () => {}]
+  const useState = (init) => [typeof init === 'function' ? init() : init, () => {}]
   const noop = () => {}
   const names = Object.keys(core)
   // 悬浮包装件在整源求值区之外(组件区),测试只关心文本与结构,用保留类名与子节点的桩
   const HintText = (props) => h('span', { className: props.className }, props.children)
-  const component = new Function(...names, 'React', 'h', 'useState', 'useEffect', 'useLayoutEffect', 'useRef', 'statsLineState', 'defaultT', 'usePricing', 'useUsageDialogTarget', 'useSpeedDialogTarget', 'useSpeedCapsulePatch', 'createPortal', 'HintText', 'useChat', `return (${source})`)(...Object.values(core), React, h, useState, noop, noop, () => ({ current: null }), { get: () => prefs }, core.createTranslator(core.MESSAGES_ZH), () => ({ rules: pricing }), () => target, () => speedTarget, (ref, text) => { capture.text = text }, (content, container) => ({ type: 'portal', props: { container }, children: [content].flat(Infinity) }), HintText, (selector) => selector({ legacy: { nodes } }))
+  const component = new Function(...names, 'React', 'h', 'useState', 'useEffect', 'useLayoutEffect', 'useRef', 'statsLineState', 'defaultT', 'usePricing', 'useUsageDialogTarget', 'useSpeedDialogTarget', 'useSpeedCapsulePatch', 'createPortal', 'HintText', 'useChat', 'useMemo', 'useCallback', 'CostPopover', 'CostBreakdownBody', `return (${source})`)(...Object.values(core), React, h, useState, noop, noop, () => ({ current: null }), { get: () => prefs }, core.createTranslator(core.MESSAGES_ZH), () => ({ rules: pricing }), () => target, () => speedTarget, (ref, text) => { capture.text = text }, (content, container) => ({ type: 'portal', props: { container }, children: [content].flat(Infinity) }), HintText, (selector) => selector({ legacy: { nodes } }), (fn) => fn(), (fn) => fn, COST_POPOVER, COST_BODY)
   return component({
     useProjection: (key) => (key === 'usageDashModelUsage' ? modelUsage : key === 'usageDashRecentSpeed' ? recentSpeed : value),
     useChat: (selector) => selector({ legacy: { nodes } }),
+    useSessions,
+    sessionId,
     t: core.createTranslator(lang === 'en' ? core.MESSAGES_EN : core.MESSAGES_ZH),
   })
+}
+
+// 交互态渲染:真实 useState 语义 + 手动重挂载,用于「点击展开」这类开合契约
+function mountInteractive(options = {}) {
+  const { prefs = on, pricing = rules, sessionId = 'sess-1' } = options
+  // 显式传 undefined 表示旧宿主没有该 props,不能被解构默认值吞掉
+  const useSessions = Object.hasOwn(options, 'useSessions') ? options.useSessions : () => ({ byId: {} })
+  const source = CLIENT_BODY.match(/const StatsLineAppended = React\.memo\(([\s\S]*?)\n    \}\)/)?.[1] + '\n}'
+  const React = { Fragment: 'fragment', useId: () => ':test:' }
+  const h = (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity).filter((x) => x != null && x !== false) })
+  const noop = () => {}
+  let states = []
+  let index = 0
+  const useState = (init) => {
+    const slot = index++
+    if (slot >= states.length) states[slot] = typeof init === 'function' ? init() : init
+    const set = (next) => { states[slot] = typeof next === 'function' ? next(states[slot]) : next }
+    return [states[slot], set]
+  }
+  const HintText = (props) => h('span', { className: props.className, 'data-hint': props.text ?? '' }, props.children)
+  const component = new Function(...Object.keys(core), 'React', 'h', 'useState', 'useEffect', 'useLayoutEffect', 'useRef', 'statsLineState', 'defaultT', 'usePricing', 'useUsageDialogTarget', 'useSpeedDialogTarget', 'useSpeedCapsulePatch', 'createPortal', 'HintText', 'useChat', 'useMemo', 'useCallback', 'CostPopover', 'CostBreakdownBody', `return (${source})`)(...Object.values(core), React, h, useState, noop, noop, () => ({ current: null }), { get: () => prefs }, core.createTranslator(core.MESSAGES_ZH), () => ({ rules: pricing }), () => null, () => null, noop, (content, container) => ({ type: 'portal', props: { container }, children: [content].flat(Infinity) }), HintText, () => null, (fn) => fn(), (fn) => fn, COST_POPOVER, COST_BODY)
+  const props = {
+    useProjection: (key) => (key === 'usageDashModelUsage' ? modelUsage : usage),
+    useChat: () => null,
+    useSessions,
+    sessionId,
+    t: core.createTranslator(core.MESSAGES_ZH),
+  }
+  const mount = () => { index = 0; return component(props) }
+  let tree = mount()
+  const trigger = () => nodes(tree).find((node) => node.type === 'button' && node.props['aria-haspopup'] === 'dialog')
+  return {
+    tree: () => tree,
+    click() {
+      const button = trigger()
+      assert.ok(button, '费用条目应是可点击按钮')
+      button.props.onClick()
+      tree = mount()
+      return tree
+    },
+    trigger,
+  }
 }
 const nodes = (tree) => tree && typeof tree === 'object' ? [tree, ...tree.children.flatMap(nodes)] : []
 const text = (tree) => typeof tree === 'string' ? tree : tree?.children.map(text).join('') ?? ''
@@ -42,12 +90,33 @@ test('Given 默认偏好 When 渲染 Then 底栏只有费用，补充项追加�
   const target = {}
   const tree = render({ target })
   assert.equal(inlineText(tree), '费用 ≈ ¥0.0020')
-  assert.equal(nodes(tree).filter((n) => n.type === 'button' || n.props.popover).length, 0)
+  assert.equal(nodes(tree).filter((n) => (n.type === 'button' && n.props['aria-haspopup'] !== 'dialog') || n.props.popover).length, 0)
   const portal = nodes(tree).find((n) => n.type === 'portal')
   assert.equal(portal.props.container, target)
   assert.doesNotMatch(text(portal), /命中率/)
   assert.match(text(portal), /输入合计（含缓存）5,000 tok/)
   assert.doesNotMatch(text(portal), /总 |输出|未命中缓存|命中缓存/)
+})
+
+test('Given 存在子代理且明细开关开启 When 渲染 Then 官方弹窗追加子代理明细入口', () => {
+  const target = {}
+  const byId = { A: { id: 'A' }, B: { id: 'B', origin: 'subagent', parentId: 'A', displayTitle: '调研' } }
+  const tree = render({ target, sessionId: 'A', useSessions: (selector) => selector({ byId, projectionsBySession: {} }) })
+  const portal = nodes(tree).filter((n) => n.type === 'portal').find((p) => text(p).includes('子代理用量'))
+  assert.ok(portal, '应追加子代理入口')
+  assert.equal(portal.props.container, target)
+  assert.match(text(portal), /查看 1 个子代理明细/)
+})
+
+test('Given 明细开关关闭 When 有子代理 Then 不追加子代理入口', () => {
+  const byId = { A: { id: 'A' }, B: { id: 'B', origin: 'subagent', parentId: 'A' } }
+  const tree = render({
+    prefs: { ...on, tokenDetail: false },
+    target: {},
+    sessionId: 'A',
+    useSessions: (selector) => selector({ byId, projectionsBySession: {} }),
+  })
+  assert.equal(nodes(tree).filter((n) => n.type === 'portal').length, 0)
 })
 
 test('Given 英文与费用关闭 When 渲染 Then 仅向官方弹窗追加英文补充项', () => {
@@ -156,4 +225,58 @@ test('Given 投影无可读值 When 渲染 Then 回落窗口节点估算', () =>
 test('Given 投影带非数值 When 渲染 Then 视为无值回落估算', () => {
   const tree = render({ speedTarget: {}, target: null, nodes: [stepNode(500, 2000)], recentSpeed: { tps: '104', steps: 2 } })
   assert.match(text(tree), /最近输出速度250 tok\/s/)
+})
+
+// —— 费用条目点击展开:trigger 契约与开合状态机 ——
+const panelNode = (tree) => nodes(tree).find((node) => node.type === 'cost-popover')
+const bodyNode = (tree) => nodes(tree).find((node) => node.type === 'cost-body')
+
+test('Given 费用可显示 When 渲染底栏 Then 费用是 aria-haspopup 按钮且默认收起', () => {
+  const tree = render({ target: null })
+  const button = nodes(tree).find((node) => node.type === 'button' && node.props['aria-haspopup'] === 'dialog')
+  assert.ok(button, '费用条目应以展开按钮呈现')
+  assert.equal(button.props['aria-expanded'], false)
+  assert.equal(inlineText(button), '费用 ≈ ¥0.0020')
+  assert.equal(button.props.type, 'button')
+  assert.match(button.props['aria-label'], /费用 ≈ ¥0\.0020/)
+  assert.equal(panelNode(tree), undefined)
+})
+
+test('Given 点击费用 When 展开 Then 面板挂载且按钮 aria-expanded 为真', () => {
+  const view = mountInteractive()
+  assert.equal(panelNode(view.tree()), undefined)
+  const tree = view.click()
+  assert.equal(view.trigger().props['aria-expanded'], true)
+  const panel = panelNode(tree)
+  assert.ok(panel, '点击后应挂载费用面板')
+  // 锚点不再冻结成矩形:面板自己按 triggerRef 当前矩形定位,这里只锁触发件与关闭回调
+  assert.equal(typeof panel.props.triggerRef, 'object')
+  assert.equal(typeof panel.props.onClose, 'function')
+})
+
+test('Given 再次点击费用 When 收起 Then 面板卸载且 aria-expanded 复位', () => {
+  const view = mountInteractive()
+  view.click()
+  const tree = view.click()
+  assert.equal(view.trigger().props['aria-expanded'], false)
+  assert.equal(panelNode(tree), undefined)
+})
+
+test('Given 宿主提供 useSessions When 展开 Then 面板携带会话数据面与当期用量', () => {
+  const useSessions = () => ({ byId: {} })
+  const view = mountInteractive({ useSessions, sessionId: 'sess-42' })
+  const tree = view.click()
+  assert.ok(panelNode(tree), '点击后应挂载费用面板')
+  const body = bodyNode(tree)
+  assert.equal(body.props.sessionId, 'sess-42')
+  assert.equal(body.props.useSessions, useSessions)
+  assert.deepEqual(body.props.usage, usage)
+  assert.deepEqual(body.props.modelUsage, modelUsage)
+})
+
+test('Given 旧宿主无 useSessions When 展开 Then 面板仍挂载并透传缺失能力', () => {
+  const view = mountInteractive({ useSessions: undefined })
+  const tree = view.click()
+  assert.ok(panelNode(tree))
+  assert.equal(bodyNode(tree).props.useSessions, undefined)
 })

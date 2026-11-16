@@ -142,9 +142,9 @@ test('宿主唤醒业务固定指向DSH，非macOS不执行且失败如实返回
     let registered, fail = false
     const calls = []
     const ctx = { effect(fn) { fn() }, webServer: { register(value) { registered = value } } }
-    const route = (method, options, fn) => { assert.equal(method, 'POST'); assert.equal(options.crossOrigin, true); return fn }
+    const route = (method, fn) => { assert.equal(method, 'POST'); return fn }
     // 片段经 gatedRoute 包装,宿主闸门在 eval 环境里按透传处理
-    const gatedRoute = (method, options, fn) => route(method, options, fn)
+    const gatedRoute = (method, fn) => route(method, fn)
     const spawn = { impl(...args) { calls.push(args.slice(0, 3)); args[3](fail ? new Error('failure') : null) } }
     new Function('ctx', 'route', 'gatedRoute', 'sendJson', '__hostSpawn', 'process', 'HOST_FOCUS_TIMEOUT_MS', fragment)(ctx, route, gatedRoute, (res, status, body) => Object.assign(res, { status, body }), spawn, { platform }, 5000)
     const res = {}
@@ -161,7 +161,7 @@ test('宿主唤醒业务固定指向DSH，非macOS不执行且失败如实返回
 // ---- 以下为身份高亮/提醒/代际套件:完整源码 + 真实 factory/apply/poll ----
 
 // 仅替换浏览器/宿主边界；执行真实 factory、apply、poll 与回调。
-function fixture({ rows = [], current = null, focus = false, highlight = true } = {}) {
+function fixture({ rows = [], current = null, focus = false, highlight = true, sessionsById = null } = {}) {
   const definitions = [], shown = [], native = [], timers = new Map(), events = new Map(), storage = new Map()
   let payload = { version: 0, units: [] }, nextTimer = 0
   if (!highlight) storage.set('turn-notify:session-hl', '0')
@@ -213,7 +213,7 @@ function fixture({ rows = [], current = null, focus = false, highlight = true } 
     let live = true, ownerCurrent = current
     const services = {
       uiWorkspace: { openSession(id) { assert.ok(live, '旧owner服务被调用'); if (fail) throw new Error('failed'); opened.push(id) } },
-      sessions: { list: { getSnapshot() { assert.ok(live, '旧owner快照被读取'); return { byId: ownerCurrent ? { [ownerCurrent]: { id: ownerCurrent, retainedBy: { mainView: 1 } } } : {} } }, subscribe(fn) { subscriptions.add(fn); return () => subscriptions.delete(fn) } } }, workspaces: {},
+      sessions: { list: { getSnapshot() { assert.ok(live, '旧owner快照被读取'); return { byId: sessionsById ?? (ownerCurrent ? { [ownerCurrent]: { id: ownerCurrent, retainedBy: { mainView: 1 } } } : {}) } }, subscribe(fn) { subscriptions.add(fn); return () => subscriptions.delete(fn) } } }, workspaces: {},
     }
     module.apply({ get: key => services[key], effect(fn) { const off = fn(); if (typeof off === 'function') cleanups.push(off) },
       inject(names, callback) {
@@ -223,7 +223,7 @@ function fixture({ rows = [], current = null, focus = false, highlight = true } 
     return { opened, setCurrent(id) { ownerCurrent = id; for (const fn of subscriptions) fn() }, off() { while (cleanups.length) cleanups.pop()(); live = false } }
   }
   const emit = (type, event) => { for (const fn of [...(events.get(type) || [])]) fn(event) }
-  return { mod, factory, owner, shown, native, rows: rowEls, window, timers,
+  return { mod, factory, owner, shown, native, rows: rowEls, window, timers, emit,
     async notify(units, module = mod) { payload = { version: payload.version + 1, units }; assert.equal(await module.__test.poll(), true) },
     clickRow(index) { emit('click', { target: { closest: () => rowEls[index] } }) },
     remind() { for (const [id, timer] of [...timers]) if (timer.delay === REMIND_MS) { timers.delete(id); timer.fn() } },
@@ -290,6 +290,178 @@ test('N2 缺失/重复DOM身份不误标；特殊字符按属性严格比较', a
   try {
     await f.notify([unit('B'), unit(id)])
     assert.deepEqual(f.rows.map(highlighted), [false, false, false, true])
+  } finally { a.off() }
+})
+
+test('P3 子代理通知的高亮/已读/提醒全部落根会话', async () => {
+  const sessionsById = {
+    root: { id: 'root', retainedBy: { mainView: 1 } },
+    child: { id: 'child', origin: 'subagent', parentId: 'root' },
+  }
+  const f = fixture({ rows: [{ id: 'root' }], sessionsById }), a = f.owner()
+  try {
+    await f.notify([{ id: 'event-child', sessionId: 'child', session: '同名', category: 'ask', text: '通知子代理' }])
+    assert.equal(highlighted(f.rows[0]), true, '高亮必须落在根会话行')
+    f.clickRow(0)
+    assert.equal(highlighted(f.rows[0]), false)
+    assert.ok(f.window.localStorage.getItem('turn-notify:session-handled:root'), '已处理信号以根会话 id 落键')
+    f.remind()
+    assert.equal(f.shown.some(item => item.text.indexOf('[再次提醒]') === 0), false, '根会话已读撤销子会话提醒')
+  } finally { a.off() }
+})
+
+test('P3 当前查看根会话 When 子会话提问提醒到期 Then 按已处理不补发', async () => {
+  const sessionsById = {
+    root: { id: 'root', retainedBy: { mainView: 1 } },
+    child: { id: 'child', origin: 'subagent', parentId: 'root' },
+  }
+  const f = fixture({ rows: [{ id: 'root' }], current: 'root', focus: true, sessionsById }), a = f.owner()
+  try {
+    await f.notify([{ id: 'event-child', sessionId: 'child', session: '同名', category: 'ask', text: '通知子代理' }])
+    const count = f.shown.length
+    f.remind()
+    assert.equal(f.shown.length, count, '根会话正在查看即子会话通知已处理')
+  } finally { a.off() }
+})
+
+test('P2-47 他窗已处理 storage 事件撤销本窗子会话提醒', async () => {
+  const sessionsById = {
+    root: { id: 'root', retainedBy: { mainView: 1 } },
+    child: { id: 'child', origin: 'subagent', parentId: 'root' },
+  }
+  const f = fixture({ rows: [{ id: 'root' }], sessionsById }), a = f.owner()
+  try {
+    await f.notify([{ id: 'event-child', sessionId: 'child', session: '同名', category: 'ask', text: '通知子代理' }])
+    assert.equal(f.mod.__test.pendingReminders.size, 1)
+    f.emit('storage', { key: 'turn-notify:session-handled:root', newValue: String(Date.now()) })
+    assert.equal(f.mod.__test.pendingReminders.size, 0, '子会话提醒随根会话已处理事实撤销')
+  } finally { a.off() }
+})
+
+test('T2 他窗已处理 storage 事件同步清本窗高亮集合与行类', async () => {
+  const f = fixture({ rows: [{ id: 'B' }] }), a = f.owner()
+  try {
+    await f.notify([{ id: 'event-B', sessionId: 'B', session: '同名', category: 'completed', text: '通知B' }])
+    assert.equal(highlighted(f.rows[0]), true, '冷启动静默对齐先挂上未读高亮')
+    f.emit('storage', { key: 'turn-notify:session-handled:B', newValue: String(Date.now()) })
+    assert.equal(highlighted(f.rows[0]), false, '他窗已处理必须同步移除本窗行高亮')
+    a.setCurrent('other')
+    assert.equal(highlighted(f.rows[0]), false, '集合条目同时删除,高亮重应用不得复活')
+  } finally { a.off() }
+})
+
+test('T3 登记时快照未就绪,快照就绪后根会话已处理撤销子会话提醒且到期不补发', async () => {
+  const sessionsById = {}
+  const f = fixture({ rows: [{ id: 'root' }], sessionsById }), a = f.owner()
+  try {
+    await f.notify([{ id: 'event-child', sessionId: 'child', session: '同名', category: 'ask', text: '通知子代理' }])
+    assert.equal(f.mod.__test.pendingReminders.size, 1)
+    Object.assign(sessionsById, {
+      root: { id: 'root', retainedBy: { mainView: 1 } },
+      child: { id: 'child', origin: 'subagent', parentId: 'root' },
+    })
+    f.emit('storage', { key: 'turn-notify:session-handled:root', newValue: String(Date.now()) })
+    assert.equal(f.mod.__test.pendingReminders.size, 0, '清除时按最新快照重新解析根 id')
+    const count = f.shown.length
+    f.remind()
+    assert.equal(f.shown.length, count, '已处理撤销后提醒到期不得补发')
+  } finally { a.off() }
+})
+
+test('D1 冷启动快照未就绪 When 快照补全 Then 子代理高亮键迁移到根键并去重', async () => {
+  const sessionsById = {}
+  const f = fixture({ rows: [{ id: 'root' }], sessionsById }), a = f.owner()
+  try {
+    await f.notify([
+      { id: 'event-child-1', sessionId: 'child-1', session: '同名', category: 'ask', text: '通知子代理1' },
+      { id: 'event-child-2', sessionId: 'child-2', session: '同名', category: 'ask', text: '通知子代理2' },
+    ])
+    assert.equal(highlighted(f.rows[0]), false, '快照未就绪时子会话 id 没有对应行')
+    assert.equal(f.mod.__test.sessionHighlights.size, 2, '登记时暂以子会话 id 落键')
+    Object.assign(sessionsById, {
+      root: { id: 'root', retainedBy: { mainView: 1 } },
+      'child-1': { id: 'child-1', origin: 'subagent', parentId: 'root' },
+      'child-2': { id: 'child-2', origin: 'subagent', parentId: 'root' },
+    })
+    a.setCurrent('root')
+    assert.deepEqual([...f.mod.__test.sessionHighlights.keys()], ['root'], '迁移后只保留一个根键')
+    assert.equal(highlighted(f.rows[0]), true, '高亮必须落到根会话行')
+  } finally { a.off() }
+})
+
+test('D1 unit 携带 rootSessionId When 快照为空 Then 高亮直接落根键', async () => {
+  const f = fixture({ rows: [{ id: 'root' }], sessionsById: {} }), a = f.owner()
+  try {
+    await f.notify([{ id: 'event-child', sessionId: 'child', rootSessionId: 'root', session: '同名', category: 'ask', text: '通知子代理' }])
+    assert.deepEqual([...f.mod.__test.sessionHighlights.keys()], ['root'], 'host 下发的根 id 优先于本地快照解析')
+    assert.equal(highlighted(f.rows[0]), true)
+  } finally { a.off() }
+})
+
+test('F2 旧投影缺 rootSessionId When 子行后置移除 Then 已解析根不降级且点击根行撤销', async () => {
+  const sessionsById = {
+    root: { id: 'root', retainedBy: { mainView: 1 } },
+    child: { id: 'child', origin: 'subagent', parentId: 'root' },
+  }
+  const f = fixture({ rows: [{ id: 'root' }], sessionsById }), a = f.owner()
+  try {
+    await f.notify([{ id: 'event-child', sessionId: 'child', session: '同名', category: 'ask', text: '通知子代理' }])
+    assert.deepEqual([...f.mod.__test.sessionHighlights.keys()], ['root'], '注册时按快照解析出根键')
+    assert.equal(f.mod.__test.sessionHighlights.get('root').rootSessionId, 'root', '解析出的根必须写回 entry')
+    delete sessionsById.child
+    a.setCurrent('other')
+    assert.deepEqual([...f.mod.__test.sessionHighlights.keys()], ['root'], '子行从快照消失后不得把已解析根降级为子 id')
+    assert.equal(highlighted(f.rows[0]), true, '根高亮保持')
+    assert.equal(f.mod.__test.pendingReminders.size, 1)
+    f.clickRow(0)
+    assert.equal(highlighted(f.rows[0]), false)
+    assert.equal(f.mod.__test.pendingReminders.size, 0, '点击根行仍按注册时解析的根 id 撤销提醒')
+    const count = f.shown.length
+    f.remind()
+    assert.equal(f.shown.length, count, '撤销后不得补发')
+  } finally { a.off() }
+})
+
+test('D2 byId 仅有 root When 点击根行 Then 未保留子代理的提醒撤销且到期不补发', async () => {
+  const sessionsById = { root: { id: 'root', retainedBy: { mainView: 1 } } }
+  const f = fixture({ rows: [{ id: 'root' }], sessionsById }), a = f.owner()
+  try {
+    await f.notify([{ id: 'event-child', sessionId: 'child', rootSessionId: 'root', session: '同名', category: 'ask', text: '通知子代理' }])
+    assert.equal(f.mod.__test.pendingReminders.size, 1)
+    f.clickRow(0)
+    assert.equal(f.mod.__test.pendingReminders.size, 0, '点击根行必须按 unit.rootSessionId 撤销子代理提醒')
+    const count = f.shown.length
+    f.remind()
+    assert.equal(f.shown.length, count, '撤销后 10 分钟提醒不得补发')
+  } finally { a.off() }
+})
+
+test('D2 深层子代理未保留 When 根会话正在查看 Then 到期提醒按已处理跳过', async () => {
+  const sessionsById = {
+    root: { id: 'root', retainedBy: { mainView: 1 } },
+    child: { id: 'child', origin: 'subagent', parentId: 'root' },
+  }
+  const f = fixture({ rows: [{ id: 'root' }], current: 'root', focus: true, sessionsById }), a = f.owner()
+  try {
+    await f.notify([{ id: 'event-grandchild', sessionId: 'grandchild', rootSessionId: 'root', session: '同名', category: 'ask', text: '通知孙代理' }])
+    const count = f.shown.length
+    f.remind()
+    assert.equal(f.shown.length, count, '根会话正在查看时深层子代理提醒必须按根 id 判定已处理')
+  } finally { a.off() }
+})
+
+test('T3 登记时快照未就绪,快照就绪后根会话正在查看则到期提醒按已处理跳过', async () => {
+  const sessionsById = {}
+  const f = fixture({ rows: [{ id: 'root' }], sessionsById, focus: true }), a = f.owner()
+  try {
+    await f.notify([{ id: 'event-child-view', sessionId: 'child', session: '同名', category: 'ask', text: '通知子代理' }])
+    Object.assign(sessionsById, {
+      root: { id: 'root', retainedBy: { mainView: 1 } },
+      child: { id: 'child', origin: 'subagent', parentId: 'root' },
+    })
+    const count = f.shown.length
+    f.remind()
+    assert.equal(f.shown.length, count, '触发时重新解析根 id,正在查看的根会话即已处理')
   } finally { a.off() }
 })
 

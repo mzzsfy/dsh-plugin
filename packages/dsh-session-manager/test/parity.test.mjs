@@ -17,6 +17,7 @@ import {
   pageArchiveRows,
   projectArchiveRows,
   projectDeletedRows,
+  resolveArchivedIds,
 } from '../src/core.mjs'
 
 const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -32,7 +33,7 @@ assert.ok(MIRROR_START >= 0 && MIRROR_END > MIRROR_START, 'client.js 镜像函�
 
 const mirror = new Function(
   CLIENT_SRC.slice(MIRROR_START, MIRROR_END)
-  + '; return { projectRows: projectRows, projectDeletedRows: projectDeletedRows, archiveToastStep: archiveToastStep, archiveToastText: archiveToastText, pageArchiveRows: pageArchiveRows, groupArchiveRowsByWorkspace: groupArchiveRowsByWorkspace, filterArchiveRows: filterArchiveRows }',
+  + '; return { projectRows: projectRows, projectDeletedRows: projectDeletedRows, archiveToastStep: archiveToastStep, archiveToastText: archiveToastText, resolveArchivedIds: resolveArchivedIds, pageArchiveRows: pageArchiveRows, groupArchiveRowsByWorkspace: groupArchiveRowsByWorkspace, filterArchiveRows: filterArchiveRows }',
 )()
 
 // client 侧输入形态 byId 字典,core 侧 rows 数组:按 title/cwd 约定构造等价输入
@@ -182,6 +183,34 @@ test('parity Toast 差分:大集合增量性能形态一致性(n=5000)', () => {
     { phase: 'ready', archivedSessionIds: [] },
     { phase: 'ready', archivedSessionIds: big },
   ])
+})
+
+// Given 归档快照三相位 × 是否已有上一次权威集合, When 双侧解箱, Then 同相位同集合
+test('parity 归档集合解箱:ready / stale / unknown 三相位双侧一致', () => {
+  const frames = [
+    undefined,
+    { phase: 'ready', archivedSessionIds: ['a', 'b'] },
+    { phase: 'pending', archivedSessionIds: ['a'] },
+    { phase: 'ready', archivedSessionIds: [] },
+    { phase: 'ready' },
+    { phase: 'ready', archivedSessionIds: 'bad' },
+  ]
+  for (const previous of [undefined, ['keep'], []]) {
+    for (const frame of frames) {
+      assert.deepEqual(
+        mirror.resolveArchivedIds(previous, frame),
+        resolveArchivedIds(previous, frame),
+        '快照 ' + JSON.stringify(frame) + ' / 上次 ' + JSON.stringify(previous),
+      )
+    }
+  }
+})
+
+test('源码契约:归档面板经解箱取权威集合,未知相位不渲染成空集结论', () => {
+  assert.ok(CLIENT_SRC.includes('resolveArchivedIds(lastReadyIdsRef.current, workspaceState)'),
+    '面板未按 phase 门取权威归档集合')
+  assert.ok(CLIENT_SRC.includes('archiveKnown: archived.phase !== \'unknown\''), '未把未知相位传给面板区分空态')
+  assert.ok(CLIENT_SRC.includes('归档状态读取中…'), '未知相位空态文案缺失')
 })
 
 // ── 归档库投影 parity:分页 / 分组 / 搜索 ──

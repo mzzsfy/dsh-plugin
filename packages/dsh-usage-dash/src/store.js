@@ -22,6 +22,8 @@ export const DEFAULT_MINUTE_RETENTION_DAYS = 7
 
 // 分钟桶对齐粒度(分钟);小时/天桶不受影响
 export const MINUTE_BUCKET_SPAN_MINUTES = 10
+const MS_PER_MINUTE = 60 * 1000
+const MINUTE_BUCKET_SPAN_MS = MINUTE_BUCKET_SPAN_MINUTES * MS_PER_MINUTE
 
 // 保留上限:小时桶固定 15 天,分钟桶可配置但最大 7 天(与分钟视图选择上限一致)
 export const HOUR_RETENTION_DAYS = 15
@@ -46,23 +48,85 @@ export function clampMinuteRetentionDays(days) {
   return Math.min(raw, MINUTE_RETENTION_MAX_DAYS)
 }
 
-// 桶串统一本地时区推导,同粒度内字典序即时间序
+// 桶串统一本地时区推导,同粒度内字典序即时间序。显式 timeZone(IANA)供跨时区
+// 口径测试与服务端 status 对拍;缺省沿用宿主本地时区(Date 分量)。
 const pad = (value) => String(value).padStart(PAD_WIDTH, '0')
 
-export function dayKey(ts) {
-  const d = new Date(ts)
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+const wallFormatters = new Map()
+function wallPartsOf(ts, timeZone) {
+  const date = new Date(ts)
+  if (typeof timeZone !== 'string' || timeZone.length === 0) {
+    return {
+      year: date.getFullYear(),
+      month: date.getMonth() + 1,
+      day: date.getDate(),
+      hour: date.getHours(),
+      minute: date.getMinutes(),
+    }
+  }
+  let formatter = wallFormatters.get(timeZone)
+  if (formatter === undefined) {
+    try {
+      formatter = new Intl.DateTimeFormat('en-US', {
+        timeZone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      })
+    } catch {
+      formatter = null
+    }
+    wallFormatters.set(timeZone, formatter)
+  }
+  if (formatter === null) return wallPartsOf(ts, undefined)
+  const parts = {}
+  for (const part of formatter.formatToParts(date)) {
+    if (part.type !== 'literal') parts[part.type] = Number(part.value)
+  }
+  return { year: parts.year, month: parts.month, day: parts.day, hour: parts.hour, minute: parts.minute }
 }
 
-export function hourKey(ts) {
-  return `${dayKey(ts)}T${pad(new Date(ts).getHours())}`
+const formatDayParts = (parts) => `${parts.year}-${pad(parts.month)}-${pad(parts.day)}`
+
+export function dayKey(ts, timeZone) {
+  return formatDayParts(wallPartsOf(ts, timeZone))
 }
 
-// 分钟桶起点对齐 10 分钟:向下取整到桶边界,不跨时
-export function minuteKey(ts) {
-  const d = new Date(ts)
-  const aligned = d.getMinutes() - (d.getMinutes() % MINUTE_BUCKET_SPAN_MINUTES)
-  return `${hourKey(ts)}:${pad(aligned)}`
+export function hourKey(ts, timeZone) {
+  const parts = wallPartsOf(ts, timeZone)
+  return `${formatDayParts(parts)}T${pad(parts.hour)}`
+}
+
+// 分钟桶起点按本地墙钟向下取整到桶边界,不跨时。偏移非整十分钟的时区
+// (尼泊尔 +5:45 / 查塔姆 +12:45)里按 UTC 纪元取整会落到 :45 这类非桶分钟,
+// 客户端与服务端必须用同一口径:localMs = ts - offset,取整后加回 offset
+export function minuteBucketStart(ts, offsetMinutes = new Date(ts).getTimezoneOffset()) {
+  const offsetMs = offsetMinutes * MS_PER_MINUTE
+  return Math.floor((ts - offsetMs) / MINUTE_BUCKET_SPAN_MS) * MINUTE_BUCKET_SPAN_MS + offsetMs
+}
+
+export function minuteKey(ts, timeZone) {
+  const parts = wallPartsOf(ts, timeZone)
+  const wallMs = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute)
+  const aligned = Math.floor(wallMs / MINUTE_BUCKET_SPAN_MS) * MINUTE_BUCKET_SPAN_MS
+  const date = new Date(aligned)
+  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}T${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}`
+}
+
+// 最近若干分钟的完整桶键:按绝对时间逐桶回推,不用「起点键..终点键」的墙钟
+// 区间——夏令时回拨时墙钟会倒退,字符串区间可能为空或纳入窗口外的桶
+export function recentMinuteBuckets(nowMs, timeZone, windowMinutes) {
+  const count = Math.ceil(windowMinutes / MINUTE_BUCKET_SPAN_MINUTES)
+  const keys = []
+  // 当前桶还在累计,计入会按整窗放大成系统性低估;从上一个桶起取完整桶
+  for (let step = 1; step <= count; step += 1) {
+    keys.push(minuteKey(nowMs - step * MINUTE_BUCKET_SPAN_MS, timeZone))
+  }
+  const unique = [...new Set(keys)].sort()
+  return { keys: new Set(unique), from: unique[0], to: unique[unique.length - 1] }
 }
 
 // 同一样本依次落三粒度
@@ -249,9 +313,16 @@ export class UsageStore {
     this.backupTable = undefined
     this.backupSessionTable = undefined
     this.openError = undefined
+    // 游标空而已有行:启动时只标记,待本轮回扫成功读完任一会话后再清,
+    // 防宿主全面拒读时每次启动清空历史(清库不再假定回扫必然可重建)
+    this.orphanResetPending = false
     this.lastPruneDay = ''
     this.markChain = Promise.resolve()
     this.pending = new Map()
+    // 本 boot 实时增量累积器:清表(孤儿清理/重建)会删掉本 boot 实时行,而回扫
+    // 按 liveFirstSeq 跳过实时拥区间不再重放,只能由此整体重建;全程保留不清,
+    // 任一步失败或清表期间新到的实时写入都留在累积器里,重试即可恢复
+    this.bootLive = { buckets: new Map(), sessions: new Map() }
     // 会话索引 pending:<g>|<bucket> → { bucket, sessions:Set };seen 防同桶重复入队
     this.sessionPending = new Map()
     this.sessionSeen = new Set()
@@ -268,12 +339,10 @@ export class UsageStore {
     this.domain = domain
     this.table = domain.table(TABLE_BUCKETS)
     this.sessionTable = domain.table(TABLE_SESSIONS)
-    // 游标空而已有行:无法区分半写坏态,丢弃行交由回扫重建
+    // 游标空而已有行:无法区分半写坏态,标记待清理;由采集器确认回扫能读出
+    // 至少一个会话后调用 clearOrphanRows,避免宿主全面拒读时反复清空历史
     const cursor = this.readCursor()
-    if ((cursor?.backfilledSessions?.length ?? 0) === 0 && !this.table.keys().next().done) {
-      for (const key of [...this.table.keys()]) await this.table.delete(key)
-      for (const key of [...this.sessionTable.keys()]) await this.sessionTable.delete(key)
-    }
+    this.orphanResetPending = (cursor?.backfilledSessions?.length ?? 0) === 0 && !this.table.keys().next().done
     // 备份域打开失败仅禁用回退能力,不拖垮主采集(openError 只覆盖主域)
     this.backupDomain = await facility.open(usageBackupDomain).catch(() => undefined)
     this.backupTable = this.backupDomain?.table(TABLE_BUCKETS)
@@ -314,8 +383,9 @@ export class UsageStore {
 
   // 同步合并进 pending,不等待持久化;崩溃丢失窗口 = flush 周期。
   // 入队按档保留资格过滤(F14):超出该档留存期的样本不写入——
-  // 写后即被 prune 删除是纯 IO 浪费;回扫历史导入经同一通道自动受控
-  async record(sample) {
+  // 写后即被 prune 删除是纯 IO 浪费;回扫历史导入经同一通道自动受控。
+  // options.live 标记实时路径写入:额外累积进本 boot 累积器,供清表后整体重建
+  async record(sample, options = {}) {
     await this.ready
     this.requireTable()
     const nowMs = this.now()
@@ -326,15 +396,35 @@ export class UsageStore {
       if (!withinRetention(g, bucketOf(sample.time), nowMs, this.retentionDays())) continue
       const bucket = bucketOf(sample.time)
       const entry = { ...delta, bucket, provider, model }
-      const existing = this.pending.get(rowKey(g, bucket, provider, model))
-      this.pending.set(rowKey(g, bucket, provider, model), existing ? addDelta(existing, entry) : entry)
+      const key = rowKey(g, bucket, provider, model)
+      const existing = this.pending.get(key)
+      this.pending.set(key, existing ? addDelta(existing, entry) : entry)
+      if (options.live === true) this.accumulateBootLive(key, entry)
     }
     this.scheduleFlush()
   }
 
+  accumulateBootLive(key, entry) {
+    const existing = this.bootLive.buckets.get(key)
+    this.bootLive.buckets.set(key, existing ? addDelta(existing, entry) : entry)
+  }
+
+  // 表已清空后按累积器整体重建本 boot 行:累积器是同键本 boot 全量实时增量,
+  // 清表期间新到的实时写入已并入其中,故按 key 覆盖 pending 而非累加(否则双计);
+  // 去重内存按「表内现存行」重建,已随表删除的键允许回扫重新入队。
+  // 不清累积器:重建后再清表仍能恢复,失败重试也不会丢
+  rebuildFromBootLive() {
+    for (const [key, delta] of this.bootLive.buckets) this.pending.set(key, { ...delta })
+    this.sessionSeen.clear()
+    for (const [key, entry] of this.bootLive.sessions) {
+      this.sessionPending.set(key, { bucket: entry.bucket, sessions: new Set(entry.sessions) })
+      for (const id of entry.sessions) this.sessionSeen.add(`${key}|${id}`)
+    }
+  }
+
   // 会话索引:桶内去重的真实会话 id。重复记录由内存 seen 短路,跨 boot 由
-  // 行内 set 合并兜底;小时档超保留期只落天档。
-  async recordSession(sessionId, time) {
+  // 行内 set 合并兜底;小时档超保留期只落天档。options.live 同 record
+  async recordSession(sessionId, time, options = {}) {
     if (typeof sessionId !== 'string' || sessionId === '' || !Number.isFinite(time)) return
     await this.ready
     this.requireSessionTable()
@@ -351,6 +441,11 @@ export class UsageStore {
       const existing = this.sessionPending.get(key)
       if (existing !== undefined) existing.sessions.add(sessionId)
       else this.sessionPending.set(key, { bucket, sessions: new Set([sessionId]) })
+      if (options.live === true) {
+        const live = this.bootLive.sessions.get(key)
+        if (live !== undefined) live.sessions.add(sessionId)
+        else this.bootLive.sessions.set(key, { bucket, sessions: new Set([sessionId]) })
+      }
     }
     if (added) this.scheduleFlush()
   }
@@ -559,22 +654,47 @@ export class UsageStore {
     })
   }
 
+  // 清空两张表(保留游标):孤儿行清理与重建共用
+  async wipeTables() {
+    const table = this.requireTable()
+    for (const key of [...table.keys()]) await table.delete(key)
+    const sessions = this.requireSessionTable()
+    for (const key of [...sessions.keys()]) await sessions.delete(key)
+  }
+
+  // 清理启动时发现的半写孤儿行:仅当本轮回扫已成功读完至少一个会话才调用。
+  // 清理与游标写同链串行,保留 liveFirstSeq 边界。
+  // 清表会连本 boot 实时行一起删掉,而回扫对实时拥区间跳过重放:清完按累积器
+  // 整体重建;累积器不清,writeGlobal/落盘任一步失败后重试仍能恢复
+  async clearOrphanRows() {
+    if (!this.orphanResetPending) return false
+    await this.enqueueGlobalWrite(async () => {
+      await this.flushBatch()
+      await this.wipeTables()
+      const cursor = this.readCursor() ?? {}
+      await this.writeGlobal([], cursor.liveFirstSeq ?? {})
+      this.rebuildFromBootLive()
+      await this.flushBatch()
+    })
+    this.orphanResetPending = false
+    return true
+  }
+
   reset(boundaries) {
     return this.enqueueGlobalWrite(async () => {
       await this.flushBatch()
       // 清空前快照到备份域:重建丢数据(规则缺陷/中断/口径变化)可整体回退;
-      // 备份不可用视为 reset 失败——回退安全带是重建的前置条件
+      // 备份域不可用时跳过(仅失去回退点,backupInfo 透明展示),重建不被卡死
       await this.snapshotToBackup()
-      const table = this.requireTable()
-      for (const key of [...table.keys()]) await table.delete(key)
-      const sessions = this.requireSessionTable()
-      for (const key of [...sessions.keys()]) await sessions.delete(key)
-      // 去重内存与库里状态同源:清库后同 (会话,桶) 允许重新入队
-      this.sessionPending = new Map()
-      this.sessionSeen.clear()
+      await this.wipeTables()
       const liveFirstSeq = {}
       if (boundaries) for (const [id, seq] of boundaries) liveFirstSeq[id] = seq
       await this.writeGlobal([], liveFirstSeq)
+      // 重建只重放 [0,watermark),实时拥区间由累积器整体回填;累积器不清,
+      // 快照/清表/落盘任一步失败后重试仍能恢复
+      this.rebuildFromBootLive()
+      await this.flushBatch()
+      this.orphanResetPending = false
     })
   }
 
@@ -600,6 +720,8 @@ export class UsageStore {
   // 再覆盖备份域;返回快照时刻与回写行数
   async restoreFromBackup() {
     if (this.backupTable === undefined) throw new Error('usage backup domain unavailable')
+    // 无快照时回退 = 清空全表与游标,属破坏性动作:直接调用也拒绝,由调用方给出状态码
+    if (!this.backupInfo().available) throw new Error('usage backup snapshot unavailable')
     return this.enqueueGlobalWrite(async () => {
       await this.flushBatch()
       const savedRows = [...this.backupTable.entries()]
@@ -614,7 +736,11 @@ export class UsageStore {
       for (const [key, row] of savedSessions) await sessions.put(key, row)
       this.sessionPending = new Map()
       this.sessionSeen.clear()
+      // 回退到备份快照后表内容为快照时刻状态,累积器若保留会在下次清表时
+      // 复活已回退掉的数据;清空累积器,后续实时数据从回退点重新累积
+      this.bootLive = { buckets: new Map(), sessions: new Map() }
       await this.writeGlobal(saved?.backfilledSessions ?? [], saved?.liveFirstSeq ?? {})
+      this.orphanResetPending = false
       return { takenAt: saved?.takenAt, rows: savedRows.length }
     })
   }

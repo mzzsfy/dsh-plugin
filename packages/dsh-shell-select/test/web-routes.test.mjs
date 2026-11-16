@@ -1,6 +1,7 @@
 // web 路由行:声明式 inject 门控 + settings 面驱动的 faces(0.1.7 形态)。
 // BDD 场景:webServer 缺席不激活路由;GET 读 describe 值;POST 归一校验后 replace;
-// ns 缺失读兜底出厂默认;写路径合并既有字段(单改 default 不丢 shells)。
+// ns 缺失读兜底出厂默认;写协议只收 shells/default/deny 三键(未知键与类型错 400),
+// 其余字段(执行预算)由写路径从当前配置整份保留。
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -73,11 +74,16 @@ function stubCtx({ settings = stubSettings([describedSection()]), webServer = st
   }
 }
 
-function fakeReq(method, body) {
+function fakeReq(method, body, headers = {}) {
   const text = body === undefined ? '' : JSON.stringify(body)
   return {
     method,
-    headers: { origin: 'http://127.0.0.1:9191', host: '127.0.0.1:9191' },
+    headers: {
+      origin: 'http://127.0.0.1:9191',
+      host: '127.0.0.1:9191',
+      'content-type': 'application/json',
+      ...headers,
+    },
     on(event, cb) {
       if (event === 'data') setImmediate(() => cb(Buffer.from(text)))
       if (event === 'end') setImmediate(cb)
@@ -99,10 +105,10 @@ function fakeRes() {
   }
 }
 
-async function callConfig(ctx, method, body) {
+async function callConfig(ctx, method, body, headers = {}) {
   const handler = ctx.webServer.state.handlers.get('/api/shell-select/config')
   const res = fakeRes()
-  await handler(fakeReq(method, body), res)
+  await handler(fakeReq(method, body, headers), res)
   return res.state
 }
 
@@ -207,13 +213,15 @@ test('POST /config:落盘后经 refresh 桥刷新执行面(运行中删除客户
     assert.equal(state.status, 200)
     assert.equal(settings.calls.replace.length, 1)
     assert.equal(refreshes.length, 1)
+    assert.equal(JSON.parse(state.body).noExecutor, false, '有活跃执行面时必须标记已送达')
+    assert.equal(JSON.parse(state.body).refreshFailed, false)
     assert.deepEqual(refreshes[0].shells.map((entry) => entry.id), ['pwsh', 'git-bash'])
   } finally {
     unbind()
   }
 })
 
-test('POST /config:桥未绑定(未接管态)请求静默丢弃,写路径不炸', async () => {
+test('POST /config:桥未绑定(未接管态)请求静默丢弃,写路径不炸且显式 noExecutor', async () => {
   const { ctx, settings } = stubCtx()
   webRoutes.apply(ctx)
   const state = await callConfig(ctx, 'POST', {
@@ -223,6 +231,31 @@ test('POST /config:桥未绑定(未接管态)请求静默丢弃,写路径不炸'
   })
   assert.equal(state.status, 200)
   assert.equal(settings.calls.replace.length, 1)
+  const payload = JSON.parse(state.body)
+  assert.equal(payload.noExecutor, true, '无活跃执行面必须显式标记,页面不得称即时生效')
+  assert.equal(payload.refreshFailed, false)
+})
+
+// S13:落盘已成功,执行面 refresh 桥抛错不得把成功写入回成 400
+// (客户端会重试同一份合法配置);响应带 refreshFailed 供页面提示。
+test('POST /config:落盘成功但 refresh 桥抛错 → 200 + refreshFailed:true 且不回滚写入', async () => {
+  const { ctx, settings } = stubCtx()
+  webRoutes.apply(ctx)
+  const unbind = bindShellRefreshBridge(() => { throw new Error('refresh bridge down') })
+  try {
+    const state = await callConfig(ctx, 'POST', {
+      shells: [{ id: 'pwsh', name: 'PowerShell', kind: 'pwsh', path: NODE_EXE }],
+      default: 'pwsh',
+      deny: [],
+    })
+    assert.equal(state.status, 200)
+    assert.equal(settings.calls.replace.length, 1, '落盘必须保留')
+    const payload = JSON.parse(state.body)
+    assert.equal(payload.ok, true)
+    assert.equal(payload.refreshFailed, true)
+  } finally {
+    unbind()
+  }
 })
 
 test('POST /config:非法负载(空清单/坏 default)400 不写', async () => {
@@ -244,6 +277,39 @@ test('POST /config:非对象负载 400', async () => {
   webRoutes.apply(ctx)
   const state = await callConfig(ctx, 'POST', ['nope'])
   assert.equal(state.status, 400)
+})
+
+test('POST /config:未知字段 400(不再静默丢弃),错误文本列出未知键', async () => {
+  const { ctx, settings } = stubCtx()
+  webRoutes.apply(ctx)
+  const state = await callConfig(ctx, 'POST', {
+    shells: [{ id: 'pwsh', name: 'PowerShell', kind: 'pwsh', path: NODE_EXE }],
+    default: 'pwsh',
+    deny: [],
+    timeoutMs: 1,
+    cwd: 'C:/',
+  })
+  assert.equal(state.status, 400)
+  assert.match(JSON.parse(state.body).error, /timeoutMs/)
+  assert.match(JSON.parse(state.body).error, /cwd/)
+  assert.equal(settings.calls.replace.length, 0)
+})
+
+test('POST /config:类型错 400(不再回落旧值或静默忽略)', async () => {
+  const { ctx, settings } = stubCtx()
+  webRoutes.apply(ctx)
+  const badPayloads = [
+    { shells: 'nope', default: 'pwsh', deny: [] },
+    { shells: [], default: 42, deny: [] },
+    { shells: [], default: 'pwsh', deny: 'nope' },
+    { shells: [], default: 'pwsh', deny: ['ok', 42] },
+    { default: 'pwsh', deny: [] },
+  ]
+  for (const payload of badPayloads) {
+    const state = await callConfig(ctx, 'POST', payload)
+    assert.equal(state.status, 400, `payload 应被拒: ${JSON.stringify(payload)}`)
+  }
+  assert.equal(settings.calls.replace.length, 0)
 })
 
 test('删除条目全链:POST 移除 cmd → 落盘无 cmd → 执行面拒绝已删 id(出厂默认不复活)', async () => {
@@ -277,4 +343,84 @@ test('buildFaces:probe 真实路径布尔,detect 返回候选数组', () => {
   const faces = buildFaces({ logger: { warn: () => {} } }, settings)
   assert.equal(faces.probe(NODE_EXE), true)
   assert.ok(Array.isArray(faces.detect(['cmd'])))
+})
+
+// ---- 写方法闸门(共享 route-gate 接线):同源 + JSON content-type ----
+
+const VALID_WRITE = {
+  shells: [{ id: 'pwsh', name: 'PowerShell', kind: 'pwsh', path: NODE_EXE }],
+  default: 'pwsh',
+  deny: [],
+}
+
+test('写路由 text/plain:400 且零落盘(跨站表单无预检,JSON 门是 CSRF 防线)', async () => {
+  const { ctx, settings } = stubCtx()
+  webRoutes.apply(ctx)
+  const state = await callConfig(ctx, 'POST', VALID_WRITE, { 'content-type': 'text/plain' })
+  assert.equal(state.status, 400)
+  assert.match(JSON.parse(state.body).error, /content-type/)
+  assert.equal(settings.calls.replace.length, 0)
+})
+
+test('写路由 Host 大小写同源:200(Host/Origin 比对大小写不敏感)', async () => {
+  const { ctx, settings } = stubCtx()
+  webRoutes.apply(ctx)
+  const state = await callConfig(ctx, 'POST', VALID_WRITE, {
+    origin: 'http://LocalHost:9191',
+    host: 'LOCALHOST:9191',
+  })
+  assert.equal(state.status, 200)
+  assert.equal(settings.calls.replace.length, 1)
+})
+
+test('写路由跨源:403 且零落盘', async () => {
+  const { ctx, settings } = stubCtx()
+  webRoutes.apply(ctx)
+  const state = await callConfig(ctx, 'POST', VALID_WRITE, { origin: 'http://evil.example', host: '127.0.0.1:9191' })
+  assert.equal(state.status, 403)
+  assert.equal(settings.calls.replace.length, 0)
+})
+
+test('S3 超限请求体:413 经真实 socket 可送达(不先 destroy socket)', async () => {
+  const { createServer, request } = await import('node:http')
+  const { ctx } = stubCtx()
+  webRoutes.apply(ctx)
+  const handler = ctx.webServer.state.handlers.get('/api/shell-select/config')
+  const server = createServer((req, res) => {
+    Promise.resolve(handler(req, res)).catch(() => {
+      if (!res.headersSent) res.writeHead(500)
+      res.end()
+    })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address()
+  try {
+    // 64KB 上限 ×2 以上:旧实现在 data 回调里先 req.destroy() 再回 400,
+    // 客户端只拿到 ECONNRESET,响应体不可达
+    const oversized = JSON.stringify({ ...VALID_WRITE, default: 'x'.repeat(96 * 1024) })
+    assert.ok(oversized.length > 64 * 1024)
+    const response = await new Promise((resolve, reject) => {
+      const req = request({
+        host: '127.0.0.1',
+        port,
+        path: '/api/shell-select/config',
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          origin: `http://127.0.0.1:${port}`,
+          host: `127.0.0.1:${port}`,
+        },
+      }, (res) => {
+        const chunks = []
+        res.on('data', (chunk) => chunks.push(chunk))
+        res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8') }))
+      })
+      req.on('error', reject)
+      req.end(oversized)
+    })
+    assert.equal(response.status, 413)
+    assert.match(response.body, /请求体超过上限/)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
 })

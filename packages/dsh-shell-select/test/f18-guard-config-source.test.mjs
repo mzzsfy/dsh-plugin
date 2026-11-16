@@ -71,8 +71,9 @@ test('F18-a 写路径收口:设置面保存后执行面立即换源(deny 生效�
 
   const settings = stubSettings({ ...mounted })
   const faces = buildFaces({ logger: { warn: () => {} } }, settings)
-  const listing = await faces.updateConfig({ deny: ['^format\\s'], shells: shells(false), default: 'pwsh' })
-  assert.deepEqual(listing.shells.map((entry) => entry.id), ['pwsh'], '写响应投影按新清单')
+  const { resolved, refreshFailed } = await faces.updateConfig({ deny: ['^format\\s'], shells: shells(false), default: 'pwsh' })
+  assert.deepEqual(resolved.shells.map((entry) => entry.id), ['pwsh'], '写响应投影按新清单')
+  assert.equal(refreshFailed, false, '执行器在场时刷新桥成功')
 
   // 执行面必须已经换源(不依赖行重载)
   assert.throws(() => executor.assertNotDenied('format C:'), /blocked by shell-select deny pattern/)
@@ -101,4 +102,13 @@ test('F18-c guard-config:官方行代挂配置以 settings.yaml 的 shell 节为
   assert.deepEqual(await officialRowConfig(async () => ({})), {}, '缺节交 schema 默认')
   assert.deepEqual(await officialRowConfig(async () => ({ shell: ['nope'] })), {}, '非对象节按缺节处理')
   assert.deepEqual(await officialRowConfig(async () => { throw new Error('read failed') }), {}, '读取失败不阻断代挂')
+})
+
+test('P3 guard-config:来源降级经 onError 留痕,不再静默成 {}', async () => {
+  const readFailures = []
+  await officialRowConfig(async () => { throw new Error('read failed') }, { onError: (msg) => readFailures.push(msg) })
+  assert.ok(readFailures.some((msg) => msg.includes('settings.yaml 读取失败')), readFailures.join(' | '))
+  const shapeFailures = []
+  await officialRowConfig(async () => ({ shell: ['nope'] }), { onError: (msg) => shapeFailures.push(msg) })
+  assert.ok(shapeFailures.some((msg) => msg.includes('形态非法')), shapeFailures.join(' | '))
 })

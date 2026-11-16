@@ -28,7 +28,7 @@ export function assistantText(message) {
 
 /** 本回合事件切片:从该 turn 的 turn/start 起,到同号 turn/end 止。 */
 export function turnSlice(events, turn) {
-  if (!Array.isArray(events)) return []
+  if (!Array.isArray(events) || turn === undefined) return []
   let start = -1
   let end = events.length
   for (let index = 0; index < events.length; index += 1) {
@@ -39,7 +39,16 @@ export function turnSlice(events, turn) {
       break
     }
   }
-  return events.slice(Math.max(start, 0), end)
+  // 窗口缺本回合 turn/start 时不能从 0 取:那会把上一回合的事件并进来。
+  // 退到最近一个其它回合的 turn/end 之后;没有边界时才是整段都属于本回合。
+  let from = start
+  if (from === -1) {
+    from = 0
+    for (let index = 0; index < end; index += 1) {
+      if (events[index]?.type === 'turn/end' && events[index].data?.turn !== turn) from = index + 1
+    }
+  }
+  return events.slice(from, end)
 }
 
 /** 末行标记;严格匹配裸标记,括号、下划线、连字符等装饰都不算。 */
@@ -156,8 +165,13 @@ function effectiveWrites(slice) {
     .filter((call) => !failed.has(call.data?.callId) && !isReadOnlyCall(call))
 }
 
-/** 结案判定;reason 供日志与提醒文案选择。 */
-export function closureVerdict(events, turn) {
+/**
+ * 结案判定;reason 供日志与提醒文案选择。
+ *
+ * enforce=false 时不再要求写文件后必须 present,只有标记或 present 才算结案凭据,
+ * 供“关闭结案强制”后按普通回合处理。
+ */
+export function closureVerdict(events, turn, { enforce = true } = {}) {
   const slice = turnSlice(events, turn)
   const writes = effectiveWrites(slice)
   const presents = slice.filter(
@@ -168,7 +182,7 @@ export function closureVerdict(events, turn) {
     lastPresent !== undefined && writes.some((event) => event.seq > lastPresent.seq)
 
   if (lastPresent !== undefined && !presentInvalidated) return { closed: true, reason: 'present' }
-  if (writes.length > 0) return { closed: false, reason: 'file-write-requires-present' }
+  if (enforce && writes.length > 0) return { closed: false, reason: 'file-write-requires-present' }
   if (matchMarker(lastAssistantText(slice, turn)) !== null) return { closed: true, reason: 'marker' }
   return { closed: false, reason: 'no-signal' }
 }

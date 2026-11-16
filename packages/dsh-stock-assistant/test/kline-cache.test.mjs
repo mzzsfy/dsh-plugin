@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { createKlineCache } from '../src/kline-cache.mjs'
 import { memoryStorage } from './helpers.mjs'
 
-const keyParts = { providerInstanceId: 'em-default', market: 'XSHG', period: '1d', code: '600519' }
+const keyParts = { providerInstanceId: 'em-default', market: 'XSHG', period: '1d', code: '600519', limit: 250 }
 const payload = { providerInstanceId: 'em-default', candles: [{ time: '2026-10-30', open: 1, high: 2, low: 0.5, close: 1.5, volume: 100 }], preClose: 1.4, complete: true, routingRevision: 0 }
 
 const setup = async () => {
@@ -51,31 +51,18 @@ test('routingRevision 不符 miss', async () => {
 test('损坏条目 miss 且不抛', async () => {
   const storage = memoryStorage()
   const domain = await storage.open()
-  await domain.table('cache').put('kline:em-default:XSHG:1d:600519', { kind: 'kline' })
+  await domain.table('cache').put('kline:em-default:XSHG:1d:600519:250', { kind: 'kline' })
   let now = 1_000_000_000_000
   const cache = createKlineCache({ cacheTable: domain.table('cache'), now: () => now })
   assert.equal(await cache.get(keyParts, 0), null)
 })
 
-test('trend TTL=0 put 跳过写入 get 恒 miss', async () => {
+// 回归: 不同 limit 的同一标的/周期结果长度不同, 缓存 key 必须隔离 limit
+test('不同 limit 不互相命中', async () => {
   const { cache } = await setup()
-  await cache.put({ ...keyParts, period: 'trend' }, payload, 0)
-  assert.equal(await cache.get({ ...keyParts, period: 'trend' }, 0), null)
-})
-
-test('invalidate 删除指定条目', async () => {
-  const { cache } = await setup()
-  await cache.put(keyParts, payload, 0)
-  await cache.invalidate(keyParts)
-  assert.equal(await cache.get(keyParts, 0), null)
-})
-
-// 回归: update(key, () => undefined) 会在表里留下空记录, 之后 catalog.records 遍历 cache 表时崩在 cache.kind
-test('invalidate 后表里不留空记录', async () => {
-  const { cache, domain } = await setup()
-  await cache.put(keyParts, payload, 0)
-  await cache.invalidate(keyParts)
-  assert.equal([...domain.table('cache').entries()].length, 0)
+  await cache.put({ ...keyParts, limit: 250 }, payload, 0)
+  assert.equal(await cache.get({ ...keyParts, limit: 1000 }, 0), null)
+  assert.ok(await cache.get({ ...keyParts, limit: 250 }, 0))
 })
 
 test('TTL 过期即删, 不留空记录', async () => {

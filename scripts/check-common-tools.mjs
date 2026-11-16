@@ -131,7 +131,7 @@ export function check({ packagesDir = PACKAGES } = {}) {
     if (external !== undefined && !Array.isArray(external)) problems.push(`${name}: dsh.client.external 必须是字符串数组`)
     else if (!(external ?? []).includes(CLIENT_SPEC)) problems.push(`${name}: dsh.client.external 未声明 ${CLIENT_SPEC}`)
 
-    if (!patchPath) { problems.push(`${name}: 缺 cordis.patch.yml`); continue }
+    if (!existsSync(patchPath)) { problems.push(`${name}: 缺 cordis.patch.yml`); continue }
     if (hasInlineRowForm(patchText)) problems.push(`${name}: 装载行不得用单行 insert 形态(宿主只支持数组)`)
     const own = rows.filter(row => row.name === LIB)
     const expected = name.replace(/^dsh-/, '') + ROW_SUFFIX
@@ -141,6 +141,14 @@ export function check({ packagesDir = PACKAGES } = {}) {
 
     const patchFile = manifest.dsh?.bundle?.patch
     if (patchFile !== undefined && !existsSync(join(dir, patchFile))) problems.push(`${name}: dsh.bundle.patch 指向不存在的 ${patchFile}`)
+
+    // 发布清单必须带上宿主实际读取的 patch 文件:files 白名单漏掉它时源码检查仍绿,
+    // 装到用户机器才因找不到装载行而失效
+    if (Array.isArray(manifest.files)) {
+      const publishedPatch = (patchFile ?? './cordis.patch.yml').replace(/^\.\//, '')
+      const published = new Set(manifest.files.map(file => file.replace(/^\.\//, '')))
+      if (!published.has(publishedPatch)) problems.push(`${name}: files 未包含 ${publishedPatch}`)
+    }
 
     if (!source) continue
     if (source.includes('<common-tools-inline>')) problems.push(`${name}: src/client.js 残留内联生成区(托管形态不应内联)`)

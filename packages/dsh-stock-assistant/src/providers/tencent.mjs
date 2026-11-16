@@ -1,9 +1,12 @@
-// 腾讯公开行情接口适配器:quotes+kline(备源)。非官方端点,无SLA,随时可能失效;延迟未知,行情时间戳为来源快照时间。
-import { normalizeQuote, parseQuoteTime, StockError, MARKET_META, sharesFromLots, amountFromWan } from '../market-model.mjs'
+// 腾讯公开行情接口适配器:quotes+kline+trend(备源)。非官方端点,无SLA,随时可能失效;延迟未知,行情时间戳为来源快照时间。
+import { normalizeQuote, parseQuoteTime, StockError, MARKET_META, sharesFromLots, amountFromWan, zonedUnixSeconds } from '../market-model.mjs'
+// 分时时间戳与东财同一基准: 腾讯给的是北京时间
+const SOURCE_ZONE = 'Asia/Shanghai'
 // 官方默认端点表(key 供 instance.endpoints 覆盖, 反代/镜像场景由 ctx.endpoints 提供同名 key)
 const DEFAULT_ENDPOINTS = {
   quotes: 'https://qt.gtimg.cn/q=',
   kline: 'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get',
+  trend: 'https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=',
 }
 const endpointOf = (ctx, key) => ctx.endpoints?.[key] || DEFAULT_ENDPOINTS[key]
 // quotes 与 kline 共用一张前缀表,防双源漂移(design.md 数据结构节)。
@@ -33,7 +36,7 @@ const quoteStamp = raw => {
 }
 
 export const tencent = {
-  descriptor: { adapterId: 'tencent', capabilities: ['quotes', 'kline'], markets: ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS'], instruments: ['equity'], maxQuoteBatch: 60, credential: 'none', description: '腾讯公开接口：免凭据，行情与K线备源，非官方无SLA', endpointKeys: [{ key: 'quotes', label: '行情批量' }, { key: 'kline', label: 'K线历史' }] },
+  descriptor: { adapterId: 'tencent', capabilities: ['quotes', 'kline', 'trend'], markets: ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS'], instruments: ['equity'], maxQuoteBatch: 60, credential: 'none', description: '腾讯公开接口：免凭据，行情/K线/分时备源，非官方无SLA', endpointKeys: [{ key: 'quotes', label: '行情批量' }, { key: 'kline', label: 'K线历史' }, { key: 'trend', label: '分时' }] },
   async probe(request, ctx) {
     // kline 探针直接拉代表证券 3 根日K(quotes 不覆盖港股);quotes 探针沿用代表证券行。
     if (request.capability === 'kline') {
@@ -42,6 +45,14 @@ export const tencent = {
       const result = await this.kline({ ...request, securityId: `${request.market}:equity:${code}`, code, period: '1d', adjust: 'qfq', limit: 3 }, ctx)
       if (!result.candles.length) throw new StockError('NO_DATA', '来源未返回可校验数据，暂不能确认能力就绪', 422)
       return { status: 'ready', capability: 'kline', market: request.market, instrument: 'equity' }
+    }
+    // 分时探针拉一次代表证券的当日分钟线: 美股没有分钟线, 直接判不支持
+    if (request.capability === 'trend') {
+      const code = { XSHG: '600519', XSHE: '000001', XHKG: '00700' }[request.market]
+      if (!code) throw new StockError('UNSUPPORTED_CAPABILITY', '腾讯来源不提供该市场分时', 422)
+      const result = await this.trend({ ...request, securityId: `${request.market}:equity:${code}`, code }, ctx)
+      if (!result.candles.length) throw new StockError('NO_DATA', '来源未返回可校验数据，暂不能确认能力就绪', 422)
+      return { status: 'ready', capability: 'trend', market: request.market, instrument: 'equity' }
     }
     const PROBE = { XSHG: '600519', XSHE: '000001', XHKG: '00700', XNAS: 'AAPL', XNYS: 'BABA' }
     const security = request.securities?.[0] || { exchange: request.market, code: PROBE[request.market] || '000001' }
@@ -84,7 +95,6 @@ export const tencent = {
     return { providerInstanceId: request.providerInstanceId, fetchedAt: ctx.now(), items, errors: request.securities.filter(s => !seen.has(symbolOf(s))).map(s => ({ securityId: s.id, code: 'NO_DATA', message: '来源未返回此证券报价' })) }
   },
   async kline(request, ctx) {
-    if (request.period === 'trend') throw new StockError('UNSUPPORTED_CAPABILITY', '腾讯来源不提供分时数据', 422)
     let symbol = klineSymbolOf(request)
     if (request.market === 'XNAS' || request.market === 'XNYS') {
       const mapped = ctx.usSymbols?.get(`US:${request.code}`)
@@ -92,7 +102,9 @@ export const tencent = {
       if (suffix === undefined) throw new StockError('UNSUPPORTED_CAPABILITY', '腾讯来源的美股K线需先经搜索建立代码映射', 422)
       symbol = suffix ? `us${request.code}.${suffix}` : `us${request.code}`
     }
-    const param = `${symbol},${{ '1d': 'day', '1w': 'week', '1M': 'month' }[request.period]},,,${request.limit},qfq`
+    const period = { '1d': 'day', '1w': 'week', '1M': 'month' }[request.period]
+    if (!period) throw new StockError('INVALID_PARAM', '腾讯 K 线只支持日/周/月，分时请走分时能力', 400)
+    const param = `${symbol},${period},,,${request.limit},qfq`
     let response
     try {
       response = await ctx.fetch(`${endpointOf(ctx, 'kline')}?param=${param}`, { headers: { Referer: 'https://gu.qq.com/', 'User-Agent': 'Mozilla/5.0' }, signal: ctx.signal, redirect: 'error' })
@@ -118,5 +130,39 @@ export const tencent = {
     const qt = Array.isArray(data?.qt?.[symbol]) ? data.qt[symbol] : null
     const preClose = qt ? num(qt[4]) : null
     return { providerInstanceId: request.providerInstanceId, fetchedAt: ctx.now(), complete: true, preClose, candles }
+  },
+  // 分时(备源): minute/query 给当日逐分钟价格/量/额。腾讯的分时没有开高低与均价,
+  // 移位填成同一价, 客户端按 OHLC 校验时才不会把每根丢掉。
+  async trend(request, ctx) {
+    const symbol = klineSymbolOf(request)
+    if (!SYMBOL_PREFIX[request.market]) throw new StockError('UNSUPPORTED_CAPABILITY', '腾讯分时只覆盖沪深港', 422)
+    let response
+    try {
+      response = await ctx.fetch(endpointOf(ctx, 'trend') + symbol, { headers: { Referer: 'https://gu.qq.com/', 'User-Agent': 'Mozilla/5.0' }, signal: ctx.signal, redirect: 'error' })
+    } catch (e) {
+      if (ctx.signal.aborted) throw new StockError('CANCELLED', '请求已取消', 503)
+      if (e instanceof StockError) throw e
+      throw new StockError('NETWORK', '无法连接行情来源', 502, { retryable: true })
+    }
+    if (!response.ok) throw new StockError('NETWORK', '来源服务暂不可用', 502, { retryable: true })
+    const body = await response.json().catch(() => { throw new StockError('BAD_PAYLOAD', '来源响应不是JSON', 502) })
+    const data = body?.data?.[symbol]?.data
+    const rows = Array.isArray(data?.data) ? data.data : []
+    const day = /^(\d{4})(\d{2})(\d{2})$/.exec(String(data?.date || ''))
+    if (!rows.length || !day) throw new StockError('NO_DATA', '来源未返回此证券分时', 422)
+    const stamp = `${day[1]}-${day[2]}-${day[3]}`
+    const candles = []
+    for (const row of rows) {
+      const cols = String(row).split(' ')
+      // 价格必须是纯数字才收: 上游偶有畸形行, 与其把 NaN 画进图里, 不如少一点
+      if (!/^\d{3,4}$/.test(cols[0] || '') || !/^\d+(\.\d+)?$/.test(cols[1] || '')) continue
+      const time = `${cols[0].padStart(4, '0').slice(0, 2)}:${cols[0].padStart(4, '0').slice(2)}`
+      const price = num(cols[1])
+      if (price == null) continue
+      candles.push({ time, at: zonedUnixSeconds(`${stamp} ${time}`, SOURCE_ZONE), open: price, close: price, high: price, low: price, volume: sharesFromLots(num(cols[2]), request.market), amount: num(cols[3]), avg: null })
+    }
+    if (!candles.length) throw new StockError('NO_DATA', '来源分时数据不可解析', 422)
+    const qt = Array.isArray(body?.data?.[symbol]?.qt?.[symbol]) ? body.data[symbol].qt[symbol] : null
+    return { providerInstanceId: request.providerInstanceId, fetchedAt: ctx.now(), complete: true, preClose: qt ? num(qt[4]) : null, candles }
   },
 }

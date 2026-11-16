@@ -71,7 +71,7 @@ export function respondFor(method, path, headers, parsedBody, options = {}) {
   const model = parsedBody?.model ?? null
   if (method === 'GET' && path.includes('/models')) return modelListResponse(headers, options.models)
   const thinking = options.scenario === 'think'
-  const toolCall = toolCallOf(options.scenario, parsedBody)
+  const toolCall = toolCallOf(options.scenario)
   const scenarioTool = toolCall !== null
   const [input = 1, output = 1] = options.tokens ?? []
   const protocol = path.includes('/responses') ? 'responses' : path.includes('/messages') ? 'anthropic' : path.includes('/chat/completions') ? 'openai' : 'other'

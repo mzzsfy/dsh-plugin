@@ -10,7 +10,7 @@ const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const source = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
 
 test('switch 隐藏规则以 input[type="checkbox"] 精确匹配', () => {
-  assert.match(source, /\.tu-switch input\[type="checkbox"\] \{ position:absolute/)
+  assert.match(source, /\.tu-switch input\[type="checkbox"\]\s*\{\s*position:absolute/)
 })
 
 test('switch 状态选择器禁止裸 input 锚定(防误伤同 label 的文本输入)', () => {
@@ -41,15 +41,13 @@ test('checked/focus-visible/disabled 三态均以 checkbox 锚定', () => {
   assert.match(source, /\.tu-switch input\[type="checkbox"\]:disabled \+/)
 })
 
-test('插件页卡片为官方 PluginCard 形制: li 卡壳 + 头部折叠 + 令牌同源', () => {
-  // Given 官方插件卡片 = ul.cards > li.PluginCard(边框卡壳 + 名称/描述头部 + chevron 折叠)
-  // When 本插件卡片注册进同一列表(slot 契约: 外观归插件自持, 官方壳未导出)
-  // Then 静态锁定 tu-pc 镜像形制, 防止退化回裸 div 平铺
-  assert.match(source, /h\('li', \{ className: 'tu-pc/, '卡片根元素必须是 li(官方列表 ul.cards 的合法子元素)')
-  assert.match(source, /\.tu-pc\{border:\.5px solid var\(--dsw-alias-border-l4\)/, '卡壳边框/底色令牌必须与官方 PluginCard 同源')
-  assert.match(source, /h\('button', \{ type: 'button', className: 'tu-pc__head'/, '缺少官方形制的头部按钮')
-  assert.match(source, /aria-expanded/, '头部必须可折叠并暴露 aria-expanded')
-  assert.match(source, /\.tu-pc__hint\{[^}]*var\(--dsw-alias-label-tertiary\)/, '提示文本令牌必须与官方 hint 同源')
+test('设置分区为紧凑卡组: 560px 容器 + 行内地址/状态, 不再有旧插件卡', () => {
+  assert.match(source, /\.tu-set\{[^}]*max-width:560px/, '设置分区必须遵守 560px 内容宽度')
+  assert.match(source, /className: 'tu-row__url'/, '隧道行必须有完整地址')
+  assert.match(source, /className: 'tu-row__meta'/, '隧道行必须有状态/统计辅助行')
+  assert.match(source, /urlDisabled/, '停用/路由错误行必须关闭地址入口')
+  assert.match(source, /tu-row__url--disabled/, '停用/路由错误地址需要禁用样式')
+  assert.doesNotMatch(source, /tu-pc/, '旧插件卡形制必须移除')
 })
 
 test('client.js 无顶层词法声明(经典 script 书挡内安全)', () => {
@@ -65,17 +63,13 @@ test('类名前缀全量 tu-(插件样式全局注入, 跨包类名冲突即互�
   assert.deepEqual(foreign, [], `存在非 tu- 前缀类名: ${[...new Set(foreign)].join(', ')}`)
 })
 
-test('插件卡双代槽位并存注册(0.1.2-0.1.5 settings.plugin.item; 0.1.7-rc.1+ plugins.bundle.config)', () => {
-  // Given settings>插件 页可配置卡在 rc.1 被宿主移除, 插件管理页包详情配置槽为 rc.1 载体
-  // Then 两代注册面同在, 新代 key = 完整包名, 错误世代宿主惰性零成本
-  assert.match(source, /ctx\.slots\.inject\('settings\.plugin\.item'/)
-  assert.match(source, /key: PANEL_ID, label: PANEL_LABEL/)
-  assert.match(source, /ctx\.slots\.inject\('plugins\.bundle\.config'/)
-  assert.match(source, /name: 'plugins\.bundle\.config', key: '@mzzsfy\/dsh-tunnel'/)
+test('只注册 settings.section, 旧插件卡与侧栏历史入口全部移除', () => {
+  assert.match(source, /ctx\.slots\.inject\('settings\.section'/)
+  assert.doesNotMatch(source, /ctx\.slots\.inject\('settings\.plugin\.item'/)
+  assert.doesNotMatch(source, /ctx\.slots\.inject\('plugins\.bundle\.config'/)
+  assert.doesNotMatch(source, /betterSidebar/)
 })
 
-test('设置卡提供 ai 使用开关: aiTools 读写面在场且经 ui-settings 提交', () => {
-  assert.match(source, /允许 ai 使用隧道工具/, '缺少 ai 使用开关行标签')
-  assert.match(source, /flip\('aiTools', aiOn\)/, 'ai 开关未接 flip 写通道')
-  assert.match(source, /outcome\.data\.ui\.aiTools/, '开关态未回读 aiTools')
+test('aiTools 只保留宿主配置面, 不在设置分区重复摆放', () => {
+  assert.doesNotMatch(source, /aiTools/, '设置分区不重复 ai 开关, 避免双写')
 })

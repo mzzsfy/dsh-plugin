@@ -212,16 +212,26 @@ test('多条件 AND 一过一不过整规则不命中', () => {
 })
 
 test('规则形状残缺跳过不崩溃', () => {
-  // Given 缺 model/缺 price/非法 unit/缺 conditions 的规则在前 When 匹配 Then 跳过并命中合法规则
+  // Given 缺 model/缺 price/非法 unit/非法 conditions 的规则在前 When 匹配 Then 跳过并命中合法规则
   const good = makeRule({ model: 'a/b' })
   const rules = [
     { unit: UNIT_PER_MILLION, price: { input: 9 }, conditions: [] },
     { model: 'a/b', conditions: [] },
     makeRule({ model: 'a/b', unit: 'perKilo' }),
-    makeRule({ model: 'a/b', conditions: undefined }),
+    makeRule({ model: 'a/b', conditions: 'bad' }),
     good,
   ]
   assert.deepEqual(matchPrice(rules, 'a/b', SUNDAY), good.price)
+})
+
+test('Given 缺失 conditions 的存量规则 When 匹配 Then 视为无条件规则命中', () => {
+  const legacy = makeRule({ model: '*/*' })
+  delete legacy.conditions
+  assert.deepEqual(matchPrice([legacy], 'a/b', SUNDAY), legacy.price)
+  const nullConditions = makeRule({ model: '*/*', conditions: null })
+  assert.deepEqual(matchPrice([nullConditions], 'a/b', SUNDAY), nullConditions.price)
+  const exact = makeRule({ model: 'a/b', price: { input: 9, output: 9, cacheRead: 9, cacheWrite: 9 } })
+  assert.deepEqual(matchPrice([legacy, exact], 'a/b', SUNDAY), exact.price)
 })
 
 test('rules 非数组或 timestamp 非法返回 null', () => {

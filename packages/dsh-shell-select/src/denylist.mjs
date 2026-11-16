@@ -21,6 +21,19 @@ function compile(pattern) {
   }
 }
 
+// 编译缓存:deny 清单来自已 resolve 的配置,同一数组引用内模式不变(refresh
+// 换新数组)。逐命令重编译是每条工具调用白付一遍正则编译。
+const COMPILED = new WeakMap()
+
+function compileAll(patterns) {
+  let regexes = COMPILED.get(patterns)
+  if (regexes === undefined) {
+    regexes = patterns.map((pattern) => compile(pattern))
+    COMPILED.set(patterns, regexes)
+  }
+  return regexes
+}
+
 /**
  * 黑名单匹配:命令命中任一 deny 条目即拒。
  * @param {string} command 模型提交的整条命令文本
@@ -29,8 +42,11 @@ function compile(pattern) {
  */
 export function matchDeny(command, deny) {
   const text = String(command ?? '')
-  for (const pattern of deny ?? []) {
-    const re = compile(pattern)
-    if (re !== undefined && re.test(text)) throw new DenyError(pattern, text)
+  const patterns = Array.isArray(deny) ? deny : []
+  if (patterns.length === 0) return
+  const regexes = compileAll(patterns)
+  for (let index = 0; index < regexes.length; index += 1) {
+    const re = regexes[index]
+    if (re !== undefined && re.test(text)) throw new DenyError(patterns[index], text)
   }
 }

@@ -161,9 +161,9 @@ const MATCH_VECTORS = [
     model: 'x/a', date: MATCH_SUNDAY_1000, expected: priceOf(5),
   },
   {
-    name: '缺 conditions 形状残缺跳过',
+    name: '缺 conditions 视为无条件命中',
     rules: [{ model: 'x/a', currency: '¥', price: priceOf(1) }],
-    model: 'x/a', date: MATCH_SUNDAY_1000, expected: null,
+    model: 'x/a', date: MATCH_SUNDAY_1000, expected: priceOf(1),
   },
   {
     name: '缺 price 形状残缺跳过',

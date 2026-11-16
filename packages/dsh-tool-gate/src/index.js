@@ -15,7 +15,8 @@
 // volatile ref)/ tools/change(注册、注销、重注册)。每次全量重算决策,
 // 只动与目标态有差异的名(幂等)。改动前记 undo journal(definition 引用 →
 // 原字段形态),行退场按 journal 逐条还原(层表换代不失联,INV-2);层已随
-// agent 销毁时 definition 引用仍在,改无人观察的对象,无害。
+// agent 销毁时 definition 引用仍在,改无人观察的对象,无害。journal 记录持
+// 弱引用:同名换定义后旧 definition 若已无人持有,其记录随 sweep 释放。
 //
 // 宿主代际门:层条目形态非 registration、或 tools 服务缺 definitions 投影面
 // (0.2.2 前)时零动作禁用,不留监听与装饰器。
@@ -24,7 +25,8 @@
 
 import { toolLayersOf } from './registry.mjs'
 import { planConvergence } from './converge.mjs'
-import { resolveConfigStrict, unwrapConfig } from './config.mjs'
+import { resolveConfigStrict, unwrapConfig, cleanAllowlist } from './config.mjs'
+import { createUndoJournal } from './journal.mjs'
 import { TOOL_SEARCH_NAME, planRequestTools } from './fallback.mjs'
 import { buildSearchTool } from './tool-search.mjs'
 import { sweepCollapseAdapters } from './decorator.mjs'
@@ -54,37 +56,50 @@ export function apply(ctx, config) {
   }
 
   /**
-   * undo journal:definition 引用 → 首次改变前原状 { hadField, value }。
+   * undo journal:definition → 首次改变前原状 { hadField, value }。
    * 键用 definition 而非层数据表:宿主层表清空时会换代(NamedEntries),
    * 层键随之失联;definition 跨层共享且身份稳定,同名换对象时新对象另记一条。
+   * 记录持弱引用(见 journal.mjs):同名换定义后旧条目不再钉住旧 definition。
    */
-  const journal = new Map()
+  const journal = createUndoJournal()
 
-  const readConfig = () => resolveConfigStrict(unwrapConfig(config ?? {}))
-
-  function restoreAll() {
-    for (const [definition, record] of journal) {
-      if (record.hadField) definition.deferLoading = record.value
-      else delete definition.deferLoading
-    }
-    journal.clear()
-  }
-
-  /** 取该 definition 的原状记录(仅记录首次改变时的现场)。 */
-  function journalEntry(definition) {
-    const recorded = journal.get(definition)
-    if (recorded !== undefined) return recorded
-    const fresh = { hadField: 'deferLoading' in definition, value: definition.deferLoading }
-    journal.set(definition, fresh)
-    return fresh
+  // 热路径配置缓存:折叠 rewrite 每请求调一次 readConfig,strict 解析 + 解箱深拷
+  // 会把 schema 管线跑在每个 LLM 请求上。volatile 字段写事务换 ref/换值,以三
+  // 字段值签名做失效键,签名一致即复用上次解析产物(调用方只读解构)。
+  const fieldValue = (field) => (typeof field?.get === 'function' ? field.get() : field)
+  const plainFlag = (value) => (value === true ? '1' : value === false ? '0' : `?${String(value)}`)
+  // 元素带类型前缀:非法残值(如 [1])与合法 ['1'] 的签名必须不同,否则会
+  // 用旧缓存绕过 strict 校验
+  const listSignature = (list) => (Array.isArray(list)
+    ? `a${list.length}:${list.map((name) => `${typeof name}:${name}`).join('\u0000')}`
+    : `t${typeof list}`)
+  const configSignature = (allowlist, enabled, collapse) => [listSignature(allowlist), plainFlag(enabled), plainFlag(collapse)].join('|')
+  let cachedSignature
+  let cachedConfig
+  const readConfig = () => {
+    const source = config ?? {}
+    const signature = configSignature(
+      fieldValue(source.allowlist),
+      fieldValue(source.enabled),
+      fieldValue(source.collapse),
+    )
+    if (cachedConfig !== undefined && signature === cachedSignature) return cachedConfig
+    const resolved = resolveConfigStrict(unwrapConfig(source))
+    // 收敛与读写面同一清洗口径:settings 历史脏值 [' read '] 必须按 'read'
+    // 命中,否则设置页显示全量注入而实际 defer(两套事实源)
+    cachedConfig = { ...resolved, allowlist: cleanAllowlist(resolved.allowlist) }
+    cachedSignature = signature
+    return cachedConfig
   }
 
   /** 一轮声明式收敛:白名单是唯一事实源,逐层只动与目标态有差异的名。 */
   function converge() {
     const { allowlist, enabled } = readConfig()
+    // 定义已离开注册表且无人持有 → 丢弃其记录(不钉住旧 definition)
+    journal.sweep()
     if (!enabled) {
       if (journal.size > 0) {
-        restoreAll()
+        journal.restoreAll()
         ctx.logger?.info?.('tool-gate: enabled=false,已还原全部原状并停止打标')
       }
       return
@@ -99,14 +114,14 @@ export function apply(ctx, config) {
       for (const name of plan.toDefer) {
         const definition = layer.definitionOf(name)
         if (definition === undefined) { skipped += 1; continue }
-        journalEntry(definition)
+        journal.record(definition)
         definition.deferLoading = true
         deferred += 1
       }
       for (const name of plan.toClear) {
         const definition = layer.definitionOf(name)
         if (definition === undefined) { skipped += 1; continue }
-        journalEntry(definition)
+        journal.record(definition)
         delete definition.deferLoading
         cleared += 1
       }
@@ -226,5 +241,5 @@ export function apply(ctx, config) {
 
   converge()
   // 行退场(禁用/卸载/重载)还原原状:系统回到「没装本包」的世界
-  ctx.effect(() => () => restoreAll())
+  ctx.effect(() => () => journal.restoreAll())
 }

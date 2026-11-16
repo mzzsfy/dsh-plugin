@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { PROTOCOL } from '../src/protocol.mjs'
 
 const source = readFileSync(new URL('../src/client.js', import.meta.url), 'utf8')
 // 版本面从 manifest 取:测试不重复声明发版号,发布改版本不会瓦解断言
@@ -50,8 +51,8 @@ test('Given 新 host 协议有交集 When 收到 hello Then 协商为 ok 且不�
   f.owner().bus.subscribe(() => {})
   const socket = f.instances[0]
   socket.open()
-  assert.deepEqual(socket.sent[0], { type: 'hello', protocol: 1, version: PKG_VERSION })
-  socket.frame({ type: 'hello', protocol: 1, protocols: [1], version: PKG_VERSION })
+  assert.deepEqual(socket.sent[0], { type: 'hello', protocol: PROTOCOL, version: PKG_VERSION })
+  socket.frame({ type: 'hello', protocol: PROTOCOL, protocols: [PROTOCOL], version: PKG_VERSION })
   assert.equal(f.state().hello, 'ok')
   assert.deepEqual(f.warns, [])
 })
@@ -61,7 +62,7 @@ test('Given host 协议无交集 When 收到 hello Then 告警一次、关闭连
   f.owner().bus.subscribe(() => {})
   const socket = f.instances[0]
   socket.open()
-  socket.frame({ type: 'hello', protocol: 9, protocols: [9], version: '9.0.0' })
+  socket.frame({ type: 'hello', protocol: PROTOCOL + 1, protocols: [PROTOCOL + 1], version: '9.0.0' })
   assert.equal(f.state().hello, 'unsupported')
   assert.equal(socket.closed, true)
   assert.equal(f.warns.length, 1)
@@ -141,7 +142,7 @@ test('Given 协议不兼容已停用 When 新 owner 挂载 Then 不再重探连�
   f.owner().bus.subscribe(() => {})
   const socket = f.instances[0]
   socket.open()
-  socket.frame({ type: 'hello', protocols: [9] })
+  socket.frame({ type: 'hello', protocols: [PROTOCOL + 1] })
   assert.equal(f.state().hello, 'unsupported')
   assert.equal(f.instances.length, 1)
   f.owner('b').bus.subscribe(() => {})

@@ -1,16 +1,20 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import {
   acquireBridgeLock,
   bridgeArtifactShape,
   bridgeBackupPath,
+  bridgeLinkTarget,
   bridgeLockPath,
+  bridgeRepointState,
   classifyBridgeLock,
+  clearStaleBridgeLock,
   healBridgeBackups,
   planBridgeHeal,
+  recoverRootBridge,
   releaseBridgeLock,
   staleBridgeBackups,
 } from '../scripts/compat/bridge-mutex.mjs'
@@ -40,9 +44,10 @@ function fixtureRepo(t) {
 const lockOf = (pid, extra = {}) => JSON.stringify({ pid, startedAt: '2026-01-01T00:00:00.000Z', workRoot: 'C:/other-workstation', ...extra })
 const backupEntry = (path, shape, mtime) => ({ path, shape, mtime })
 
-test('锁判定:无锁 free、持有者存活 busy、持有者已死或损坏 stale', () => {
+test('锁判定:无锁 free、持有者存活 busy、持有者已死或损坏/空文件 stale', () => {
   assert.equal(classifyBridgeLock(null).status, 'free')
-  assert.equal(classifyBridgeLock('').status, 'free')
+  assert.equal(classifyBridgeLock('').status, 'stale')
+  assert.match(classifyBridgeLock('').reason, /空锁文件/)
 
   const busy = classifyBridgeLock(lockOf(4242), { isAlive: () => true })
   assert.equal(busy.status, 'busy')
@@ -178,6 +183,16 @@ test('heal 落地:重指残留的链接被原桥备份替换并留审计', (t) =
   assert.ok(logs.some((message) => message.includes('heal 恢复') && message.includes('备份形状 dir')))
 })
 
+test('空锁文件可被原子接管,不会永久占位', (t) => {
+  const repoRoot = fixtureRepo(t)
+  writeFileSync(bridgeLockPath(repoRoot), '')
+  const lock = acquireBridgeLock({ repoRoot, workRoot: 'C:/work', pid: 4242, isAlive: () => false })
+  const content = JSON.parse(readFileSync(bridgeLockPath(repoRoot), 'utf8'))
+  assert.equal(content.pid, 4242)
+  lock.release()
+  assert.equal(existsSync(bridgeLockPath(repoRoot)), false)
+})
+
 test('heal 落地:真实目录在位时不动原桥,只清陈旧备份', (t) => {
   const repoRoot = fixtureRepo(t)
   const dst = join(repoRoot, 'node_modules', 'zod')
@@ -192,4 +207,253 @@ test('heal 落地:真实目录在位时不动原桥,只清陈旧备份', (t) => 
   // 形状非法的备份保留待人工处置
   assert.equal(existsSync(`${dst}.compat-bak-4`), true)
   assert.ok(logs.some((message) => message.includes('形状非法')))
+})
+
+/**
+ * B7b 强杀 keeper 后的根桥兜底:重指判定 + 还原 + 清锁
+ *
+ * BDD 场景:
+ *   1. 重指判定 —— 只有符号链接且指向本 workRoot 才算重指;pnpm 自身链接不算
+ *   2. keeper 被强杀(finally 未执行)—— recover 还原备份、删除无备份补链、清陈旧锁
+ *   3. 锁被存活工位持有 —— 不动别人的根桥;本工位残留重指时拒绝并报未达成
+ *   4. 备份形状非法 —— 不删唯一证据,按未达成上报
+ *   5. clearStaleBridgeLock —— 只清登记本工位且持有者已死的锁
+ */
+
+const BRIDGE_HOST = join('.compat', '0.2.2-rc.1', 'dsh-host', 'node_modules')
+const REPOINT_PACKAGES = ['zod', '@deepseek-ai/dsh-tools']
+
+/** 造现场:dst 原位是原桥(真实目录),重指后原位变链接、原桥改名为带 pid 备份 */
+function repointedRepo(t, { packages = REPOINT_PACKAGES, backup = true, backupShape = 'dir' } = {}) {
+  const repoRoot = fixtureRepo(t)
+  const workRoot = join(repoRoot, '.compat')
+  const entries = []
+  for (const name of packages) {
+    const src = join(repoRoot, BRIDGE_HOST, name)
+    mkdirSync(src, { recursive: true })
+    writeFileSync(join(src, 'package.json'), `{"name":"host${name}"}`)
+    const dst = join(repoRoot, 'node_modules', name)
+    mkdirSync(dst, { recursive: true })
+    writeFileSync(join(dst, 'package.json'), `{"name":"original${name}"}`)
+    if (backup) {
+      if (backupShape === 'dir') renameSync(dst, bridgeBackupPath(dst, 999))
+      else {
+        rmSync(dst, { recursive: true, force: true })
+        writeFileSync(bridgeBackupPath(dst, 999), 'junk')
+      }
+    } else {
+      rmSync(dst, { recursive: true, force: true })
+    }
+    symlinkSync(src, dst, process.platform === 'win32' ? 'junction' : 'dir')
+    entries.push({ name, src, dst })
+  }
+  return { repoRoot, workRoot, entries }
+}
+
+test('重指判定:指进本 workRoot 的链接才算重指,指到别处属原桥', (t) => {
+  const { repoRoot, workRoot, entries } = repointedRepo(t)
+  const state = bridgeRepointState({ repoRoot, workRoot, packages: REPOINT_PACKAGES })
+  assert.deepEqual(state.repointed.map((item) => item.name), entries.map((entry) => entry.name))
+  assert.deepEqual(state.foreign, [])
+
+  // 指向别的工位/仓库内的链接不属本工位重指
+  const [first] = entries
+  rmSync(first.dst, { force: true })
+  mkdirSync(join(repoRoot, 'other-host'), { recursive: true })
+  symlinkSync(join(repoRoot, 'other-host'), first.dst, process.platform === 'win32' ? 'junction' : 'dir')
+  const after = bridgeRepointState({ repoRoot, workRoot, packages: REPOINT_PACKAGES })
+  assert.deepEqual(after.repointed.map((item) => item.name), [entries[1].name])
+  assert.deepEqual(after.foreign.map((item) => item.name), [first.name])
+  assert.equal(bridgeLinkTarget(first.dst), join(repoRoot, 'other-host'))
+})
+
+test('重指判定:工位目录被清掉后的悬空链接仍算重指', (t) => {
+  // Given 链接指向的宿主闭包已被删除;When 复核根桥;Then 不得因 existsSync 假报"无重指"
+  const { repoRoot, workRoot, entries } = repointedRepo(t, { packages: ['zod'] })
+  rmSync(entries[0].src, { recursive: true, force: true })
+  const state = bridgeRepointState({ repoRoot, workRoot, packages: ['zod'] })
+  assert.deepEqual(state.repointed.map((item) => item.name), ['zod'])
+  assert.equal(bridgeArtifactShape(entries[0].dst), 'symlink')
+
+  const result = recoverRootBridge({ repoRoot, workRoot, packages: ['zod'], isAlive: () => false })
+  assert.equal(result.ok, true)
+  assert.equal(bridgeArtifactShape(entries[0].dst), 'dir', '悬空重指也必须还原为原桥')
+})
+
+test('recover:强杀现场还原备份并清陈旧锁', (t) => {
+  const { repoRoot, workRoot, entries } = repointedRepo(t)
+  writeFileSync(bridgeLockPath(repoRoot), lockOf(999999, { workRoot }))
+  const logs = []
+  const result = recoverRootBridge({
+    repoRoot,
+    workRoot,
+    packages: REPOINT_PACKAGES,
+    isAlive: () => false,
+    log: (message) => logs.push(message),
+  })
+  assert.equal(result.ok, true, logs.join('\n'))
+  assert.deepEqual(result.healed.map((item) => item.name), entries.map((entry) => entry.name))
+  assert.equal(result.clearedLock, true)
+  assert.deepEqual(result.pending, [])
+  for (const entry of entries) {
+    assert.equal(bridgeArtifactShape(entry.dst), 'dir', `${entry.name} 必须还原为原桥目录`)
+    assert.equal(readFileSync(join(entry.dst, 'package.json'), 'utf8'), `{"name":"original${entry.name}"}`)
+    assert.equal(existsSync(bridgeBackupPath(entry.dst, 999)), false, '备份必须被消费掉')
+  }
+  assert.equal(existsSync(bridgeLockPath(repoRoot)), false, '陈旧锁必须清掉')
+})
+
+test('recover:重指时根桥本不存在则删除补链,不留悬空链接', (t) => {
+  const { repoRoot, workRoot, entries } = repointedRepo(t, { packages: ['zod'], backup: false })
+  const result = recoverRootBridge({ repoRoot, workRoot, packages: ['zod'], isAlive: () => false })
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.removed.map((item) => item.name), ['zod'])
+  assert.equal(existsSync(entries[0].dst), false, '无备份补链必须删除,回到"缺失"')
+})
+
+test('recover:锁被存活工位持有且本工位无残留重指时不动别人的根桥', (t) => {
+  const { repoRoot, workRoot } = repointedRepo(t, { packages: ['zod'], backup: false })
+  const otherRoot = join(repoRoot, '.compat-multimodel')
+  const lockPath = bridgeLockPath(repoRoot)
+  writeFileSync(lockPath, lockOf(process.pid, { workRoot: otherRoot }))
+  // 别家工位的重指现场:本 workRoot 下无重指
+  const dst = join(repoRoot, 'node_modules', 'zod')
+  const foreignHost = join(repoRoot, '.compat-multimodel', 'dsh-host', 'node_modules', 'zod')
+  mkdirSync(foreignHost, { recursive: true })
+  rmSync(dst, { force: true })
+  symlinkSync(foreignHost, dst, process.platform === 'win32' ? 'junction' : 'dir')
+  const result = recoverRootBridge({ repoRoot, workRoot, packages: ['zod'] })
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.healed, [])
+  assert.equal(existsSync(lockPath), true, '别人的锁不得清除')
+  assert.equal(bridgeArtifactShape(dst), 'symlink', '别人的重指不得改动')
+})
+
+test('recover:锁被存活工位持有且本工位重指仍在则拒绝,不得报成功', (t) => {
+  const { repoRoot, workRoot, entries } = repointedRepo(t, { packages: ['zod'] })
+  const lockPath = bridgeLockPath(repoRoot)
+  const otherLock = lockOf(process.pid, { workRoot: join(repoRoot, '.compat-multimodel') })
+  writeFileSync(lockPath, otherLock)
+  const result = recoverRootBridge({ repoRoot, workRoot, packages: ['zod'] })
+  assert.equal(result.ok, false)
+  assert.equal(result.refused, true)
+  assert.deepEqual(result.pending, [entries[0].dst])
+  assert.equal(readFileSync(lockPath, 'utf8'), otherLock, '拒绝路径不得改写别人的锁')
+  assert.equal(bridgeArtifactShape(entries[0].dst), 'symlink')
+})
+
+test('recover:备份形状非法时不删唯一证据,按未达成上报', (t) => {
+  const { repoRoot, workRoot, entries } = repointedRepo(t, { packages: ['zod'], backupShape: 'other' })
+  const result = recoverRootBridge({ repoRoot, workRoot, packages: ['zod'], isAlive: () => false })
+  assert.equal(result.ok, false)
+  assert.deepEqual(result.pending, [entries[0].dst])
+  assert.equal(existsSync(bridgeBackupPath(entries[0].dst, 999)), true, '非法备份不得删除')
+  assert.equal(bridgeArtifactShape(entries[0].dst), 'symlink', '重指补链不得删除')
+})
+
+/**
+ * B7c 跨 hostDir 重指:归属按实际链接目标,不按 workRoot 前缀
+ *
+ * BDD 场景:
+ *   1. hostDir 落在 workRoot 之外 —— 只凭 workRoot 会漏判(repointed=0/foreign=1),
+ *      显式 hostDirs 或锁内记录的 hostDir 必须能认领
+ *   2. 锁记录 hostDir 的强杀现场 —— recover 还原自带备份(pid 后缀可不同)、清锁
+ *   3. 裸调用(无锁无 hostDir)—— 按 compat 宿主闭包兜底认领孤儿重指
+ */
+
+function crossHostRepo(t) {
+  const repoRoot = fixtureRepo(t)
+  const workRoot = join(repoRoot, '.compat-multimodel')
+  const hostDir = join(repoRoot, '.compat', '0.2.2-rc.3', 'dsh-host')
+  const entries = []
+  for (const name of ['zod']) {
+    const src = join(hostDir, 'node_modules', name)
+    mkdirSync(src, { recursive: true })
+    writeFileSync(join(src, 'package.json'), '{"name":"host-zod"}')
+    const dst = join(repoRoot, 'node_modules', name)
+    mkdirSync(dst, { recursive: true })
+    writeFileSync(join(dst, 'package.json'), '{"name":"original-zod"}')
+    renameSync(dst, bridgeBackupPath(dst, 1344))
+    symlinkSync(src, dst, process.platform === 'win32' ? 'junction' : 'dir')
+    entries.push({ name, src, dst })
+  }
+  return { repoRoot, workRoot, hostDir, entries }
+}
+
+test('重指判定:hostDir 在 workRoot 之外按实际链接目标认领,不得漏判', (t) => {
+  const { repoRoot, workRoot, hostDir } = crossHostRepo(t)
+  const blind = bridgeRepointState({ repoRoot, workRoot, packages: ['zod'], includeLayout: false })
+  assert.deepEqual(blind.repointed, [], '只按 workRoot 前缀会漏判(实机形态)')
+  assert.deepEqual(blind.foreign.map((item) => item.name), ['zod'])
+
+  const byLayout = bridgeRepointState({ repoRoot, workRoot, packages: ['zod'] })
+  assert.deepEqual(byLayout.repointed.map((item) => [item.name, item.via]), [['zod', 'host-layout']], '默认按实际链接目标认领')
+
+  const explicit = bridgeRepointState({ repoRoot, workRoot, hostDirs: [hostDir], packages: ['zod'] })
+  assert.deepEqual(explicit.repointed.map((item) => [item.name, item.via]), [['zod', 'hostDir']])
+})
+
+test('recover:锁内 hostDir 跨 workRoot 也能还原自带备份并清锁', (t) => {
+  const { repoRoot, workRoot, hostDir, entries } = crossHostRepo(t)
+  writeFileSync(bridgeLockPath(repoRoot), lockOf(999999, { workRoot, hostDir }))
+  const logs = []
+  const result = recoverRootBridge({
+    repoRoot,
+    workRoot,
+    packages: ['zod'],
+    isAlive: () => false,
+    log: (message) => logs.push(message),
+  })
+  assert.equal(result.ok, true, logs.join('\n'))
+  assert.deepEqual(result.healed.map((item) => item.name), ['zod'])
+  assert.equal(result.clearedLock, true)
+  assert.equal(bridgeArtifactShape(entries[0].dst), 'dir')
+  assert.equal(readFileSync(join(entries[0].dst, 'package.json'), 'utf8'), '{"name":"original-zod"}')
+  assert.equal(existsSync(bridgeBackupPath(entries[0].dst, 1344)), false, '自带备份必须被消费')
+  assert.equal(existsSync(bridgeLockPath(repoRoot)), false)
+})
+
+test('recover:无锁无 hostDir 时按宿主闭包兜底还原孤儿重指,失败非零', (t) => {
+  const { repoRoot, workRoot } = crossHostRepo(t)
+  const healed = recoverRootBridge({ repoRoot, workRoot, packages: ['zod'], isAlive: () => false })
+  assert.equal(healed.ok, true)
+  assert.deepEqual(healed.healed.map((item) => item.name), ['zod'])
+
+  // 还原不了(备份形状非法)必须报未达成,调用方据此非零
+  const { repoRoot: repo2, workRoot: root2, entries } = crossHostRepo(t)
+  const dst = entries[0].dst
+  rmSync(bridgeBackupPath(dst, 1344), { recursive: true, force: true })
+  writeFileSync(bridgeBackupPath(dst, 1344), 'junk')
+  const failed = recoverRootBridge({ repoRoot: repo2, workRoot: root2, packages: ['zod'], isAlive: () => false })
+  assert.equal(failed.ok, false)
+  assert.deepEqual(failed.pending, [dst])
+  assert.equal(bridgeArtifactShape(dst), 'symlink', '非法备份现场不得删链接')
+})
+
+test('acquireBridgeLock:显式 hostDir 入锁,供强杀后认领重指', (t) => {
+  const repoRoot = fixtureRepo(t)
+  const hostDir = join(repoRoot, '.compat', '0.2.2-rc.3', 'dsh-host')
+  const lock = acquireBridgeLock({ repoRoot, workRoot: 'C:/mine', hostDir })
+  const written = JSON.parse(readFileSync(bridgeLockPath(repoRoot), 'utf8'))
+  assert.equal(written.hostDir, hostDir)
+  lock.release()
+})
+
+test('clearStaleBridgeLock:只清登记本工位且持有者已死的锁', (t) => {
+  const repoRoot = fixtureRepo(t)
+  const workRoot = join(repoRoot, '.compat')
+  const path = bridgeLockPath(repoRoot)
+
+  assert.equal(clearStaleBridgeLock({ repoRoot, workRoot, isAlive: () => true }), false, '无锁不算清理')
+  writeFileSync(path, lockOf(process.pid, { workRoot }))
+  assert.equal(clearStaleBridgeLock({ repoRoot, workRoot }), false, '持有者存活不得清')
+  assert.equal(existsSync(path), true)
+
+  writeFileSync(path, lockOf(999999, { workRoot: join(repoRoot, '.compat-multimodel') }))
+  assert.equal(clearStaleBridgeLock({ repoRoot, workRoot, isAlive: () => false }), false, '别家工位的锁不得清')
+  assert.equal(existsSync(path), true)
+
+  writeFileSync(path, lockOf(999999, { workRoot }))
+  assert.equal(clearStaleBridgeLock({ repoRoot, workRoot, isAlive: () => false }), true)
+  assert.equal(existsSync(path), false)
 })

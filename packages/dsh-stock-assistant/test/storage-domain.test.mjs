@@ -47,9 +47,63 @@ test('S09 存量 credentialEnv 记录打开即归一, 自选不丢', async t => 
   const root = state.get()
   assert.equal(root.providers.every(p => 'credentialRef' in p && !('credentialEnv' in p)), true, '旧字段读出来就是新字段')
   assert.deepEqual(root.watchlist.order, [security.id], '自选不能被兼容逻辑顺带清掉')
-  // 下一次 control 写入才把记录换成新字段(打开本身只读)
+  // 归一发生在打开时, schema 判定有差异即回写; 后续写入继续沿用新字段
+  assert.equal((await readFile(join(dir, 'stock_assistant.json'), 'utf8')).includes('credentialEnv'), false, '打开即回写新字段')
   await state.mutate(operation(1, base.revision), c => ({ ...c, preferences: { ...c.preferences, refreshSeconds: 60 } }))
   assert.equal((await readFile(join(dir, 'stock_assistant.json'), 'utf8')).includes('credentialEnv'), false, '写入后不再有旧字段')
+  await state.close()
+})
+
+// P1-10: 旧记录把代理账号密码写在 URL userinfo 里, 打开时剥离; 打开即回写, 不等下一次写入
+test('P1-10 存量代理 userinfo 打开即剥离, 持久化不再含账号密码', async t => {
+  const dir = await withDir(t), backend = new JsonStorageBackend(dir)
+  t.after(() => backend.close())
+  const base = initialControl()
+  const legacyProxy = 'https://' + ['proxy-user', 'proxy-secret'].join(':') + '@proxy.corp:8443'
+  const legacyRoot = { ...base, providers: base.providers.map((p, index) => index === 0 ? { ...p, proxy: legacyProxy } : p) }
+  const file = join(dir, 'stock_assistant.json')
+  await writeFile(file, legacyDocument(legacyRoot))
+  const state = await openState(facilityOf(backend))
+  const proxy = state.get().providers[0].proxy
+  assert.equal(typeof proxy, 'string')
+  const url = new URL(proxy)
+  assert.equal(url.username, '', '用户名不得留在内存配置')
+  assert.equal(url.password, '', '密码不得留在内存配置')
+  // K3: 归一差异在 openState 内回写, 用户没有任何写操作也不该留下明文
+  const opened = await readFile(file, 'utf8')
+  assert.equal(opened.includes('proxy-user'), false, '打开即回写: 持久化文件不得含代理用户名')
+  assert.equal(opened.includes('proxy-secret'), false, '打开即回写: 持久化文件不得含代理密码')
+  await state.mutate(operation(1, base.revision), c => ({ ...c, preferences: { ...c.preferences, refreshSeconds: 60 } }))
+  const persisted = await readFile(file, 'utf8')
+  assert.equal(persisted.includes('proxy-user'), false, '持久化文件不得含代理用户名')
+  assert.equal(persisted.includes('proxy-secret'), false, '持久化文件不得含代理密码')
+  await state.close()
+})
+
+// K2/K3: 反代端点 userinfo 与 operations 里的配置副本同样是明文入口: 打开即回写, 三处都清洗
+test('K2/K3 打开即回写: 端点和 operations 载荷都不再留明文', async t => {
+  const dir = await withDir(t), backend = new JsonStorageBackend(dir)
+  t.after(() => backend.close())
+  const base = initialControl()
+  const userinfo = (host, path = '') => `https://${['legacy-user', 'legacy-secret'].join(':')}@${host}${path}`
+  const legacyProvider = { ...base.providers[0], proxy: userinfo('proxy.example.com:8443'), endpoints: { kline: userinfo('mirror.example.com', '/kline') } }
+  const legacyRoot = {
+    ...base,
+    providers: [legacyProvider, ...base.providers.slice(1)],
+    operations: [{ id: crypto.randomUUID(), hash: 'h', at: 1, result: { revision: 1 }, action: 'configuration', payload: { providers: [legacyProvider], endpoints: { quotes: userinfo('alt.example.com', '/quotes') } } }],
+  }
+  const file = join(dir, 'stock_assistant.json')
+  await writeFile(file, legacyDocument(legacyRoot))
+  const state = await openState(facilityOf(backend))
+  const opened = await readFile(file, 'utf8')
+  assert.equal(opened.includes('legacy-user'), false, '打开即回写: 文件不得含端点/代理用户名')
+  assert.equal(opened.includes('legacy-secret'), false, '打开即回写: 文件不得含端点/代理密码')
+  const root = state.get()
+  assert.equal(new URL(root.providers[0].proxy).username, '', '代理 URL 无 userinfo')
+  assert.equal(new URL(root.providers[0].endpoints.kline).username, '', '端点 URL 无 userinfo')
+  const payload = root.operations[0].payload
+  assert.equal(new URL(payload.providers[0].proxy).username, '', 'operations.payload.providers 同样剥离')
+  assert.equal(new URL(payload.endpoints.quotes).username, '', 'operations.payload.endpoints 同样剥离')
   await state.close()
 })
 

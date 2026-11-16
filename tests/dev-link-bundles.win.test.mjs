@@ -1,9 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {execFileSync, execSync} from 'node:child_process'
-import {mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync} from 'node:fs'
+import {mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync, readlinkSync} from 'node:fs'
 import {tmpdir} from 'node:os'
-import {join} from 'node:path'
+import {join, resolve} from 'node:path'
 
 /**
  * dev-link.mjs dsh.profile.bundles 对账
@@ -178,6 +178,64 @@ test('孤儿清理:改名/删除包的 file 残留依赖行与装载条目一并
   assert.equal(deps['@mzzsfy/pkg-a'], fileSpec(sand.sandRepo, 'pkg-a'))
 })
 
+test('悬空 junction:按链接形态清理并重建为工作副本', (t) => {
+  // Given profile 里的 junction 目标已不存在(existsSync 跟随解析恒 false);
+  // When 重跑 dev-link;Then 必须识别链接本体并清理,不能撞 EEXIST 留下死链
+  const sand = sandbox(t, {
+    packages: {'pkg-plugin': PLUGIN_MANIFEST},
+    profileDeps: {'@mzzsfy/pkg-plugin': ''},
+  })
+  const profileManifest = JSON.parse(readFileSync(join(sand.profile, 'package.json'), 'utf8'))
+  profileManifest.dependencies['@mzzsfy/pkg-plugin'] = fileSpec(sand.sandRepo, 'pkg-plugin')
+  writeFileSync(join(sand.profile, 'package.json'), JSON.stringify(profileManifest))
+  const nodeModules = join(sand.profile, 'node_modules', '@mzzsfy')
+  mkdirSync(nodeModules, {recursive: true})
+  const link = join(nodeModules, 'pkg-plugin')
+  execSync(`cmd /c mklink /J "${link}" "${join(sand.sandRepo, 'packages', 'pkg-missing')}"`)
+
+  const out = runDevLink(sand, ['pkg-plugin'])
+  assert.match(out, /pkg-plugin: .*pkg-plugin -> .*pkg-plugin/, '应报告重挂 junction')
+  assert.match(out, /校验通过/, '清理重建后终态应通过')
+  assert.equal(
+    resolve(readlinkSync(link)).toLowerCase(),
+    resolve(join(sand.sandRepo, 'packages', 'pkg-plugin')).toLowerCase(),
+    'junction 应重指工作副本',
+  )
+})
+
+test('workspace yaml 首行即 minimumReleaseAgeExclude:替换不追加重复键且收敛', (t) => {
+  // Given 豁免节位于文件首行(无前置换行)且历史重复;When all 模式重写;
+  // Then 只保留一个段、旧内容消失,第二次运行幂等
+  const sand = sandbox(t, {
+    packages: {'pkg-plugin': PLUGIN_MANIFEST},
+    profileDeps: {'@mzzsfy/pkg-plugin': ''},
+  })
+  const profileManifest = JSON.parse(readFileSync(join(sand.profile, 'package.json'), 'utf8'))
+  profileManifest.dependencies['@mzzsfy/pkg-plugin'] = fileSpec(sand.sandRepo, 'pkg-plugin')
+  writeFileSync(join(sand.profile, 'package.json'), JSON.stringify(profileManifest))
+  const workspace = join(sand.profile, 'pnpm-workspace.yaml')
+  writeFileSync(workspace, [
+    'minimumReleaseAgeExclude:',
+    '  - "@mzzsfy/pkg-plugin@0.0.0"',
+    'packages:',
+    '  - .',
+    'minimumReleaseAgeExclude:',
+    '  - "@mzzsfy/stale@0.0.0"',
+    '',
+  ].join('\n'))
+
+  const out = runDevLink(sand, ['all'])
+  assert.match(out, /FIX  minimumReleaseAgeExclude 已重写/, '首行段必须被识别并重写')
+  const text = readFileSync(workspace, 'utf8')
+  assert.equal((text.match(/^minimumReleaseAgeExclude:/gm) ?? []).length, 1, '重复键必须收敛为一个')
+  assert.ok(text.startsWith('minimumReleaseAgeExclude:'), '段应保留在首行位置')
+  assert.doesNotMatch(text, /pkg-plugin@0\.0\.0|stale@0\.0\.0/, '旧豁免内容必须被替换')
+
+  const second = runDevLink(sand, ['all'])
+  assert.match(second, /minimumReleaseAgeExclude 已是最新,无需更新/, '第二次运行应幂等')
+  assert.equal((readFileSync(workspace, 'utf8').match(/^minimumReleaseAgeExclude:/gm) ?? []).length, 1)
+})
+
 test('all 模式:批量加入缺失插件包并移出公共依赖包残留', (t) => {
   const sand = sandbox(t, {
     packages: {'pkg-a': PLUGIN_MANIFEST, 'pkg-b': PLUGIN_MANIFEST, 'pkg-lib': LIB_MANIFEST},
@@ -225,4 +283,31 @@ test('市场禁用:残留装载条目移出后校验通过', (t) => {
   assert.match(out, /pkg-plugin.*移出 dsh\.profile\.bundles\(市场已禁用\)/, '与市场互搏的装载条目应被移出')
   assert.match(out, /校验通过/, '移出后终态应通过')
   assert.deepEqual(readBundles(sand), ['@deepseek-ai/dsh-base'], '其他条目不得被动')
+})
+
+test('hostMin 不满足:残留依赖行、装载条目与 junction 一并出层', (t) => {
+  const sand = sandbox(t, {
+    packages: {'pkg-future': {...PLUGIN_MANIFEST, dsh: {...PLUGIN_MANIFEST.dsh, hostMin: '999.0.0'}}},
+    bundles: ['@deepseek-ai/dsh-base', '@mzzsfy/pkg-future'],
+  })
+  const profileManifest = JSON.parse(readFileSync(join(sand.profile, 'package.json'), 'utf8'))
+  profileManifest.dependencies['@mzzsfy/pkg-future'] = fileSpec(sand.sandRepo, 'pkg-future')
+  writeFileSync(join(sand.profile, 'package.json'), JSON.stringify(profileManifest))
+  const nodeModules = join(sand.profile, 'node_modules', '@mzzsfy')
+  mkdirSync(nodeModules, {recursive: true})
+  const junction = join(nodeModules, 'pkg-future')
+  execSync(`cmd /c mklink /J "${junction}" "${join(sand.sandRepo, 'packages', 'pkg-future')}"`)
+
+  let out = ''
+  try {
+    out = runDevLink(sand, ['pkg-future'])
+  } catch (error) {
+    out = `${error.stdout ?? ''}${error.stderr ?? ''}`
+  }
+  assert.match(out, /hostMin 不满足,删除依赖行/, 'hostMin 拒绝后残留依赖行应删除')
+  assert.match(out, /hostMin 不满足,移出 dsh\.profile\.bundles/, '装载条目应移出')
+  assert.deepEqual(readBundles(sand), ['@deepseek-ai/dsh-base'], '装载层不得留下不支持代际的包')
+  const deps = JSON.parse(readFileSync(join(sand.profile, 'package.json'), 'utf8')).dependencies
+  assert.equal(deps['@mzzsfy/pkg-future'], undefined)
+  assert.equal(existsSync(junction), false, 'junction 应被卸除')
 })

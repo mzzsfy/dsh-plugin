@@ -8,9 +8,10 @@ window.__ModuleLoader__.load({
     const CONFIG_TIMEOUT_MS = 2000
     const LOG_PREFIX = '[dsh-bug-perf]'
     const PKG_ID = '@mzzsfy/dsh-bug-perf'
-    const NAMESPACE = 'bug-perf'
     const DIAG_SAMPLE_MS = 5000
     const DIAG_MAX_SAMPLES = 720
+    // 连接统计只保留最近这么多条: 长生命周期页面反复重连时不能无限增长
+    const DIAG_MAX_SOCKETS = 64
     const DIAG_DEFAULT_REPORT_EVERY = 12
 
     // 设置卡片依赖 React;缺失时只跳过 UI,不影响其余补丁
@@ -152,11 +153,13 @@ window.__ModuleLoader__.load({
       if (proto === undefined || typeof proto.restart !== 'function') {
         return { installed: false, reason: 'RemoteStream.restart missing' }
       }
-      if (proto[RESTART_MARKER] === true) return { installed: false, reason: 'already installed' }
-      proto[RESTART_MARKER] = true
+      if (proto[RESTART_MARKER] !== undefined) return { installed: false, reason: 'already installed' }
       const original = proto.restart
+      const token = {}
       const states = new WeakMap()
-      proto.restart = function coalescedRestart() {
+      // 在途尾随定时器: 卸载时一并取消, 否则 HMR 会留下旧闭包继续调用重启
+      const pendingTimers = new Set()
+      const patched = function coalescedRestart() {
         const now = clock.now()
         let state = states.get(this)
         if (state === undefined) {
@@ -166,13 +169,15 @@ window.__ModuleLoader__.load({
         if (now - state.last >= windowMs) {
           if (state.pending !== undefined) {
             clock.clearTimeout(state.pending)
+            pendingTimers.delete(state.pending)
             state.pending = undefined
           }
           state.last = now
           return original.call(this)
         }
         if (state.pending === undefined) {
-          state.pending = clock.setTimeout(() => {
+          const timer = clock.setTimeout(() => {
+            pendingTimers.delete(timer)
             state.pending = undefined
             state.last = clock.now()
             try {
@@ -181,9 +186,21 @@ window.__ModuleLoader__.load({
               // 实例已释放:尾随调用没有可重建的 generation
             }
           }, windowMs - (now - state.last))
+          state.pending = timer
+          pendingTimers.add(timer)
         }
       }
-      return { installed: true }
+      proto[RESTART_MARKER] = token
+      proto.restart = patched
+      // 只还原本代包装: 后装实例的包装由它自己的卸载路径负责
+      const dispose = () => {
+        for (const timer of pendingTimers) clock.clearTimeout(timer)
+        pendingTimers.clear()
+        if (proto.restart !== patched) return
+        proto.restart = original
+        if (proto[RESTART_MARKER] === token) delete proto[RESTART_MARKER]
+      }
+      return { installed: true, dispose }
     }
 
     const installRestartCoalesceFromRequire = ({ requireImpl, windowMs, timers: clock }) => {
@@ -241,9 +258,11 @@ window.__ModuleLoader__.load({
       if (holder === undefined || typeof holder.view !== 'function') {
         return { installed: false, reason: 'webTerminals.view missing' }
       }
-      if (holder[WATCHDOG_MARKER] === true) return { installed: false, reason: 'already installed' }
-      holder[WATCHDOG_MARKER] = true
+      if (holder[WATCHDOG_MARKER] !== undefined) return { installed: false, reason: 'already installed' }
+      const token = {}
       const monitors = new WeakMap()
+      // 每个被监控视图一条检查节拍; 卸载时统一清掉, 否则 HMR 后旧闭包继续重连
+      const intervals = new Set()
       const monitor = (view) => {
         if (view === undefined || monitors.has(view)) return
         const state = { revision: view.revision, changedAt: clock.now(), armed: false, healedAt: -Infinity }
@@ -259,20 +278,37 @@ window.__ModuleLoader__.load({
             console.warn(`${LOG_PREFIX} watchdog tick failed:`, error instanceof Error ? error.message : String(error))
           }
         }, options.checkMs)
-        view.lifetime?.signal?.addEventListener?.('abort', () => clock.clearInterval(interval), { once: true })
+        intervals.add(interval)
+        view.lifetime?.signal?.addEventListener?.('abort', () => {
+          intervals.delete(interval)
+          clock.clearInterval(interval)
+        }, { once: true })
       }
       try {
         for (const views of holder.views?.values?.() ?? []) for (const view of views.values()) monitor(view)
       } catch {
         // 视图表结构随宿主版本变化:已有视图漏检,新建视图仍由包装覆盖
       }
-      const original = holder.view.bind(holder)
-      holder.view = (...args) => {
-        const view = original(...args)
+      const hadOwnView = Object.prototype.hasOwnProperty.call(holder, 'view')
+      const previous = holder.view
+      const patched = (...args) => {
+        const view = previous.apply(holder, args)
         monitor(view)
         return view
       }
-      return { installed: true }
+      holder[WATCHDOG_MARKER] = token
+      holder.view = patched
+      // 服务属性读取可能被依赖追踪代理包成新引用, 按实例上的属性描述符判归属
+      const dispose = () => {
+        for (const interval of intervals) clock.clearInterval(interval)
+        intervals.clear()
+        if (Object.getOwnPropertyDescriptor(holder, 'view')?.value === patched) {
+          if (hadOwnView) holder.view = previous
+          else delete holder.view
+        }
+        if (holder[WATCHDOG_MARKER] === token) delete holder[WATCHDOG_MARKER]
+      }
+      return { installed: true, dispose }
     }
 
     const PLUGIN_ID = '@mzzsfy/dsh-bug-perf'
@@ -295,6 +331,11 @@ window.__ModuleLoader__.load({
     // 连接健康存活这么多倍间隔后清零累计, 避免历史事件把补丁永久禁用
     const BREAKER_RECOVER_INTERVALS = 10
     const STUCK_NOTICE_ID = 'dsh-bug-perf-stuck'
+    // 每类样式独占标记: 设置卡片样式与本插件其它样式同用 data-plugin 归属标记,
+    // 只按 data-plugin 判重会让先注入的那类把后一类短路掉
+    const STUCK_STYLE_ID = 'dsh-bug-perf-stuck-style'
+    const STUCK_STYLE_MARKER = 'stuck'
+    const SETTINGS_STYLE_MARKER = 'settings'
     const STUCK_HINT_TEXTS = ['载入历史…', 'Loading history…']
     const STUCK_MESSAGE_SELECTOR = '[data-chat-flow-key]'
     const STUCK_CSS = [
@@ -325,6 +366,12 @@ window.__ModuleLoader__.load({
       return total
     }
 
+    // 环形缓冲: 诊断只服务现场排查, 超出窗口的旧连接统计直接淘汰
+    const recordSocket = (diag, stats) => {
+      diag.sockets.push(stats)
+      while (diag.sockets.length > DIAG_MAX_SOCKETS) diag.sockets.shift()
+    }
+
     const reportDiag = (win, diag) => {
       const fetchImpl = win.fetch
       if (typeof fetchImpl !== 'function') return
@@ -338,7 +385,14 @@ window.__ModuleLoader__.load({
         errors: diag.errors.slice(-4),
       }
       try {
-        void fetchImpl(`${DIAG_REPORT_PATH}?d=${encodeURIComponent(JSON.stringify(payload))}`, { cache: 'no-store', keepalive: true }).catch(() => { })
+        // 副作用路由按写路由约束: POST + JSON, 由宿主闸门做同源与 content-type 校验
+        void fetchImpl(DIAG_REPORT_PATH, {
+          method: 'POST',
+          cache: 'no-store',
+          keepalive: true,
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+        }).catch(() => { })
       } catch {
         // 上报失败不影响页面
       }
@@ -366,8 +420,9 @@ window.__ModuleLoader__.load({
       sample()
       const timer = clock.setInterval(sample, DIAG_SAMPLE_MS)
       const schedule = win.setTimeout
+      let probe
       if (typeof schedule === 'function') {
-        clock.setInterval(() => {
+        probe = clock.setInterval(() => {
           const started = clock.now()
           schedule(() => {
             const delay = clock.now() - started
@@ -384,11 +439,19 @@ window.__ModuleLoader__.load({
         }
       })
       try { observer?.observe({ entryTypes: ['longtask'] }) } catch { }
-      win.addEventListener?.('error', (event) => {
+      const onError = (event) => {
         diag.errors.push(String(event?.message ?? '').slice(0, 200))
         if (diag.errors.length > DIAG_MAX_SAMPLES) diag.errors.shift()
-      })
-      return { timer, observer }
+      }
+      win.addEventListener?.('error', onError)
+      // 采样面全部可撤: 定时器、观察器与错误监听缺一都会在 HMR 后按代数叠加
+      const dispose = () => {
+        clock.clearInterval(timer)
+        if (probe !== undefined) clock.clearInterval(probe)
+        try { observer?.disconnect() } catch { }
+        win.removeEventListener?.('error', onError)
+      }
+      return { timer, observer, dispose }
     }
 
     // 采样与上报分离:关闭上报只停请求,内存采样继续供现场排查(window.__dshBugPerf)
@@ -400,7 +463,14 @@ window.__ModuleLoader__.load({
       const everyMs = options.reportEvery * DIAG_SAMPLE_MS
       const timer = clock.setInterval(() => reportDiag(win, diag), everyMs)
       diag.enabled = true
-      return { enabled: true, timer }
+      return {
+        enabled: true,
+        timer,
+        dispose: () => {
+          clock.clearInterval(timer)
+          diag.enabled = false
+        },
+      }
     }
 
     // 宿主心跳为固定短周期且丢两次即 terminate, 经反代时 pong 常被链路吞掉。
@@ -464,7 +534,7 @@ window.__ModuleLoader__.load({
           const site = { lastUpstreamAt: openedAt, lastKeepAliveAt: openedAt, keepAliveSent: false }
           const socketStats = diag === undefined ? undefined : { streams: {}, byStream: new Map(), openedAt: clock.now(), closed: false }
           if (socketStats !== undefined) {
-            diag.sockets.push(socketStats)
+            recordSocket(diag, socketStats)
             diag.totals.opened += 1
           }
           this.addEventListener('message', (event) => {
@@ -511,11 +581,14 @@ window.__ModuleLoader__.load({
       }
       Native[KEEPALIVE_MARKER] = Wrapped
       win.WebSocket = Wrapped
+      const uninstall = () => disable('disabled')
       return {
         installed: true,
         state,
         setIntervalMs: (ms) => { state.intervalMs = ms },
-        uninstall: () => disable('disabled'),
+        uninstall,
+        // 统一还原句柄名: 生命周期收集端只认 dispose; 卸载与配置关闭要能分开辨认
+        dispose: () => disable('unloaded'),
       }
     }
 
@@ -554,14 +627,17 @@ window.__ModuleLoader__.load({
       return `${flow.childElementCount ?? 0}:${rows.length}:${typeof last === 'string' ? last.length : 0}`
     }
 
+    // 停滞提示样式按独占 id 判重: 设置卡片样式同样带 data-plugin, 不能作为本类的在位判据
     const ensureStuckStyle = (doc) => {
-      const selector = `style[data-plugin="${PLUGIN_ID}"]`
-      const existing = doc.querySelector?.(selector)
-      if (existing !== null && existing !== undefined) return
+      const existing = doc.getElementById?.(STUCK_STYLE_ID)
+      if (existing !== null && existing !== undefined) return existing
       const style = doc.createElement('style')
+      style.setAttribute('id', STUCK_STYLE_ID)
       style.setAttribute('data-plugin', PLUGIN_ID)
+      style.setAttribute('data-style', STUCK_STYLE_MARKER)
       style.textContent = STUCK_CSS
       doc.head.appendChild(style)
+      return style
     }
 
     // 会话停滞时优先让宿主自己重建连接: 官方 connection 服务的 reconnect() 会中止当前
@@ -571,9 +647,10 @@ window.__ModuleLoader__.load({
       const doc = win?.document
       if (doc === undefined || typeof doc.createElement !== 'function') return { installed: false, reason: 'document unavailable' }
       if (options?.enabled === false) return { installed: false, reason: 'disabled' }
-      // 样式随每次安装重注: HMR 重建会先删掉本插件的 style
-      ensureStuckStyle(doc)
-      if (win[STUCK_MARKER] === true) return { installed: false, reason: 'already installed' }
+      // 先判重再注入: 重复安装不能创建无人释放的样式, 样式只属于真正接管的那一代
+      if (win[STUCK_MARKER] !== undefined) return { installed: false, reason: 'already installed' }
+      const style = ensureStuckStyle(doc)
+      const token = {}
       const state = { since: undefined, fingerprint: undefined, lastTickAt: undefined, quietSince: undefined, notice: undefined, attempts: 0, lastAttemptAt: undefined }
       const reload = () => { try { win.location?.reload?.() } catch { } }
       const showNotice = () => {
@@ -659,8 +736,15 @@ window.__ModuleLoader__.load({
         showNotice()
       }
       const timer = clock.setInterval(tick, options.checkMs)
-      win[STUCK_MARKER] = true
-      return { installed: true, state, timer }
+      win[STUCK_MARKER] = token
+      // 卸载: 停表, 摘掉本代注入的提示条与样式, 让下一代重新安装而不是沿用旧闭包
+      const dispose = () => {
+        clock.clearInterval(timer)
+        hideNotice()
+        if (doc.getElementById?.(STUCK_STYLE_ID) === style) style.remove()
+        if (win[STUCK_MARKER] === token) delete win[STUCK_MARKER]
+      }
+      return { installed: true, state, timer, dispose }
     }
 
     const loadConfig = async () => {
@@ -678,15 +762,13 @@ window.__ModuleLoader__.load({
       }
     }
 
-    const installTerminalWatchdogWhenReady = (ctx, options, report) => {
+    const installTerminalWatchdogWhenReady = (ctx, options, report, lifecycle) => {
       const start = (holder) => {
+        if (lifecycle?.disposed === true) return
         try {
-          report.features.terminalWatchdog = installTerminalWatchdog({
-            holder,
-            options,
-            timers,
-            isVisible: () => document.visibilityState !== 'hidden',
-          })
+          report.features.terminalWatchdog = lifecycle === undefined
+            ? installTerminalWatchdog({ holder, options, timers, isVisible: () => document.visibilityState !== 'hidden' })
+            : lifecycle.track(installTerminalWatchdog({ holder, options, timers, isVisible: () => document.visibilityState !== 'hidden' }))
         } catch (error) {
           report.features.terminalWatchdog = { installed: false, reason: error instanceof Error ? error.message : String(error) }
         }
@@ -718,7 +800,9 @@ window.__ModuleLoader__.load({
     const installJobStreamLimit = ({ jobs, options, workspacesOf, uiSessionOf, doc }) => {
       if (jobs === undefined || typeof jobs.watchRows !== 'function') return { installed: false, reason: 'jobs unavailable' }
       if (jobs[JOB_LIMIT_MARKER] !== undefined) return { installed: false, reason: 'already installed' }
-      const original = jobs.watchRows.bind(jobs)
+      const hadOwnWatchRows = Object.prototype.hasOwnProperty.call(jobs, 'watchRows')
+      const previousWatchRows = jobs.watchRows
+      const original = previousWatchRows.bind(jobs)
       const entries = new Map()
       const order = []
       // active: 常驻流总数; windowUsed: 占默认窗口且不是当前视图的条数(派生值); current/clicked: 定向放行新建条数
@@ -781,14 +865,12 @@ window.__ModuleLoader__.load({
       }
       const readArchived = () => read(() => {
         const workspaces = typeof workspacesOf === 'function' ? workspacesOf() : workspacesOf
-        const snapshot = workspaces?.list?.getSnapshot?.()
-        if (snapshot === undefined) return undefined
-        // phase 未就绪时 archivedSessionIds 是空占位, 不能当权威空集
-        if (snapshot.phase !== undefined && snapshot.phase !== 'ready') return undefined
-        if (subscription === undefined && typeof workspaces?.list?.subscribe === 'function') {
+        const list = workspaces?.list
+        // 订阅与就绪判定解耦: pending 期间没有其它触发器, 只能靠订阅在转 ready 时收敛
+        if (subscription === undefined && typeof list?.subscribe === 'function') {
           // 归档变化即时回收: 模型推送合并到一次微任务
           let scheduled = false
-          subscription = workspaces.list.subscribe(() => {
+          subscription = list.subscribe(() => {
             if (scheduled) return
             scheduled = true
             const reconcile = () => {
@@ -799,9 +881,13 @@ window.__ModuleLoader__.load({
             else Promise.resolve().then(reconcile)
           })
         }
+        const snapshot = list?.getSnapshot?.()
+        if (snapshot === undefined) return undefined
+        // phase 非 ready 或集合非数组一律按未知处理, 不能当权威空集, 也不写缓存
+        if (snapshot.phase !== 'ready') return undefined
+        if (!Array.isArray(snapshot.archivedSessionIds)) return undefined
         if (cache.snapshot === snapshot) return cache.archived
-        const ids = Array.isArray(snapshot.archivedSessionIds) ? snapshot.archivedSessionIds : []
-        const archived = new Set(ids.map((id) => String(id)))
+        const archived = new Set(snapshot.archivedSessionIds.map((id) => String(id)))
         cache.snapshot = snapshot
         cache.archived = archived
         state.archived = archived.size
@@ -837,7 +923,7 @@ window.__ModuleLoader__.load({
         else if (reason === 'click') state.clicked += 1
         return releaser(key, entry)
       }
-      jobs.watchRows = (sessionId) => {
+      const patchedWatchRows = (sessionId) => {
         const key = String(sessionId)
         const existing = entries.get(key)
         if (existing !== undefined) {
@@ -857,6 +943,7 @@ window.__ModuleLoader__.load({
         }
         return admit(key, true)
       }
+      jobs.watchRows = patchedWatchRows
       const promote = (sessionId) => {
         const key = String(sessionId)
         const existing = entries.get(key)
@@ -874,6 +961,8 @@ window.__ModuleLoader__.load({
         promote(rowKey.slice(SESSION_ROW_PREFIX.length))
       }
       doc?.addEventListener?.('click', onDocumentClick, true)
+      const marker = { state, dispose: undefined }
+      // 卸载: 摘监听、退订、释放全部流并还原 watchRows, 下一代才能重新接管
       const dispose = () => {
         doc?.removeEventListener?.('click', onDocumentClick, true)
         if (typeof subscription === 'function') subscription()
@@ -882,8 +971,14 @@ window.__ModuleLoader__.load({
           forget(key)
           entry.release()
         }
+        if (Object.getOwnPropertyDescriptor(jobs, 'watchRows')?.value === patchedWatchRows) {
+          if (hadOwnWatchRows) jobs.watchRows = previousWatchRows
+          else delete jobs.watchRows
+        }
+        if (jobs[JOB_LIMIT_MARKER] === marker) delete jobs[JOB_LIMIT_MARKER]
       }
-      Object.defineProperty(jobs, JOB_LIMIT_MARKER, { value: { state, dispose }, configurable: true })
+      marker.dispose = dispose
+      Object.defineProperty(jobs, JOB_LIMIT_MARKER, { value: marker, configurable: true })
       return { installed: true, state, dispose }
     }
 
@@ -968,7 +1063,7 @@ window.__ModuleLoader__.load({
       {
         key: 'diag',
         title: '性能采样上报',
-        description: '内存采样始终运行;开启后按采样次数把摘要写入宿主临时文件,默认不产生请求与落盘。',
+        description: '内存采样始终运行;开启后按采样次数把摘要写入宿主数据目录(DSH_HOME),默认不产生请求与落盘。',
         fields: [{ name: 'reportEvery', label: '上报间隔', unit: '次采样' }],
       },
     ]
@@ -1183,6 +1278,9 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 设置卡片只占插件管理页的 bundle 配置槽(0.2.2 起官方唯一在用的 bundle 配置位);
+    // settings.plugin.item 不在当前宿主的槽位契约里, 注册它只会留下永不触发的等待
+    const SETTINGS_SLOT = 'plugins.bundle.config'
     const registerSettingsUi = (ctx) => {
       if (h === undefined || typeof ctx.inject !== 'function') return
       ctx.inject(['slots'], (scope) => {
@@ -1192,6 +1290,7 @@ window.__ModuleLoader__.load({
           scope.effect(() => {
             const style = document.createElement('style')
             style.setAttribute('data-plugin', PKG_ID)
+            style.setAttribute('data-style', SETTINGS_STYLE_MARKER)
             style.textContent = UI_CSS
             document.head.appendChild(style)
             return () => style.remove()
@@ -1199,44 +1298,87 @@ window.__ModuleLoader__.load({
         } catch (error) {
           console.warn(`${LOG_PREFIX} styles unavailable:`, error instanceof Error ? error.message : String(error))
         }
-        const register = (name, options) => {
-          try {
-            slots.inject(name, () => {
-              try {
-                slots.register(options, () => h(SettingsPanel))
-              } catch (error) {
-                console.warn(`${LOG_PREFIX} settings slot ${name} register failed:`, error instanceof Error ? error.message : String(error))
-              }
-            })
-          } catch (error) {
-            console.warn(`${LOG_PREFIX} settings slot ${name} unavailable:`, error instanceof Error ? error.message : String(error))
-          }
+        try {
+          slots.inject(SETTINGS_SLOT, () => {
+            try {
+              slots.register({ name: SETTINGS_SLOT, key: PKG_ID }, () => h(SettingsPanel))
+            } catch (error) {
+              console.warn(`${LOG_PREFIX} settings slot ${SETTINGS_SLOT} register failed:`, error instanceof Error ? error.message : String(error))
+            }
+          })
+        } catch (error) {
+          console.warn(`${LOG_PREFIX} settings slot ${SETTINGS_SLOT} unavailable:`, error instanceof Error ? error.message : String(error))
         }
-        register('settings.plugin.item', { name: 'settings.plugin.item', id: NAMESPACE, key: NAMESPACE })
-        register('plugins.bundle.config', { name: 'plugins.bundle.config', key: PKG_ID })
       })
     }
 
+    // 每代安装的还原句柄收集器。apply 返回它也由 cordis 按 fiber 收集, 同时提前注册一个 effect:
+    // apply 中途抛错时没有人返回句柄, 只有已注册的 effect 还能跑清理。
+    // window 令牌兜底同页重放(模块重估不会跑上一代的清理), 否则定时器与监听按代数叠加。
+    const DISPOSE_TOKEN = Symbol.for('@mzzsfy/dsh-bug-perf/dispose')
+    const createLifecycle = (ctx) => {
+      const disposers = []
+      let disposed = false
+      const run = (dispose) => {
+        try {
+          dispose()
+        } catch (error) {
+          console.warn(`${LOG_PREFIX} dispose failed:`, error instanceof Error ? error.message : String(error))
+        }
+      }
+      const dispose = () => {
+        if (disposed) return
+        disposed = true
+        for (const disposeOne of disposers.splice(0).reverse()) run(disposeOne)
+        if (window[DISPOSE_TOKEN] === dispose) delete window[DISPOSE_TOKEN]
+      }
+      const previous = window[DISPOSE_TOKEN]
+      if (typeof previous === 'function') run(previous)
+      window[DISPOSE_TOKEN] = dispose
+      if (typeof ctx?.effect === 'function') {
+        try {
+          ctx.effect(() => dispose)
+        } catch (error) {
+          console.warn(`${LOG_PREFIX} lifecycle effect unavailable:`, error instanceof Error ? error.message : String(error))
+        }
+      }
+      return {
+        get disposed() { return disposed },
+        // 安装结果带 dispose 即纳入本代还原; 已卸载时立即还原, 不留跨代残留
+        track(result) {
+          const disposeOne = result?.dispose
+          if (typeof disposeOne !== 'function') return result
+          if (disposed) run(disposeOne)
+          else disposers.push(disposeOne)
+          return result
+        },
+        dispose,
+      }
+    }
+
     const apply = (ctx) => {
+      const lifecycle = createLifecycle(ctx)
       registerSettingsUi(ctx)
       const report = { config: undefined, features: {} }
       window.__dshBugPerf = report
       const diag = createDiag(timers)
       report.diag = diag
-      startDiagSampling({ win: window, clock: timers, diag, doc: window.document })
+      lifecycle.track(startDiagSampling({ win: window, clock: timers, diag, doc: window.document }))
       // 会话流连接在页面启动早期建立, 保活先按默认值同步安装, 配置到达后再校正间隔
-      const keepAlive = safely(() => installSocketKeepAlive({
+      const keepAlive = lifecycle.track(safely(() => installSocketKeepAlive({
         win: window,
         options: DEFAULT_CONFIG.socketKeepAlive,
         clock: timers,
         diag,
         onDisabled: (reason) => { report.features.socketKeepAlive = { installed: false, reason } },
-      }))
+      })))
       report.features.socketKeepAlive = summarize(keepAlive)
       void (async () => {
         const config = normalizeConfig(await loadConfig())
+        if (lifecycle.disposed) return
         report.config = config
         const reporting = startDiagReporting({ win: window, clock: timers, diag, options: config.diag })
+        lifecycle.track(reporting)
         report.features.diag = reporting.enabled ? { installed: true } : { installed: false, reason: 'disabled' }
         if (!config.socketKeepAlive.enabled) {
           keepAlive.uninstall?.()
@@ -1245,24 +1387,27 @@ window.__ModuleLoader__.load({
           keepAlive.setIntervalMs?.(config.socketKeepAlive.intervalMs)
         }
         report.features.restartCoalesce = config.restartCoalesce.enabled
-          ? installRestartCoalesceFromRequire({ requireImpl: require, windowMs: config.restartCoalesce.windowMs, timers })
+          ? lifecycle.track(installRestartCoalesceFromRequire({ requireImpl: require, windowMs: config.restartCoalesce.windowMs, timers }))
           : { installed: false, reason: 'disabled' }
         if (config.terminalWatchdog.enabled) {
-          installTerminalWatchdogWhenReady(ctx, config.terminalWatchdog, report)
+          installTerminalWatchdogWhenReady(ctx, config.terminalWatchdog, report, lifecycle)
         } else {
           report.features.terminalWatchdog = { installed: false, reason: 'disabled' }
         }
         const stuckOptions = config.stuckSession
         const startStuckSession = (connection) => {
+          // 服务就绪可能晚于本代卸载: 已卸载就不装, 避免装完立刻还原
+          if (lifecycle.disposed) return
           report.actions = { reconnect: () => { try { connection?.reconnect?.() } catch { } } }
           report.features.stuckSession = stuckOptions.enabled
-            ? summarize(safely(() => installStuckSession({ win: window, options: stuckOptions, clock: timers, connection })))
+            ? summarize(lifecycle.track(safely(() => installStuckSession({ win: window, options: stuckOptions, clock: timers, connection }))))
             : { installed: false, reason: 'disabled' }
         }
         const startJobStreamLimit = (jobs) => {
+          if (lifecycle.disposed) return
           report.features.jobStreamLimit = config.jobStreamLimit.enabled
             ? safely(() => {
-              const result = installJobStreamLimit({ jobs, options: config.jobStreamLimit, workspacesOf: () => ctx.get?.('workspaces'), uiSessionOf: () => ctx.get?.('uiSession'), doc: window.document })
+              const result = lifecycle.track(installJobStreamLimit({ jobs, options: config.jobStreamLimit, workspacesOf: () => ctx.get?.('workspaces'), uiSessionOf: () => ctx.get?.('uiSession'), doc: window.document }))
               return result.installed === true ? { installed: true, state: result.state } : result
             })
             : { installed: false, reason: 'disabled' }
@@ -1285,6 +1430,7 @@ window.__ModuleLoader__.load({
         report.features.applyError = error instanceof Error ? error.message : String(error)
         console.warn(`${LOG_PREFIX} apply failed:`, report.features.applyError)
       })
+      return lifecycle.dispose
     }
 
     return {
@@ -1295,6 +1441,7 @@ window.__ModuleLoader__.load({
         LIMITS,
         DIAG_SAMPLE_MS,
         DIAG_MAX_SAMPLES,
+        DIAG_MAX_SOCKETS,
         DIAG_PROBE_MS,
         DIAG_BLOCK_MS,
         normalizeConfig,
@@ -1303,6 +1450,7 @@ window.__ModuleLoader__.load({
         createDiag,
         startDiagSampling,
         startDiagReporting,
+        createLifecycle,
         installRestartCoalesce,
         installRestartCoalesceFromRequire,
         watchdogTick,

@@ -7,12 +7,14 @@ import assert from 'node:assert/strict'
 import {
   DEFAULT_MINUTE_RETENTION_DAYS,
   HOUR_RETENTION_DAYS,
+  MINUTE_BUCKET_SPAN_MINUTES,
   MINUTE_RETENTION_MAX_DAYS,
   UsageStore,
   __resetSharedStoreForTests,
   clampMinuteRetentionDays,
   dayKey,
   hourKey,
+  minuteBucketStart,
   minuteKey,
   sharedStore,
 } from '../src/store.js'
@@ -37,8 +39,9 @@ function rowOf(bucket, provider, model) {
   }
 }
 
-// 内存假域:表与 global 方法面同构;failUpdate 返回错误时 update 抛出该错误
-function fakeDomain({ failUpdate = () => null } = {}) {
+// 内存假域:表与 global 方法面同构;failUpdate/failPut/failGlobal 返回错误时对应写入抛出,
+// onDelete 供在清表事务内部注入「事务期间到达的实时写入」
+function fakeDomain({ failUpdate = () => null, failPut = () => null, failGlobal = () => null, onDelete = () => {} } = {}) {
   const rows = new Map()
   const sessionRows = new Map()
   const stats = { puts: 0, sessionPuts: 0, globalSets: 0 }
@@ -51,10 +54,13 @@ function fakeDomain({ failUpdate = () => null } = {}) {
       return store.size
     },
     async put(key, value) {
+      const failure = failPut(name, key)
+      if (failure) throw failure
       countPut()
       store.set(key, value)
     },
     async delete(key) {
+      await onDelete(name, key)
       return store.delete(key)
     },
     async update(key, fn) {
@@ -78,6 +84,8 @@ function fakeDomain({ failUpdate = () => null } = {}) {
     global: {
       get: () => globalValue,
       set: async (value) => {
+        const failure = failGlobal()
+        if (failure) throw failure
         stats.globalSets += 1
         globalValue = value
       },
@@ -138,6 +146,39 @@ test('跨日跨时跨分边界:毫秒推进即换桶', () => {
   assert.equal(hourKey(after), '2026-08-03T00')
   assert.equal(minuteKey(before), '2026-08-02T23:50')
   assert.equal(minuteKey(after), '2026-08-03T00:00')
+})
+
+test('A4 桶键显式时区:同一时刻按不同宿主日历落不同桶', () => {
+  // Given 宿主 UTC 与 +8 两个日历口径 When 取同一时刻的桶键 Then 日/时/分整体按日历平移
+  const ts = Date.parse('2026-03-15T18:30:00Z')
+  assert.equal(dayKey(ts, 'UTC'), '2026-03-15')
+  assert.equal(hourKey(ts, 'UTC'), '2026-03-15T18')
+  assert.equal(minuteKey(ts, 'UTC'), '2026-03-15T18:30')
+  assert.equal(dayKey(ts, 'Asia/Shanghai'), '2026-03-16')
+  assert.equal(hourKey(ts, 'Asia/Shanghai'), '2026-03-16T02')
+  assert.equal(minuteKey(ts, 'Asia/Shanghai'), '2026-03-16T02:30')
+})
+
+test('分钟桶按本地墙钟对齐:非整十分钟偏移时区(+5:45)不落到非桶分钟', () => {
+  // Given 尼泊尔偏移 -345(UTC+5:45)下的 UTC 整十分钟刻度
+  const utcTen = Date.UTC(2026, 2, 15, 6, 0)
+  const wallOf = (ts) => new Date(ts + 345 * 60 * 1000)
+  // When 取桶起点
+  const start = minuteBucketStart(utcTen, -345)
+  // Then 落到本地墙钟 11:40(而非 UTC 对齐得到的 11:45),同刻同桶且不跨时
+  const wall = wallOf(start)
+  assert.equal(wall.getUTCHours(), 11)
+  assert.equal(wall.getUTCMinutes(), 40)
+  assert.equal(wall.getUTCMinutes() % MINUTE_BUCKET_SPAN_MINUTES, 0)
+  // 同刻同桶:墙钟 11:45 落 11:40 桶,11:50 起落下一桶
+  assert.equal(start, utcTen - 5 * 60 * 1000)
+  assert.equal(wallOf(minuteBucketStart(utcTen + 14 * 60 * 1000, -345)).getUTCMinutes(), 50)
+  // 跨日:本地 00:05 归次日 00:00 桶
+  const afterMidnight = Date.UTC(2026, 2, 15, 18, 20)
+  const midnight = wallOf(minuteBucketStart(afterMidnight, -345))
+  assert.equal(midnight.getUTCDate(), 16)
+  assert.equal(midnight.getUTCHours(), 0)
+  assert.equal(midnight.getUTCMinutes(), 0)
 })
 
 test('token 样本同刻落三粒度三行,行内无 g 字段', async () => {
@@ -358,13 +399,13 @@ test('pruneMinutes 按保留窗口清理分钟桶且不碰其他粒度', async (
   const domain = fakeDomain()
   const store = makeStore(domain, { now: () => local(2026, 8, 10, 12, 0) })
   const table = domain.table()
-  await table.put('M|2026-08-08T11:00|a|m', rowOf('2026-08-08T11:00', 'a', 'm'))
+  await table.put('M|2026-08-01T11:00|a|m', rowOf('2026-08-01T11:00', 'a', 'm'))
   await table.put('M|2026-08-08T12:00|a|m', rowOf('2026-08-08T12:00', 'a', 'm'))
   await table.put('M|2026-08-09T00:00|a|m', rowOf('2026-08-09T00:00', 'a', 'm'))
   await table.put('D|2026-08-01|a|m', rowOf('2026-08-01', 'a', 'm'))
   await table.put('H|2026-08-01T00|a|m', rowOf('2026-08-01T00', 'a', 'm'))
   await store.pruneMinutes(DEFAULT_MINUTE_RETENTION_DAYS)
-  assert.equal(domain.rows.has('M|2026-08-08T11:00|a|m'), false)
+  assert.equal(domain.rows.has('M|2026-08-01T11:00|a|m'), false)
   assert.equal(domain.rows.has('M|2026-08-08T12:00|a|m'), true)
   assert.equal(domain.rows.has('M|2026-08-09T00:00|a|m'), true)
   assert.equal(domain.rows.has('D|2026-08-01|a|m'), true)
@@ -488,12 +529,191 @@ test('游标写单次失败不断链', async () => {
   assert.deepEqual([...(await store.seenSessions())].sort(), ['b'])
 })
 
-test('启动时游标为空且已有行则清空待重建', async () => {
+test('启动时游标为空且已有行:只标记待清,回扫读出会话后 clearOrphanRows 才清空', async () => {
+  const domain = fakeDomain()
+  await domain.table().put('D|2026-08-02|a|m', rowOf('2026-08-02', 'a', 'm'))
+  await domain.table('sessions').put('H|2026-08-02T10|s1', { bucket: '2026-08-02T10', sessions: ['s1'] })
+  const store = makeStore(domain)
+  await store.readyPromise()
+  assert.equal(domain.rows.size, 1, '启动阶段不得先清历史')
+  assert.equal(domain.sessionRows.size, 1)
+  assert.equal(store.orphanResetPending, true)
+  assert.equal(await store.clearOrphanRows(), true)
+  assert.equal(domain.rows.size, 0)
+  assert.equal(domain.sessionRows.size, 0)
+  assert.equal(store.orphanResetPending, false)
+  // 幂等:再次调用不重复处理
+  assert.equal(await store.clearOrphanRows(), false)
+})
+
+// U3:孤儿清理先 flush 再整表删除,本 boot 实时行也被删;回扫对实时拥区间
+// (liveFirstSeq 之后)跳过重放,store 必须自行回填实时增量与会话索引
+test('U3 孤儿清理保留本 boot 实时行并回填(含已落盘行,不含上一 boot 孤儿行)', async () => {
+  const domain = fakeDomain()
+  // 上一 boot 遗留:表有行、游标空 → 孤儿态
+  await domain.table().put('M|2026-08-02T14:30|deepseek|deepseek/deepseek-chat',
+    { ...rowOf('2026-08-02T14:30', 'deepseek', 'deepseek/deepseek-chat'), inputTokens: 111, lastSeen: 1 })
+  await domain.table('sessions').put('D|2026-08-02', { bucket: '2026-08-02', sessions: ['stale'] })
+  const store = makeStore(domain)
+  await store.readyPromise()
+  assert.equal(store.orphanResetPending, true)
+  // 本 boot 实时样本已 flush 落表(孤儿清理发生在本轮回扫首个会话之后)
+  await store.record(tokenSample(local(2026, 8, 2, 14, 37)), { live: true })
+  await store.recordSession('live-session', local(2026, 8, 2, 14, 37), { live: true })
+  await store.flushNow()
+  assert.equal(store.orphanResetPending, true)
+
+  assert.equal(await store.clearOrphanRows(), true)
+  await store.flushNow()
+  // 实时行原样重建:同桶同维度只有本 boot 增量,不含孤儿行的 111
+  const minuteRows = await store.rangeRows('M', '2026-08-02T14:30', '2026-08-02T14:30')
+  assert.equal(minuteRows.length, 1)
+  assert.equal(minuteRows[0].inputTokens, 10, '实时增量不双计也不丢')
+  assert.equal(minuteRows[0].outputTokens, 20)
+  const dayRows = await store.rangeRows('D', '2026-08-02', '2026-08-02')
+  assert.equal(dayRows.length, 1)
+  assert.equal(dayRows[0].inputTokens, 10)
+  // 会话索引同样回填:旧孤儿会话被清,实时会话保留
+  const sessions = await store.sessionRangeRows('D', '2026-08-02', '2026-08-02')
+  assert.deepEqual(sessions.map((row) => row.sessions), [['live-session']])
+})
+
+test('U3 回扫写入不进入实时快照:清表后不重复计数', async () => {
   const domain = fakeDomain()
   await domain.table().put('D|2026-08-02|a|m', rowOf('2026-08-02', 'a', 'm'))
   const store = makeStore(domain)
   await store.readyPromise()
+  // 回扫写入(无 live 标记):历史由回扫自身重建,store 不回填
+  await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
+  await store.flushNow()
+  await store.clearOrphanRows()
+  await store.flushNow()
   assert.equal(domain.rows.size, 0)
+})
+
+test('U3 重建(reset)后实时行仍在:清表不吞本 boot 实时读数', async () => {
+  const domain = fakeDomain()
+  const backup = fakeDomain()
+  const store = new UsageStore(facilityOf(domain, backup), { now: () => FIXED_NOW })
+  await store.record(tokenSample(local(2026, 8, 2, 14, 37)), { live: true })
+  await store.reset(new Map([['live-session', 9]]))
+  await store.flushNow()
+  const dayRows = await store.rangeRows('D', '2026-08-02', '2026-08-02')
+  assert.equal(dayRows.length, 1)
+  assert.equal(dayRows[0].inputTokens, 10)
+  const sessions = await store.seenSessions()
+  assert.deepEqual([...sessions], [], '游标按重建边界写,实时会话 id 仍待回扫确认')
+})
+
+test('U3 备份恢复不回填实时快照(快照已含),避免双计', async () => {
+  const domain = fakeDomain()
+  const backup = fakeDomain()
+  const store = new UsageStore(facilityOf(domain, backup), { now: () => FIXED_NOW })
+  await store.record(tokenSample(local(2026, 8, 2, 14, 37)), { live: true })
+  await store.reset()
+  // 重置后继续实时采集一笔,再回退:回到重置前快照(只有第一笔)
+  await store.record(tokenSample(local(2026, 8, 2, 14, 37)), { live: true })
+  await store.restoreFromBackup()
+  const dayRows = await store.rangeRows('D', '2026-08-02', '2026-08-02')
+  assert.equal(dayRows.length, 1)
+  assert.equal(dayRows[0].inputTokens, 10, '恢复后只剩快照值,实时快照不得再叠加')
+})
+
+test('U3 孤儿清理落盘失败:累积器保留,重试仍能回填实时行', async () => {
+  let failures = 1
+  const domain = fakeDomain({ failUpdate: () => (failures-- > 0 ? new Error('transient') : null) })
+  await domain.table().put('D|2026-08-02|a|m', rowOf('2026-08-02', 'a', 'm'))
+  const store = makeStore(domain)
+  await store.readyPromise()
+  await store.record(tokenSample(local(2026, 8, 2, 14, 37)), { live: true })
+  await assert.rejects(store.clearOrphanRows(), /usage store flush failed/)
+  assert.equal(store.orphanResetPending, true, '清理失败不得置完成位')
+  assert.equal(await store.clearOrphanRows(), true)
+  await store.flushNow()
+  const dayRows = await store.rangeRows('D', '2026-08-02', '2026-08-02')
+  assert.equal(dayRows.length, 1)
+  assert.equal(dayRows[0].inputTokens, 10, '重试后实时行仍在且不双计')
+})
+
+// 终验阻断 1:writeGlobal 抛错时表已清空,旧实现把快照丢了,第二次成功也回填不出行
+test('U3 孤儿清理写游标失败:表已清空但累积器仍可重建,重试后实时行不丢', async () => {
+  let failures = 1
+  const domain = fakeDomain({ failGlobal: () => (failures-- > 0 ? new Error('cursor write failed') : null) })
+  await domain.table().put('D|2026-08-02|a|m', rowOf('2026-08-02', 'a', 'm'))
+  const store = makeStore(domain)
+  await store.readyPromise()
+  assert.equal(store.orphanResetPending, true)
+  await store.record(tokenSample(local(2026, 8, 2, 14, 37)), { live: true })
+  await store.recordSession('live-session', local(2026, 8, 2, 14, 37), { live: true })
+  await store.flushNow()
+  await assert.rejects(store.clearOrphanRows(), /cursor write failed/)
+  assert.equal(store.orphanResetPending, true, '失败不置完成位')
+  assert.equal(await store.clearOrphanRows(), true)
+  await store.flushNow()
+  const dayRows = await store.rangeRows('D', '2026-08-02', '2026-08-02')
+  assert.equal(dayRows.length, 1)
+  assert.equal(dayRows[0].inputTokens, 10, '第二次成功后实时行由累积器重建')
+  const sessions = await store.sessionRangeRows('D', '2026-08-02', '2026-08-02')
+  assert.deepEqual(sessions.map((row) => row.sessions), [['live-session']])
+})
+
+// 终验阻断 2:备份快照写入抛错时主表仍是清空前状态,旧实现已把快照摘走,
+// 第二次成功时清表后无法恢复
+test('U3 重建备份快照失败:主表与累积器保留,重试清表后实时行不丢', async () => {
+  const domain = fakeDomain()
+  let failures = 1
+  const backup = fakeDomain({ failPut: (name) => (name === 'buckets' && failures-- > 0 ? new Error('backup put failed') : null) })
+  const store = new UsageStore(facilityOf(domain, backup), { now: () => FIXED_NOW })
+  await store.record(tokenSample(local(2026, 8, 2, 14, 37)), { live: true })
+  await store.flushNow()
+  await assert.rejects(store.reset(), /backup put failed/)
+  assert.equal((await store.rangeRows('D', '2026-08-02', '2026-08-02'))[0].inputTokens, 10, '失败时主表未被清')
+  await store.reset()
+  await store.flushNow()
+  const dayRows = await store.rangeRows('D', '2026-08-02', '2026-08-02')
+  assert.equal(dayRows.length, 1)
+  assert.equal(dayRows[0].inputTokens, 10, '第二次成功后累积器仍能重建实时行')
+})
+
+// 终验阻断 3:清表事务启动(摘取快照)之后、flush 捕获 pending 之前到达的实时
+// 样本会随 flush 写进表又被 wipe 删除;只回填旧快照会丢它。累积器重建须包含它,
+// 且同键覆盖不双计(15 而非 10 或 20)。删除钩子用在事务内 prune 的删除点上,
+// 作为「事务已启动」的确定性注入时机
+test('U3 清表事务期间新到的实时样本一并重建:同桶合计 15 而非 10', async () => {
+  const hooks = { onDelete: () => {} }
+  const domain = fakeDomain({ onDelete: (name, key) => hooks.onDelete(name, key) })
+  // 超期分钟行只用于让事务内的 prune 触发一次删除
+  await domain.table().put('M|2026-07-01T00:00|a|m', rowOf('2026-07-01T00:00', 'a', 'm'))
+  const store = makeStore(domain)
+  await store.readyPromise()
+  assert.equal(store.orphanResetPending, true)
+  // 实时样本先留在 pending:事务内 flush 会把它写进表,随后被 wipe 删除
+  await store.record(tokenSample(local(2026, 8, 2, 14, 37)), { live: true })
+  let injected = false
+  hooks.onDelete = async () => {
+    if (injected) return
+    injected = true
+    await store.record(tokenSample(local(2026, 8, 2, 14, 37), {
+      inputTokens: 5, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+    }), { live: true })
+  }
+  assert.equal(await store.clearOrphanRows(), true)
+  await store.flushNow()
+  const dayRows = await store.rangeRows('D', '2026-08-02', '2026-08-02')
+  assert.equal(dayRows.length, 1)
+  assert.equal(dayRows[0].inputTokens, 15, '清表期间的实时增量必须并入重建集且不双计')
+})
+
+test('启动游标为空且宿主全面拒读:孤儿标记保持,历史不被清空', async () => {
+  const domain = fakeDomain()
+  await domain.table().put('D|2026-08-02|a|m', rowOf('2026-08-02', 'a', 'm'))
+  const store = makeStore(domain)
+  await store.readyPromise()
+  // 模拟本轮回扫没有任何成功会话:不调用 clearOrphanRows
+  assert.equal(store.orphanResetPending, true)
+  assert.equal(domain.rows.size, 1)
+  // 下一轮启动仍标记待清,数据仍在
+  assert.equal(store.orphanResetPending, true)
 })
 
 test('启动时游标非空则既有行保留', async () => {
@@ -544,8 +764,7 @@ test('restore 前先快照当前态:回退动作自身可再回退', async () =>
   assert.equal(after.length, 1)
 })
 
-test('备份域不可用:重建照常,backupInfo 标记不可用,restore 报错', async () => {
-  const domain = fakeDomain()
+test('备份域不可用:重建照常,backupInfo 标记不可用,restore 报错', async () => {  const domain = fakeDomain()
   const facility = {
     open: async (definition) => {
       if (definition?.name === 'usage_stats_backup') throw new Error('backup domain unavailable')
@@ -558,6 +777,21 @@ test('备份域不可用:重建照常,backupInfo 标记不可用,restore 报错'
   assert.equal(domain.rows.size, 0)
   assert.equal(store.backupInfo().available, false)
   await assert.rejects(store.restoreFromBackup(), /backup domain unavailable/)
+})
+
+test('无备份快照时 restore 拒绝:不清空全量与游标', async () => {
+  const domain = fakeDomain()
+  const backup = fakeDomain()
+  const store = new UsageStore(facilityOf(domain, backup), { now: () => FIXED_NOW })
+  await store.record(tokenSample(local(2026, 8, 2, 14, 0)))
+  await store.markSeenSessions(['s1'])
+  await store.flushNow()
+  const keysBefore = [...domain.rows.keys()].sort()
+  assert.equal(store.backupInfo().available, false)
+  // 无快照的回退等于清库:必须在破坏前拒绝
+  await assert.rejects(store.restoreFromBackup(), /backup snapshot unavailable/)
+  assert.deepEqual([...domain.rows.keys()].sort(), keysBefore)
+  assert.deepEqual([...(await store.seenSessions())], ['s1'])
 })
 
 test('域打开失败进入降级:ready 可等待,操作按调用失败', async () => {

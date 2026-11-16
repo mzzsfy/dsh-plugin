@@ -62,7 +62,7 @@ test('源码契约:prompt 通道参数形态(requestId 幂等 + queue + text 段
 })
 
 test('源码契约:旧宿主无 prompt 时通道降级为 null(仅回填)', () => {
-  assert.ok(CLIENT_SRC.includes("(remoteSession && typeof remoteSession.prompt === 'function')"), 'prompt 通道应以能力探测守门(含面缺失)')
+  assert.ok(CLIENT_SRC.includes("typeof remoteSession.prompt === 'function'"), 'prompt 通道应以能力探测守门(含面缺失)')
 })
 
 // F4 回填不得覆盖用户输入 的客户端契约(实测 bug:点分叉后 200ms 内用户输入被 setDraft 吞掉;
@@ -99,20 +99,24 @@ test('源码契约:映射缺失的轮触发重拉而非静默跳过', () => {
   // 锚定 ForkDock 起点切片:SteerRecallDock 的注入 scan 同名在先,不得误抓
   const forkStart = CLIENT_SRC.indexOf('function ForkDock({')
   assert.ok(forkStart > 0, 'ForkDock 切片定位失败')
-  const scan = CLIENT_SRC.slice(CLIENT_SRC.indexOf('function scan() {', forkStart), CLIENT_SRC.indexOf('if (typeof MutationObserver', forkStart))
+  const scan = CLIENT_SRC.slice(CLIENT_SRC.indexOf('function scan() {', forkStart), CLIENT_SRC.indexOf('const unsubscribeScan = subscribeMutationScan(scan)', forkStart))
   assert.ok(scan.includes('entry === undefined'), '扫描应识别映射缺失的轮')
-  assert.ok(scan.includes('refreshRef.current()'), '映射缺失时应触发重拉')
+  assert.ok(scan.includes('refreshRef.current'), '映射缺失时应触发重拉')
 })
 
 test('源码契约:前一轮未入映射时补拉更早锚点页', () => {
   const forkStart = CLIENT_SRC.indexOf('function ForkDock({')
   assert.ok(forkStart > 0, 'ForkDock 切片定位失败')
-  const scan = CLIENT_SRC.slice(CLIENT_SRC.indexOf('function scan() {', forkStart), CLIENT_SRC.indexOf('if (typeof MutationObserver', forkStart))
-  assert.ok(scan.includes('let floor = Number.POSITIVE_INFINITY'), '扫描需同时求映射最小轮号')
-  assert.ok(scan.includes('if (turn - 1 < floor && refreshRef.current)'), '前一轮早于映射最早轮时应补拉更早页')
+  const scan = CLIENT_SRC.slice(CLIENT_SRC.indexOf('function scan() {', forkStart), CLIENT_SRC.indexOf('const unsubscribeScan = subscribeMutationScan(scan)', forkStart))
+  assert.ok(scan.includes('const floor = knownTurns.length > 0 ? Math.min(...knownTurns)'), '扫描需同时求映射最小轮号')
+  assert.ok(scan.includes('if (turn - 1 < floor) refreshRef.current()'), '前一轮早于映射最早轮时应补拉更早页')
 })
 
-test('源码契约:重拉有在途门控', () => {  const refresh = CLIENT_SRC.slice(CLIENT_SRC.indexOf('refreshRef.current = () =>'), CLIENT_SRC.indexOf('loadRef.current()\n      .then((map) => {\n        if (disposed) return'))
+test('源码契约:重拉有在途门控', () => {
+  const refresh = CLIENT_SRC.slice(
+    CLIENT_SRC.indexOf('refreshRef.current = (options) => {'),
+    CLIENT_SRC.indexOf('useEffect(() => {\n    if (sessionId === undefined || isSubagentSession)'),
+  )
   assert.ok(CLIENT_SRC.includes('refreshPendingRef'), '重拉必须有在途门控标志')
   assert.ok(refresh.includes('if (refreshPendingRef.current) return'), '门控判断应位于重拉入口首位')
   assert.ok(refresh.includes('refreshPendingRef.current = true'), '进入重拉即置在途')
@@ -120,7 +124,10 @@ test('源码契约:重拉有在途门控', () => {  const refresh = CLIENT_SRC.s
 })
 
 test('源码契约:重拉结果与基线结构签名相同则不 setState(防扫描循环)', () => {
-  const refresh = CLIENT_SRC.slice(CLIENT_SRC.indexOf('refreshRef.current = () =>'), CLIENT_SRC.indexOf('loadRef.current()\n      .then((map) => {\n        if (disposed) return'))
+  const refresh = CLIENT_SRC.slice(
+    CLIENT_SRC.indexOf('refreshRef.current = (options) => {'),
+    CLIENT_SRC.indexOf('useEffect(() => {\n    if (sessionId === undefined || isSubagentSession)'),
+  )
   assert.ok(refresh.includes('setTurnEnds'), '重拉应更新映射')
   assert.ok(refresh.includes('turnEndsSignature(turnEndsRef.current) === turnEndsSignature(map)'),
     'loadTurnEnds 每次新建 Map,基线必须比结构签名而非引用,相同即短路,避免 setState 触发扫描循环')
@@ -128,7 +135,7 @@ test('源码契约:重拉结果与基线结构签名相同则不 setState(防扫
 
 test('源码契约:重拉入口经 ref 跨组件传递(Bootstrap 装配,扫描处调用)', () => {
   assert.ok(CLIENT_SRC.includes('const refreshRef = useRef(null)'), 'ForkDock 侧应有 refreshRef')
-  assert.ok(CLIENT_SRC.includes('refreshRef.current = () => {'), 'Bootstrap 应装配重拉入口')
+  assert.ok(CLIENT_SRC.includes('refreshRef.current = (options) => {'), 'Bootstrap 应装配重拉入口')
 })
 
 test('源码契约:fork dock 订阅官方 input 快照取草稿', () => {

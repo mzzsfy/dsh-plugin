@@ -5,17 +5,31 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
 
-import { MAX_RANGE_SPAN_DAYS, registerUsageRoutes } from '../src/routes.js'
+import { MAX_HOUR_SLOTS, MAX_HOUR_SPAN_DAYS, MAX_MINUTE_SPAN_DAYS, MAX_RANGE_SPAN_DAYS, registerUsageRoutes } from '../src/routes.js'
 import { DEFAULT_MINUTE_RETENTION_DAYS, hourKey, minuteKey } from '../src/store.js'
+import { CLIENT_BODY } from './client-eval.mjs'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const MINUTE_MS = 60 * 1000
+const MS_PER_HOUR = 60 * MINUTE_MS
+const HOURS_PER_DAY = 24
+// 客户端纯函数区(同源求值):端到端用例直接使用浏览器半区的范围解析
+const clientCore = new Function(`${CLIENT_BODY}\nreturn { resolveHourRange }`)()
+// 桶串按分量差计槽,与路由同口径;不受运行环境夏令时绝对时长影响
+const countHourSlots = (from, to) => {
+  const parts = (key) => {
+    const [year, month, day, hour] = key.split(/[-T]/).map(Number)
+    return [year, month - 1, day, hour]
+  }
+  return (Date.UTC(...parts(to)) - Date.UTC(...parts(from))) / MS_PER_HOUR + 1
+}
 const ROUTE_PREFIX = '/api/usage-dash'
 const PATH_RANGE = `${ROUTE_PREFIX}/range`
 const PATH_HOURS = `${ROUTE_PREFIX}/hours`
 const PATH_MINUTES = `${ROUTE_PREFIX}/minutes`
 const PATH_STATUS = `${ROUTE_PREFIX}/status`
 const PATH_RESET = `${ROUTE_PREFIX}/reset`
+const PATH_RESTORE = `${ROUTE_PREFIX}/restore`
 const PATH_PRICING = `${ROUTE_PREFIX}/pricing`
 const PATH_UNKNOWN = `${ROUTE_PREFIX}/unknown`
 const LOCAL_HOST = '127.0.0.1:3080'
@@ -65,12 +79,12 @@ function makeWebServer() {
   }
 }
 
-function makeStore({ rows = [], sessionRows = [], fail, failSessionRows } = {}) {
+function makeStore({ rows = [], sessionRows = [], fail, failSessionRows, backupAvailable = false } = {}) {
   const calls = { rangeRows: 0, sessionRangeRows: [] }
   return {
     calls,
     backupInfo() {
-      return { available: false }
+      return { available: backupAvailable }
     },
     async restoreFromBackup() {
       calls.restoreFromBackup = (calls.restoreFromBackup ?? 0) + 1
@@ -139,7 +153,7 @@ function makePricing({ active = true, rules = [] } = {}) {
   }
 }
 
-function mount({ store, collector, retentionDays, now, pricing } = {}) {
+function mount({ store, collector, retentionDays, now, pricing, timeZone } = {}) {
   const ctx = makeCtx()
   ctx.webServer = makeWebServer()
   const dispose = registerUsageRoutes(ctx, {
@@ -148,6 +162,7 @@ function mount({ store, collector, retentionDays, now, pricing } = {}) {
     retentionDays: retentionDays ?? (() => DEFAULT_MINUTE_RETENTION_DAYS),
     now: now ?? (() => FIXED_NOW),
     pricing,
+    timeZone,
   })
   return { routes: ctx.webServer.routes, dispose, ctx }
 }
@@ -195,14 +210,24 @@ const invokeJson = (routes, path, { headers, payload, ...rest } = {}) =>
 // 值经 JSON 线协议传输,undefined 键不出现,按线形态对比
 const wireOf = (value) => JSON.parse(JSON.stringify(value))
 
-test('跨源 POST 拒绝 403 forbidden', async () => {
+test('跨源 POST 拒绝 403', async () => {
   const { routes } = mount()
   const res = await invoke(routes, PATH_STATUS, {
     headers: { origin: 'http://evil.example', host: LOCAL_HOST },
   })
   const parsed = JSON.parse(res.body)
   assert.equal(res.statusCode, 403)
-  assert.deepEqual(parsed, { ok: false, error: { code: 'forbidden', message: parsed.error.message } })
+  // 共享网关信封:{error};守卫文案不外泄内部细节
+  assert.deepEqual(parsed, { error: '跨源请求被拒绝' })
+})
+
+// U5 回归:同源比对大小写不敏感(旧本地实现直接比较 host 字符串,大写 Host 被误拒)
+test('Origin 与 Host 大小写不同仍判同源', async () => {
+  const { routes } = mount()
+  const res = await invokeJson(routes, PATH_STATUS, { headers: { origin: 'http://127.0.0.1:3080', host: '127.0.0.1:3080' } })
+  assert.equal(res.statusCode, 200)
+  const upper = await invokeJson(routes, PATH_STATUS, { headers: { origin: 'http://127.0.0.1:3080', host: '127.0.0.1:3080'.toUpperCase() } })
+  assert.equal(upper.statusCode, 200, 'Host 大写不得误判跨源')
 })
 
 test('无 Origin 的 POST 放行', async () => {
@@ -218,8 +243,18 @@ test('content-type 非 JSON 拒绝 400', async () => {
   const res = await invoke(routes, PATH_STATUS, { headers: { 'content-type': 'text/plain' } })
   const parsed = JSON.parse(res.body)
   assert.equal(res.statusCode, 400)
-  assert.equal(parsed.ok, false)
-  assert.equal(parsed.error.code, 'usage_api_error')
+  assert.deepEqual(parsed, { error: 'content-type 须为 application/json' })
+})
+
+// U5 回归:媒体类型按 essence 精确比较,旧本地 includes 子串判定会放行混杂类型
+test('content-type 含 application/json 子串但媒体类型非 JSON 仍拒绝', async () => {
+  const { routes } = mount()
+  for (const contentType of ['text/plain; application/json', 'application/jsonp']) {
+    const res = await invoke(routes, PATH_STATUS, { headers: { 'content-type': contentType } })
+    assert.equal(res.statusCode, 400, contentType)
+  }
+  const ok = await invoke(routes, PATH_STATUS, { headers: { 'content-type': 'Application/JSON; charset=utf-8' } })
+  assert.equal(ok.statusCode, 200, '大小写与参数的合法 JSON 媒体类型放行')
 })
 
 test('非 POST 方法拒绝 405', async () => {
@@ -233,7 +268,8 @@ test('非 POST 方法拒绝 405', async () => {
 
 test('未知路径 404 not_found', async () => {
   const { routes } = mount()
-  const res = await invoke(routes, PATH_STATUS, { url: PATH_UNKNOWN })
+  // exact 注册下未知路径不会进 handler;此处直接以未匹配 URL 驱动同一 dispatch 验证兜底
+  const res = await invokeJson(routes, PATH_STATUS, { url: PATH_UNKNOWN })
   const parsed = JSON.parse(res.body)
   assert.equal(res.statusCode, 404)
   assert.equal(parsed.ok, false)
@@ -262,6 +298,42 @@ test('reset 引发的重建中放行并回状态快照', async () => {
   assert.equal(parsed.ok, true)
   assert.deepEqual(parsed.value, wireOf(collector.status()))
   assert.equal(collector.calls.resetAndRescan, 1)
+})
+
+test('回扫进行中 restore 与 reset 同谓词冲突 409 且不调用回退', async () => {
+  const store = makeStore()
+  const collector = makeCollector({ stateOverrides: { running: true }, rebuilding: false })
+  const { routes } = mount({ store, collector })
+  const res = await invokeJson(routes, PATH_RESTORE)
+  const parsed = JSON.parse(res.body)
+  assert.equal(res.statusCode, 409)
+  assert.equal(parsed.ok, false)
+  assert.equal(store.calls.restoreFromBackup, undefined)
+})
+
+test('重建中 restore 经 rebuilding 放行(与 reset 复用同一冲突谓词)', async () => {
+  const store = makeStore({ backupAvailable: true })
+  const collector = makeCollector({ stateOverrides: { running: true }, rebuilding: true })
+  const { routes } = mount({ store, collector })
+  const res = await invokeJson(routes, PATH_RESTORE)
+  const parsed = JSON.parse(res.body)
+  assert.equal(res.statusCode, 200)
+  assert.equal(parsed.ok, true)
+  assert.equal(store.calls.restoreFromBackup, 1)
+})
+
+test('无备份快照时 restore 409 且不触发破坏性回退', async () => {
+  // Given 备份域无快照(available=false)且无扫描冲突
+  const store = makeStore({ backupAvailable: false })
+  const { routes } = mount({ store })
+  // When 请求回退
+  const res = await invokeJson(routes, PATH_RESTORE)
+  const parsed = JSON.parse(res.body)
+  // Then 409 与明确原因,且未调用回退(避免静默清空全量与游标)
+  assert.equal(res.statusCode, 409)
+  assert.equal(parsed.ok, false)
+  assert.match(parsed.error.message, /backup snapshot unavailable/)
+  assert.equal(store.calls.restoreFromBackup, undefined)
 })
 
 test('hours 桶串分量回滚拒绝 400', async () => {
@@ -293,6 +365,74 @@ test('range 跨度超上限拒绝 400', async () => {
   assert.equal(parsed.error.code, 'usage_api_error')
 })
 
+test('hours 千年跨度在聚合前拒绝 400,不物化桶(防 OOM 回归)', async () => {
+  const store = makeStore()
+  const { routes } = mount({ store })
+  const res = await invokeJson(routes, PATH_HOURS, { payload: { from: '1000-01-01T00', to: '9999-12-31T23' } })
+  const parsed = JSON.parse(res.body)
+  assert.equal(res.statusCode, 400)
+  assert.equal(parsed.ok, false)
+  assert.match(parsed.error.message, new RegExp(`span exceeds ${MAX_HOUR_SPAN_DAYS} days`))
+  assert.equal(store.calls.rangeRows, 0, '不得进入聚合')
+  assert.equal(store.calls.sessionRangeRows.length, 0, '不得读取会话行')
+})
+
+// 本地墙钟小时桶:按分量构造,测试期望不依赖运行环境时区(跨夏令时也按墙钟推进)
+const hourBucketAt = (offsetHours) => hourKey(
+  new Date(2026, 0, 1 + Math.floor(offsetHours / HOURS_PER_DAY), offsetHours % HOURS_PER_DAY).getTime(),
+)
+
+test('hours 跨度上限为闭区间 361 槽(15 天 + 端点):361 放行,362 拒绝', () => {
+  assert.equal(MAX_HOUR_SLOTS, 361)
+  assert.equal(MAX_HOUR_SLOTS, MAX_HOUR_SPAN_DAYS * HOURS_PER_DAY + 1)
+})
+
+test('hours 恰好 361 槽放行,362 槽拒绝', async () => {
+  const { routes } = mount()
+  const from = hourBucketAt(0)
+  const ok = await invokeJson(routes, PATH_HOURS, { payload: { from, to: hourBucketAt(MAX_HOUR_SLOTS - 1) } })
+  assert.equal(ok.statusCode, 200, `闭区间 ${MAX_HOUR_SLOTS} 槽必须放行`)
+  const tooLong = await invokeJson(routes, PATH_HOURS, { payload: { from, to: hourBucketAt(MAX_HOUR_SLOTS) } })
+  const parsed = JSON.parse(tooLong.body)
+  assert.equal(tooLong.statusCode, 400)
+  assert.match(parsed.error.message, new RegExp(`span exceeds ${MAX_HOUR_SPAN_DAYS} days`))
+})
+
+// U1 端到端:客户端 15d 预设(361 槽)必须被真实路由接受——旧上限 360 使它恒 400
+test('客户端 15d 预设请求端到端放行且槽数为 361', async () => {
+  const now = new Date(2026, 0, 15, 12, 0)
+  const request = clientCore.resolveHourRange('15d', now)
+  assert.ok(request, '15d 预设可解析')
+  assert.equal(countHourSlots(request.from, request.to), 361)
+  const { routes } = mount()
+  const res = await invokeJson(routes, PATH_HOURS, { payload: request })
+  const parsed = JSON.parse(res.body)
+  assert.equal(res.statusCode, 200)
+  assert.deepEqual([parsed.value.from, parsed.value.to], [request.from, request.to])
+})
+
+test('minutes 十年跨度在聚合前拒绝 400,不物化桶(防 OOM 回归)', async () => {
+  const store = makeStore()
+  const { routes } = mount({ store })
+  const res = await invokeJson(routes, PATH_MINUTES, { payload: { from: '1000-01-01T00:00', to: '9999-12-31T23:50' } })
+  const parsed = JSON.parse(res.body)
+  assert.equal(res.statusCode, 400)
+  assert.equal(parsed.ok, false)
+  assert.match(parsed.error.message, new RegExp(`span exceeds ${MAX_MINUTE_SPAN_DAYS} days`))
+  assert.equal(store.calls.rangeRows, 0, '不得进入聚合')
+  assert.equal(store.calls.sessionRangeRows.length, 0, '不得读取会话行')
+})
+
+test('minutes 跨度上限按 MAX_SLOTS 可枚举天数:恰好上限放行,多十分钟拒绝', async () => {
+  const { routes } = mount()
+  const lastDay = String(MAX_MINUTE_SPAN_DAYS).padStart(2, '0')
+  const nextDay = String(MAX_MINUTE_SPAN_DAYS + 1).padStart(2, '0')
+  const ok = await invokeJson(routes, PATH_MINUTES, { payload: { from: '2026-01-01T00:00', to: `2026-01-${lastDay}T23:50` } })
+  assert.equal(ok.statusCode, 200)
+  const tooLong = await invokeJson(routes, PATH_MINUTES, { payload: { from: '2026-01-01T00:00', to: `2026-01-${nextDay}T00:00` } })
+  assert.equal(tooLong.statusCode, 400)
+})
+
 test('range 合法请求回 UsageStatsRange 信封', async () => {
   const store = makeStore({
     rows: [
@@ -313,16 +453,17 @@ test('range 合法请求回 UsageStatsRange 信封', async () => {
   assert.equal(store.calls.rangeRows, 1)
 })
 
-test('status 回采集快照并附带回退点元信息', async () => {
+test('status 回采集快照并附带回退点元信息与宿主时区', async () => {
   const collector = makeCollector({
     stateOverrides: { running: true, total: 5, done: 2, scannedSessions: 7, lastSessionId: 's1', error: 'boom', recordFailures: 1 },
   })
-  const { routes } = mount({ collector })
+  const { routes } = mount({ collector, timeZone: 'UTC' })
   const res = await invokeJson(routes, PATH_STATUS)
   const parsed = JSON.parse(res.body)
   assert.equal(res.statusCode, 200)
   assert.equal(parsed.ok, true)
-  assert.deepEqual(parsed.value, { ...collector.status(), backup: { available: false } })
+  // 面板用该 IANA 时区生成日/时/分范围,与宿主桶键日历对齐
+  assert.deepEqual(parsed.value, { ...collector.status(), backup: { available: false }, timeZone: 'UTC' })
 })
 
 test('minutes 超出保留窗口标注 coveredFrom/coveredTo', async () => {
@@ -436,12 +577,14 @@ test('pricing POST 合法规则写入并回读自增 revision', async () => {
   assert.deepEqual(pricing.rules(), [PRICING_RULE])
 })
 
-test('pricing POST 缺 content-type 同样放行', async () => {
+// U5 回归:pricing 只放宽方法策略,写请求仍须过共享网关注入的 JSON content-type 门
+test('pricing POST 缺 content-type 拒绝 400', async () => {
   const pricing = makePricing()
   const { routes } = mount({ pricing })
   const res = await invoke(routes, PATH_PRICING, { body: JSON.stringify({ rules: [] }) })
-  assert.equal(res.statusCode, 200)
-  assert.equal(JSON.parse(res.body).ok, true)
+  assert.equal(res.statusCode, 400)
+  assert.deepEqual(JSON.parse(res.body), { error: 'content-type 须为 application/json' })
+  assert.equal(pricing.calls.replace, 0)
 })
 
 test('pricing POST 非法规则拒绝 400 且不写入', async () => {
@@ -478,15 +621,14 @@ test('pricing POST 跨 Origin 拒绝 403', async () => {
     payload: { rules: [] },
     headers: { origin: 'http://evil.example', host: LOCAL_HOST },
   })
-  const parsed = JSON.parse(res.body)
   assert.equal(res.statusCode, 403)
-  assert.equal(parsed.error.code, 'forbidden')
+  assert.deepEqual(JSON.parse(res.body), { error: '跨源请求被拒绝' })
   assert.equal(pricing.calls.replace, 0)
 })
 
 test('pricing 非 GET/POST 方法拒绝 405', async () => {
   const { routes } = mount({ pricing: makePricing() })
-  const res = await invoke(routes, PATH_PRICING, { method: 'PUT' })
+  const res = await invoke(routes, PATH_PRICING, { method: 'PUT', headers: { ...JSON_HEADERS } })
   const parsed = JSON.parse(res.body)
   assert.equal(res.statusCode, 405)
   assert.equal(parsed.error.code, 'usage_api_error')
@@ -518,10 +660,10 @@ test('写入规则后 range 响应携带 cost 与 unpriced', async () => {
   assert.equal(parsed.value.cost, 2)
   assert.equal(parsed.value.unpriced, 1)
   assert.equal(parsed.value.daily[0].cost, 2)
-  assert.deepEqual(parsed.value.models.map((entry) => [entry.model, entry.cost]), [
-    ['deepseek-chat', 2],
-    ['other-model', 0],
-  ])
+  const priced = parsed.value.models.find((entry) => entry.model === 'deepseek-chat')
+  const unpriced = parsed.value.models.find((entry) => entry.model === 'other-model')
+  assert.equal(priced.cost, 2)
+  assert.equal('cost' in unpriced, false, '未命中规则的模型不得回 cost:0(客户端会显示 ≈ ¥0.00)')
 })
 
 test('改规则重查 range cost 随之变化', async () => {

@@ -3,7 +3,8 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile, utimes, rm, readdir, mkdir } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { mkdtemp, writeFile, utimes, rm, readdir, mkdir, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -165,4 +166,103 @@ test('readPrompts 归一化:非法形状回退空数组,非字符串 text 与缺
   // writePrompts 落盘后回读同值
   await writePrompts(dir, [{ text: '落盘', at: 3 }])
   assert.deepEqual(await readPrompts(dir), [{ text: '落盘', at: 3 }])
+})
+
+// ── 文件名末段定长(Windows 文件名上限)──
+
+const { WORKSPACE_LEAF_MAX, readWorkspaceCache: readCache, workspaceTempFile: tempFile, commitTempFile } = await import('../src/history-cache.mjs')
+
+function hash8(cwd) {
+  return createHash('sha1').update(cwd).digest('hex').slice(0, 8)
+}
+
+test('长目录名:leaf 定长截断,hash 仍唯一,读写往返成功', async (t) => {
+  const dir = await makeDir(t)
+  // 300 字符末段:超过 Windows 单文件名上限(255),旧实现读写恒 ENOENT
+  const longLeaf = 'a'.repeat(300)
+  const cwd = 'C:\\' + longLeaf
+  await writeWorkspaceCache(dir, cwd, { entries: [{ sid: 's1', text: '长目录输入' }], extracts: {} })
+  const names = await readdir(dir)
+  assert.deepEqual(names, [`${'a'.repeat(WORKSPACE_LEAF_MAX)}-${hash8(cwd)}.json`], '末段截断到定长,hash 取全路径')
+  assert.ok(names[0].length <= WORKSPACE_LEAF_MAX + 1 + 8 + '.json'.length, '文件名长度有界')
+  const back = await readCache(dir, cwd)
+  assert.equal(back.entries[0].text, '长目录输入', '超长目录名工作区可读写')
+})
+
+test('长目录名:截断后末段相同的不同工作区各落一份文件,互不覆写', async (t) => {
+  const dir = await makeDir(t)
+  const prefix = 'C:\\' + 'b'.repeat(300)
+  await writeWorkspaceCache(dir, prefix, { entries: [{ sid: 's1', text: '第一个' }], extracts: {} })
+  await writeWorkspaceCache(dir, prefix + 'Z', { entries: [{ sid: 's1', text: '第二个' }], extracts: {} })
+  const names = await readdir(dir)
+  assert.equal(names.length, 2, '截断后 leaf 相同,唯一性由全路径 hash 保证')
+  assert.equal((await readCache(dir, prefix)).entries[0].text, '第一个')
+  assert.equal((await readCache(dir, prefix + 'Z')).entries[0].text, '第二个')
+})
+
+// ── 临时文件名与改名收敛(双实例共用同一缓存目录)──
+
+test('临时文件名:同一目标反复生成互不相同,含实例标识且不被轮询当成缓存', async (t) => {
+  const dir = await makeDir(t)
+  const target = join(dir, 'x-1234abcd.json')
+  const names = new Set()
+  for (let i = 0; i < 50; i += 1) names.add(tempFile(target))
+  assert.equal(names.size, 50, '每次生成唯一(固定 .tmp 名会让两实例互相抢走临时文件)')
+  for (const name of names) {
+    assert.ok(name.startsWith(target + '.'), '同目录前缀,rename 同卷')
+    assert.ok(name.endsWith('.tmp'))
+    assert.ok(name.includes(`.${process.pid}-`), '带进程标识')
+    assert.equal(name.endsWith('.json'), false, '轮询按 .json 过滤,临时文件不得被当成缓存')
+  }
+  // 两代模块(热重载)各自计数,随机段保证跨代不同名
+  const next = await import('../src/history-cache.mjs?instances=next')
+  for (let i = 0; i < 50; i += 1) assert.equal(names.has(next.workspaceTempFile(target)), false)
+  // 残留临时文件不参与 global 轮询
+  await writeFile([...names][0], JSON.stringify({ cwd: 'C:\\x', entries: [] }), 'utf8')
+  assert.deepEqual(await listWorkspaceCachesCached(dir), [])
+})
+
+test('改名收敛:临时文件已不在而目标已存在按成功处理,目标缺失仍报错', async (t) => {
+  const dir = await makeDir(t)
+  const target = join(dir, 'x-1234abcd.json')
+  const tmp = tempFile(target)
+  const body = JSON.stringify({ cwd: 'C:\\x', entries: [] })
+  // 正常路径:临时文件在位 → 改名落位,临时文件消失
+  await writeFile(tmp, body, 'utf8')
+  await commitTempFile(tmp, target)
+  assert.equal(await readFile(target, 'utf8'), body)
+  await assert.rejects(readFile(tmp, 'utf8'), { code: 'ENOENT' })
+  // 收敛:临时文件被对方实例/清理器移走,目标已由对方落位 → 不把 ENOENT 抛给更新调用方
+  await commitTempFile(tmp, target)
+  assert.equal(await readFile(target, 'utf8'), body, '目标内容不被破坏')
+  // 目标也不在:无从收敛,原样抛错
+  await assert.rejects(commitTempFile(tmp, join(dir, 'missing.json')), { code: 'ENOENT' })
+})
+
+test('两代并发写同一工作区缓存:确认的更新都在,目录无临时文件残留', async (t) => {
+  const dir = await makeDir(t)
+  const next = await import('../src/history-cache.mjs?instances=next')
+  await Promise.all([
+    updateWorkspaceCache(dir, 'C:\\x', () => ({ entries: [{ text: 'A', at: 1, sid: 's1' }], extracts: {} })),
+    next.updateWorkspaceCache(dir, 'C:\\x', (cache) => ({
+      entries: [...cache.entries, { text: 'B', at: 2, sid: 's1' }],
+      extracts: {},
+    })),
+  ])
+  const back = await readCache(dir, 'C:\\x')
+  assert.deepEqual(back.entries.map((entry) => entry.text), ['A', 'B'], '两代共用提交队列,互不丢更新')
+  const names = await readdir(dir)
+  assert.deepEqual(names, [`x-${hash8('C:\\x')}.json`], '临时文件已全部改名,不留残留')
+})
+
+test('删除工作区缓存:文件不存在按成功处理,存在则整份移除', async (t) => {
+  const { removeWorkspaceCache } = await import('../src/history-cache.mjs')
+  const dir = await makeDir(t)
+  // 目录/文件都不在:不抛
+  await removeWorkspaceCache(dir, 'C:\\x')
+  await writeWorkspaceCache(dir, 'C:\\x', { entries: [{ sid: 's1', text: '待删' }], extracts: {} })
+  assert.deepEqual(await readdir(dir), [`x-${hash8('C:\\x')}.json`])
+  await removeWorkspaceCache(dir, 'C:\\x')
+  assert.deepEqual(await readdir(dir), [], '缓存整份移除')
+  assert.equal(await readCache(dir, 'C:\\x'), null)
 })

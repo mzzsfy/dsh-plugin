@@ -2,7 +2,7 @@ import { setupCommonTools, createChangeNotifier } from '@mzzsfy/dsh-common-tools
 // 用量面板 Host 半区:多平台余额查询 + 定期轮询 + 历史快照落盘。webServer 路由供浏览器半区调用,
 // fetch 直连平台 API,配置持久化在 ~/.dsh/dsh-usage-panel/accounts.json,快照在 history.json。
 
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
@@ -16,8 +16,9 @@ import {
   extractCustom,
 } from './parsers.mjs'
 import { readingToSnapshots, appendPoint, buildMonthSequence, newSequenceStore } from './history.mjs'
-import { withHostGate } from './route-gate.mjs'
+import { withRouteGate } from './route-gate.mjs'
 import { createHistoryStore } from './historyStore.mjs'
+import { createAtomicWriter } from './atomicFile.mjs'
 import { createBackoff, lastQuerySecOf, isDue, runLimited, POLL_INTERVAL_SEC } from './poller.mjs'
 import {
   DEFAULT_QUOTA_THRESHOLD_PCT,
@@ -51,6 +52,7 @@ const DATA_FILE = join(DATA_DIR, 'accounts.json')
 const HISTORY_FILE = join(DATA_DIR, 'history.json')
 const BAK_SUFFIX = '.bak'
 const ACCOUNTS_BROKEN_MESSAGE = '账号配置文件已损坏已备份,已暂停写入以防数据丢失'
+const DISPOSED_MESSAGE = '插件实例已卸载,已停止写入'
 const TICK_SEC = 30
 
 const NAMESPACE = 'usage-panel'
@@ -125,21 +127,37 @@ function parseReading(account, body) {
 // 读路由响应不含明文 Key,读数不含敏感凭据;写路由统一经 guardedRoute
 // (同源 + JSON 守卫),阻断跨站简单请求 drive-by 改写账号/配置或借测试通道外发(turn-notify 同构)。
 
+// 读体:超限立即以 413 结束等待但不 destroy 连接——先回的响应必须能送到客户端,
+// 连接破坏后 413 会变成 ECONNRESET;请求流继续被消费(丢弃),不会阻塞客户端写。
+// aborted/close 早于 end 时按中断拒绝,防半截请求留下悬挂 promise。
+const BODY_OVER_LIMIT_STATUS = 413
+const BODY_ABORTED_STATUS = 400
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let size = 0
+    let settled = false
+    let overLimit = false
     const chunks = []
+    const settle = (fn, value) => {
+      if (settled) return
+      settled = true
+      fn(value)
+    }
     req.on('data', (chunk) => {
+      if (overLimit) return
       size += chunk.length
       if (size > BODY_MAX_BYTES) {
-        reject(new Error('请求体超过上限'))
-        req.destroy()
+        overLimit = true
+        chunks.length = 0
+        settle(reject, Object.assign(new Error('请求体超过上限'), { status: BODY_OVER_LIMIT_STATUS }))
         return
       }
       chunks.push(chunk)
     })
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
-    req.on('error', reject)
+    req.on('end', () => settle(resolve, Buffer.concat(chunks).toString('utf8')))
+    req.on('error', (error) => settle(reject, error))
+    req.on('aborted', () => settle(reject, Object.assign(new Error('请求已中断'), { status: BODY_ABORTED_STATUS })))
+    req.on('close', () => settle(reject, Object.assign(new Error('请求已中断'), { status: BODY_ABORTED_STATUS })))
   })
 }
 
@@ -148,44 +166,32 @@ function sendJson(res, status, payload) {
   res.end(JSON.stringify(payload))
 }
 
-// 同源守卫:浏览器写请求恒带 Origin,与 Host 不符即拒;无 Origin 的非浏览器客户端放行。
-function rejectCrossOrigin(req, res) {
-  const origin = req.headers ? req.headers.origin : undefined
-  if (!origin) return false
-  let sameOrigin = false
+// JSON 体统一入口:解析失败回固定中文,不把 JSON.parse 的英文原文与片段回给面板
+async function readJsonBody(req) {
+  const text = await readBody(req)
   try {
-    sameOrigin = new URL(origin).host === req.headers.host
+    return JSON.parse(text)
   } catch {
-    sameOrigin = false
+    throw new Error('请求体必须是合法 JSON')
   }
-  if (sameOrigin) return false
-  sendJson(res, 403, { error: '跨源请求被拒绝' })
-  return true
 }
 
-function rejectNonJson(req, res) {
-  const contentType = req.headers ? String(req.headers['content-type'] || '') : ''
-  if (contentType.indexOf('application/json') >= 0) return false
-  sendJson(res, 400, { error: 'content-type 须为 application/json' })
-  return true
-}
-
+// 同源守卫:浏览器写请求恒带 Origin,与 Host 不符即拒;无 Origin 的非浏览器客户端放行。
+// 守卫实现统一由共享 route-gate 提供(大小写不敏感同源 + 媒体类型精确比较),本文件不再自带副本。
 // 路由样板:双方法变体放行 GET(读无 CSRF 面),其余 405;POST-only 变体供无读面的
 // 写路由(测试通道/查询)使用——GET 放行会让跨站 <img src> 无守卫驱动外发;
-// POST 加跨源/JSON 守卫;业务异常归一,handler 只留业务体。全部路由统一经此,防逐路由遗漏。
+// 跨源与 JSON content-type 由注册处的 withRouteGate 统一下沉,业务异常归一,
+// handler 只留业务体。全部路由统一经此,防逐路由遗漏。
 const guardedRoute = (handler) => async (req, res) => {
   try {
     if (req.method !== 'GET' && req.method !== 'POST') {
       sendJson(res, 405, { error: 'method not allowed' })
       return
     }
-    if (req.method === 'POST') {
-      if (rejectCrossOrigin(req, res)) return
-      if (rejectNonJson(req, res)) return
-    }
     await handler(req, res)
   } catch (error) {
-    sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
+    // 读体超限等带 status 的错误按原状态码回,其余业务异常 400
+    sendJson(res, error && Number.isInteger(error.status) ? error.status : 400, { error: error && error.message ? error.message : String(error) })
   }
 }
 guardedRoute.post = (handler) => async (req, res) => {
@@ -237,12 +243,14 @@ function buildRequest(account) {
   return { url: base.replace(/\/+$/, '') + meta.path, method: 'GET', headers, body: undefined }
 }
 
-async function performRequest(request) {
+async function performRequest(request, lifecycleSignal) {
+  const timeoutSignal = AbortSignal.timeout(FETCH_TIMEOUT_MS)
+  const signal = lifecycleSignal === undefined ? timeoutSignal : AbortSignal.any([lifecycleSignal, timeoutSignal])
   const response = await fetch(request.url, {
     method: request.method,
     headers: request.headers,
     body: request.body,
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    signal,
   })
   const text = await response.text()
   if (!response.ok) {
@@ -261,6 +269,19 @@ function requireOk(condition, message) {
   if (!condition) throw new Error(message)
 }
 
+// 端点 URL 只接受可解析的 http(s) 绝对地址:非法串既无法按分量脱敏,也不能当请求目标。
+// 错误信息不回显原值(原值可能含凭据)
+function parseEndpointUrl(value, label) {
+  let parsed
+  try {
+    parsed = new URL(value)
+  } catch {
+    throw new Error(label + ' 不是合法的 URL,请填写完整的 http(s) 地址')
+  }
+  requireOk(parsed.protocol === 'http:' || parsed.protocol === 'https:', label + ' 须为 http(s) 地址')
+  return parsed
+}
+
 function normalizeAccounts(input) {
   requireOk(Array.isArray(input), 'accounts 必须是数组')
   requireOk(input.length <= MAX_ACCOUNTS, '账号数量超过上限 ' + MAX_ACCOUNTS)
@@ -269,6 +290,10 @@ function normalizeAccounts(input) {
     const type = String(raw.type || '')
     requireOk(ACCOUNT_TYPES.indexOf(type) >= 0, '未知平台类型: ' + type)
     const customSource = raw.custom && typeof raw.custom === 'object' ? raw.custom : {}
+    const baseUrl = typeof raw.baseUrl === 'string' ? raw.baseUrl.trim() : ''
+    const customUrl = typeof customSource.url === 'string' ? customSource.url.trim() : ''
+    if (baseUrl.length > 0) parseEndpointUrl(baseUrl, '第 ' + (index + 1) + ' 个账号的 baseUrl')
+    if (customUrl.length > 0) parseEndpointUrl(customUrl, '第 ' + (index + 1) + ' 个账号的 custom.url')
     const headers = {}
     if (customSource.headers && typeof customSource.headers === 'object') {
       for (const name of Object.keys(customSource.headers)) {
@@ -295,10 +320,10 @@ function normalizeAccounts(input) {
       id,
       name: typeof raw.name === 'string' && raw.name.trim().length > 0 ? raw.name.trim() : type,
       type,
-      baseUrl: typeof raw.baseUrl === 'string' ? raw.baseUrl.trim() : '',
+      baseUrl,
       apiKey: typeof raw.apiKey === 'string' ? raw.apiKey.trim() : '',
       custom: {
-        url: typeof customSource.url === 'string' ? customSource.url.trim() : '',
+        url: customUrl,
         method: typeof customSource.method === 'string' ? customSource.method.toUpperCase() : 'GET',
         headers,
         body: typeof customSource.body === 'string' ? customSource.body : '',
@@ -313,15 +338,90 @@ function normalizeAccounts(input) {
 
 // 响应剥离明文凭据:apiKey 用 hasKey 表达;自定义头/体按字段名脱敏,
 // 客户端回存时把占位替换回旧值,因此占位必须稳定且不可能与真实值撞车。
+// 自定义端点 URL 的敏感查询参数/用户信息与上游错误体同样可能携带凭据,
+// 响应侧一并脱敏(错误体按账号 Key 与常见 token 形态兜底)。
 const REDACTED = '[已隐藏]'
 const SECRET_FIELD = /(api[-_]?key|token|secret|password|authorization|cookie)/i
 
+// URL 脱敏:敏感查询参数与用户信息(userinfo)统一隐藏。userinfo 非空即视为
+// 凭据——常见形态 `https://token:@host` 的 token 在用户名位,密码位为空,
+// 只判断 password 会把它明文回显;两段各自按非空判定,回存时对称还原。
+function redactUrl(value) {
+  if (typeof value !== 'string' || value.length === 0) return value
+  try {
+    const parsed = new URL(value)
+    let changed = false
+    for (const name of [...parsed.searchParams.keys()]) {
+      if (SECRET_FIELD.test(name) && parsed.searchParams.get(name) !== REDACTED) {
+        parsed.searchParams.set(name, REDACTED)
+        changed = true
+      }
+    }
+    if (parsed.username.length > 0 && decodeUrlPart(parsed.username) !== REDACTED) {
+      parsed.username = REDACTED
+      changed = true
+    }
+    if (parsed.password.length > 0 && decodeUrlPart(parsed.password) !== REDACTED) {
+      parsed.password = REDACTED
+      changed = true
+    }
+    return changed ? parsed.toString() : value
+  } catch {
+    // 非法 URL 不能按分量脱敏,也可能整串就是凭据:整体置占位,绝不原样回显。
+    // 保存侧由 parseEndpointUrl 拒绝回存,占位不会落盘
+    return REDACTED
+  }
+}
+
+// URL 中非空 userinfo 的明文形态(含百分号编码形态),供错误文本脱敏。
+// 非法 URL 用字面形态兜底:上游把原始地址写进错误体时同样要遮住这段凭据
+function urlUserInfoSecrets(value) {
+  if (typeof value !== 'string' || value.length === 0) return []
+  try {
+    const parsed = new URL(value)
+    const secrets = []
+    for (const part of [parsed.username, parsed.password]) {
+      if (part.length === 0) continue
+      secrets.push(part)
+      const decoded = decodeUrlPart(part)
+      if (decoded !== part) secrets.push(decoded)
+    }
+    return secrets
+  } catch {
+    const match = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#\s@]+)@/.exec(value)
+    if (match === null) return []
+    const secrets = [match[1]]
+    for (const part of match[1].split(':')) {
+      if (part.length === 0) continue
+      secrets.push(part)
+      const decoded = decodeUrlPart(part)
+      if (decoded !== part) secrets.push(decoded)
+    }
+    return secrets
+  }
+}
+
+function redactTextSecrets(value, extraSecrets = []) {
+  if (typeof value !== 'string' || value.length === 0) return value
+  let text = value
+  for (const secret of extraSecrets) {
+    if (typeof secret === 'string' && secret.length > 0) text = text.split(secret).join(REDACTED)
+  }
+  text = text.replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]{4,}/gi, '$1' + REDACTED)
+  text = text.replace(/\bsk-[A-Za-z0-9._-]{4,}\b/g, REDACTED)
+  // 上游错误体常把请求 URL 原样带回,查询参数里的 token 同样不能进响应
+  text = text.replace(/([?&](?:api[-_]?key|token|secret|password|authorization|cookie)=)[^&\s"'`]+/gi, '$1' + REDACTED)
+  return text
+}
+
+// 自定义请求体整体视为凭据面:字段名不可信(access_key/auth/pin 等命名各异,
+// 白名单拦不住),字符串值一律遮住;数值/布尔等结构保留,回存按位置对称还原
 function redactJson(value) {
   if (Array.isArray(value)) return value.map(redactJson)
   if (value === null || typeof value !== 'object') return value
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [
     key,
-    typeof item === 'string' && SECRET_FIELD.test(key) ? REDACTED : redactJson(item),
+    typeof item === 'string' && item.length > 0 ? REDACTED : redactJson(item),
   ]))
 }
 
@@ -336,14 +436,49 @@ function redactBody(body) {
   return REDACTED
 }
 
+// 自定义头/体整块属凭据面:上游错误体常把请求原样带回,其值同样要进脱敏集合。
+// 头值逐个收集;体按 JSON 递归收集字符串值,非 JSON 体整体视为一个凭据串
+function collectStringValues(value, out) {
+  if (typeof value === 'string') {
+    if (value.length > 0) out.push(value)
+    return
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectStringValues(item, out)
+    return
+  }
+  if (value !== null && typeof value === 'object') for (const item of Object.values(value)) collectStringValues(item, out)
+}
+
+function customCredentialSecrets(custom) {
+  const secrets = []
+  for (const value of Object.values(custom.headers || {})) {
+    if (typeof value === 'string' && value.length > 0) secrets.push(value)
+  }
+  if (typeof custom.body !== 'string' || custom.body.length === 0) return secrets
+  try {
+    collectStringValues(JSON.parse(custom.body), secrets)
+  } catch {
+    secrets.push(custom.body)
+  }
+  return secrets
+}
+
 function redactAccount(account) {
   const custom = account.custom || {}
+  const userInfo = [...urlUserInfoSecrets(account.baseUrl), ...urlUserInfoSecrets(custom.url)]
+  const last = account.last && typeof account.last === 'object'
+    ? { ...account.last, error: redactTextSecrets(account.last.error, [account.apiKey, ...userInfo, ...customCredentialSecrets(custom)]) }
+    : account.last
   return {
     ...account,
     apiKey: '',
     hasKey: account.apiKey.length > 0,
+    baseUrl: redactUrl(account.baseUrl),
+    last,
     custom: {
       ...custom,
+      url: redactUrl(custom.url),
       headers: Object.fromEntries(Object.entries(custom.headers || {}).map(([name, value]) => [name, value === '' ? '' : REDACTED])),
       body: redactBody(custom.body),
     },
@@ -377,6 +512,56 @@ function restoreBody(submitted, existing) {
     return JSON.stringify(restoreJson(JSON.parse(submitted), JSON.parse(existing)), null, 2)
   } catch {
     return submitted
+  }
+}
+
+// URL.password getter 返回百分号编码值,比较占位前先解码
+function decodeUrlPart(value) {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
+
+// 端点 URL 的脱敏占位按参数名/用户信息位还原旧值;无法还原的占位由 assertRestoredUrl 拒绝落盘
+function restoreUrl(submitted, existing) {
+  if (typeof submitted !== 'string' || typeof existing !== 'string') return submitted
+  try {
+    const next = new URL(submitted)
+    const old = new URL(existing)
+    let changed = false
+    for (const name of [...next.searchParams.keys()]) {
+      if (next.searchParams.get(name) !== REDACTED || !SECRET_FIELD.test(name)) continue
+      const oldValue = old.searchParams.get(name)
+      if (oldValue === null) continue
+      next.searchParams.set(name, oldValue)
+      changed = true
+    }
+    if (decodeUrlPart(next["username"]) === REDACTED) {
+      next["username"] = decodeUrlPart(old["username"])
+      changed = true
+    }
+    if (decodeUrlPart(next["password"]) === REDACTED) {
+      next["password"] = decodeUrlPart(old["password"])
+      changed = true
+    }
+    return changed ? next.toString() : submitted
+  } catch {
+    return submitted
+  }
+}
+
+function assertRestoredUrl(url) {
+  if (typeof url !== 'string') return
+  let decoded = url
+  try {
+    decoded = decodeURIComponent(url)
+  } catch {
+    decoded = url
+  }
+  if (decoded.includes(REDACTED)) {
+    throw new Error('自定义端点 URL 的隐藏参数无法还原,请重新填写该地址')
   }
 }
 
@@ -417,13 +602,24 @@ function assertRestored(custom) {
 }
 
 // 脱敏回存的纯函数面:路由层只负责拒绝落盘,判定逻辑在此单测
-export const __test = { redactAccount, restoreHeaders, restoreBody, findRedacted, assertRestored, REDACTED }
+export const __test = {
+  redactAccount,
+  redactUrl,
+  redactTextSecrets,
+  restoreHeaders,
+  restoreBody,
+  restoreUrl,
+  findRedacted,
+  assertRestored,
+  assertRestoredUrl,
+  REDACTED,
+}
 
-async function queryAccount(account) {
+async function queryAccount(account, lifecycleSignal) {
   const queriedAt = Date.now()
   let last
   try {
-    const text = await performRequest(buildRequest(account))
+    const text = await performRequest(buildRequest(account), lifecycleSignal)
     let body
     try {
       body = JSON.parse(text)
@@ -447,10 +643,11 @@ async function queryAccount(account) {
 export const inject = ['webServer']
 
 export function apply(ctx, configRef) {
-  // 宿主闸门:插件 exact 路由先于宿主 /api prefix 命中,统一在注册处包一层,
-  // 否则无 cookie 的调用绕过 connection.admit 直接进业务面
+  // 宿主闸门 + 写路由 CSRF 闸门(同源 / JSON content-type)统一由共享 withRouteGate
+  // 在注册处包一层:插件 exact 路由先于宿主 /api prefix 命中,否则无 cookie 的调用
+  // 绕过 connection.admit 直接进业务面
   const register = ctx.webServer.register.bind(ctx.webServer)
-  const gatedRegister = (route) => register({ ...route, handler: withHostGate(ctx, route.handler) })
+  const gatedRegister = (route) => register({ ...route, handler: withRouteGate(ctx, route.handler) })
   const tools = setupCommonTools(ctx)
   const changes = createChangeNotifier(() => tools.publish())
   ctx.effect(() => () => changes.dispose(), '通知变更合并')
@@ -459,12 +656,24 @@ export function apply(ctx, configRef) {
   let loadPromise = null
   let writeChain = Promise.resolve()
   let accountsBroken = false
-  let historyStore = createHistoryStore({ file: HISTORY_FILE })
+  const historyStore = createHistoryStore({ file: HISTORY_FILE })
+  // 账号配置原子替换:直接写目标文件会先截断,崩溃/ENOSPC 留下半截 JSON,
+  // 损坏守卫再把坏文件备份并永久拒写(账号 Key 全丢)
+  const writeAccountsFile = createAtomicWriter(DATA_FILE)
   let history = newSequenceStore()
   // 账号级退避状态:每账号失败计数独立,只管退避不管调度;调度到点由 last.queriedAt + 统一间隔另行判定
   const pollState = new Map()  // 通知投影(client 轮询展示)与事件序号
   const projection = createProjection({})
   let notifySeq = 0
+  // 实例生命周期:dispose 即中止在途上游查询与出站请求,并阻断迟到结果写盘/通知。
+  // 共享数据目录下旧实例若继续写会覆盖新实例,禁用/HMR 后必须尽早停手。
+  const lifecycle = new AbortController()
+  let disposed = false
+  ctx.effect(() => () => {
+    disposed = true
+    lifecycle.abort()
+    historyStore.stop()
+  }, 'usage-panel lifecycle')
 
   function readNotifySettings() {
     const settings = ctx.get('settings')
@@ -479,7 +688,9 @@ export function apply(ctx, configRef) {
   let notifyConfigWriteChain = Promise.resolve()
 
   function persistNotifyPatch(patch) {
+    if (disposed) return Promise.reject(new Error(DISPOSED_MESSAGE))
     const run = notifyConfigWriteChain.then(async () => {
+      if (disposed) throw new Error(DISPOSED_MESSAGE)
       // 读出当前值做浅合并后整体写回,不依赖宿主写入的嵌套合并语义
       const merged = { ...readNotifySettings(), ...patch }
       // 双形写(maintain 同构,判定延迟到使用点):legacy 方法面以 register 为准
@@ -507,6 +718,7 @@ export function apply(ctx, configRef) {
   }
 
   function persistHistory() {
+    if (disposed) return Promise.reject(new Error(DISPOSED_MESSAGE))
     return historyStore.persist().then(() => { bumpDataRevision() })
   }
 
@@ -532,6 +744,7 @@ export function apply(ctx, configRef) {
 
   // 查询成功后落快照:按读数取样追加各序列,并重建当月月窗口序列。
   function recordSnapshots(account, reading, queriedAt) {
+    if (disposed) return Promise.resolve()
     const snaps = readingToSnapshots(reading)
     for (const snap of snaps) {
       appendPoint(history, account.id + ':' + snap.suffix, queriedAt, snap.value, queriedAt)
@@ -554,12 +767,13 @@ export function apply(ctx, configRef) {
 
   function runQuery(account) {
     // 归属校验(F13):闭包持的是查询发起时的账号对象;完成时按当前 config
-    // 引用对账——账号已删除/替换则本结果为孤儿,丢弃不写不评估
-    const owned = () => config !== null && Array.isArray(config.accounts) && config.accounts.includes(account)
+    // 引用对账——账号已删除/替换则本结果为孤儿,丢弃不写不评估;dispose 后的
+    // 迟到结果同样按孤儿处理(不允许旧实例写盘/外发)
+    const owned = () => !disposed && config !== null && Array.isArray(config.accounts) && config.accounts.includes(account)
     const queriedAt = Date.now()
     const inflight = inflightQueries.get(account.id)
     if (inflight !== undefined) return inflight
-    const run = queryAccount(account).then((result) => {
+    const run = queryAccount(account, lifecycle.signal).then((result) => {
       inflightQueries.delete(account.id)
       if (!owned()) return { ...result, ok: false, orphaned: true }
       const backoff = pollEntry(account)
@@ -584,6 +798,7 @@ export function apply(ctx, configRef) {
   // 刷新评估:越逻辑点事件入投影并经 webhook / dsh-im 投递;沿触发状态随账号落盘,
   // 重启不重发。评估在通知关闭时短路,状态零成本。
   function evaluateAndDispatch(account, queriedAt) {
+    if (disposed) return
     const globalNotify = readNotifySettings()
     if (!globalNotify.enabled) return
     const rule = mergeAccountOverride(globalNotify, account.notify)
@@ -602,7 +817,7 @@ export function apply(ctx, configRef) {
         projection.push(event)
         notifyChange()
       }
-      void sendWebhook({ url: globalNotify.webhookUrl, payload: buildWebhookPayload(event) })
+      void sendWebhook({ url: globalNotify.webhookUrl, payload: buildWebhookPayload(event), signal: lifecycle.signal })
       deliverIm(event, globalNotify)
     }
   }
@@ -610,24 +825,25 @@ export function apply(ctx, configRef) {
   // IM 投递:多目标逐发 fire-and-forget 不重试,失败即弃,与 webhook 同语义;
   // dshIm 经运行期可选读取,未装 dsh-im 的 profile 本插件照常工作。
   function deliverIm(event, globalNotify) {
+    if (disposed) return
     const dshIm = ctx.get('dshIm')
     if (dshIm === undefined) return
     for (const { botId, targetId } of normalizeImTargets(globalNotify.imTargets)) {
-      void Promise.resolve().then(() => dshIm.send(botId, targetId, event.text, { signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS) })).catch(() => {})
+      const timeoutSignal = AbortSignal.timeout(WEBHOOK_TIMEOUT_MS)
+      const signal = AbortSignal.any([lifecycle.signal, timeoutSignal])
+      void Promise.resolve().then(() => dshIm.send(botId, targetId, event.text, { signal })).catch(() => {})
     }
   }
 
   function ensureConfig() {
     if (config !== null && !accountsBroken) return Promise.resolve(config)
-    if (accountsBroken) {
-      // 损坏解除路径(historyStore 同构):坏文件已被备份移走,重读 ENOENT 即解除;
-      // 用户手工修复后放回合法文件,重读解析成功同样解除
-      loadPromise = null
-      accountsBroken = false
-    }
+    // 损坏态每次调用都重试读原路径:只有出现可解析文件才算恢复;
+    // 备份导致的 ENOENT 不是恢复(否则下一次调用即解除,坏文件后的首个写入就会覆盖账号)
+    if (accountsBroken) loadPromise = null
     if (!loadPromise) {
+      const wasBroken = accountsBroken
       // 损坏守卫(historyStore 同构):解析失败先把坏文件备份 .bak 并标记 broken 拒写,
-      // 防空配置被后续持久化覆盖,账号 Key 全部丢失;修复文件后重读成功即解除
+      // 防空配置被后续持久化覆盖,账号 Key 全部丢失
       loadPromise = readFile(DATA_FILE, 'utf8')
         .then((text) => {
           const parsed = JSON.parse(text)
@@ -638,12 +854,15 @@ export function apply(ctx, configRef) {
         })
         .catch((error) => {
           const missing = error && error.code === 'ENOENT'
-          config = defaultConfig()
-          if (missing) {
+          // 首次使用缺失文件是合法初始态;损坏备份后的缺失仍是损坏
+          if (missing && !wasBroken) {
+            config = defaultConfig()
             accountsBroken = false
             return config
           }
+          if (config === null) config = defaultConfig()
           accountsBroken = true
+          if (missing) return config
           return rename(DATA_FILE, DATA_FILE + BAK_SUFFIX).catch(() => {}).then(() => config)
         })
     }
@@ -652,12 +871,18 @@ export function apply(ctx, configRef) {
 
   function persistConfig() {
     if (accountsBroken) return Promise.reject(new Error(ACCOUNTS_BROKEN_MESSAGE))
+    if (disposed) return Promise.reject(new Error(DISPOSED_MESSAGE))
     // 写链毒化防护:链上失败不传播到后续写入(调用方 await 本次结果感知单次失败);
     // 落盘成功即自增修订号并广播(F31):全部账号变更路径(增删改/启停/重排)
     // 都经此口,面板订阅对账,单飞重拉账号与历史
     const result = writeChain.then(async () => {
+      // dispose 可能落在排队期间:执行前复查,旧实例不得再写盘
+      if (disposed) throw new Error(DISPOSED_MESSAGE)
       await mkdir(dirname(DATA_FILE), { recursive: true })
-      await writeFile(DATA_FILE, JSON.stringify(config), 'utf8')
+      // mkdir 可能让出事件循环,写文件前再复查
+      if (disposed) throw new Error(DISPOSED_MESSAGE)
+      // 临时文件 + rename:写入中断只毁临时文件,accounts.json 保持旧完整内容
+      await writeAccountsFile(JSON.stringify(config))
       bumpDataRevision()
     })
     writeChain = result.catch(() => {})
@@ -675,7 +900,7 @@ export function apply(ctx, configRef) {
             sendJson(res, 200, { accounts: current.accounts.map(redactAccount), revision: accountsRevision })
             return
           }
-          const body = JSON.parse(await readBody(req))
+          const body = await readJsonBody(req)
           return withAccountsLock(async () => {
             await ensureConfig()
             // 账号表乐观锁:客户端带读取时的修订号;不一致说明他窗已改,拒绝整体覆盖。
@@ -687,41 +912,60 @@ export function apply(ctx, configRef) {
             const previous = Array.isArray(config.accounts) ? config.accounts : []
             const saved = normalizeAccounts(body && body.accounts).map((account) => {
               const old = previous.find((item) => item.id === account.id)
-              if (old === undefined) return account
-              // 客户端拿不到旧 Key,空 Key 视为「保持不变」;last 与 notifyState 不经表单,
-              // 同 id 旧值回填,防编辑账号丢失读数与沿触发防抖基线。自定义头/体的
-              // 脱敏占位同样按旧账号还原,否则编辑名称就会把凭据写成占位。
-              const merged = account.apiKey.length > 0 ? account : { ...account, apiKey: old.apiKey }
-              const oldCustom = old.custom || {}
+              // 基础地址与自定义端点 URL 同样可能带 userinfo/敏感查询参数:回显已脱敏,
+              // 回存按旧账号对称还原;任何账号(含新建)都不得把占位当凭据落盘
+              const baseUrl = restoreUrl(account.baseUrl, old === undefined ? '' : old.baseUrl)
+              assertRestoredUrl(baseUrl)
+              const oldCustom = old === undefined ? {} : old.custom || {}
               const custom = {
                 ...account.custom,
+                url: restoreUrl(account.custom.url, oldCustom.url),
                 headers: restoreHeaders(account.custom.headers, oldCustom.headers),
                 body: restoreBody(account.custom.body, oldCustom.body),
               }
               assertRestored(custom)
-              return { ...merged, custom, last: old.last, notifyState: old.notifyState }
+              assertRestoredUrl(custom.url)
+              if (old === undefined) return { ...account, baseUrl, custom }
+              // 客户端拿不到旧 Key,空 Key 视为「保持不变」;last 与 notifyState 不经表单,
+              // 同 id 旧值回填,防编辑账号丢失读数与沿触发防抖基线。自定义头/体/URL 的
+              // 脱敏占位同样按旧账号还原,否则编辑名称就会把凭据写成占位。
+              const merged = account.apiKey.length > 0 ? account : { ...account, apiKey: old.apiKey }
+              return { ...merged, baseUrl, custom, last: old.last, notifyState: old.notifyState }
+            })
+            // P1-2:删除前先快照 history/pollState,persistConfig 成功才算删除生效;
+            // 失败时逐项恢复(只恢复被删项,保留并发查询新增的数据)
+            const removedPollEntries = [...pollState.entries()].filter(([id]) => !saved.some((account) => account.id === id))
+            const removedHistoryEntries = Object.entries(history).filter(([key]) => {
+              const accountId = key.slice(0, key.indexOf(':'))
+              return !saved.some((account) => account.id === accountId)
             })
             config = { version: 1, accounts: saved }
             accountsRevision += 1
             const savedRevision = accountsRevision
-            // 已删除账号的轮询状态同步清理,不留悬挂退避
-            for (const id of [...pollState.keys()]) {
-              if (!saved.some((account) => account.id === id)) pollState.delete(id)
-            }
-            // 已删除账号的历史序列同步清理(id 无冒号前置校验保证账号段切分可靠),
-            // 防 history.json 无主数据无限累积
-            for (const key of Object.keys(history)) {
-              const accountId = key.slice(0, key.indexOf(':'))
-              if (!saved.some((account) => account.id === accountId)) delete history[key]
-            }
+            for (const [id] of removedPollEntries) pollState.delete(id)
+            for (const [key] of removedHistoryEntries) delete history[key]
             await persistConfig().catch((error) => {
-              // 写失败(如 broken 拒写)回滚内存态,防 tick/GET 与磁盘不一致
+              // 写失败(如 broken 拒写)回滚内存态,防 tick/GET 与磁盘不一致;
+              // history/pollState 恢复删除前快照,否则下一次 persistHistory 会把缺历史永久落盘
               config = { version: 1, accounts: previous }
               accountsRevision = savedRevision - 1
+              for (const [id, value] of removedPollEntries) pollState.set(id, value)
+              for (const [key, value] of removedHistoryEntries) history[key] = value
               throw error
             })
-            await persistHistory().catch(() => {})
-            sendJson(res, 200, { ok: true, accounts: saved.map(redactAccount), revision: savedRevision })
+            // 删除账号后历史清理失败不能静默:账号已从配置移除,下次 persist 会覆盖,
+            // 但本轮磁盘仍留旧历史,必须让调用方看见(响应告警 + 日志),不假装成功
+            let historyWarning = null
+            await persistHistory().catch((error) => {
+              historyWarning = error && error.message ? error.message : String(error)
+              ctx.logger?.warn?.('usage-panel: 账号变更后历史落盘失败: ' + historyWarning)
+            })
+            sendJson(res, 200, {
+              ok: true,
+              accounts: saved.map(redactAccount),
+              revision: savedRevision,
+              ...(historyWarning === null ? {} : { historyWarning }),
+            })
           })
         }),
       }),
@@ -734,7 +978,7 @@ export function apply(ctx, configRef) {
         kind: 'exact',
         path: '/api/usage-panel/query',
         handler: guardedRoute.post(async (req, res) => {
-          const body = JSON.parse(await readBody(req))
+          const body = await readJsonBody(req)
           const id = body && typeof body.id === 'string' ? body.id : ''
           const auto = body && body.auto === true
           const current = await ensureConfig()
@@ -760,14 +1004,31 @@ export function apply(ctx, configRef) {
       gatedRegister({
         kind: 'exact',
         path: '/api/usage-panel/history',
-        handler: async (req, res) => {
+        handler: guardedRoute(async (req, res) => {
           if (req.method !== 'GET') {
             sendJson(res, 405, { error: 'method not allowed' })
             return
           }
           await ensureHistory()
+          // P3:按账号过滤(逗号分隔),面板单卡刷新/对账只取变化账号的序列,
+          // 避免 20 账号 × 数千点整表重拉
+          const raw = new URL(req.url, 'http://localhost').searchParams.get('accountIds')
+          if (raw !== null) {
+            const ids = raw.length === 0 ? [] : raw.split(',')
+            requireOk(ids.length <= MAX_ACCOUNTS, 'accountIds 数量超过上限')
+            const filtered = {}
+            for (const id of ids) {
+              requireOk(/^[^:,]{1,128}$/.test(id), 'accountIds 含非法账号 id')
+              const prefix = id + ':'
+              for (const key of Object.keys(history)) {
+                if (key.indexOf(prefix) === 0) filtered[key] = history[key]
+              }
+            }
+            sendJson(res, 200, { sequences: filtered })
+            return
+          }
           sendJson(res, 200, { sequences: history })
-        },
+        }),
       }),
     'usage-panel history route',
   )
@@ -819,7 +1080,6 @@ export function apply(ctx, configRef) {
     })
     return () => {
       disposeRoute()
-      projection.dispose()
     }
   }, 'usage-panel notifications route')
 
@@ -850,7 +1110,7 @@ export function apply(ctx, configRef) {
             sendJson(res, 200, { notify: publicNotify(readNotifySettings()), imAvailable: ctx.get('dshIm') !== undefined })
             return
           }
-          const body = JSON.parse(await readBody(req))
+          const body = await readJsonBody(req)
           const check = validateNotifyPatch(body)
           requireOk(check.ok, check.reason)
           // 读改写经串行链执行:重叠请求各自基于旧快照合并会互相覆盖
@@ -870,7 +1130,7 @@ export function apply(ctx, configRef) {
         kind: 'exact',
         path: '/api/usage-panel/test-webhook',
         handler: guardedRoute.post(async (req, res) => {
-          const result = await sendWebhook({ url: readNotifySettings().webhookUrl, payload: buildWebhookPayload(buildTestEvent()) })
+          const result = await sendWebhook({ url: readNotifySettings().webhookUrl, payload: buildWebhookPayload(buildTestEvent()), signal: lifecycle.signal })
           sendJson(res, 200, result)
         }),
       }),
@@ -929,7 +1189,8 @@ export function apply(ctx, configRef) {
           // 逐目标结算,真实结果随响应返回,与 test-webhook 的不谎报原则一致
           const results = await Promise.all(targets.map(async ({ botId, targetId }) => {
             try {
-              await dshIm.send(botId, targetId, buildTestEvent().text, { signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS) })
+              const timeoutSignal = AbortSignal.timeout(WEBHOOK_TIMEOUT_MS)
+              await dshIm.send(botId, targetId, buildTestEvent().text, { signal: AbortSignal.any([lifecycle.signal, timeoutSignal]) })
               return { botId, targetId, ok: true, detail: 'sent' }
             } catch (error) {
               return { botId, targetId, ok: false, detail: error && error.code ? error.code : 'delivery-failed' }
@@ -958,7 +1219,7 @@ export function apply(ctx, configRef) {
     // tick 回调因 config 为 null 空转,自动查询静默停摆,通知全部缺席
     void ensureConfig()
     const dispose = timerCtx.interval(() => {
-      if (pollInFlight) return
+      if (disposed || pollInFlight) return
       const current = config
       if (!current) return
       const nowSec = Math.floor(Date.now() / 1000)
@@ -976,7 +1237,7 @@ export function apply(ctx, configRef) {
         .then(async () => {
           // 受限并发执行:单账号失败/超时不拖满整轮,后续 tick 不因互斥停摆
           await runLimited(due, POLL_CONCURRENCY, (account) => runQuery(account).catch(() => {}))
-          await persistConfig().catch(() => {})
+          if (!disposed) await persistConfig().catch(() => {})
         })
         .catch(() => {})
         .then(() => {

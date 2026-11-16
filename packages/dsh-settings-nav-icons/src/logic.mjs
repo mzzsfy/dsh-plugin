@@ -129,59 +129,392 @@ export const GLYPHS = {
   wallet: WALLET, gauge: GAUGE,
 }
 
-// 声明值解析与安全门(F28 加固):唯一 SVG 根(首 <svg> 尾 </svg> 且中间不得
-// 出现第二个根级标签) + 标签白名单(静态图形元素: path/circle/rect/line/
-// polyline/polygon/ellipse/g/defs/linearGradient/radialGradient/stop/title/desc),
-// 其余标签(iframe/foreignObject/script/style/animate/use/a/image…)一律拒绝;
-// 黑名单仍保留事件属性与 javascript: 兜底(防白名单标签携带活动属性)。
-// glyph 名称查表(原型链成员经 typeof 收口不可能混入);非法值 undefined。
+// 声明值解析与四重白名单安全门(标签门 + 属性门 + 颜色值门 + 文法门):值先经
+// 严格子集解析器建出元素与属性序列,再逐项过白名单;文法外字符(实体引用、
+// 注释、CDATA、处理指令、命名空间前缀、未加引号属性值、单根之外的内容)一律
+// 否决,该子集与浏览器解析结果等价,不靠正则黑名单。载体标签(script/style/
+// use/image/a/foreignObject/animate…)不在标签白名单;style/href/xlink:href/
+// attributeName/SMIL 动画属性/on* 事件属性不在任何属性白名单。颜色属性
+// (fill/stroke/color/stop-color)只认颜色字面量与指向本值内 id 的 url(#id),
+// 外部 URL 无从表达。解析器自持而非 DOMParser:client.js 与 logic.mjs 需在
+// 无 DOM 环境跑同一份判定(parity),DOMParser 只在浏览器存在。
+// 图元门在四重白名单之后追加:声明必须含至少一个非退化图元,空壳/仅
+// defs/title/desc 的声明不是图标——写进官方 innerHTML 等于把齿轮清空。
+// glyph 名称查表只认自有键(原型链成员不可达);非法值 undefined。
 export const SVG_MAX_CHARS = 4 * 1024
-// 白名单标签集:16×16 静态图标的合法绘制元素
-const SVG_TAG_ALLOW = new Set([
-  'path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse',
+// 白名单标签集:16×16 静态图标的合法绘制元素(嵌套 svg 仍合法)
+export const SVG_TAG_ALLOW = new Set([
+  'svg', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse',
   'g', 'defs', 'lineargradient', 'radialgradient', 'stop', 'title', 'desc',
 ])
-const SVG_TAG_RE = /<\/?([a-z][a-z0-9-]*)(?=[\s/>])/gi
+// 表现层属性:任一白名单标签可带,其中颜色四属性另做值校验
+export const SVG_ATTR_GLOBAL = new Set([
+  'id', 'class', 'fill', 'fill-opacity', 'fill-rule', 'stroke', 'stroke-width',
+  'stroke-opacity', 'stroke-linecap', 'stroke-linejoin', 'stroke-miterlimit',
+  'stroke-dasharray', 'stroke-dashoffset', 'color', 'opacity', 'transform',
+  'vector-effect', 'display', 'visibility', 'stop-color', 'stop-opacity',
+])
+// 标签专有属性:几何/渐变/描述面。属性名一律小写(HTML 解析器对 camelCase
+// SVG 属性名有校正表,小写进 DOM 即还原 viewBox/gradientUnits 等)
+export const SVG_ATTR_BY_TAG = {
+  svg: new Set(['width', 'height', 'viewbox', 'preserveaspectratio', 'version', 'xmlns', 'role', 'aria-hidden', 'aria-label', 'focusable', 'data-navic']),
+  path: new Set(['d', 'pathlength']),
+  rect: new Set(['x', 'y', 'width', 'height', 'rx', 'ry']),
+  circle: new Set(['cx', 'cy', 'r']),
+  ellipse: new Set(['cx', 'cy', 'rx', 'ry']),
+  line: new Set(['x1', 'y1', 'x2', 'y2']),
+  polyline: new Set(['points']),
+  polygon: new Set(['points']),
+  g: new Set(),
+  defs: new Set(),
+  lineargradient: new Set(['x1', 'y1', 'x2', 'y2', 'gradientunits', 'gradienttransform', 'spreadmethod']),
+  radialgradient: new Set(['cx', 'cy', 'r', 'fx', 'fy', 'fr', 'gradientunits', 'gradienttransform', 'spreadmethod']),
+  stop: new Set(['offset']),
+  title: new Set(),
+  desc: new Set(),
+}
+// 颜色属性名:值经 svgColorAllowed 校验
+export const SVG_COLOR_ATTRS = new Set(['fill', 'stroke', 'color', 'stop-color'])
+// 图元表:每类绘制标签的几何属性。不在表内的标签(g/svg 嵌套)本身不画像素,
+// 只承载结构;其中「非渲染子树」连后代都不画。
+export const SVG_SHAPE_ATTRS = {
+  path: ['d'],
+  polyline: ['points'],
+  polygon: ['points'],
+  circle: ['r'],
+  ellipse: ['rx', 'ry'],
+  rect: ['width', 'height'],
+  line: ['x1', 'y1', 'x2', 'y2'],
+}
+// 非渲染子树根:定义(defs)、描述(title/desc)与渐变容器只提供引用或语义,
+// 其后代永不画像素——defs 里的图元不算图标。
+export const SVG_NON_RENDERED = new Set(['defs', 'title', 'desc', 'lineargradient', 'radialgradient', 'stop'])
+// 坐标数:polyline/polygon 至少两对才成线,单点没有长度。
+export const SVG_POINTS_MIN_PAIRS = 2
+// path 命令参数个数与分词正则(命令字母 + 坐标;指数记法的 e 归入坐标)
+export const SVG_PATH_PARAMS = { m: 2, l: 2, h: 1, v: 1, c: 6, s: 4, q: 4, t: 2, a: 7, z: 0 }
+export const SVG_PATH_COMMAND_RE = /^[MmZzLlHhVvCcSsQqTtAa]$/
+export const SVG_PATH_TOKEN_RE = /[MmZzLlHhVvCcSsQqTtAa]|[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?/g
+
+// path 是否画出像素:逐段比端点与笔位,任一非零位移即成段(隐式重复的坐标对
+// 按前一条命令续段);只有 moveto、零长度段与退化弧(端点不动)不算。
+export function pathDraws(d) {
+  if (typeof d !== 'string' || d === '') return false
+  const tokens = d.match(SVG_PATH_TOKEN_RE)
+  if (tokens === null) return false
+  let penX = 0
+  let penY = 0
+  let startX = 0
+  let startY = 0
+  let command = ''
+  let started = false
+  for (let at = 0; at < tokens.length;) {
+    const token = tokens[at]
+    if (SVG_PATH_COMMAND_RE.test(token)) {
+      // 子路径必须以 moveto 起手:缺它的词法外内容不产生任何渲染
+      if (!started && token !== 'm' && token !== 'M') return false
+      started = true
+      at += 1
+      if (token === 'z' || token === 'Z') {
+        if (penX !== startX || penY !== startY) return true
+        penX = startX
+        penY = startY
+        command = ''
+        continue
+      }
+      command = token
+      continue
+    }
+    if (command === '') return false
+    const kind = command.toLowerCase()
+    const args = tokens.slice(at, at + SVG_PATH_PARAMS[kind]).map(Number)
+    if (args.length < SVG_PATH_PARAMS[kind] || args.some((value) => !Number.isFinite(value))) return false
+    at += SVG_PATH_PARAMS[kind]
+    const relative = command !== command.toUpperCase()
+    // 相对命令的坐标是增量,绝对命令的坐标与笔位直接比较
+    const departs = (x, y) => {
+      const nextX = relative ? penX + x : x
+      const nextY = relative ? penY + y : y
+      return nextX !== penX || nextY !== penY
+    }
+    if (kind === 'm') {
+      penX = relative ? penX + args[0] : args[0]
+      penY = relative ? penY + args[1] : args[1]
+      startX = penX
+      startY = penY
+      // 首个坐标对是 moveto,后续隐式重复按 lineto 处理
+      command = relative ? 'l' : 'L'
+      continue
+    }
+    if (kind === 'c' || kind === 's' || kind === 'q' || kind === 't') {
+      for (let pair = 0; pair < args.length; pair += 2) {
+        if (departs(args[pair], args[pair + 1])) return true
+      }
+      penX = relative ? penX + args[args.length - 2] : args[args.length - 2]
+      penY = relative ? penY + args[args.length - 1] : args[args.length - 1]
+      continue
+    }
+    const endpoint = (x, y) => (relative ? [penX + x, penY + y] : [x, y])
+    let endX
+    let endY
+    if (kind === 'h') {
+      endX = relative ? penX + args[0] : args[0]
+      endY = penY
+    } else if (kind === 'v') {
+      endX = penX
+      endY = relative ? penY + args[0] : args[0]
+    } else if (kind === 'a') {
+      [endX, endY] = endpoint(args[5], args[6])
+      // 端点不动是退化弧(半径为零按直线处理,仍在下方比长度)
+      if (endX === penX && endY === penY) continue
+    } else {
+      [endX, endY] = endpoint(args[0], args[1])
+    }
+    if (endX !== penX || endY !== penY) return true
+    penX = endX
+    penY = endY
+  }
+  return false
+}
+
+// 单元素是否画出像素:长度类须为正,坐标类任一非零即成线,路径须至少一条非零长度段。
+// 零尺寸图元与「无图元」等价:r="0"/width="0" 不产生任何可见内容,同样判非法。
+export function svgShapeDraws(tag, attrs) {
+  function positive(name) {
+    const size = parseFloat(attrs[name])
+    return Number.isFinite(size) && size > 0
+  }
+  function moved(name) {
+    const coord = parseFloat(attrs[name])
+    return Number.isFinite(coord) && coord !== 0
+  }
+  function present(name) {
+    return attrs[name] !== undefined && attrs[name] !== ''
+  }
+  function points() {
+    const coords = String(attrs.points).match(SVG_PATH_TOKEN_RE)
+    const count = coords === null ? 0 : coords.filter((token) => !SVG_PATH_COMMAND_RE.test(token)).length
+    return count >= SVG_POINTS_MIN_PAIRS * 2
+  }
+  if (tag === 'path') return present('d') && pathDraws(attrs.d)
+  if (tag === 'polyline' || tag === 'polygon') return present('points') && points()
+  if (tag === 'circle') return positive('r')
+  if (tag === 'ellipse') return positive('rx') && positive('ry')
+  if (tag === 'rect') return positive('width') && positive('height')
+  if (tag === 'line') return moved('x1') || moved('y1') || moved('x2') || moved('y2')
+  return false
+}
+
+// 安全门文法常量:名称/深度上界与四条颜色文法正则。全部导出以纳入 parity 逐项
+// 同源断言——单边改值或改正则必须立刻变红,不允许静默漂移。
+export const SVG_NS = 'http://www.w3.org/2000/svg'
+export const SVG_WS = ' \t\n\f\r'
+export const SVG_NAME_MAX = 32
+export const SVG_MAX_DEPTH = 8
+export const SVG_ID_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/
+export const SVG_HEX_RE = /^#[0-9a-f]{3,8}$/
+export const SVG_FUNC_RE = /^(rgb|rgba|hsl|hsla)\([0-9.,%+\- ]{1,40}\)$/
+export const SVG_KEYWORD_RE = /^[a-z]{3,24}$/
+export const SVG_LOCAL_REF_RE = /^url\(#([A-Za-z_][A-Za-z0-9_-]{0,63})\)$/i
+export const SVG_SPRITE_ID_RE = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/
+const SVG_REJECT = Symbol('svg-reject')
+// 安全门判定缓存:full-document 扫描每帧对同一批声明值反复过门,解析器按调用
+// 分配上下文,纯函数结果按原值缓存(上限后清空,不接受无界增长)
+const SVG_GATE_CACHE = new Map()
+export const SVG_GATE_CACHE_MAX = 256
 
 export function resolveIcon(value) {
   if (typeof value !== 'string') return undefined
   const trimmed = value.trim()
-  if (
-    trimmed.length <= SVG_MAX_CHARS
-    && /^<svg[\s>]/i.test(trimmed)
-    && /<\/svg>\s*$/i.test(trimmed)
-    && resolveIconTagsAllowed(trimmed)
-    && !/\bon[a-z]+\s*=/i.test(trimmed)
-    && !/javascript:/i.test(trimmed)
-  ) return trimmed
-  return typeof GLYPHS[trimmed] === 'string' ? GLYPHS[trimmed] : undefined
+  if (trimmed.length <= SVG_MAX_CHARS && svgMarkupAllowed(trimmed)) return trimmed
+  return Object.hasOwn(GLYPHS, trimmed) && typeof GLYPHS[trimmed] === 'string' ? GLYPHS[trimmed] : undefined
 }
 
-// 唯一根 + 标签白名单(F28):逐标签扫描,svg 开闭计数兜底唯一根;
-// 白名单外标签(含自闭合 iframe 等)直接否决
-function resolveIconTagsAllowed(markup) {
-  let svgDepth = 0
-  let seenRootOpen = false
-  let seenRootClose = false
-  for (const match of markup.matchAll(SVG_TAG_RE)) {
-    const name = match[1].toLowerCase()
-    const closing = match[0].startsWith('</')
-    if (name === 'svg') {
-      if (closing) {
-        svgDepth -= 1
-        if (svgDepth === 0) seenRootClose = true
-        else if (svgDepth < 0) return false
-      } else {
-        svgDepth += 1
-        if (seenRootOpen && svgDepth === 1) return false
-        if (svgDepth === 1) seenRootOpen = true
+// 属性白名单:全局表现层属性,或该标签专有属性;两者皆不在即否决
+export function svgAttributeAllowed(tag, name) {
+  if (SVG_ATTR_GLOBAL.has(name)) return true
+  const own = SVG_ATTR_BY_TAG[tag]
+  return own !== undefined && own.has(name)
+}
+
+// 颜色值:颜色字面量(none/currentColor/命名色/十六进制/rgb()/hsl())或本地
+// url(#id);外部 URL、拼接串、var()、expression() 均不可表达。关键字先行:
+// 常见值(none/currentColor)一次正则即收口。关键字/十六进制/函数名大小写不敏感,
+// 统一按小写归一;url() 片段是 DOM id,大小写敏感,保留原样,与 id 登记侧同口径。
+export function svgColorAllowed(value, refs) {
+  const raw = value.trim()
+  const literal = raw.toLowerCase()
+  if (SVG_KEYWORD_RE.test(literal)) return true
+  if (SVG_HEX_RE.test(literal) || SVG_FUNC_RE.test(literal)) return true
+  const local = SVG_LOCAL_REF_RE.exec(raw)
+  if (local === null) return false
+  refs.push(local[1])
+  return true
+}
+
+// 严格子集解析:唯一 svg 根、双引号属性、无实体引用与注释/CDATA/处理指令、
+// 开闭标签严格配对、嵌套深度有上界;逐标签逐属性过白名单,收尾核验
+// url(#id) 指向本值内定义的 id(官方 sprite 与页面其他 id 不可达),并要求
+// 至少一个非退化图元(零绘制内容不得当图标)。
+export function svgMarkupAllowed(markup) {
+  const cached = SVG_GATE_CACHE.get(markup)
+  if (cached !== undefined) return cached
+  const size = markup.length
+  const ids = new Set()
+  const refs = []
+  let drawn = false
+  let at = 0
+
+  function reject() { throw SVG_REJECT }
+  function isWs(ch) { return SVG_WS.indexOf(ch) >= 0 }
+  function isNameStart(ch) { return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') }
+  function isNamePart(ch) { return isNameStart(ch) || (ch >= '0' && ch <= '9') || ch === '-' }
+  function skipWs() { while (at < size && isWs(markup[at])) at += 1 }
+
+  function readName() {
+    const start = at
+    if (at >= size || !isNameStart(markup[at])) reject()
+    at += 1
+    while (at < size && isNamePart(markup[at])) at += 1
+    if (at - start > SVG_NAME_MAX) reject()
+    return markup.slice(start, at).toLowerCase()
+  }
+
+  function readQuoted() {
+    if (markup[at] !== '"') reject()
+    at += 1
+    const start = at
+    for (;;) {
+      if (at >= size) reject()
+      const ch = markup[at]
+      if (ch === '"') {
+        at += 1
+        return markup.slice(start, at - 1)
       }
+      // 标签闭合符与实体引用不得出现在值里:前者破坏剥壳,后者可绕开名字检查
+      if (ch === '<' || ch === '>' || ch === '&') reject()
+      at += 1
+    }
+  }
+
+  function readText() {
+    for (;;) {
+      if (at >= size) return
+      if (markup[at] === '<') return
+      if (markup[at] === '&') reject()
+      at += 1
+    }
+  }
+
+  function readAttribute(tag, attrs) {
+    const name = readName()
+    skipWs()
+    if (markup[at] !== '=') reject()
+    at += 1
+    skipWs()
+    const value = readQuoted()
+    if (!svgAttributeAllowed(tag, name)) reject()
+    if (name === 'xmlns' && value !== SVG_NS) reject()
+    if (name === 'id') {
+      if (!SVG_ID_RE.test(value)) reject()
+      ids.add(value)
+      return
+    }
+    if (SVG_COLOR_ATTRS.has(name) && !svgColorAllowed(value, refs)) reject()
+    // 只登记图元标签的几何属性,供图元门判定(其余标签不画像素)
+    if (attrs !== null) attrs[name] = value
+  }
+
+  function readElement(depth, rendered) {
+    if (depth > SVG_MAX_DEPTH) reject()
+    if (markup[at] !== '<') reject()
+    at += 1
+    const tag = readName()
+    if (!SVG_TAG_ALLOW.has(tag)) reject()
+    // 渲染树内计数:非渲染子树(defs/title/desc/渐变)的后代不算绘制
+    const paints = rendered && !SVG_NON_RENDERED.has(tag)
+    const attrs = Object.hasOwn(SVG_SHAPE_ATTRS, tag) ? {} : null
+    let selfClosed = false
+    for (;;) {
+      const before = at
+      skipWs()
+      if (at >= size) reject()
+      if (markup[at] === '>') {
+        at += 1
+        break
+      }
+      if (markup[at] === '/') {
+        if (markup[at + 1] !== '>') reject()
+        at += 2
+        selfClosed = true
+        break
+      }
+      // 属性之间必须有空白:斜杠分隔等宽松形态不入子集
+      if (at === before) reject()
+      readAttribute(tag, attrs)
+    }
+    if (paints && attrs !== null && svgShapeDraws(tag, attrs)) drawn = true
+    if (selfClosed) return tag
+    for (;;) {
+      if (at >= size) reject()
+      if (markup[at] !== '<') {
+        readText()
+        continue
+      }
+      if (markup[at + 1] !== '/') {
+        readElement(depth + 1, paints)
+        continue
+      }
+      at += 2
+      if (readName() !== tag) reject()
+      skipWs()
+      if (markup[at] !== '>') reject()
+      at += 1
+      return tag
+    }
+  }
+
+  let allowed = true
+  try {
+    skipWs()
+    if (readElement(0, true) !== 'svg') reject()
+    skipWs()
+    if (at !== size) reject()
+    for (const id of refs) if (!ids.has(id)) reject()
+    // 图元门:零绘制声明(空 svg / 仅 defs/title/desc / 只有 moveto / 几何退化)不是图标
+    if (!drawn) reject()
+  } catch (error) {
+    if (error !== SVG_REJECT) throw error
+    allowed = false
+  }
+  if (SVG_GATE_CACHE.size >= SVG_GATE_CACHE_MAX) SVG_GATE_CACHE.clear()
+  SVG_GATE_CACHE.set(markup, allowed)
+  return allowed
+}
+
+// 已写入 DOM 的内容是否仍含可绘制图元:输入是本插件写进 official/injected 节点的
+// innerHTML,只作内容判据、不承担安全门职责,故按宽松标签扫描——属性顺序、自闭合
+// 与序列化形态差异不影响结论;非渲染子树内的图元同样不算。
+export const SVG_FRAGMENT_TAG_RE = /<(\/?)([a-z][a-z0-9]*)([^>]*)>/gi
+export const SVG_FRAGMENT_ATTR_RE = /([a-z][a-z0-9-]*)="([^"]*)"/g
+
+export function svgInnerDraws(inner) {
+  if (typeof inner !== 'string' || inner === '') return false
+  let hidden = 0
+  for (const match of inner.matchAll(SVG_FRAGMENT_TAG_RE)) {
+    const tag = match[2].toLowerCase()
+    if (match[1] === '/') {
+      if (hidden > 0 && SVG_NON_RENDERED.has(tag)) hidden -= 1
       continue
     }
-    if (svgDepth === 0) return false
-    if (!SVG_TAG_ALLOW.has(name)) return false
+    if (hidden === 0 && Object.hasOwn(SVG_SHAPE_ATTRS, tag)) {
+      const attrs = {}
+      for (const pair of match[3].matchAll(SVG_FRAGMENT_ATTR_RE)) attrs[pair[1]] = pair[2]
+      if (svgShapeDraws(tag, attrs)) return true
+    }
+    if (!match[3].trimEnd().endsWith('/') && SVG_NON_RENDERED.has(tag)) hidden += 1
   }
-  return seenRootOpen && seenRootClose && svgDepth === 0
+  return false
 }
 
 // 官方 DOM 锚点:与 client.js 控制器字面量同源锁定(parity 断言对表)。
@@ -199,7 +532,8 @@ export function isGear(svg) {
 }
 
 // 完整 svg 字符串剥壳取内部内容:resolveIcon 输出与 GLYPHS/声明值均为完整 svg,
-// 内容改写制只写 official.innerHTML,壳由本函数剥除。输入已过安全门(单根闭合)。
+// 内容改写制只写 official.innerHTML,壳由本函数剥除。输入已过安全门(单根闭合且
+// 含图元),剥壳结果恒非空——空内容会清空官方图标,且记账相等后不再重试。
 export function svgInner(html) {
   return html.replace(/^<svg[^>]*>/i, '').replace(/<\/svg>\s*$/i, '')
 }
@@ -258,24 +592,36 @@ export function themedIcon(name) {
 }
 
 // 分区取图全链:声明(含别名) → 内置映射 → 关键词/哈希兜底。decide 与声明
-// 变更就地重写共用;撤销时回退必须含内置映射,否则卡死在哈希图。
+// 变更就地重写共用;撤销时回退必须含内置映射,否则卡死在哈希图。内置映射是
+// 普通字面量对象,查表经 Object.hasOwn 收口:label 恰为 constructor/toString
+// 等原型链成员时不可达其继承值(否则取到函数,.replace 即抛)。
 export function resolveForLabel(label) {
   const declared = lookupWithAlias(DECLARED_ICONS, label)
   if (declared !== undefined) {
     const resolved = resolveIcon(declared)
     if (resolved !== undefined) return resolved
   }
-  const mapped = ICONS[label]
-  if (mapped !== undefined) return mapped
+  if (Object.hasOwn(ICONS, label)) return ICONS[label]
   return themedIcon(label)
 }
 
 // 市场卡片头像槽决策:img(作者头像)与 div(字母色块)同构处理——原子节点隐藏,
-// 插件图标注入跟随。记账值 = 插件名,换名重贴由该比较驱动。命中须同时校验
-// 行内隐藏仍在:React 重渲染可能清 style 保记账,放行让 replacePass 重贴自愈。
+// 插件图标注入跟随。记账值 = 插件名,换名重贴由该比较驱动。幂等须三件齐备:
+// 记账相等、行内隐藏在场、紧随槽体之后的那一个注入节点仍可绘制——React 重渲染
+// 可能清 style 或摘掉注入节点,旧版本还可能注入过零绘制空壳;任一缺失即重出
+// 决策由重贴自愈。判据锚定「槽的下一元素」而非父容器任意节点:同一行里两个槽
+// 共用父容器时,缺图的那个不得被另一槽的注入满足。
 export function decideAvatar(av, name) {
-  if (name === '' || (av.dataset.navic === name && av.style.display === 'none')) return null
+  if (name === '') return null
+  if (avatarApplied(av, name)) return null
   return { name, html: themedIcon(name), av }
+}
+
+export function avatarApplied(av, name) {
+  if (av.dataset.navic !== name || av.style.display !== 'none') return false
+  const injected = av.nextElementSibling
+  if (injected === null || injected === undefined) return false
+  return injected.dataset !== undefined && injected.dataset.navic === '1' && svgInnerDraws(injected.innerHTML)
 }
 
 export function applyAvatar(av, decision) {
@@ -294,7 +640,8 @@ export function applyAvatar(av, decision) {
 }
 
 // 内置映射:官方分区与无法改源的第三方插件分区。自有插件分区一律走
-// 外部声明机制(各插件 register 自己的 label),不再进这张表。
+// 外部声明机制(各插件 register 自己的 label),不再进这张表。原型链成员
+// 不是合法键,查表侧由 resolveForLabel 的 Object.hasOwn 收口。
 export const ICONS = {
   '通用设置': TUNE, 'General': TUNE,
   'Theme / 外观': THEME,
@@ -348,10 +695,11 @@ export function aliasKeysOf(label) {
 }
 
 // 官方 sprite 原样重建:官方 svg 携带 data-icon 声明(sprite 代自描述形态),
-// 按该属性即可无损重建。返回 null = 非自描述形态(内联代)。
+// 按该属性即可无损重建。属性值拼进 innerHTML 前过 id 形态门,畸形值不重建。
+// 返回 null = 非自描述形态(内联代)。
 export function officialSpriteRestore(svg) {
   const icon = svg.getAttribute ? svg.getAttribute('data-icon') : null
-  if (icon === null || icon === '') return null
+  if (icon === null || !SVG_SPRITE_ID_RE.test(icon)) return null
   return '<use href="#' + icon + '"></use>'
 }
 
@@ -367,9 +715,10 @@ export function hasExternalNavMark(cell) {
   return false
 }
 
-// 单元格改写判定(内容改写制):不新建 svg、不动属性,直接把官方齿轮 svg 的
-// 内部内容改写为本插件图标;记账迁到官方 svg 自身(dataset.navic = label),
-// 原样以 navicOrig 留存,节点与 class/位置等属性保持官方原样。
+// 单元格改写判定(内容改写制):不新建 svg,只把官方齿轮 svg 的内部内容改写为
+// 本插件图标;官方 svg 上的呈现属性(class/width/位置等)保持原样,只就地增删
+// data-* 记账三种:navic(记账=label)、navicOrig(官方原样备份)、navicYield(让位);
+// 改写路径落前两条,回退路径删 navic、留 navicOrig 并落 yield。
 // 裁决(哲学:只替换官方默认齿轮;非默认 icon 一律不管):
 // 1. yield 记账(navicYield)永不重入;
 // 2. 外部供给声明格(data-*-nav-icon,他包公开声明):无残留零动作;有残留
@@ -399,7 +748,9 @@ export function decide(cell) {
     return { label, official, inner: svgInner(resolveForLabel(label)), orig: official.innerHTML }
   }
   if (external) return revertDecision(official, official.dataset.navic)
-  if (official.dataset.navic === label) return null
+  // 记账相等还须内容真在画:旧版本把零绘制声明(空串、仅 defs、仅 title)写进过
+  // innerHTML,这类内容不视为已完成改写,否则该格永久空白且永不自愈
+  if (official.dataset.navic === label && svgInnerDraws(official.innerHTML)) return null
   return { label, official, inner: svgInner(resolveForLabel(label)), orig: official.dataset.navicOrig ?? official.innerHTML }
 }
 
@@ -409,9 +760,23 @@ function revertDecision(official, booked) {
   return { label: booked, revert: true, official, inner }
 }
 
-export function applyDecision(cell, decision) {
-  // 内容改写 + svg 自记账;先清 0.1.x 注入语义的升级残留(带 '1' 标记的旧节点)
-  for (const injected of cell.querySelectorAll('[' + ATTR_MARK + '="1"]')) injected.remove()
+// 升级残留清理:0.1.x 注入制在官方 svg 之后追加带纯标记 '1' 的兄弟节点,0.2.x
+// 起改为内容改写制,残留只增不减。清理必须在单元格裁决之前无条件执行——外部
+// 供给格/让位格不产生决策,残留若留给 applyDecision 就永不清理(让位格双图)。
+// 首个 svg 是官方节点本身(React 持引用,移除即 reconcile NotFoundError);图标
+// 内容里的嵌套 svg 也可能带纯标记(安全门允许嵌套 svg 与 data-navic),误删即
+// 掏空当前图标:只清 primary 之外的直接兄弟。
+export function clearInjected(cell) {
+  const primary = cell.querySelectorAll('svg')[0] ?? null
+  for (const injected of cell.querySelectorAll('[' + ATTR_MARK + '="1"]')) {
+    if (injected === primary) continue
+    if (primary !== null && (primary.contains(injected) || injected.parentElement !== primary.parentElement)) continue
+    injected.remove()
+  }
+}
+
+export function applyDecision(decision) {
+  // 内容改写 + svg 自记账(升级残留已由 clearInjected 在裁决入口清理)
   if (decision.revert === true) {
     decision.official.innerHTML = decision.inner
     delete decision.official.dataset.navic

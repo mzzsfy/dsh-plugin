@@ -30,7 +30,8 @@
   白名单或任何会话的加载态。
 - **原状还原**:收敛改动以 undo journal 按 definition 记录原状,行禁用/卸载
   按 journal 逐条还原,系统回到「没装本包」的世界(层表换代后同 definition
-  重建仍可还原)。
+  重建仍可还原)。记录持 weakRef:离开注册表且无人持有的定义可被回收,同名
+  换定义后旧条目不再常驻。
 - **干净禁用**:层条目为未知形态(既非 registration 包装也无 name)或 tools
   缺 `register`/可见面时打日志零动作,不崩;llm 面失败只损失折叠,
   打标收敛不受影响。
@@ -47,7 +48,12 @@ GUI 卡片是唯一配置入口(原生 schemastery 节已抑制):
 - 白名单含未注册名时卡片顶部警示
 
 HTTP 面(`/api/tool-gate/*`,GUI 数据通道):`GET /state`、
-`POST /allowlist`、`POST /enabled`、`POST /collapse`。
+`POST /allowlist`、`POST /enabled`、`POST /collapse`。全部路由走共享
+`withRouteGate`(宿主闸门 + 写方法 Origin↔Host 同源 + `application/json`
+精确 content-type);写路由严格校验请求体(形态不符 400 且不落盘,不静默清空
+白名单;名字 trim 后去重;超 1MB 回 413,不先毁 socket,响应真实可达)。
+收敛与 `GET /state` 回读共用 `cleanAllowlist`,历史上已落盘的 `[' read ']` 也
+按 `read` 命中,设置页显示与实际注入保持同一事实源。
 
 ## 配置(行条目,经 GUI 写)
 

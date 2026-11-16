@@ -31,7 +31,7 @@ const CSS = [
   '.dm-panel { --dm-accent:var(--dsw-alias-brand-primary); --dm-accent-deep:var(--dsw-alias-button-primary-hover); --dm-accent-wash:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent); --dm-ok:var(--dsw-alias-state-success-primary); --dm-warn:var(--dsw-alias-state-warn-primary); --dm-danger:var(--dsw-alias-state-error-primary); --dm-danger-wash:color-mix(in srgb,var(--dsw-alias-state-error-primary) 10%,transparent); --dm-text:var(--dsw-alias-label-primary); --dm-text-sub:var(--dsw-alias-label-secondary); --dm-text-dim:var(--dsw-alias-label-tertiary); --dm-bg:var(--dsw-alias-bg-layer-1); --dm-bg-sub:var(--dsw-alias-bg-layer-2); --dm-bg-muted:var(--dsw-alias-bg-module-platform); --dm-card:var(--dsw-alias-bg-layer-1); --dm-card-border:var(--dsw-alias-border-l2); --dm-border:var(--dsw-alias-border-l2); --dm-border-strong:var(--dsw-alias-border-l3); --dm-hover:var(--dsw-alias-interactive-bg-hover); --dm-hover-danger:var(--dsw-alias-interactive-bg-hover-danger); --dm-skeleton:var(--dsw-alias-bg-skeleton); --dm-overlay:color-mix(in srgb,var(--dsw-alias-label-primary) 45%,transparent); --dm-radius-sm:var(--dsw-radius-sm); --dm-radius-md:var(--dsw-radius-md); --dm-radius-lg:var(--dsw-radius-lg); --dm-mono:var(--ds-font-family-code);',
   '  display:flex; flex-direction:column; gap:10px; color:var(--dm-text); font-size:14px; line-height:22px; }',
   '.dm-head { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }',
-  '.dm-head__title { font-weight:600; font-size:14px; }',
+  '.dm-head__title { font-weight:600; font-size:18px; line-height:28px; }',
   '.dm-head__hint { color:var(--dm-text-sub); font-size:13px; line-height:20px; }',
   '.dm-card { display:flex; flex-direction:column; padding:10px 12px; background:var(--dm-card); border:.5px solid var(--dm-card-border); border-radius:var(--dm-radius-md); }',
   '.dm-card__head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding-bottom:6px; }',
@@ -87,6 +87,25 @@ const CSS = [
   '.dm-notes__h { font-weight:600; color:var(--dm-text); margin-top:8px; }',
   '.dm-notes__li { padding-left:12px; }',
   '.dm-notes__gap { height:8px; }',
+  // ---- 升级前检查:逐项状态与安全模式候选 ----
+  '.dm-checks { display:flex; flex-direction:column; gap:2px; max-height:180px; overflow:auto; }',
+  '.dm-check { display:flex; align-items:flex-start; gap:8px; padding:3px 0; font-size:13px; line-height:20px; }',
+  '.dm-check__status { flex:none; width:44px; font-weight:600; }',
+  '.dm-check__status--pass { color:var(--dm-ok); }',
+  '.dm-check__status--warn { color:var(--dm-warn); }',
+  '.dm-check__status--block { color:var(--dm-danger); }',
+  '.dm-check__body { min-width:0; overflow-wrap:anywhere; }',
+  '.dm-check__detail { color:var(--dm-text-sub); font-size:12px; line-height:18px; }',
+  // ---- 安全模式白名单:当前插件全量勾选列表 ----
+  '.dm-whitelist { display:flex; flex-direction:column; gap:1px; max-height:260px; overflow:auto; padding:6px 8px; border:.5px solid var(--dm-border); border-radius:var(--dm-radius-sm); background:var(--dm-bg-sub); }',
+  '.dm-whitelist__item { display:flex; align-items:flex-start; gap:8px; padding:4px 0; font-size:13px; line-height:20px; }',
+  '.dm-whitelist__item input { flex:none; margin:3px 0 0; }',
+  '.dm-whitelist__body { min-width:0; overflow-wrap:anywhere; }',
+  '.dm-whitelist__meta { color:var(--dm-text-sub); font-size:12px; line-height:18px; }',
+  '.dm-whitelist__empty { color:var(--dm-text-sub); font-size:13px; line-height:20px; }',
+  '.dm-progress { display:flex; flex-direction:column; gap:4px; }',
+  '.dm-progress__meta { color:var(--dm-text-sub); font-size:12px; line-height:18px; }',
+  '.dm-log { max-height:180px; overflow:auto; margin:0; padding:8px; border-radius:var(--dm-radius-sm); background:var(--dm-bg-muted); color:var(--dm-text-sub); font-family:var(--dm-mono); font-size:12px; line-height:18px; white-space:pre-wrap; overflow-wrap:anywhere; }',
   // ---- 开关:隐藏原生 checkbox,选中态 track 与 thumb 位移用过渡呈现 ----
   '.dm-switch input[type="checkbox"] { position:absolute; opacity:0; width:0; height:0; }',
   '.dm-switch { position:relative; display:inline-flex; align-items:center; cursor:pointer; gap:8px; min-height:32px; }',
@@ -110,9 +129,16 @@ const REFRESH_URL = '/api/maintain/refresh'
 const CHANNEL_URL = '/api/maintain/channel'
 const POLL_INTERVAL_URL = '/api/maintain/poll-interval'
 const REGISTRY_BASE_URL = '/api/maintain/registry-base'
+const SAFE_MODE_WHITELIST_URL = '/api/maintain/safe-mode-whitelist'
+const PLUGINS_URL = '/api/maintain/plugins'
 const UPGRADE_URL = '/api/maintain/upgrade'
+const RECEIPT_ACK_URL = '/api/maintain/upgrade/receipt-ack'
+const PREFLIGHT_URL = '/api/maintain/preflight'
+const SAFE_MODE_RESTORE_URL = '/api/maintain/safe-mode/restore'
 const RESTART_URL = '/api/maintain/restart'
 const RELEASE_NOTES_URL = '/api/maintain/release-notes'
+const UPGRADE_SUCCESS_SEEN_KEY = 'dsh-maintain:upgrade-success-seen'
+const seenUpgradeReceipts = new Set()
 const UPGRADE_POLL_MS = 2 * 1000
 // 升级提示浮条挂 body,脱离 React 组件树,SPA 切页不消失
 const UPGRADE_FLOAT_ID = 'dsh-maintain-upgrade-float'
@@ -126,7 +152,7 @@ const DEFAULT_REGISTRY_BASE = 'https://registry.npmjs.org'
 const RESTART_POLL_MS = 1 * 1000
 const RESTART_POLL_TIMEOUT_MS = 5 * 1000
 // 重启等待总时长:超时说明宿主未被进程管理器拉起或退出失败,退出等待态转人工处理
-const RESTART_TIMEOUT_MS = 30 * 1000
+const RESTART_TIMEOUT_MS = 60 * 1000
 // 主文档连续就绪拍数门槛:单次 200 可能落在 fallback 刚注册的瞬间,连续多次确认启动链稳定
 const RESTART_READY_REQUIRED = 2
 // 刷新放行后的最后缓冲:给宿主启动链一段无请求干扰的稳定期再整页刷新
@@ -239,6 +265,7 @@ function ensureUpgradeWatch() {
       pollFailures = 0
       broadcastUpgradeStatus(next)
       const upgrade = next ? next.upgrade : null
+      if (upgrade && upgrade.running === true && upgrade.progress) updateUpgradeFloatProgress(upgrade.progress)
       // 落定即终判:切换成功由切换退出接管守卫进入重启等待,失败浮条展示原因
       if (!upgrade || upgrade.running !== true) {
         upgradeWatch.generation = null
@@ -316,6 +343,7 @@ function showUpgradeFloat(state) {
   ensureUpgradeFloatStyle()
   removeUpgradeFloat()
   const text = document.createElement('span')
+  text.id = UPGRADE_FLOAT_ID + '__text'
   const close = document.createElement('button')
   close.id = UPGRADE_FLOAT_ID + '__close'
   close.textContent = '×'
@@ -345,6 +373,14 @@ function removeUpgradeFloat() {
   if (box !== null) box.remove()
 }
 
+// 浮条进度只更新文本,不重建节点,避免每次轮询闪烁
+function updateUpgradeFloatProgress(progress) {
+  if (!progress) return
+  const text = document.getElementById(UPGRADE_FLOAT_ID + '__text')
+  if (text === null) return
+  text.textContent = '升级中:' + (progress.phaseLabel || progress.phase) + ',已用时 ' + fmtElapsed(progress.startedAt)
+}
+
 function fmtTime(ms) {
   const t = Number(ms)
   if (t !== t || !t) return null
@@ -353,11 +389,15 @@ function fmtTime(ms) {
   return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes())
 }
 
-function fmtElapsed(startedAt) {
-  const seconds = Math.max(0, Math.round((Date.now() - startedAt) / 1000))
+function fmtDuration(ms) {
+  const seconds = Math.max(0, Math.floor((Number(ms) || 0) / 1000))
   if (seconds < 60) return seconds + ' 秒'
   if (seconds < 60 * 60) return Math.floor(seconds / 60) + ' 分 ' + (seconds % 60) + ' 秒'
   return Math.floor(seconds / (60 * 60)) + ' 小时 ' + Math.floor((seconds % (60 * 60)) / 60) + ' 分'
+}
+
+function fmtElapsed(startedAt) {
+  return fmtDuration(Date.now() - startedAt)
 }
 
 function h(type, props) {
@@ -405,6 +445,135 @@ function EditRow(props) {
   )
 }
 
+// 安全模式白名单:从 host 拉取当前已安装 profile 插件,勾选即保存;不可选的插件仍展示原因,
+// 已保存但当前不存在的包保留为可取消的孤儿项,避免配置只能靠手改。
+function WhitelistPicker(props) {
+  const value = Array.isArray(props.value) ? props.value.filter((name) => typeof name === 'string') : []
+  const [pending, setPending] = useState(null)
+  const [plugins, setPlugins] = useState(null)
+  const [loadError, setLoadError] = useState(null)
+  const [attempt, setAttempt] = useState(0)
+  const disabled = Boolean(props.busy || props.restarting || pending !== null)
+  const selected = new Set(pending !== null ? pending : value)
+
+  useEffect(() => {
+    if (!props.busy && pending !== null) setPending(null)
+  }, [props.busy, pending])
+
+  useEffect(() => {
+    let active = true
+    setLoadError(null)
+    api(PLUGINS_URL)
+      .then((data) => {
+        if (!active) return
+        if (!data || data.available !== true) throw new Error(data?.reason || '插件列表不可用')
+        setPlugins(Array.isArray(data.plugins) ? data.plugins : [])
+      })
+      .catch((error) => {
+        if (active) setLoadError(error && error.message ? error.message : String(error))
+      })
+    return () => { active = false }
+  }, [attempt])
+
+  function toggle(name) {
+    const next = new Set(selected)
+    if (next.has(name)) next.delete(name)
+    else next.add(name)
+    setPending([...next])
+    props.onSave([...next])
+  }
+
+  const rows = Array.isArray(plugins) ? plugins : []
+  const known = new Set(rows.map((row) => row.name))
+  const orphan = value.filter((name) => !known.has(name))
+  const items = rows.map((row) => ({ ...row, orphan: false }))
+    .concat(orphan.map((name) => ({ name, version: null, enabled: null, selectable: true, orphan: true })))
+
+  return h('div', { className: 'dm-field' },
+    h('span', { className: 'dm-field__label' }, '安全模式白名单'),
+    h('div', { className: 'dm-field__main' },
+      plugins === null && loadError === null
+        ? h('div', { className: 'dm-skeleton', 'aria-busy': 'true' },
+            [0, 1, 2].map((index) => h('div', { className: 'dm-skeleton__row', key: index })))
+        : null,
+      loadError !== null
+        ? h('div', { className: 'dm-notice dm-notice--error' },
+            '读取插件列表失败:' + loadError,
+            h('button', { className: 'dm-btn dm-btn--ghost', disabled, onClick: () => setAttempt(attempt + 1) }, '重试'))
+        : null,
+      items.length > 0
+        ? h('div', { className: 'dm-whitelist' }, items.map((item) => {
+            const checked = selected.has(item.name)
+            const notes = []
+            if (item.orphan) notes.push('当前插件列表中没有此插件')
+            if (item.installed === false) notes.push('未安装')
+            if (item.enabled === false) notes.push('未启用')
+            if (item.official) notes.push('官方插件')
+            if (item.availability === 'installation') notes.push('安装内置')
+            if (item.readOnly) notes.push('只读')
+            if (item.protected) notes.push('默认保护')
+            return h('label', { className: 'dm-whitelist__item', key: item.name },
+              h('input', {
+                type: 'checkbox',
+                checked,
+                disabled: disabled || (!item.selectable && !checked),
+                onChange: () => toggle(item.name),
+              }),
+              h('div', { className: 'dm-whitelist__body' },
+                h('div', null, item.name + (item.version ? ' ' + item.version : '')),
+                notes.length > 0 ? h('div', { className: 'dm-whitelist__meta' }, notes.join(' · ')) : null))
+          }))
+        : plugins !== null
+          ? h('div', { className: 'dm-whitelist__empty' }, '当前没有插件')
+          : null,
+      h('div', { className: 'dm-field__hint' },
+        '勾选即保存;白名单插件不会被安全模式自动禁用。不兼容时安全模式不可用,需先升级或手动禁用。'),
+      props.busy ? h('span', { className: 'dm-meta' }, '保存中…') : null,
+    ),
+  )
+}
+
+// 安装入口可用性:通道最新版未知或不是合法精确 semver(tags 未就绪/通道被删/远端 tag 非法)时
+// 提交必被 host 400(缺省目标按 dist-tags 解析,拿不到精确版本即拒绝),入口一并禁用,
+// 不留"点了必失败"的路径。busy/restarting 是瞬态门;运行版本非法不在此禁用,重装/回退照常放行
+// LOGIC-BEGIN installDisabled
+function installDisabled(status, busy, restarting) {
+  if (!status.channelLatest || status.channelLatestValid === false) return true
+  if (busy && busy.upgrade) return true
+  if (restarting) return true
+  return Boolean(status.upgrade && status.upgrade.running === true)
+}
+// LOGIC-END installDisabled
+
+// 安装按钮的预检门:环境硬失败不可越过;插件硬阻断仅当显式勾选安全模式且候选可禁用时可越过。
+// 预检尚未加载时保持原有安装门禁,不阻塞旧宿主。
+// LOGIC-BEGIN canStartInstall
+function canStartInstall(status, busy, restarting, preflight, safeMode) {
+  if (installDisabled(status, busy, restarting)) return false
+  if (!preflight) return true
+  if (preflight.environmentOk === false) return false
+  const blocked = preflight.pluginSummary ? preflight.pluginSummary.block : 0
+  const safeModeOverride = preflight.okWithSafeMode === undefined
+    ? safeMode && preflight.safeMode && preflight.safeMode.available
+    : preflight.okWithSafeMode === true
+  if (blocked > 0 && !safeModeOverride) return false
+  return true
+}
+// LOGIC-END canStartInstall
+
+// LOGIC-BEGIN preflightSummaryLine
+function preflightSummaryLine(preflight) {
+  if (!preflight) return '尚未检查'
+  if (preflight.ok) return '检查通过'
+  if (preflight.environmentOk === false) return '环境检查未通过'
+  if (preflight.pluginSummary && preflight.pluginSummary.block > 0
+    && (preflight.okWithSafeMode === true || (preflight.okWithSafeMode === undefined && preflight.safeMode && preflight.safeMode.available))) {
+    return '插件不兼容,可开启安全模式'
+  }
+  return '检查未通过'
+}
+// LOGIC-END preflightSummaryLine
+
 // 版本区:当前版本、通道切换、通道最新版、结论、检查时间与错误、刷新与升级。
 function VersionCard(props) {
   const status = props.status
@@ -430,7 +599,12 @@ function VersionCard(props) {
         }, props.busy.refresh ? '检查中…' : '刷新'),
         h('button', {
           className: 'dm-btn dm-btn--primary',
-          disabled: props.busy.upgrade || props.restarting || (status.upgrade && status.upgrade.running === true),
+          disabled: installDisabled(status, props.busy, props.restarting),
+          title: installDisabled(status, props.busy, props.restarting)
+            ? (status.channelLatest && status.channelLatestValid === false
+                ? '通道最新版不是合法版本,请先检查更新'
+                : '通道最新版未知,请先检查更新')
+            : undefined,
           onClick: props.onUpgrade,
         }, props.busy.upgrade ? '安装中…' : '安装'))),
     h('div', { className: 'dm-field' },
@@ -449,7 +623,9 @@ function VersionCard(props) {
             // 保留切换出口(否则通道切换能力不可达,只能手改 settings.yaml)
             ? h('select', {
                 className: 'dm-select',
-                value: tagNames.indexOf(status.channel) >= 0 ? status.channel : tagNames[0],
+                // 标注项本身(持久化通道)就是当前选中项:不在 tags 时也必须选中它,
+                // 否则界面显示的是另一个通道而保存值仍是旧通道,用户看到的状态与提交不一致
+                value: status.channel,
                 onChange: (e) => props.onChannel(e.target.value),
                 disabled: props.busy.channel || props.restarting,
               }, (tagNames.indexOf(status.channel) >= 0 ? [] : [status.channel]).concat(tagNames)
@@ -492,36 +668,179 @@ function SettingsCard(props) {
       onSave: props.onRegistryBase,
       hint: '默认以灰字提示,清空保存即恢复默认;官方源不可达时改为镜像',
     }),
+    h(WhitelistPicker, {
+      value: status.safeModeWhitelist,
+      busy: props.busy.safeModeWhitelist,
+      restarting: props.restarting,
+      onSave: props.onSafeModeWhitelist,
+    }),
   )
 }
 
-// 升级状态区:进行中显示阶段与已用时;结束后显示结果,失败附原因摘要。
+// 成功回执只提示一次:按 operationId 记录已读,下一次进入设置页不再重复展示历史成功。
+function upgradeReceiptKey(last) {
+  if (!last) return null
+  const identity = last.operationId
+    || [last.targetVersion || '', last.finishedAt || last.startedAt || ''].join('|')
+  return UPGRADE_SUCCESS_SEEN_KEY + ':' + identity
+}
+
+function upgradeReceiptSeen(key) {
+  if (!key) return false
+  if (seenUpgradeReceipts.has(key)) return true
+  try { return window.localStorage.getItem(key) === '1' } catch { return false }
+}
+
+function markUpgradeReceiptSeen(key) {
+  if (!key) return
+  seenUpgradeReceipts.add(key)
+  try { window.localStorage.setItem(key, '1') } catch {}
+}
+
+// 新宿主启动后的插件同步升级:独立进度卡,避免复用已结束的宿主升级状态。
+function PluginUpgradeCard(props) {
+  const pluginUpgrade = props.status.pluginUpgrade
+  if (!pluginUpgrade || pluginUpgrade.running !== true) return null
+  return h('div', { className: 'dm-card' },
+    h('div', { className: 'dm-card__head' }, h('span', { className: 'dm-card__title' }, '插件同步升级')),
+    h('div', { className: 'dm-progress' },
+      h('div', { className: 'dm-field__control' },
+        h('span', { className: 'dm-warn' }, pluginUpgrade.phaseLabel || '升级插件'),
+        h('span', { className: 'dm-meta' }, '已用时 ' + fmtElapsed(pluginUpgrade.startedAt))),
+      pluginUpgrade.phaseElapsedMs > 0
+        ? h('div', { className: 'dm-progress__meta' }, '本阶段已用时 ' + fmtDuration(pluginUpgrade.phaseElapsedMs))
+        : null,
+      pluginUpgrade.outputTail
+        ? h('pre', { className: 'dm-log', 'aria-label': '插件升级输出' }, pluginUpgrade.outputTail)
+        : h('div', { className: 'dm-progress__meta' }, '等待插件升级输出…')),
+  )
+}
+
+// 升级状态区:进行中显示阶段时间线与 npm 输出尾部;结束后显示结果与插件健康摘要。
 function UpgradeCard(props) {
   const upgrade = props.status.upgrade
-  if (!upgrade || (!upgrade.running && !upgrade.last)) return null
-  const last = upgrade.last
+  const last = upgrade && upgrade.last
+  const progress = upgrade && upgrade.progress
+  const health = last && last.health
+  const pluginUpgrade = last && last.plugins
+  const lastStartedAt = Number(last && (last.startedAt || last.switchedAt))
+  const historical = Boolean(upgrade && (upgrade.historical === true
+    || (last && last.historical === true)
+    || (props.status.bootAt && lastStartedAt && lastStartedAt < props.status.bootAt)))
+  const pluginUpgradeWarning = Boolean(last && last.plugins
+    && (last.plugins.error || (Array.isArray(last.plugins.failed) && last.plugins.failed.length > 0)))
+  const pluginUpgradePending = Boolean(last && last.plugins && last.plugins.pending === true)
+  const receiptKey = upgrade && !upgrade.running && last && last.ok === true && !pluginUpgradeWarning && !pluginUpgradePending
+    ? upgradeReceiptKey(last)
+    : null
+  const receiptRef = useRef({ key: null, seen: false })
+  if (receiptRef.current.key !== receiptKey) {
+    receiptRef.current = {
+      key: receiptKey,
+      seen: Boolean(last && last.receiptSeen === true) || upgradeReceiptSeen(receiptKey),
+    }
+  }
+  useEffect(() => {
+    if (!receiptKey || receiptRef.current.seen) return
+    markUpgradeReceiptSeen(receiptKey)
+    if (last && last.operationId) {
+      post(RECEIPT_ACK_URL, { operationId: last.operationId }).catch(() => {})
+    }
+  }, [receiptKey])
+  if (!upgrade || (!upgrade.running && !last)) return null
+  if (receiptRef.current.seen) return null
   return h('div', { className: 'dm-card' },
-    h('div', { className: 'dm-card__head' }, h('span', { className: 'dm-card__title' }, '升级')),
+    h('div', { className: 'dm-card__head' }, h('span', { className: 'dm-card__title' }, historical ? '上次升级' : '升级')),
     upgrade.running
-      ? h('div', { className: 'dm-field' },
-          h('span', { className: 'dm-field__label' }, '进度'),
-          h('div', { className: 'dm-field__main' },
-            h('div', { className: 'dm-field__control' },
-              h('span', { className: 'dm-warn' }, '升级进行中'),
-              h('span', { className: 'dm-meta' }, last ? (last.phase || '') + (last.targetVersion ? ' → ' + last.targetVersion : '') : ''),
-              h('span', { className: 'dm-meta' }, '已用时 ' + fmtElapsed(last ? last.startedAt : Date.now())))))
+      ? h('div', { className: 'dm-progress' },
+          h('div', { className: 'dm-field__control' },
+            h('span', { className: 'dm-warn' }, progress ? progress.phaseLabel : '升级进行中'),
+            h('span', { className: 'dm-meta' }, last && last.targetVersion ? '目标 ' + last.targetVersion : ''),
+            h('span', { className: 'dm-meta' }, '已用时 ' + fmtElapsed(progress ? progress.startedAt : (last ? last.startedAt : Date.now())))),
+          progress && progress.phaseElapsedMs > 0
+            ? h('div', { className: 'dm-progress__meta' }, '本阶段已用时 ' + fmtDuration(progress.phaseElapsedMs))
+            : null,
+          progress && progress.outputTail
+            ? h('pre', { className: 'dm-log', 'aria-label': 'npm 输出' }, progress.outputTail)
+            : h('div', { className: 'dm-progress__meta' }, '等待 npm 输出…'))
       : h('div', { className: 'dm-field' },
-          h('span', { className: 'dm-field__label' }, '结果'),
+          h('span', { className: 'dm-field__label' }, historical ? '上次结果' : '结果'),
           h('div', { className: 'dm-field__main' },
             last.ok
-              ? h('span', { className: 'dm-ok' }, last.exitScheduled === true ? '升级完成,宿主正在退出切换版本' : '升级完成,已切换版本链接')
-              : h('div', { className: 'dm-notice dm-notice--error' }, '升级失败:' + (last.error || '详情见日志')),
-            last.ok === true && last.exitScheduled !== true
+              ? h('span', { className: 'dm-ok' },
+                  historical
+                    ? (last.landed === true ? '上次升级完成,已运行目标版本' : '上次升级完成,已切换版本链接')
+                    : last.exitScheduled === true
+                      ? '升级完成,宿主正在退出切换版本'
+                      : last.landed === true ? '升级完成,已运行目标版本' : '升级完成,已切换版本链接')
+              : last.pending === true
+                ? h('div', { className: 'dm-notice dm-notice--warn' }, '上次升级已切换版本,当前仍在运行旧版本,等待宿主重启')
+                : last.landed === true
+                  ? h('div', { className: 'dm-notice dm-notice--warn' },
+                      '升级完成,但插件装载检查异常:' + (last.error || (health && health.ok === false ? '插件健康检查未通过' : '详情见日志')))
+                  : h('div', { className: 'dm-notice dm-notice--error' },
+                      '升级失败:' + (last.error || (health && health.ok === false ? '插件装载降级' : '详情见日志'))),
+            historical
+              ? h('div', { className: 'dm-dialog__hint' },
+                  '来自上次宿主运行的记录'
+                  + (last.targetVersion ? ' · 目标 ' + last.targetVersion : '')
+                  + (fmtTime(last.switchedAt || last.startedAt || last.finishedAt) ? ' · ' + fmtTime(last.switchedAt || last.startedAt || last.finishedAt) : '')
+                  + ';本次启动未发起升级')
+              : null,
+            last.ok === true && last.exitScheduled === false
               ? h('div', { className: 'dm-notice dm-notice--warn' },
                   last.error
                     ? '已切换但启动器未提供退出能力,请手动重启宿主'
                     : '自动重启未勾选:请手动重启宿主加载新版本,重启前不能再次发起升级')
+              : null,
+            pluginUpgrade && pluginUpgrade.requested === true
+              ? pluginUpgrade.pending === true
+                ? h('div', { className: 'dm-field__hint' }, '插件同步升级:等待新宿主启动后按目标版本执行')
+                : h('div', { className: pluginUpgrade.failed && pluginUpgrade.failed.length > 0 ? 'dm-notice dm-notice--warn' : 'dm-field__hint' },
+                    '插件同步升级:更新 ' + ((pluginUpgrade.updated || []).length) + ' 个'
+                    + ((pluginUpgrade.failed || []).length > 0 ? ',失败 ' + pluginUpgrade.failed.length + ' 个' : '')
+                    + ((pluginUpgrade.skipped || []).length > 0 ? ',跳过 ' + pluginUpgrade.skipped.length + ' 个' : '')
+                    + (pluginUpgrade.error ? ';' + pluginUpgrade.error : ''),
+                    (pluginUpgrade.failed || []).length > 0
+                      ? h('div', { className: 'dm-check__detail' },
+                          pluginUpgrade.failed.map((row) => row.name + ':' + row.error).join('; '))
+                      : null)
+              : null,
+            health && health.ok === false
+              ? h('div', { className: 'dm-notice dm-notice--error' },
+                  '插件健康检查未通过:失败 ' + ((health.failed || []).length) + ' 个,插件错误 ' + ((health.bundleErrors || []).length) + ' 个'
+                  + ((health.failed || []).length > 0 ? '(' + health.failed.map((row) => row.moduleName || row.entryId).join(', ') + ')' : '')
+                  + ((health.bundleErrors || []).length > 0 ? '(' + health.bundleErrors.map((row) => row.name + ':' + row.error).join(', ') + ')' : ''))
+              : health && health.available === false
+                ? h('div', { className: 'dm-notice dm-notice--warn' },
+                    '插件健康检查不可用:' + (health.unavailableReason || '宿主未提供插件清单'))
+                : null,
+            Array.isArray(last.safeModeRestoreError) && last.safeModeRestoreError.length > 0
+              ? h('div', { className: 'dm-notice dm-notice--error' },
+                  '安全模式恢复失败:' + last.safeModeRestoreError.map((row) => row.name).join(','))
               : null)),
+  )
+}
+
+// 安全模式恢复卡:只展示宿主记录内的插件,恢复动作由 host 逐个启用,不接收任意插件名。
+function SafeModeCard(props) {
+  const record = props.status.safeMode
+  if (!record || record.active !== true || !Array.isArray(record.disabled) || record.disabled.length === 0) return null
+  return h('div', { className: 'dm-card' },
+    h('div', { className: 'dm-card__head' },
+      h('span', { className: 'dm-card__title' }, '安全模式'),
+      h('div', { className: 'dm-card__actions' },
+        h('button', {
+          className: 'dm-btn',
+          disabled: props.busy.safeMode || props.restarting,
+          onClick: props.onRestore,
+        }, props.busy.safeMode ? '恢复中…' : '恢复全部插件'))),
+    h('div', { className: 'dm-field' },
+      h('span', { className: 'dm-field__label' }, '已禁用'),
+      h('div', { className: 'dm-field__main' },
+        h('div', { className: 'dm-field__control' },
+          record.disabled.map((plugin) => h('span', { className: 'dm-badge', key: plugin.name }, plugin.name + (plugin.version ? ' ' + plugin.version : '')))),
+        h('div', { className: 'dm-field__hint' }, '这些插件在升级前被临时禁用;恢复后需重启宿主生效。'))),
   )
 }
 
@@ -547,7 +866,7 @@ function OpsCard(props) {
             onClick: props.onRestart,
           }, restartConfirmLabel(props.armed, props.activeWorkTotal))),
         h('div', { className: 'dm-field__hint' },
-          '重启直接终止宿主进程,依赖进程管理器(pm2 / systemd / supervisor 托管循环等)自动拉起;手动终端启动的进程不会自动恢复。',
+          '重启直接终止宿主进程,以非零退出码 75 离场;依赖进程管理器(pm2 自动拉起 / systemd 默认 Restart=on-failure / supervisor 默认 autorestart=unexpected 等托管循环)据此重启,手动终端启动的进程不会自动恢复。',
           '在跑回合保持中断状态(不写结束记录),下次启动按中断收起;装了自动继续类插件会从断点续跑。'),
         h('div', { className: 'dm-field__hint' }, '重启后本页自动检测宿主恢复并刷新;若长时间未恢复请手动刷新。'))),
   )
@@ -561,13 +880,33 @@ function switchToggle(props) {
   ]
 }
 
-// 安装确认弹窗:展示版本变更(从→到)与目标版本,安装即退出切换,由启动方式拉起。
+// 安装确认弹窗:展示版本变更、升级前检查与安全模式;安装即退出切换,由启动方式拉起。
 // 重装修复(目标==运行版本)与回退(目标低于运行版本)是面板显式意图,窗内分类说明;
-// 自动重启为单次意图(默认开),关闭则安装后宿主继续运行,手动重启加载新版本
+// 自动重启为单次意图(默认开),关闭则安装后宿主继续运行,手动重启加载新版本。
+// 预检失败不允许绕过:宁可阻止一次安装,也不让用户在未知环境上切换。
 function UpgradeDialog(props) {
   const status = props.status
   const changeLine = buildInstallChangeLine(status)
   const [autoRestart, setAutoRestart] = useState(true)
+  const [safeMode, setSafeMode] = useState(false)
+  const [upgradePlugins, setUpgradePlugins] = useState(false)
+  const [preflight, setPreflight] = useState(null)
+  const [preflightError, setPreflightError] = useState(null)
+  const [attempt, setAttempt] = useState(0)
+  useEffect(() => {
+    let active = true
+    setPreflight(null)
+    setPreflightError(null)
+    post(PREFLIGHT_URL, { targetVersion: status.channelLatest })
+      .then((report) => { if (active) setPreflight(report) })
+      .catch((error) => { if (active) setPreflightError(error && error.message ? error.message : String(error)) })
+    return () => { active = false }
+  }, [status.channelLatest, attempt])
+  const safeModeInfo = preflight && preflight.safeMode && typeof preflight.safeMode === 'object'
+    ? preflight.safeMode
+    : {}
+  const candidates = Array.isArray(safeModeInfo.candidates) ? safeModeInfo.candidates : []
+  const startDisabled = !preflight || preflightError !== null || !canStartInstall(status, props.busy, props.restarting, preflight, safeMode)
   const finishLine = autoRestart
     ? '安装完成后宿主将立即退出切换版本:托管启动时由进程管理器拉起,手动终端启动时需你重新运行宿主;页面随宿主恢复自动刷新。'
     : '安装完成后宿主继续运行当前版本,需手动重启宿主加载新版本;重启前不能再次发起升级。'
@@ -576,14 +915,78 @@ function UpgradeDialog(props) {
       h('div', { className: 'dm-dialog__title' }, '确认安装'),
       h('div', { className: 'dm-dialog__hint' }, '版本变更:当前 运行 ' + (status.runningVersion || '未知') + ' / 已装 ' + (status.installedVersion || '未知')),
       h('div', { className: 'dm-notice dm-notice--warn' }, changeLine),
+      h('div', { className: 'dm-dialog__hint' }, '升级前检查:' + preflightSummaryLine(preflight)),
+      preflightError !== null
+        ? h('div', { className: 'dm-notice dm-notice--error' },
+            '检查失败:' + preflightError,
+            h('button', { className: 'dm-btn dm-btn--ghost', onClick: () => setAttempt(attempt + 1) }, '重试'))
+        : null,
+      preflight === null && preflightError === null
+        ? h('div', { className: 'dm-skeleton', 'aria-busy': 'true' },
+            [0, 1, 2].map((index) => h('div', { className: 'dm-skeleton__row', key: index })))
+        : null,
+      preflight !== null && Array.isArray(preflight.checks)
+        ? h('div', { className: 'dm-checks' },
+            preflight.checks.map((check) => h('div', { className: 'dm-check', key: check.id },
+              h('span', { className: 'dm-check__status dm-check__status--' + check.status }, check.status === 'pass' ? '通过' : check.status === 'warn' ? '注意' : '阻断'),
+              h('div', { className: 'dm-check__body' },
+                h('div', null, check.label),
+                check.detail ? h('div', { className: 'dm-check__detail' }, check.detail) : null))))
+        : null,
+      preflight !== null && Array.isArray(preflight.plugins) && preflight.plugins.length > 0
+        ? h('details', { className: 'dm-details' },
+            h('summary', null, '插件兼容明细(' + ((preflight.pluginSummary && preflight.pluginSummary.warn) || 0) + ' 未验证 / ' + ((preflight.pluginSummary && preflight.pluginSummary.block) || 0) + ' 不兼容)'),
+            h('div', { className: 'dm-checks' }, preflight.plugins.map((plugin) => h('div', { className: 'dm-check', key: plugin.name },
+              h('span', { className: 'dm-check__status dm-check__status--' + plugin.status }, plugin.status === 'ok' ? '通过' : plugin.status === 'warn' ? '注意' : '阻断'),
+              h('div', { className: 'dm-check__body' },
+                h('div', null, plugin.name + (plugin.version ? ' ' + plugin.version : '')),
+                h('div', { className: 'dm-check__detail' }, plugin.reasons.join('; ')))))))
+        : null,
+      candidates.length > 0
+        ? h('div', { className: 'dm-notice dm-notice--warn' },
+            h('label', { className: 'dm-switch' },
+              ...switchToggle({
+                checked: safeMode,
+                disabled: safeModeInfo.available !== true || !autoRestart,
+                onChange: (e) => setSafeMode(e.target.checked),
+              }),
+              '安全模式:临时禁用 ' + candidates.length + ' 个未验证或不兼容插件'),
+            h('div', { className: 'dm-dialog__hint' }, '升级成功后可在「版本与运维」页逐个恢复;安全模式升级必须自动重启。'))
+        : null,
+      safeModeInfo.reason
+        && (candidates.length > 0 || (safeModeInfo.protected || []).length > 0)
+        ? h('div', { className: 'dm-dialog__hint' }, '安全模式不可用:' + safeModeInfo.reason)
+        : null,
+      h('label', { className: 'dm-switch' },
+        ...switchToggle({
+          checked: upgradePlugins,
+          disabled: !autoRestart || status.upgradePluginsAvailable !== true || status.pluginUpgradeMode !== 'post-restart',
+          onChange: (e) => setUpgradePlugins(e.target.checked),
+        }),
+        '同时升级所有插件',
+      ),
+      h('div', { className: 'dm-dialog__hint' },
+        status.upgradePluginsAvailable === true && status.pluginUpgradeMode === 'post-restart'
+          ? '宿主升级完成后按新宿主兼容性升级 profile 插件,只升不降;无更高版本、不兼容或 Git 插件会跳过,单项失败不阻断宿主升级。'
+          : '当前宿主未加载新的插件升级流程,请先重启宿主加载新版本。'),
       h('div', { className: 'dm-dialog__hint' }, finishLine),
       h('label', { className: 'dm-switch' },
-        ...switchToggle({ checked: autoRestart, onChange: (e) => setAutoRestart(e.target.checked) }),
+        ...switchToggle({ checked: autoRestart, onChange: (e) => {
+          setAutoRestart(e.target.checked)
+          if (!e.target.checked) {
+            setSafeMode(false)
+            setUpgradePlugins(false)
+          }
+        } }),
         '安装后自动重启宿主',
       ),
       h('div', { className: 'dm-dialog__actions' },
         h('button', { className: 'dm-btn', onClick: props.onCancel }, '取消'),
-        h('button', { className: 'dm-btn dm-btn--primary', onClick: () => props.onConfirm(status.channelLatest, autoRestart) }, '开始安装'),
+        h('button', {
+          className: 'dm-btn dm-btn--primary',
+          disabled: startDisabled,
+          onClick: () => props.onConfirm(status.channelLatest, autoRestart, safeMode, upgradePlugins),
+        }, preflight === null ? '检查中…' : '开始安装'),
       ),
     ),
   )
@@ -799,7 +1202,7 @@ function MaintainApp() {
         }
         if (tick.action === 'timeout') {
           setRestarting(false)
-          setError('重启未在 ' + RESTART_TIMEOUT_MS / 1000 + ' 秒内完成,宿主可能未被拉起,请检查进程管理器后手动刷新')
+          setError('重启未在 ' + RESTART_TIMEOUT_MS / (60 * 1000) + ' 分钟内完成,宿主可能未被拉起,请检查进程管理器后手动刷新')
           return
         }
         await restartSleep(RESTART_POLL_MS, controller)
@@ -882,10 +1285,15 @@ function MaintainApp() {
     submitEdit(REGISTRY_BASE_URL, { base }, 'registryBase', (error) => '保存失败:' + (error && error.message ? error.message : String(error)))
   }
 
-  function onUpgrade(targetVersion, autoRestart) {
+  function onSafeModeWhitelist(plugins) {
+    const list = Array.isArray(plugins) ? plugins : []
+    submitEdit(SAFE_MODE_WHITELIST_URL, { plugins: list }, 'safeModeWhitelist', (error) => '保存失败:' + (error && error.message ? error.message : String(error)))
+  }
+
+  function onUpgrade(targetVersion, autoRestart, safeMode, upgradePlugins) {
     setUpgradeDialogOpen(false)
     markBusy('upgrade', true)
-    post(UPGRADE_URL, { targetVersion, autoRestart })
+    post(UPGRADE_URL, { targetVersion, autoRestart, safeMode, upgradePlugins })
       .then((next) => {
         const snapshot = next && next.status ? next.status : next
         setStatus(snapshot); setError(null)
@@ -894,6 +1302,17 @@ function MaintainApp() {
       })
       .catch((upgradeError) => notify('升级触发失败:' + (upgradeError && upgradeError.message ? upgradeError.message : String(upgradeError)), 'error'))
       .then(() => markBusy('upgrade', false))
+  }
+
+  function onRestoreSafeMode() {
+    markBusy('safeMode', true)
+    post(SAFE_MODE_RESTORE_URL, {})
+      .then((result) => {
+        notify(result.restored ? '已恢复 ' + result.count + ' 个插件,重启宿主后生效' : '部分插件恢复失败,请查看面板状态', result.restored ? 'ok' : 'error')
+        return load()
+      })
+      .catch((restoreError) => notify('恢复失败:' + (restoreError && restoreError.message ? restoreError.message : String(restoreError)), 'error'))
+      .then(() => markBusy('safeMode', false))
   }
 
   function onRestart() {
@@ -926,11 +1345,13 @@ function MaintainApp() {
       .catch(() => {})
       .then(() => {
         setRestarting(true)
+        return post(RESTART_URL, activeWorkTotal > 0 ? { force: true } : undefined)
+      })
+      .then(() => {
         // 宿主重启后内存快照归零,升级观察与浮条随重启作废;
-        // 放在受理成功之后:明确回绝(409 互斥)时升级仍在跑,观察器必须存活
+        // 只在受理成功后移除:明确回绝(409 升级互斥)时升级仍在跑,观察器必须存活
         stopUpgradeWatch()
         removeUpgradeFloat()
-        return post(RESTART_URL, activeWorkTotal > 0 ? { force: true } : undefined)
       })
       .catch((restartError) => {
         if (restartPostLost(restartError)) {
@@ -996,17 +1417,22 @@ function MaintainApp() {
       onReleaseNotes: () => { setRestartArmed(false); setNotesVersion(status.channelLatest) },
       onRestart,
     }),
+    h(PluginUpgradeCard, { status }),
+    h(UpgradeCard, { status, restartArmed, restarting, activeWorkTotal, onRestart }),
+    h(SafeModeCard, { status, busy, restarting, onRestore: onRestoreSafeMode }),
+    h(OpsCard, { armed: restartArmed, restarting, activeWorkTotal, onRestart }),
     h(SettingsCard, {
       status,
       busy,
       restarting,
       onPollInterval,
       onRegistryBase,
+      onSafeModeWhitelist,
     }),
-    h(UpgradeCard, { status, restartArmed, restarting, activeWorkTotal, onRestart }),
-    h(OpsCard, { armed: restartArmed, restarting, activeWorkTotal, onRestart }),
     upgradeDialogOpenLive ? h(UpgradeDialog, {
       status,
+      busy,
+      restarting,
       onCancel: () => setUpgradeDialogOpen(false),
       onConfirm: onUpgrade,
     }) : null,

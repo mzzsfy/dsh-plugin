@@ -28,8 +28,7 @@
     }
   },
   "scripts": {
-    "test": "node --test \"test/*.test.mjs\"",
-    "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
+    "test": "node --test \"test/*.test.mjs\""
   },
   "publishConfig": {
     "access": "public",
@@ -43,7 +42,8 @@
     "src",
     "test",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "兼容性测试.md"
   ],
   "repository": {
     "type": "git",

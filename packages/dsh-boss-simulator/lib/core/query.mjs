@@ -3,7 +3,7 @@
 import { createHash } from 'node:crypto'
 import { fail, pass } from './command.mjs'
 import { taskUsageSummary } from './usage.mjs'
-import { ACTIVE_RUN_STATES } from './task.mjs'
+import { ACTIVE_RUN_STATES, acceptedReportFor, artifactRevisionOf, currentArtifactRejected, effectiveAcceptance, expireStaleRuns } from './task.mjs'
 
 const DEFAULT_PAGE_LIMIT = 50
 const MAX_PAGE_LIMIT = 200
@@ -14,6 +14,9 @@ export function queryBoard(aggregates, globalControl, options = {}) {
   if (!Number.isInteger(limit) || limit < 1 || limit > MAX_PAGE_LIMIT) {
     return fail('INVALID_ARGUMENT', `limit 须为 1..${MAX_PAGE_LIMIT} 的整数`)
   }
+  if (since !== undefined && !Number.isFinite(since)) return fail('INVALID_ARGUMENT', 'since 须为毫秒时间戳')
+  if (until !== undefined && !Number.isFinite(until)) return fail('INVALID_ARGUMENT', 'until 须为毫秒时间戳')
+  if (since !== undefined && until !== undefined && until < since) return fail('INVALID_ARGUMENT', '时间窗口无效')
   if (since !== undefined && until !== undefined && until - since > MAX_TIME_WINDOW_MS) {
     return fail('INVALID_ARGUMENT', '时间窗口过大')
   }
@@ -22,8 +25,12 @@ export function queryBoard(aggregates, globalControl, options = {}) {
     const bad = businessStates.filter((s) => !allowed.has(s))
     if (bad.length > 0) return fail('INVALID_ARGUMENT', `businessStates 非法: ${bad.join(', ')}`)
   }
+  // 时间窗口按任务活跃期与窗口相交判定:createdAt <= until 且 updatedAt >= since。
+  // 只看单个字段会把"窗口内创建但已更新到窗口后"或"窗口前创建但窗口内仍有活动"的任务误裁。
   const filtered = aggregates.filter((a) => (workspaceId ? a.projectWorkspaceId === workspaceId : true))
     .filter((a) => (search ? a.taskId.toLowerCase().includes(search.toLowerCase()) || a.title.toLowerCase().includes(search.toLowerCase()) : true))
+    .filter((a) => (since !== undefined ? (Number.isFinite(a.updatedAt) ? a.updatedAt : a.createdAt) >= since : true))
+    .filter((a) => (until !== undefined ? a.createdAt <= until : true))
   const priorityRank = { high: 0, normal: 1, low: 2 }
   const all = filtered.filter((a) => (businessStates ? businessStates.includes(a.businessState) : true))
     .sort((a, b) => (priorityRank[a.priority] ?? 1) - (priorityRank[b.priority] ?? 1) || a.createdAt - b.createdAt || a.taskId.localeCompare(b.taskId))
@@ -32,7 +39,7 @@ export function queryBoard(aggregates, globalControl, options = {}) {
     counts[state] = filtered.filter((a) => a.businessState === state).length
   }
   const viewRevision = createHash('sha256').update(JSON.stringify([globalControl, [...aggregates].sort((a, b) => a.taskId.localeCompare(b.taskId))])).digest('hex')
-  const queryKey = JSON.stringify([workspaceId ?? null, search?.toLowerCase() ?? null, businessStates ?? null])
+  const queryKey = JSON.stringify([workspaceId ?? null, search?.toLowerCase() ?? null, businessStates ?? null, since ?? null, until ?? null])
   let start = 0
   if (cursor) {
     let decoded
@@ -86,7 +93,14 @@ function projectModelTasks(aggregates) {
   }))
 }
 
-export function projectTaskSummary(aggregate) {
+// 读面 stale 收敛(纯内存,不写盘):超过失联阈值的在飞 Run 按已断投影。
+// 不收敛时同一份数据在"刚刷新"与"任何写动作触发 expire 后"给出两套事实。
+function converged(aggregate) {
+  return expireStaleRuns(aggregate).result?.aggregate ?? aggregate
+}
+
+export function projectTaskSummary(raw) {
+  const aggregate = converged(raw)
   const attribution = runModelAttribution(aggregate)
   return {
     taskId: aggregate.taskId,
@@ -96,8 +110,8 @@ export function projectTaskSummary(aggregate) {
     businessState: aggregate.businessState,
     controlState: aggregate.control.state,
     stopDetail: aggregate.control.stopDetail,
+    stopErrors: aggregate.control.stopErrors ?? [],
     block: aggregate.block,
-    pendingCancel: aggregate.control.pendingCancel !== null,
     definitionRevision: aggregate.definitionRevision,
     authorized: aggregate.authorization !== null,
     workItemCount: Object.keys(aggregate.workItems).length,
@@ -114,7 +128,8 @@ export function projectTaskSummary(aggregate) {
 }
 
 // 单任务详情投影:含 workItems/runs/报告摘要/用量汇总;查询无副作用
-export function projectTaskDetail(aggregate, globalControl) {
+export function projectTaskDetail(raw, globalControl) {
+  const aggregate = converged(raw)
   const usage = taskUsageSummary(aggregate)
   const attribution = runModelAttribution(aggregate)
   return {
@@ -131,6 +146,8 @@ export function projectTaskDetail(aggregate, globalControl) {
       requiredCriterionIds: w.requiredCriterionIds,
       replacedBy: w.replacedBy,
     })),
+    // 推进目标由服务端给出:面板按子项派生态选择,不再盲取第一个子项
+    nextDispatch: nextDispatchOf(aggregate),
     runs: Object.values(aggregate.runs).map((r) => ({
       runId: r.runId, workItemId: r.workItemId, phase: r.phase, state: r.state,
       attemptOrdinal: r.attemptOrdinal, executionEpoch: r.executionEpoch,
@@ -140,10 +157,12 @@ export function projectTaskDetail(aggregate, globalControl) {
       actualModel: attribution.get(r.runId) ?? null,
       stopObserved: r.stopObserved ?? null,
       reportDiagnostic: r.reportDiagnostic ?? null,
+      usageDiagnostic: r.usageDiagnostic ?? null,
       dispatchError: r.dispatchError ?? null,
     })),
     reports: Object.values(aggregate.reports).map((r) => ({
       reportId: r.reportId, runId: r.runId, verdict: r.verdict, historical: r.historical,
+      effective: effectiveAcceptance(aggregate, r),
       issues: r.issues, definitionRevision: r.definitionRevision,
     })),
     usage,
@@ -152,7 +171,8 @@ export function projectTaskDetail(aggregate, globalControl) {
 }
 
 // WorkItem.state 派生(只读,不落盘):planned/executing/awaitingReview/accepted/blocked/withdrawn
-export function deriveWorkItemState(aggregate, workItem) {
+export function deriveWorkItemState(rawAggregate, workItem) {
+  const aggregate = converged(rawAggregate)
   if (workItem.replacedBy) return 'withdrawn'
   const runs = Object.values(aggregate.runs).filter((r) => r.workItemId === workItem.workItemId)
   const inFlight = runs.find((r) => ACTIVE_RUN_STATES.has(r.state))
@@ -163,15 +183,46 @@ export function deriveWorkItemState(aggregate, workItem) {
   })
   const blockedByAuth = !aggregate.authorization || aggregate.authorization.definitionRevision !== aggregate.definitionRevision
   if ((depsMissing || blockedByAuth) && aggregate.businessState !== 'completed') return 'blocked'
-  const accepted = runs.some((r) => {
-    const report = aggregate.reports[r.workItemId + ':' + r.runId] ?? Object.values(aggregate.reports).find((rep) => rep.runId === r.runId)
-    return report?.verdict === 'pass' && !report.historical
-  })
-  if (accepted) return 'accepted'
-  const awaiting = runs.some((r) => {
-    const report = Object.values(aggregate.reports).find((rep) => rep.runId === r.runId)
-    return report && ['ready_for_review'].includes(report.verdict) && !report.historical
-  })
-  if (awaiting) return 'awaitingReview'
+  // 与派发准入/结案同一判据:旧产物代次的 pass 不显示为已通过
+  if (acceptedReportFor(aggregate, workItem.workItemId)) return 'accepted'
+  if (awaitingAcceptance(aggregate, workItem.workItemId)) return 'awaitingReview'
   return 'planned'
+}
+
+// 待验收的唯一判据与 Run 服务派发验收同一条件:当前定义、当前实施产物代次、
+// 该代次的实施 Run 已结算且提交了 ready_for_review。该代次已被验收(issues)时
+// 交付物已被驳回,子项回到待实施,不再反复派验收。
+function awaitingAcceptance(aggregate, workItemId) {
+  const artifactRevision = artifactRevisionOf(aggregate, workItemId)
+  const reports = Object.values(aggregate.reports).filter((report) => report.workItemId === workItemId
+    && !report.historical
+    && report.definitionRevision === aggregate.definitionRevision
+    && report.artifactRevision === artifactRevision)
+  if (!reports.some((report) => report.verdict === 'ready_for_review' && aggregate.runs[report.runId]?.state === 'settled')) return false
+  return !currentArtifactRejected(aggregate, workItemId)
+}
+
+// 子项缺省派发阶段:显式 workItemId 派发与 nextDispatchOf 共用同一派生口径。
+// 已有实施产物(被驳回或求助)时下一动作是修复;从未实施过的子项才从 implement 开始。
+export function defaultPhaseFor(rawAggregate, workItemId) {
+  const aggregate = converged(rawAggregate)
+  const workItem = aggregate.workItems[workItemId]
+  if (!workItem) return null
+  const state = deriveWorkItemState(aggregate, workItem)
+  if (state === 'awaitingReview') return 'accept'
+  if (state === 'planned') return artifactRevisionOf(aggregate, workItemId) > 0 ? 'fix' : 'implement'
+  return null
+}
+
+// 推进目标:按子项派生态选下一个可派发目标(验收优先于实施,均按子项声明序)。
+// 面板不再固定派发第一个子项:重复实施已验收项会推进产物代次,作废既有验收。
+export function nextDispatchOf(rawAggregate) {
+  const aggregate = converged(rawAggregate)
+  const items = Object.values(aggregate.workItems).filter((item) => !item.replacedBy)
+  const states = items.map((item) => ({ item, state: deriveWorkItemState(aggregate, item) }))
+  const awaiting = states.find(({ state }) => state === 'awaitingReview')
+  if (awaiting) return { workItemId: awaiting.item.workItemId, phase: defaultPhaseFor(aggregate, awaiting.item.workItemId) }
+  const planned = states.find(({ state }) => state === 'planned')
+  if (planned) return { workItemId: planned.item.workItemId, phase: defaultPhaseFor(aggregate, planned.item.workItemId) }
+  return null
 }

@@ -28,6 +28,7 @@ const ReactStub = {
 function createRuntime(component, props) {
   const instances = new Map()
   const order = []
+  let currentProps = props
   let scheduled = false
   let unmounted = false
   let renderCount = 0
@@ -104,7 +105,7 @@ function createRuntime(component, props) {
 
   function renderAll() {
     if (unmounted || failure) return
-    renderComponent(component, props, 'root')
+    renderComponent(component, currentProps, 'root')
   }
 
   function schedule() {
@@ -174,6 +175,10 @@ function createRuntime(component, props) {
         unmounted = true
       }
     },
+    setProps(next) {
+      currentProps = next
+      runtime.render()
+    },
     async flush() {
       for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve))
       if (failure) throw failure
@@ -206,6 +211,11 @@ function createRuntime(component, props) {
 function loadSlots({ documentStub, fetchStub, Observer }) {
   const modules = []
   const registered = []
+  // 外层 ctx.slots 的注册:fork 入口必须归属 remote.session inject 子 fiber,
+  // 不得落在外层(服务重启重跑注入回调时会叠加注册)
+  const outerRegistered = []
+  const injectCallbacks = []
+  const injectedContexts = []
   const windowStub = {
     __ModuleLoader__: { load: (module) => modules.push(module) },
     addEventListener() {},
@@ -220,16 +230,38 @@ function loadSlots({ documentStub, fetchStub, Observer }) {
   assert.equal(modules.length, 1, 'client.js 未调用 __ModuleLoader__.load')
   const plugin = modules[0].factory(requireStub)
   const sessions = { binding: () => undefined, fork: () => Promise.resolve('child-1'), open() {} }
-  plugin.apply({
+  const remote = { session: { follow: () => (async function* () { yield { type: 'snapshot', cursor: 0, records: [] }; await new Promise(() => {}) })() } }
+  const ctx = {
     get: (name) => (name === 'sessions' ? sessions : {}),
     effect: () => {},
     slots: {
       inject: (name, register) => register(),
-      register: (options, component) => registered.push({ options, component }),
+      register: (options, component) => {
+        outerRegistered.push({ options, component })
+        registered.push({ options, component })
+      },
     },
-    remote: undefined,
-  })
-  return registered
+    remote,
+    inject: (deps, register) => {
+      if (!deps.includes('remote.session') || !remote.session) return
+      injectCallbacks.push(register)
+      const childRegistered = []
+      const childCtx = {
+        remote,
+        slots: {
+          inject: (name, mount) => mount(),
+          register: (options, component) => {
+            childRegistered.push({ options, component })
+            registered.push({ options, component })
+          },
+        },
+      }
+      injectedContexts.push({ childCtx, childRegistered })
+      register(childCtx)
+    },
+  }
+  plugin.apply(ctx)
+  return { registered, outerRegistered, injectCallbacks, injectedContexts }
 }
 
 function createDocumentStub({ turnBubbles = [], withToolsRow = false } = {}) {
@@ -365,7 +397,7 @@ test('C1 回归:同一缺失映射连续扫描只补拉一次,签名相同不再
     status: 200,
     json: async () => ({ enabled: !String(url).includes('fork-auto-resend-enabled') }),
   })
-  const registered = loadSlots({ documentStub, fetchStub, Observer: observerHub.Observer })
+  const { registered } = loadSlots({ documentStub, fetchStub, Observer: observerHub.Observer })
   const entry = registered.find((item) => item.options.id === 'context-manager-fork')
   assert.ok(entry, '未注册 fork dock 条目')
 
@@ -392,13 +424,232 @@ test('C1 回归:同一缺失映射连续扫描只补拉一次,签名相同不再
   assert.equal(loadCalls, 2, '挂载拉取 1 次 + 缺映射补拉 1 次后应终止;实际补拉 ' + loadCalls + ' 次')
   const settledRenders = runtime.renderCount
   observerHub.fireAll()
+  await new Promise((resolve) => setTimeout(resolve, 0))
   await runtime.flush()
   assert.equal(loadCalls, 3, '一次新的扫描只应补拉一次')
   assert.equal(runtime.renderCount, settledRenders, '补拉结果与基线签名相同,不得 setState 触发重渲染')
   observerHub.fireAll()
+  await new Promise((resolve) => setTimeout(resolve, 0))
   await runtime.flush()
   assert.equal(loadCalls, 4, '后续扫描仍只补拉一次')
   assert.equal(runtime.renderCount, settledRenders, '签名相同永不进入 setState 循环')
+})
+
+// P1-4 行为回归:挂载时映射只有第 0 轮,挂载后新增第 1 轮气泡——前向补拉快照后
+// 按钮必须出现(旧实现同签名抑制 re-snapshot,只补历史页,永远看不到新轮)
+test('P1-4 行为:挂载后新增轮经前向补快照获得锚点并注入按钮', async () => {
+  const appended = []
+  const officialButton = { className: 'official-action' }
+  const actionsRow = {
+    querySelector: (selector) => (selector.startsWith('button:not(') ? officialButton : null),
+    appendChild: (node) => appended.push(node),
+  }
+  const bubble = {
+    getAttribute(name) {
+      if (name === 'data-chat-flow-kind') return 'user'
+      if (name === 'data-chat-turn') return '1'
+      return null
+    },
+    querySelector(selector) {
+      if (selector === '[class$="_actions"]') return actionsRow
+      return null
+    },
+  }
+  const documentStub = createDocumentStub({ turnBubbles: [bubble] })
+  const fetchStub = async (url) => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ enabled: !String(url).includes('fork-auto-resend-enabled') }),
+  })
+  const { registered } = loadSlots({ documentStub, fetchStub, Observer: createObserverHub().Observer })
+  const entry = registered.find((item) => item.options.id === 'context-manager-fork')
+  assert.ok(entry, '未注册 fork dock 条目')
+
+  const calls = []
+  const loadTurnEnds = async (options) => {
+    calls.push(options)
+    if (options && options.forward === true) {
+      return new Map([
+        [0, { seq: 2, text: '首问', open: false }],
+        [1, { seq: 5, text: '第二问', open: false }],
+      ])
+    }
+    return new Map([[0, { seq: 2, text: '首问', open: false }]])
+  }
+  const runtime = createRuntime(entry.component, {
+    session: { sessionId: 's1' },
+    inputActions: undefined,
+    useInput: undefined,
+    forkSession: async () => 'child-1',
+    cancelSession: () => {},
+    submitPrompt: null,
+    loadTurnEnds,
+  })
+  runtime.render()
+  await runtime.flush()
+
+  assert.equal(calls.length, 2, '挂载首拉 + 发现新轮前向补拉')
+  assert.deepEqual(calls[1], { forward: true, turn: 1 }, '第 1 轮缺失且大于已知最大轮号,应按轮前向补拉')
+  assert.equal(documentStub.createdButtons.filter((button) => 'data-cx-fork' in button.attrs).length, 1,
+    '前向补拉拿到第 1 轮锚点后应注入分叉按钮')
+  assert.equal(appended.length, 1, '按钮应挂到该轮操作排')
+})
+
+// C9 回归:宿主轮号从 1 起,首轮气泡没有可用的更早 turn/end(分叉边界不可表达)。
+// 旧实现为它走「前一轮比映射里最早轮还早」分支,每次 DOM 变异翻一页更早锚点,
+// 40 页预算被首轮气泡耗尽;首轮必须在补拉分支前短路
+test('C9 回归:首轮气泡不触发非前向补拉,不注入按钮', async () => {
+  const observerHub = createObserverHub()
+  const actionsRow = {
+    querySelector: (selector) => (selector.startsWith('button:not(') ? { className: 'official-action' } : null),
+    appendChild() {},
+  }
+  const bubble = {
+    getAttribute(name) {
+      if (name === 'data-chat-flow-kind') return 'user'
+      if (name === 'data-chat-turn') return '1'
+      return null
+    },
+    querySelector(selector) {
+      if (selector === '[class$="_actions"]') return actionsRow
+      return null
+    },
+  }
+  const documentStub = createDocumentStub({ turnBubbles: [bubble] })
+  const fetchStub = async (url) => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ enabled: !String(url).includes('fork-auto-resend-enabled') }),
+  })
+  const { registered } = loadSlots({ documentStub, fetchStub, Observer: observerHub.Observer })
+  const entry = registered.find((item) => item.options.id === 'context-manager-fork')
+  assert.ok(entry, '未注册 fork dock 条目')
+  let loadCalls = 0
+  const loadTurnEnds = async () => {
+    loadCalls += 1
+    // 首轮已闭合:映射里有第 1 轮,且它就是最早一轮
+    return new Map([[1, { seq: 2, text: '首问', open: false }]])
+  }
+  const runtime = createRuntime(entry.component, {
+    session: { sessionId: 's1' },
+    inputActions: undefined,
+    useInput: undefined,
+    forkSession: async () => 'child-1',
+    cancelSession: () => {},
+    submitPrompt: null,
+    loadTurnEnds,
+  })
+  runtime.render()
+  await runtime.flush()
+  assert.equal(loadCalls, 1, '挂载只做首拉')
+  const forkButtons = () => documentStub.createdButtons.filter((button) => 'data-cx-fork' in button.attrs)
+  assert.equal(forkButtons().length, 0, '首轮无更早锚点,不得注入按钮')
+  for (let round = 0; round < 3; round += 1) {
+    observerHub.fireAll()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await runtime.flush()
+  }
+  assert.equal(loadCalls, 1, '首轮气泡不得为更早锚点补拉(每次变异翻一页会把 40 页预算耗尽)')
+  assert.equal(forkButtons().length, 0, '连续扫描仍不得注入首轮按钮')
+})
+
+// C8 回归:remote.session 服务重启会让点分 inject 回调重跑;插槽注册必须归属
+// inject 子 fiber(随子 fiber 回收),挂外层 ctx.slots 时每次重跑叠加一份 fork 入口
+test('C8 回归:fork 插槽注册归属 remote.session inject 子 fiber,重跑不落外层', async () => {
+  const documentStub = createDocumentStub()
+  const fetchStub = async (url) => ({ ok: true, status: 200, json: async () => ({ enabled: true }) })
+  const { registered, outerRegistered, injectCallbacks, injectedContexts } = loadSlots({
+    documentStub, fetchStub, Observer: createObserverHub().Observer,
+  })
+  const forkEntries = (list) => list.filter((item) => item.options.id === 'context-manager-fork')
+  assert.equal(forkEntries(registered).length, 1, 'apply 时 fork 入口注册一份')
+  assert.equal(forkEntries(outerRegistered).length, 0, 'fork 入口不得注册在外层 ctx.slots')
+  assert.equal(forkEntries(injectedContexts[0].childRegistered).length, 1, 'fork 入口应归属 inject 子 fiber')
+  // 模拟 remote.session 服务重启:inject 回调以新子 fiber 重跑
+  const rerunRegistered = []
+  const rerunCtx = {
+    remote: { session: { follow: () => (async function* () { yield { type: 'snapshot', cursor: 0, records: [] } })() } },
+    slots: {
+      inject: (name, mount) => mount(),
+      register: (options, component) => rerunRegistered.push({ options, component }),
+    },
+  }
+  injectCallbacks[0](rerunCtx)
+  assert.equal(forkEntries(rerunRegistered).length, 1, '重跑后新子 fiber 持有一份注册')
+  assert.equal(forkEntries(injectedContexts[0].childRegistered).length, 1, '旧子 fiber 的注册不因重跑叠加')
+  assert.equal(forkEntries(outerRegistered).length, 0, '外层始终不得持有 fork 注册(否则每次重跑叠加)')
+})
+
+// P2-32 行为回归:切会话后旧会话的慢响应迟到,不得覆盖新会话映射
+
+test('P2-32 行为:切会话后旧会话迟到响应按 sessionId+代际丢弃', async () => {
+  const appended = []
+  const officialButton = { className: 'official-action' }
+  const actionsRow = {
+    querySelector: (selector) => (selector.startsWith('button:not(') ? officialButton : null),
+    appendChild: (node) => appended.push(node),
+  }
+  const bubble = {
+    getAttribute(name) {
+      if (name === 'data-chat-flow-kind') return 'user'
+      if (name === 'data-chat-turn') return '1'
+      return null
+    },
+    querySelector(selector) {
+      if (selector === '[class$="_actions"]') return actionsRow
+      return null
+    },
+  }
+  const documentStub = createDocumentStub({ turnBubbles: [bubble] })
+  const fetchStub = async (url) => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ enabled: !String(url).includes('fork-auto-resend-enabled') }),
+  })
+  const { registered } = loadSlots({ documentStub, fetchStub, Observer: createObserverHub().Observer })
+  const entry = registered.find((item) => item.options.id === 'context-manager-fork')
+  assert.ok(entry, '未注册 fork dock 条目')
+
+  const calls = []
+  let resolveOld
+  const loadTurnEnds = () => {
+    calls.push(true)
+    if (calls.length === 1) return new Promise((resolve) => { resolveOld = resolve })
+    return Promise.resolve(new Map([
+      [0, { seq: 2, text: '首问', open: false }],
+      [1, { seq: 4, text: '第二问', open: false }],
+    ]))
+  }
+  const forkCalls = []
+  const common = {
+    inputActions: undefined,
+    useInput: undefined,
+    cancelSession: () => {},
+    submitPrompt: null,
+    loadTurnEnds,
+    forkSession: async (opts) => { forkCalls.push(opts); return 'child-1' },
+  }
+  const runtime = createRuntime(entry.component, { ...common, session: { sessionId: 's1' } })
+  runtime.render()
+  await runtime.flush()
+  assert.equal(calls.length, 1, 's1 首拉应在途')
+
+  runtime.setProps({ ...common, session: { sessionId: 's2' } })
+  await runtime.flush()
+  assert.equal(calls.length, 2, '切到 s2 应重新拉取')
+  // 旧会话响应最后才到:必须按 sessionId+代际丢弃,不得覆盖 s2 映射
+  resolveOld(new Map([
+    [0, { seq: 999, text: '旧首问', open: false }],
+    [1, { seq: 1000, text: '旧第二问', open: false }],
+  ]))
+  await runtime.flush()
+
+  const forkButtons = documentStub.createdButtons.filter((button) => 'data-cx-fork' in button.attrs)
+  assert.equal(forkButtons.length, 1, '旧会话迟到响应不得触发重扫再次注入')
+  forkButtons[0].listeners.click[0]()
+  await runtime.flush()
+  assert.equal(forkCalls.length, 1, '点击应执行分叉')
+  assert.equal(forkCalls[0].atSeq, 2, '锚点必须来自 s2 映射,旧会话 seq=999 不得泄漏')
 })
 
 // 历史浮层挂载工位:统计 /api/context/inputs 请求,记录 document 级键盘监听
@@ -413,7 +664,7 @@ async function mountHistory({ withToolsRow = false } = {}) {
     }
     return { ok: true, status: 200, json: async () => ({ enabled: true }) }
   }
-  const registered = loadSlots({ documentStub, fetchStub, Observer: createObserverHub().Observer })
+  const { registered } = loadSlots({ documentStub, fetchStub, Observer: createObserverHub().Observer })
   const entry = registered.find((item) => item.options.id === 'context-manager-history')
   assert.ok(entry, '未注册历史浮层 dock 条目')
   const runtime = createRuntime(entry.component, {

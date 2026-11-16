@@ -1,9 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {execFileSync, spawnSync} from 'node:child_process'
-import {mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync} from 'node:fs'
+import {execFileSync, execSync, spawnSync} from 'node:child_process'
+import {mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, readdirSync, readlinkSync} from 'node:fs'
 import {tmpdir} from 'node:os'
-import {join} from 'node:path'
+import {join, resolve} from 'node:path'
 
 /**
  * dev-link.mjs 仓库根解析桥
@@ -129,6 +129,29 @@ test('根桥已有同名实体且另有缺失:只补缺失项,既有实体原样
   assert.ok(existsSync(join(sand.sandRepo, 'node_modules', TRANSITIVE, 'package.json')), '缺失项应被并入')
 })
 
+test('根锚点悬空链接:按链接形态清理后重建', (t) => {
+  // Given 根 node_modules/@mzzsfy/<pkg> 是目标已删除的悬空 junction;
+  // When dev-link 重建同层锚点;Then 必须按链接本体识别并清理,不能 EEXIST 崩红
+  const sand = sandbox(t, {
+    packages: {
+      'pkg-pure': {
+        name: '@mzzsfy/pkg-pure',
+        dependencies: {'@mzzsfy/pkg-other': '^1.0.0'},
+      },
+    },
+  })
+  const link = join(sand.sandRepo, 'node_modules', '@mzzsfy', 'pkg-pure')
+  mkdirSync(join(sand.sandRepo, 'node_modules', '@mzzsfy'), {recursive: true})
+  execSync(`cmd /c mklink /J "${link}" "${join(sand.sandRepo, 'packages', 'missing-target')}"`)
+
+  const out = runDevLink(sand, ['pkg-pure'])
+  assert.match(out, /同层锚点: 1 个 @mzzsfy 包,修正 1/, '悬空锚点应被识别并修正')
+  assert.equal(
+    resolve(readlinkSync(link)).toLowerCase(),
+    resolve(join(sand.sandRepo, 'packages', 'pkg-pure')).toLowerCase(),
+  )
+})
+
 test('纯 @mzzsfy 依赖包:无外部依赖,根桥无动作', (t) => {
   const sand = sandbox(t, {
     packages: {
@@ -140,7 +163,9 @@ test('纯 @mzzsfy 依赖包:无外部依赖,根桥无动作', (t) => {
   })
   const out = runDevLink(sand, ['pkg-pure'])
   assert.match(out, /根解析桥: 0 个外部依赖齐备/)
-  assert.ok(!existsSync(join(sand.sandRepo, 'node_modules')), '不应创建根 node_modules')
+  // 同层 @mzzsfy 锚点必须建立(host 半区静态 import 的解析入口),但不产生外部依赖目录
+  assert.ok(existsSync(join(sand.sandRepo, 'node_modules', '@mzzsfy', 'pkg-pure')))
+  assert.deepEqual(readdirSync(join(sand.sandRepo, 'node_modules')).filter((name) => !name.startsWith('@')), [])
 })
 
 test('纯 devDependencies 包:不装不校验', (t) => {
@@ -154,7 +179,8 @@ test('纯 devDependencies 包:不装不校验', (t) => {
   })
   const out = runDevLink(sand, ['pkg-devonly'])
   assert.match(out, /根解析桥: 0 个外部依赖齐备/, 'devDeps 不进入根桥口径')
-  assert.ok(!existsSync(join(sand.sandRepo, 'node_modules')), 'devDeps 不应产生根 node_modules')
+  assert.ok(existsSync(join(sand.sandRepo, 'node_modules', '@mzzsfy', 'pkg-devonly')))
+  assert.deepEqual(readdirSync(join(sand.sandRepo, 'node_modules')).filter((name) => !name.startsWith('@')), [])
 })
 
 test('未发布包(线上 404,file 协议):根桥照常补齐', (t) => {

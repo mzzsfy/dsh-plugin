@@ -29,6 +29,8 @@ import {
   BUILTIN_TONES as coreBuiltinTones,
   AUDIO_EXTS as coreAudioExts,
   MIME_BY_EXT as coreMimeByExt,
+  UPLOAD_FILE_MAX_BYTES as coreUploadFileMaxBytes,
+  validateUpload as coreValidateUpload,
 } from '../src/core.mjs'
 
 const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -42,7 +44,7 @@ function clientLogic() {
   const section = source.slice(begin + '/* LOGIC-BEGIN */'.length, end)
   const factory = new Function(
     section
-      + '; return { decideClaim, resolveSound, mergeMapping, deadCustomIds, chooseChannels, parseVolume, foregroundSystemDefault, claimEvent, markDone, windowId, localGet, localSet, localDel, storageState, CLAIM_LOCK_TTL_MS, IDLE_AWAY_MS, KEY_DND, KEY_TOAST, KEY_SOUND, KEY_SYSTEM, KEY_PAGE_SOUND, KEY_PAGE_SOUND_CATEGORIES, imTargetKey, toggleImTargetList, removeImTargetFromList, unregisterImBotList, imBoundBotIds, CATEGORIES, CATEGORY_LABELS, DEFAULT_TONES, TONE_LABELS, AUDIO_EXTS, MIME_BY_EXT };',
+      + '; return { decideClaim, resolveSound, mergeMapping, deadCustomIds, chooseChannels, parseVolume, foregroundSystemDefault, claimEvent, markDone, windowId, localGet, localSet, localDel, storageState, CLAIM_LOCK_TTL_MS, IDLE_AWAY_MS, KEY_DND, KEY_TOAST, KEY_SOUND, KEY_SYSTEM, KEY_PAGE_SOUND, KEY_PAGE_SOUND_CATEGORIES, imTargetKey, toggleImTargetList, removeImTargetFromList, unregisterImBotList, imBoundBotIds, CATEGORIES, CATEGORY_LABELS, DEFAULT_TONES, TONE_LABELS, AUDIO_EXTS, MIME_BY_EXT, UPLOAD_FILE_MAX_BYTES, pickFileProblem };',
   )
   return factory()
 }
@@ -77,6 +79,29 @@ test('[parity 数据镜像] 默认音效与内置音名标签对照', () => {
 test('[parity 数据镜像] 音频扩展名与 MIME 映射对照', () => {
   assert.deepEqual(client.AUDIO_EXTS, coreAudioExts)
   assert.deepEqual(client.MIME_BY_EXT, coreMimeByExt)
+  assert.equal(client.UPLOAD_FILE_MAX_BYTES, coreUploadFileMaxBytes)
+})
+
+test('[client 逻辑] 音效选择前置拒绝非音频、空文件与超 2MB 文件', () => {
+  assert.equal(client.pickFileProblem({ name: 'clip.wav', size: 1 }), null)
+  assert.match(client.pickFileProblem({ name: 'clip.txt', size: 1 }), /仅支持/)
+  assert.equal(client.pickFileProblem({ name: 'empty.wav', size: 0 }), '文件为空')
+  assert.match(client.pickFileProblem({ name: 'big.wav', size: client.UPLOAD_FILE_MAX_BYTES + 1 }), /单文件超过上限/)
+})
+
+// 上传前置校验双实现对照:同一尺寸两侧给出同一判定与同一文案,
+// 防空文件在一侧被报成超限(用户会去压缩而不是换文件)
+test('[parity 上传校验] 空文件与超限文案两侧一致', () => {
+  const cases = [
+    { size: 0, client: '文件为空', core: '文件为空' },
+    { size: 1, client: null, core: null },
+    { size: coreUploadFileMaxBytes, client: null, core: null },
+    { size: coreUploadFileMaxBytes + 1, client: '单文件超过上限', core: '单文件超过上限' },
+  ]
+  for (const item of cases) {
+    assert.equal(client.pickFileProblem({ name: 'clip.wav', size: item.size }), item.client, 'client size=' + item.size)
+    assert.equal(coreValidateUpload({ filename: 'clip.wav', size: item.size, totalBytes: 0 }).reason ?? null, item.core, 'core size=' + item.size)
+  }
 })
 
 // client 段为位置参数签名,core 为对象签名,此处适配后逐场景对照。

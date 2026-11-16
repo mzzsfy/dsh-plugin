@@ -229,7 +229,56 @@ for (const variant of ['think', 'others']) {
     assert.equal(old.open, false, '正文未挂载期间展开的旧行也要被新行接管')
     assert.equal(next.open, true)
   })
+
+  test(`Given 首扫时已有更早展开的${variant}行 When 首帧扫描 Then 不展开末行`, () => {
+    const f = fixture(variant === 'others')
+    const old = f.add(variant, '既存展开行', true)
+    old.state = 'ok'
+    const last = f.add(variant, '末行')
+    last.state = 'ok'
+    f.mount(); f.flush()
+    assert.equal(old.open, true, '既存展开行保持')
+    assert.equal(last.open, false, '首扫沿用逻辑层 hasForeignExpandedRow 守卫')
+    assert.equal(last.clicks, 0, '不得点击末行')
+  })
 }
+
+test('Given 首扫后出现非末条外来展开行 When 常规扫描 Then 不展开末行', () => {
+  const f = fixture()
+  f.mount(); f.flush()
+  const foreign = f.add('think', '外来展开行', true)
+  foreign.state = 'ok'
+  const last = f.add('think', '末行')
+  last.state = 'ok'
+  f.notify(); f.flush()
+  assert.equal(foreign.open, true, '外来展开行保持')
+  assert.equal(last.open, false, '常规扫描沿用 hasForeignExpandedRow 守卫')
+  assert.equal(last.clicks, 0, '不得点击末行')
+})
+
+test('Given 首扫后出现非末条外来展开工具行 When 常规扫描 Then 不展开末工具行', () => {
+  const f = fixture(true)
+  f.mount(); f.flush()
+  const foreign = f.add('others', '外来工具行', true)
+  foreign.state = 'ok'
+  const last = f.add('others', '末工具行')
+  last.state = 'ok'
+  f.notify(); f.flush()
+  assert.equal(foreign.open, true, '外来工具行保持')
+  assert.equal(last.open, false, '工具机常规扫描同样守卫')
+  assert.equal(last.clicks, 0, '不得点击末工具行')
+})
+
+test('Given 用户手动展开旧行 When 新思考行出现 Then 手动行与新末行并存', () => {
+  const f = fixture()
+  const old = f.add('think', '旧思考', true)
+  old.state = 'ok'
+  f.mount(); f.flush()
+  const next = f.add('think', '新思考')
+  f.flush()
+  assert.equal(old.open, true, '手动行不被收回')
+  assert.equal(next.open, true, '新末行仍自动展开')
+})
 
 test('Given 用户主动收起末思考 When 随后宿主隐藏过程 Then 不重新展开', () => {
   const f = fixture()
@@ -251,6 +300,19 @@ test('Given 最新回合过程组折叠 When 首扫 Then 展开过程组一次',
   assert.equal(proc.open, true)
   f.notify(); f.flush()
   assert.equal(proc.clicks, 1, '展开后不重复点击')
+})
+
+test('Given 过程组点击被宿主吞掉 When 后续扫描 Then 不永久放弃并重试展开', () => {
+  const f = fixture()
+  const proc = f.addProcess('2', false)
+  proc.swallow = true
+  f.add('think', '新回合思考', false, '2')
+  f.mount(); f.flush()
+  assert.equal(proc.open, false, '持续吞点击期间保持收起')
+  proc.swallow = false
+  f.notify(); f.flush()
+  assert.equal(proc.open, true, '宿主恢复后仍应重试并展开')
+  assert.ok(proc.clicks >= 2, '至少重试点击一次')
 })
 
 test('Given 用户手动收起最新回合过程组 When 后续扫描 Then 不再自动展开', () => {
@@ -540,4 +602,56 @@ test('Given 展开已排滚动帧 When 卸载并投递旧帧 Then 不写滚动�
   callbacks.forEach(fn => fn())
   assert.equal(f.scroll.scrollTop, top)
   assert.equal(f.frames.size, 0)
+})
+
+test('Given 宿主重置最新思考行的展开态 When 扫描 Then 插件闩锁仍重展开', () => {
+  const f = fixture()
+  const think = f.add('think', '正文')
+  f.mount(); f.flush()
+  assert.equal(think.open, true)
+  // 模拟宿主 aria 被重置:没有用户 click,也没有隐藏祖先
+  think.open = false
+  f.notify(); f.flush()
+  assert.equal(think.open, true, '宿主重置不是用户已读,不得永久压制')
+})
+
+test('Given 流式回合无过程组按钮 When 宿主重置展开态 Then 插件闩锁重展开', () => {
+  const f = fixture()
+  f.processes.length = 0
+  const think = f.add('think', '正文')
+  f.mount(); f.flush()
+  assert.equal(think.open, true)
+  think.open = false
+  f.notify(); f.flush()
+  assert.equal(think.open, true, '无过程组不等于回合切换,宿主重置须恢复')
+})
+
+test('Given 上回合有过程组而当前回合流式无按钮 When 宿主重置展开态 Then 仍重展开', () => {
+  const f = fixture()
+  const old = f.add('think', '旧回合', false, '1')
+  f.mount(); f.flush()
+  old.state = 'ok'
+  f.notify(); f.flush()
+  const current = f.add('think', '流式新回合', false, '2')
+  f.flush()
+  f.notify(); f.flush()
+  assert.equal(current.open, true)
+  current.open = false
+  f.notify(); f.flush()
+  assert.equal(current.open, true, '回合号比最新过程组更大,属于进行中回合,重置须恢复')
+})
+
+test('Given 手动工具行与新工具行并存 When 扫描 Then 新行照常自动展开', () => {
+  const f = fixture(true)
+  const a = f.add('others', '工具A')
+  f.mount(); f.flush()
+  const b = f.add('others', '工具B')
+  f.flush()
+  a.head.click(); f.flush()
+  assert.equal(a.open, true, '手动展开')
+  assert.equal(b.open, false, '插件行让位')
+  const c = f.add('others', '工具C')
+  f.flush()
+  assert.equal(c.open, true, '手动行不得阻断新末行')
+  assert.equal(a.open, true, '手动行保持')
 })

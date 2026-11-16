@@ -56,8 +56,16 @@ const fakeWorkspaces = (archivedSessionIds = []) => {
       snapshot = { phase: 'ready', archivedSessionIds: [...ids] }
       publish()
     },
-    pending() { snapshot = { phase: 'pending', archivedSessionIds: [] } },
+    pending() {
+      snapshot = { phase: 'pending', archivedSessionIds: [] }
+      publish()
+    },
+    ready(ids = []) {
+      snapshot = { phase: 'ready', archivedSessionIds: [...ids] }
+      publish()
+    },
     breakSnapshot() { snapshot = { phase: 'ready', archivedSessionIds: undefined } },
+    repair(ids) { snapshot.archivedSessionIds = [...ids] },
     listeners: () => listeners.size,
   }
 }
@@ -314,7 +322,7 @@ test('任务流_归档快照缺失_按未归档处理', () => {
   assert.equal(result.state.rejectedArchived, 0)
 })
 
-// Given 归档快照尚未就绪(phase 未 ready), When 订阅, Then 不当权威空集, 仍按未归档判定
+// Given 归档快照尚未就绪(phase 未 ready), When 订阅, Then 不当权威空集, 仍按未归档判定且已建立订阅
 test('任务流_归档快照未就绪_按未归档处理', () => {
   const workspaces = fakeWorkspaces([])
   workspaces.pending()
@@ -322,6 +330,23 @@ test('任务流_归档快照未就绪_按未归档处理', () => {
   for (const id of ['s1', 's2', 's3']) jobs.watchRows(id)
   assert.deepEqual(jobs.watched, ['s1', 's2', 's3'])
   assert.equal(result.state.archived, 0)
+  assert.equal(workspaces.listeners(), 1)
+})
+
+// Given 订阅时快照仍是 pending, When 快照转为 ready 并带入归档集合, Then 推送后立即收敛并回收已归档条目
+test('任务流_归档快照pending转ready_收敛回收', async () => {
+  const workspaces = fakeWorkspaces([])
+  workspaces.pending()
+  const { jobs, result } = install({ workspaces })
+  jobs.watchRows('s1')
+  jobs.watchRows('s2')
+  assert.equal(result.state.archived, 0)
+  workspaces.ready(['s1'])
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(jobs.released, ['s1'])
+  assert.equal(result.state.reclaimed, 1)
+  assert.equal(result.state.archived, 1)
+  assert.equal(result.state.windowUsed, 1)
 })
 
 // Given 归档快照读取抛错, When 订阅, Then 不打断调用方, 按未归档放行
@@ -332,14 +357,21 @@ test('任务流_归档快照读取抛错_按未归档处理', () => {
   assert.equal(result.state.rejected, 0)
 })
 
-// Given 归档快照形状异常(缺少 archivedSessionIds 数组), When 订阅, Then 按空集处理并放行
-test('任务流_归档集合形状异常_按空集处理', () => {
+// Given 归档快照形状异常(缺少 archivedSessionIds 数组), When 订阅, Then 按未知处理, 且不把未知写进缓存
+test('任务流_归档集合形状异常_未知且不缓存', () => {
   const workspaces = fakeWorkspaces([])
   workspaces.breakSnapshot()
   const { jobs, result } = install({ workspaces })
-  for (const id of ['s1', 's2']) jobs.watchRows(id)
+  jobs.watchRows('s1')
+  jobs.watchRows('s2')
   assert.deepEqual(jobs.watched, ['s1', 's2'])
   assert.equal(result.state.rejected, 0)
+  assert.equal(result.state.archived, 0)
+  // 同一快照对象修正集合后必须重新解析; 若把未知当空集缓存, s1 不会被回收
+  workspaces.repair(['s1'])
+  jobs.watchRows('s3')
+  assert.deepEqual(jobs.released, ['s1'])
+  assert.equal(result.state.archived, 1)
 })
 
 // Given 已放行的会话随后被归档, When 归档集合变化后再次订阅, Then 回收它的流与窗口额度

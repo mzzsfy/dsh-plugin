@@ -5,7 +5,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:http'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -22,6 +23,9 @@ test.after(async () => {
 function makeCtx({ timerAvailable = true, settingsValue = {}, dshIm = undefined } = {}) {
   let value = settingsValue
   const routes = new Map()
+  // 真实 tick 驱动:timer 桩捕获 interval 回调与周期,供用例手动触发;
+  // 旧桩只 void 回调,导致 tick 零覆盖(A1 假绿)
+  const intervals = []
   const settingsService = {
     register() {},
     get: () => value,
@@ -43,8 +47,8 @@ function makeCtx({ timerAvailable = true, settingsValue = {}, dshIm = undefined 
       fn({
         settings: settingsService,
         interval: timerAvailable
-          ? (intervalFn) => {
-              void intervalFn
+          ? (intervalFn, ms) => {
+              intervals.push({ fn: intervalFn, ms })
               return () => {}
             }
           : undefined,
@@ -56,13 +60,46 @@ function makeCtx({ timerAvailable = true, settingsValue = {}, dshIm = undefined 
       },
     },
   }
-  return { ctx, routes }
+  return { ctx, routes, intervals }
 }
 
-function makeReq(method, { origin, contentType, body } = {}) {
+async function waitFor(check, timeoutMs = 3000) {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    const value = await check()
+    if (value) return value
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  throw new Error('waitFor timeout')
+}
+
+// kimi 形态读数:5 小时窗 95% 已用 / 7 天窗 50%
+const KIMI_BODY = {
+  limits: [{ detail: { limit: 100, remaining: 5, resetTime: 'T1' } }],
+  usage: { limit: 200, remaining: 100, resetTime: 'T2' },
+}
+
+function stubUpstream() {
+  const control = { calls: 0, release: null }
+  const original = globalThis.fetch
+  control.restore = () => { globalThis.fetch = original }
+  globalThis.fetch = () => {
+    control.calls += 1
+    return new Promise((resolve) => {
+      control.release = () => resolve({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify(KIMI_BODY),
+      })
+    })
+  }
+  return control
+}
+
+function makeReq(method, { origin, contentType, body, host } = {}) {
   const req = new EventEmitter()
   req.method = method
-  req.headers = { host: 'localhost:3000' }
+  req.headers = { host: host ?? 'localhost:3000' }
   if (origin !== undefined) req.headers.origin = origin
   if (contentType !== undefined) req.headers['content-type'] = contentType
   if (body !== undefined) {
@@ -100,6 +137,52 @@ test('settings:timer 激活即预载配置(tick 不因 config 空窗停摆)', as
   const res = await call(routes, '/api/usage-panel/accounts', makeReq('GET'))
   assert.equal(res.status, 200)
   assert.ok(Array.isArray(res.payload.accounts), '配置已载入内存,轮询具备调度对象')
+})
+
+test('A1 tick 真实回调:到点查询命中上游、queriedAt 落盘、history 生成,在途重入被拦', async () => {
+  // Given 启动前已有配置(验证 apply 预载路径,而非面板请求后才懒加载)
+  await writeFile(join(tempDir, 'accounts.json'), JSON.stringify({
+    version: 1,
+    accounts: [{ id: 'acct-tick', name: '轮询账号', type: 'kimi', apiKey: 'sk-test' }],
+  }), 'utf8')
+  const { ctx, routes, intervals } = makeCtx({ timerAvailable: true })
+  apply(ctx)
+  assert.equal(intervals.length, 1, 'timer 激活必须武装一个轮询 interval')
+  const fetchControl = stubUpstream()
+  try {
+    // When 手动触发真实 tick:配置预载完成前空转,完成后必须到点查询
+    await waitFor(() => {
+      intervals[0].fn()
+      return fetchControl.calls > 0
+    })
+    assert.equal(fetchControl.calls, 1, 'tick 必须真的发起上游查询,而非空转')
+    // 首个 tick 仍在途:再次触发必须被 pollInFlight 拦住
+    intervals[0].fn()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(fetchControl.calls, 1, '在途重入不得再次打上游')
+
+    fetchControl.release()
+    const saved = await waitFor(async () => {
+      try {
+        const parsed = JSON.parse(await readFile(join(tempDir, 'accounts.json'), 'utf8'))
+        return parsed.accounts[0].last?.queriedAt ? parsed : null
+      } catch {
+        return null
+      }
+    })
+    // Then last.queriedAt 随配置持久化(重启后调度不丢基线)
+    assert.equal(typeof saved.accounts[0].last.queriedAt, 'number')
+    assert.equal(saved.accounts[0].last.ok, true)
+    // Then 成功读数生成历史序列(历史落盘先于配置落盘发生,此处必已存在)
+    const historyRes = await call(routes, '/api/usage-panel/history', makeReq('GET'))
+    assert.equal(historyRes.status, 200)
+    assert.ok(
+      Object.keys(historyRes.payload.sequences).some((key) => key.startsWith('acct-tick:')),
+      'tick 查询成功必须生成历史序列',
+    )
+  } finally {
+    fetchControl.restore()
+  }
 })
 
 test('settings:timer 服务缺失时 pollArmed 为 false(降级可见)', async () => {
@@ -159,25 +242,117 @@ test('守卫:全部 POST 路由拒绝跨源与非 JSON,POST-only 路由拒绝 GE
   assert.equal(read.status, 200, 'GET 读路由放行')
 })
 
-test('accounts:损坏配置文件拒绝写入并备份(broken 守卫)', async () => {
+test('accounts:损坏配置文件拒绝一切写入,放回合法文件后才恢复', async () => {
   await writeFile(join(tempDir, 'accounts.json'), '{broken', 'utf8')
   const { ctx, routes } = makeCtx()
   apply(ctx)
-  const res = await call(routes, '/api/usage-panel/accounts', makeReq('POST', {
+  const first = await call(routes, '/api/usage-panel/accounts', makeReq('POST', {
     origin: 'http://localhost:3000',
     contentType: 'application/json',
     body: '{"accounts":[]}',
   }))
-  assert.equal(res.status, 400)
-  assert.match(res.payload.error, /损坏/)
-  // 坏文件已备份移走;重读(解除路径)后 GET 得空配置,写入恢复
+  assert.equal(first.status, 400)
+  assert.match(first.payload.error, /损坏/)
+  // 坏文件已备份;损坏态保持,不因备份移走(ENOENT)自动解除
   const get = await call(routes, '/api/usage-panel/accounts', makeReq('GET'))
   assert.equal(get.status, 200)
   assert.deepEqual(get.payload.accounts, [])
+  const second = await call(routes, '/api/usage-panel/accounts', makeReq('POST', {
+    origin: 'http://localhost:3000',
+    contentType: 'application/json',
+    body: '{"accounts":[]}',
+  }))
+  assert.equal(second.status, 400, '损坏态必须拒写一切写入,不只挡一次')
+  // 用户放回合法文件:重读成功解除损坏,写入恢复
+  await writeFile(join(tempDir, 'accounts.json'), JSON.stringify({ version: 1, accounts: [] }), 'utf8')
   const save = await call(routes, '/api/usage-panel/accounts', makeReq('POST', {
     origin: 'http://localhost:3000',
     contentType: 'application/json',
     body: '{"accounts":[{"id":"acct-r","type":"custom"}]}',
   }))
-  assert.equal(save.status, 200, '重读解除损坏后写入恢复')
+  assert.equal(save.status, 200, '合法文件恢复后写入恢复')
+})
+
+test('守卫:content-type 精确匹配,JSON.parse 错误回固定中文', async () => {
+  const { ctx, routes } = makeCtx()
+  apply(ctx)
+  // 子串包含 application/json 但媒体类型不是 JSON:必须拒绝
+  const trick = await call(routes, '/api/usage-panel/accounts', makeReq('POST', {
+    origin: 'http://localhost:3000',
+    contentType: 'text/plain; application/json',
+    body: '{"accounts":[]}',
+  }))
+  assert.equal(trick.status, 400)
+  assert.match(trick.payload.error, /content-type/)
+  // 合法 JSON 媒体类型但体损坏:固定中文,不回传 JSON.parse 英文原文
+  const malformed = await call(routes, '/api/usage-panel/accounts', makeReq('POST', {
+    origin: 'http://localhost:3000',
+    contentType: 'application/json; charset=utf-8',
+    body: '{"accounts": [',
+  }))
+  assert.equal(malformed.status, 400)
+  assert.equal(malformed.payload.error, '请求体必须是合法 JSON')
+})
+
+// U5:写路由接入共享 withRouteGate —— 同源比对大小写不敏感(旧本地实现比较原始 host 串)
+test('守卫:Host 头部大写仍按同源放行(共享网关大小写不敏感)', async () => {
+  const { ctx, routes } = makeCtx()
+  apply(ctx)
+  const res = await call(routes, '/api/usage-panel/query', makeReq('POST', {
+    origin: 'http://localhost:3000',
+    contentType: 'application/json',
+    body: '{"id":"missing"}',
+  }))
+  // 业务侧账号不存在 → 400;关键是不被跨源守卫误拒为 403
+  assert.equal(res.status, 400)
+  const upper = await call(routes, '/api/usage-panel/notify-config', makeReq('POST', {
+    origin: 'http://LOCALHOST:3000',
+    contentType: 'application/json',
+    body: '{}',
+    host: 'LOCALHOST:3000',
+  }))
+  assert.equal(upper.status, 200)
+})
+
+// U8:读体超限不 destroy 连接,413 经真实 socket 送回(旧实现 destroy 后连接重置)
+test('读体超限:真实 socket 收到 413 而非连接重置', async () => {
+  const { ctx, routes } = makeCtx()
+  apply(ctx)
+  const server = createServer((req, res) => {
+    const handler = routes.get(new URL(req.url, 'http://localhost').pathname)
+    if (!handler) {
+      res.writeHead(404)
+      res.end()
+      return
+    }
+    handler(req, res)
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const origin = 'http://127.0.0.1:' + server.address().port
+  try {
+    const oversized = 'x'.repeat(300 * 1024)
+    const response = await fetch(origin + '/api/usage-panel/query', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin },
+      body: JSON.stringify({ id: 'acct-body', pad: oversized }),
+    })
+    assert.equal(response.status, 413)
+    assert.match((await response.json()).error, /超过上限/)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test('读体被客户端中断:以 400 结束,不悬挂', async () => {
+  const { ctx, routes } = makeCtx()
+  apply(ctx)
+  const req = makeReq('POST', { origin: 'http://localhost:3000', contentType: 'application/json' })
+  const res = { status: null, payload: null }
+  res.writeHead = (status) => { res.status = status }
+  res.end = (text) => { res.payload = JSON.parse(text) }
+  const settled = routes.get('/api/usage-panel/query')(req, res)
+  process.nextTick(() => req.emit('aborted'))
+  await settled
+  assert.equal(res.status, 400)
+  assert.match(res.payload.error, /中断/)
 })

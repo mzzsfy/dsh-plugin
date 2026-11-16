@@ -17,11 +17,7 @@
       "patch": "./cordis.patch.yml"
     },
     "client": {
-      "platform": "web",
-      "inject": [
-        "@deepseek-ai/dsh-client-runtime",
-        "@deepseek-ai/dsh-client-ui-slots"
-      ]
+      "platform": "web"
     },
     "hostMin": "0.2.0-rc.1",
     "compatibility": {
@@ -29,6 +25,7 @@
         "0.2.0-rc.1": "unknown",
         "0.2.0-rc.2": "unknown",
         "0.2.1-alpha.1": "unknown",
+        "0.2.1-rc.3": "compatible",
         "0.2.1-rc.5": "unknown",
         "0.2.2-rc.1": "compatible",
         "0.2.2-rc.3": "compatible"
@@ -36,8 +33,7 @@
     }
   },
   "scripts": {
-    "test": "node --test \"test/*.test.mjs\"",
-    "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
+    "test": "node --test \"test/*.test.mjs\""
   },
   "publishConfig": {
     "access": "public",
@@ -52,24 +48,16 @@
     "node": ">=22"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": ">=4.1.0",
-    "@deepseek-ai/dsh-sandbox": ">=0.2.0-rc.1",
+    "@deepseek-ai/cordis": ">=4.0.5",
     "@deepseek-ai/dsh-tools": ">=0.2.0-rc.1",
     "@deepseek-ai/schemastery": "^3.18.4"
-  },
-  "devDependencies": {
-    "@deepseek-ai/cordis": "4.1.0",
-    "@deepseek-ai/dsh-sandbox": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-scope": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-system-prompt": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
-    "@deepseek-ai/schemastery": "3.19.0"
   },
   "files": [
     "src",
     "test",
     "cordis.patch.yml",
     "白名单延迟加载-BDD.md",
+    "兼容性测试.md",
     "README.md"
   ]
 }

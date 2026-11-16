@@ -6,6 +6,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { UsageCollector } from '../src/collector.js'
+import { modelUsageProjectionDefinition } from '../src/session-models.js'
 
 const local = (y, mo, d, h = 0, mi = 0) => new Date(y, mo - 1, d, h, mi).getTime()
 
@@ -28,22 +29,42 @@ const tick = () => new Promise((resolve) => setImmediate(resolve))
 
 // 采集器依赖的 store 面:record/recordSession/seenSessions/liveSequences/
 // markSeenSessions/markLiveSequences/reset/readyPromise,内存态 + 可注入失败
-function fakeStore({ failRecord = false, failMarkLive = false, hasBuckets = false, hasSessions = false } = {}) {
+function fakeStore({ failRecord = false, failMarkLive = false, hasBuckets = false, hasSessions = false, orphanResetPending = false } = {}) {
   const samples = []
+  const liveSamples = []
   const sessionIndex = []
-  const state = { backfilledSessions: new Set(), liveFirstSeq: new Map(), hasBuckets, hasSessions }
-  const stats = { markLiveCalls: 0, markSeenCalls: 0, resets: 0, lastBoundaries: null }
+  const liveSessionIndex = []
+  const state = { backfilledSessions: new Set(), liveFirstSeq: new Map(), hasBuckets, hasSessions, orphanResetPending }
+  const stats = { markLiveCalls: 0, markSeenCalls: 0, resets: 0, lastBoundaries: null, orphanClears: 0 }
   return {
     samples,
+    liveSamples,
     sessionIndex,
+    liveSessionIndex,
     state,
     stats,
-    async record(sample) {
+    get orphanResetPending() {
+      return state.orphanResetPending
+    },
+    async clearOrphanRows() {
+      stats.orphanClears += 1
+      if (!state.orphanResetPending) return false
+      state.orphanResetPending = false
+      // 与真实 store 同契约:清库后回填本 boot 实时增量
+      samples.length = 0
+      sessionIndex.length = 0
+      samples.push(...liveSamples)
+      sessionIndex.push(...liveSessionIndex)
+      return true
+    },
+    async record(sample, options = {}) {
       if (failRecord) throw new Error('simulated record failure')
       samples.push(sample)
+      if (options.live === true) liveSamples.push(sample)
     },
-    async recordSession(id, time) {
+    async recordSession(id, time, options = {}) {
       sessionIndex.push([id, time])
+      if (options.live === true) liveSessionIndex.push([id, time])
     },
     hasBucketRows() {
       return state.hasBuckets
@@ -311,6 +332,102 @@ test('(session,turn,step) 去重:同键先到样本生效,重复报告吞掉', a
   await tick()
   assert.equal(store.samples.length, 1)
   assert.equal(store.samples[0].inputTokens, 100)
+})
+
+// D1:官方 usageOf 的流内回落。attempt/message 都可能只带 stream,
+// 取最后一个 usage chunk,不能只读 message 顶层 data.usage。
+test('D1 assistant/attempt 的 stream 最后一个 usage chunk 计入四桶', async () => {
+  const { ctx, store } = liveCollector()
+  const t = local(2026, 8, 2, 10, 0)
+  ctx.emit('session/event', session('s1'), ev('assistant/attempt', 1, t, {
+    turn: 0,
+    step: 0,
+    stream: [
+      rawChunk(t, { type: 'usage', usage: usage({ inputTokens: 80, outputTokens: 8 }) }),
+      rawChunk(t, { type: 'usage', usage: usage({ inputTokens: 200, outputTokens: 20 }) }),
+    ],
+  }))
+  await tick()
+  const tokenSamples = store.samples.filter((sample) => !sample.request && !sample.turn)
+  assert.equal(tokenSamples.length, 1)
+  assert.equal(tokenSamples[0].inputTokens, 200)
+  assert.equal(tokenSamples[0].outputTokens, 20)
+})
+
+test('D1 assistant/message 无顶层 usage 时回落到 stream 最后一个 usage chunk', async () => {
+  const { ctx, store } = liveCollector()
+  const t = local(2026, 8, 2, 10, 0)
+  ctx.emit('session/event', session('s1'), ev('assistant/message', 1, t, {
+    turn: 0,
+    step: 0,
+    stream: [
+      rawChunk(t, { type: 'usage', usage: usage({ inputTokens: 80, outputTokens: 8 }) }),
+      rawChunk(t, { type: 'usage', usage: usage({ inputTokens: 200, outputTokens: 20 }) }),
+    ],
+    message: {},
+  }))
+  await tick()
+  const tokenSamples = store.samples.filter((sample) => !sample.request && !sample.turn)
+  assert.equal(tokenSamples.length, 1)
+  assert.equal(tokenSamples[0].inputTokens, 200)
+  assert.equal(tokenSamples[0].outputTokens, 20)
+})
+
+test('D1 attempt 流式部分值后续被 message 权威值替换', async () => {
+  const { ctx, store } = liveCollector()
+  const t = local(2026, 8, 2, 10, 0)
+  ctx.emit('session/event', session('s1'), ev('assistant/attempt', 1, t, {
+    turn: 0,
+    step: 0,
+    stream: [rawChunk(t, { type: 'usage', usage: usage({ inputTokens: 100, outputTokens: 10 }) })],
+  }))
+  ctx.emit('session/event', session('s1'), ev('assistant/message', 2, t + 1000, {
+    turn: 0,
+    step: 0,
+    usage: usage({ inputTokens: 200, outputTokens: 20 }),
+    message: {},
+  }))
+  await tick()
+  const totals = store.samples
+    .filter((sample) => !sample.request && !sample.turn)
+    .reduce((sum, sample) => ({
+      inputTokens: sum.inputTokens + sample.inputTokens,
+      outputTokens: sum.outputTokens + sample.outputTokens,
+    }), { inputTokens: 0, outputTokens: 0 })
+  assert.deepEqual(totals, { inputTokens: 200, outputTokens: 20 })
+})
+
+// D2:retry-started 只清替换槽,官方 tokenUsage 保留失败 attempt 的 100/10,
+// 成功 attempt 的 300/30 叠加为 400/40;collector 与 session-models 对拍。
+test('D2 retry 保留失败 attempt,成功 attempt 叠加为 400/40 并与 session-models 对拍', async () => {
+  const { ctx, store } = liveCollector()
+  const t = local(2026, 8, 2, 10, 0)
+  const events = [
+    attempt(1, t, 0, 0, [
+      rawChunk(t, { type: 'usage', usage: usage({ inputTokens: 100, outputTokens: 10 }) }),
+    ]),
+    ev('llm/retry-started', 2, t + 1000, { turn: 0, step: 0 }),
+    attempt(3, t + 2000, 0, 0, [
+      rawChunk(t + 2000, { type: 'usage', usage: usage({ inputTokens: 300, outputTokens: 30 }) }),
+    ]),
+  ]
+  for (const event of events) ctx.emit('session/event', session('s1'), event)
+  await tick()
+  const collectorTotals = store.samples
+    .filter((sample) => !sample.request && !sample.turn)
+    .reduce((sum, sample) => ({
+      inputTokens: sum.inputTokens + sample.inputTokens,
+      outputTokens: sum.outputTokens + sample.outputTokens,
+    }), { inputTokens: 0, outputTokens: 0 })
+  assert.deepEqual(collectorTotals, { inputTokens: 400, outputTokens: 40 })
+
+  let state = modelUsageProjectionDefinition.init({}, 0)
+  for (const event of events) state = modelUsageProjectionDefinition.apply(state, event)
+  const wireTotals = modelUsageProjectionDefinition.wire.view(state).hours.reduce((sum, entry) => ({
+    inputTokens: sum.inputTokens + entry.uncachedInputTokens,
+    outputTokens: sum.outputTokens + entry.outputTokens,
+  }), { inputTokens: 0, outputTokens: 0 })
+  assert.deepEqual(wireTotals, collectorTotals)
 })
 
 test('无 step/start 起点的 usage 样本不带 durationMs', async () => {
@@ -970,6 +1087,28 @@ test('回扫:fork 继承前缀整体跳过且不播种路由', async () => {
   assert.equal(store.samples[0].model, undefined)
 })
 
+// D4:直读 fallback 的 inheritedEventCount 来自 end-seed cut;只计自身 50/5,
+// 不能把继承前缀 100/10 重放成 165
+test('D4 fork 直读 fallback 的继承 cut 后只计自身用量', async () => {
+  const t = local(2026, 8, 2, 14, 0)
+  const persistence = fakePersistence([{
+    id: 'child',
+    inheritedEventCount: 1,
+    events: [
+      ev('assistant/message', 0, t, { turn: 0, step: 0, usage: usage({ inputTokens: 100, outputTokens: 10 }), message: {} }),
+      ev('session/end-seed', 1, t, { inherited: true }),
+      ev('assistant/message', 2, t, { turn: 1, step: 0, usage: usage({ inputTokens: 50, outputTokens: 5 }), message: {} }),
+    ],
+  }])
+  const store = fakeStore()
+  const collector = new UsageCollector(fakeCtx({ persistence }), store)
+  await collector.backfill(persistence, fakeSessions())
+  const tokenSamples = store.samples.filter((sample) => !sample.request && !sample.turn)
+  assert.equal(tokenSamples.length, 1)
+  assert.equal(tokenSamples[0].inputTokens, 50)
+  assert.equal(tokenSamples[0].outputTokens, 5)
+})
+
 test('回扫:单会话失败不中断整轮且不进游标', async () => {
   const t = local(2026, 8, 2, 14, 0)
   const persistence = fakePersistence([
@@ -1083,6 +1222,91 @@ test('abort:扫描中中断停止处理且不写游标', async () => {
   assert.equal(collector.status().done, 1)
 })
 
+test('回扫:游标空+旧行且全部会话拒读时不清库,保留历史等下次可读再重建', async () => {
+  const store = fakeStore({ orphanResetPending: true })
+  const persistence = fakePersistence([{ id: 'a', fail: 'stored log is corrupt' }])
+  const collector = new UsageCollector(fakeCtx({ persistence }), store)
+  await collector.backfill(persistence, fakeSessions())
+  assert.equal(store.stats.orphanClears, 0, '没有成功读完任何会话不得清库')
+  assert.equal(store.state.orphanResetPending, true)
+  assert.equal(store.samples.length, 0)
+})
+
+test('回扫:游标空+旧行且至少一个会话可读时先清库再重建', async () => {
+  const t = local(2026, 8, 2, 14, 0)
+  const store = fakeStore({ orphanResetPending: true })
+  const persistence = fakePersistence([
+    { id: 'bad', fail: 'stored log is corrupt' },
+    { id: 'ok', events: [ev('turn/end', 0, t)] },
+  ])
+  const collector = new UsageCollector(fakeCtx({ persistence }), store)
+  await collector.backfill(persistence, fakeSessions())
+  assert.equal(store.stats.orphanClears, 1, '成功读完首个会话后清一次孤儿行')
+  assert.equal(store.state.orphanResetPending, false)
+  assert.equal(store.samples.length, 1)
+})
+
+// U3:孤儿态清库发生在本轮实时样本已落盘之后,回扫又按 liveFirstSeq 跳过实时拥区间;
+// 实时样本与会话索引必须由 store 回填,否则面板上刚发生的用量凭空消失
+test('U3 孤儿态+实时样本:清库后本 boot 实时行仍在,且回扫历史一并重建', async () => {
+  const t = local(2026, 8, 2, 14, 0)
+  const store = fakeStore({ orphanResetPending: true })
+  const persistence = fakePersistence([{ id: 'hist', events: [ev('turn/end', 1, t)] }])
+  const ctx = fakeCtx({ persistence })
+  const collector = new UsageCollector(ctx, store)
+  collector.start()
+  // 实时事件:本 boot 实时路径(seq 5 属实时拥区间)
+  ctx.emit('session/event', session('live'), ev('turn/end', 5, t))
+  await tick()
+  assert.equal(store.samples.length, 1)
+  assert.equal(store.liveSamples.length, 1, '实时写入必须带 live 标记(回填依据)')
+  assert.deepEqual(store.sessionIndex, [['live', t]])
+  // 本轮回扫成功读完首个会话:孤儿行清库;实时行必须原样回填
+  await collector.backfill(persistence, ctx.sessions)
+  assert.equal(store.stats.orphanClears, 1)
+  assert.equal(store.samples.length, 2, '实时样本 + 回扫样本都在')
+  assert.deepEqual(store.sessionIndex.map(([id]) => id).sort(), ['hist', 'live'])
+})
+
+test('rescan 串行化:旧扫描未退出时新 rescan 排队执行而非静默空转', async () => {
+  const t = local(2026, 8, 2, 14, 0)
+  let listCalls = 0
+  let releaseFirst
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve })
+  const base = fakeHostPersistence([{ id: 's1', events: [ev('turn/end', 0, t)] }])
+  const persistence = {
+    async list() {
+      listCalls += 1
+      return base.list()
+    },
+    async open(id, access) {
+      if (listCalls === 1) await firstGate
+      return base.open(id, access)
+    },
+  }
+  const store = fakeStore()
+  const collector = new UsageCollector(fakeCtx({ persistence }), store)
+  const first = collector.rescan()
+  await tick()
+  const second = collector.rescan()
+  releaseFirst()
+  await Promise.all([first, second])
+  assert.equal(listCalls, 2, '排队中的第二次扫描必须真正执行')
+  assert.equal(collector.status().running, false)
+})
+
+test('归档会话用量照常计入:归档只影响主视图可见性,采集层不按归档集合过滤', async () => {
+  const t = local(2026, 8, 2, 14, 0)
+  const persistence = fakeHostPersistence([
+    { id: 'archived-1', header: { id: 'archived-1', archived: true }, events: [ev('assistant/message', 0, t, { usage: usage() })] },
+  ])
+  const store = fakeStore()
+  const collector = new UsageCollector(fakeCtx({ persistence }), store)
+  await collector.rescan()
+  assert.equal(store.samples.length, 1)
+  assert.equal(store.sessionIndex.length, 1)
+})
+
 test('回扫并发受默认并发 4 约束', async () => {
   const TARGET_COUNT = 8
   const EXPECTED_CONCURRENCY = 4
@@ -1114,20 +1338,25 @@ test('回扫并发受默认并发 4 约束', async () => {
   assert.equal(store.samples.length, TARGET_COUNT)
 })
 
-test('resetAndRescan 以 wipe 时刻日志长度为活跃会话边界并重扫', async () => {
+test('resetAndRescan 以本 boot 实时起点为重放上界,无实时增量的会话取日志尾部', async () => {
   const t = local(2026, 8, 2, 9, 0)
   const events = Array.from({ length: 13 }, (_, seq) => ev('turn/end', seq, t))
   const persistence = fakeHostPersistence([{ id: 'live-a', events }])
-  const sessions = fakeSessions([{ id: 'live-a', seq: 10 }, { id: 'live-b' }])
+  const sessions = fakeSessions([{ id: 'live-a', seq: 10 }, { id: 'live-b', seq: 4 }, { id: 'live-c' }])
   const store = fakeStore()
   store.state.liveFirstSeq.set('live-a', 3)
   const collector = new UsageCollector(fakeCtx({ sessions, persistence }), store)
+  collector.start()
+  // 本 boot 实时观测到 live-a 的首个事件 seq 3:累积器自该点起累积,重放上界必须是 3
+  collector.ctx.emit('session/event', session('live-a'), ev('turn/end', 3, t))
+  await tick()
   await collector.resetAndRescan()
   assert.equal(store.stats.resets, 1)
-  assert.deepEqual([...store.stats.lastBoundaries.keys()].sort(), ['live-a', 'live-b'])
-  assert.equal(store.stats.lastBoundaries.get('live-a'), 10)
-  assert.equal(store.stats.lastBoundaries.get('live-b'), -1)
-  assert.equal(store.samples.length, 10)
+  assert.deepEqual([...store.stats.lastBoundaries.keys()].sort(), ['live-a', 'live-b', 'live-c'])
+  assert.equal(store.stats.lastBoundaries.get('live-a'), 3, '实时区间不得被重放上界覆盖')
+  assert.equal(store.stats.lastBoundaries.get('live-b'), 4, '无实时增量取尾部')
+  assert.equal(store.stats.lastBoundaries.get('live-c'), -1, 'seq 读不出按 -1 哨兵')
+  assert.equal(store.samples.length, 3, '只重放 [0,3)')
   assert.deepEqual([...store.state.backfilledSessions], ['live-a'])
 })
 
@@ -1257,4 +1486,20 @@ test('补扫:无历史用量(全新安装)时不补扫', async () => {
   const collector = new UsageCollector(fakeCtx(), store)
   await collector.ensureSessionIndex(reader)
   assert.deepEqual(store.sessionIndex, [])
+})
+
+test('resetAndRescan 实时起点不可知(-1 哨兵)时重放零事件:宁漏不冒双计', async () => {
+  const t = local(2026, 8, 2, 9, 0)
+  const events = Array.from({ length: 13 }, (_, seq) => ev('turn/end', seq, t))
+  const persistence = fakeHostPersistence([{ id: 'live-a', events }])
+  const sessions = fakeSessions([{ id: 'live-a', seq: 10 }])
+  const store = fakeStore()
+  const collector = new UsageCollector(fakeCtx({ sessions, persistence }), store)
+  collector.start()
+  // 首个实时事件没有 seq:边界不可知,按 -1 记录
+  collector.ctx.emit('session/event', session('live-a'), ev('turn/end', undefined, t))
+  await tick()
+  await collector.resetAndRescan()
+  assert.equal(store.stats.lastBoundaries.get('live-a'), -1, '不可知起点不得退化成当前尾部')
+  assert.equal(store.samples.length, 0, '宁漏:重放零事件,实时增量由累积器回填')
 })

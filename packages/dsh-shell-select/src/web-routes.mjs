@@ -18,6 +18,22 @@ export const inject = ['webServer', 'settings']
 // 设置节命名空间 = 本包主行在组合树中的条目 id(cordis.patch.yml insert id)
 export const SECTION_NS = 'shell-select'
 
+// 可写字段(其余字段由宿主 settings 面维护,写路径整份保留)
+const WRITABLE_KEYS = ['shells', 'default', 'deny']
+
+/** 写负载严格对账:未知键与类型错一律拒绝(400),不静默丢弃也不静默回落旧值。 */
+function assertWritablePatch(patch) {
+  const unknown = Object.keys(patch).filter((key) => !WRITABLE_KEYS.includes(key))
+  if (unknown.length > 0) {
+    throw new Error(`配置写入只接受 ${WRITABLE_KEYS.join('/')},未知字段: ${unknown.join(', ')}`)
+  }
+  if (!Array.isArray(patch.shells)) throw new Error('shells 必须是数组')
+  if (typeof patch.default !== 'string' || patch.default === '') throw new Error('default 必须是非空字符串')
+  if (!Array.isArray(patch.deny)) throw new Error('deny 必须是字符串数组')
+  const badRule = patch.deny.find((rule) => typeof rule !== 'string')
+  if (badRule !== undefined) throw new Error(`deny 必须是字符串数组,非法条目类型: ${typeof badRule}`)
+}
+
 /** 会话可见清单:条目 + 解析后的真实路径与可用性(与主行 listShells 同构)。 */
 function listShellsOf(section) {
   return {
@@ -70,18 +86,30 @@ export function buildFaces(ctx, settings) {
     // 挂载快照就此陈旧——replace 成功即权威信号,桥调活跃实例换源并重建
     // 工具注册(原生设置页对本行被 auto:false 抑制,本 API 是唯一写口)
     async updateConfig(patch) {
+      assertWritablePatch(patch)
       const current = readCurrent()
       const section = normalizeConfigPaths({
         ...current,
-        shells: patch.shells ?? current.shells,
-        default: patch.default ?? current.default,
-        deny: Array.isArray(patch.deny) ? patch.deny : current.deny,
+        shells: patch.shells,
+        default: patch.default,
+        deny: patch.deny,
       })
       const validated = resolveConfig(section)
       assertServiceableConfig(validated)
       await settings.replace(SECTION_NS, section)
-      requestShellRefresh(validated)
-      return listShellsOf(validated)
+      // 落盘已成功:refresh 桥只是执行面换源通道,失败时降级为「行重挂/重启后
+      // 生效」,不得把成功的写入回成 400(客户端会重试同一份合法配置)。
+      // 无活跃执行面与刷新失败是两种事实:前者写入本身有效、只是没有实例可换源,
+      // 页面不得宣称「即时生效」(P3)。
+      let refreshFailed = false
+      let noExecutor = false
+      try {
+        noExecutor = requestShellRefresh(validated) === false
+      } catch (error) {
+        refreshFailed = true
+        ctx.logger?.warn?.(`shell-select: 配置已落盘但执行面刷新失败(重挂/重启后生效): ${error?.message ?? error}`)
+      }
+      return { resolved: listShellsOf(validated), refreshFailed, noExecutor }
     },
     detect: (kinds) => detectCandidates(kinds ?? [...KINDS], process.env, candidateExists),
     probe: (candidatePath) => candidateExists(candidatePath),

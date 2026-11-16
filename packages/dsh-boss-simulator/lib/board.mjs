@@ -1,18 +1,40 @@
-// board API v2:/api/boss-simulator/board 只读查询(查询投影契约)+/api/boss-simulator/interrupt 写路由。
-// 安全边界(全仓库约定):不做 host 认证;写路由跨源防护以 Origin 同源比对为上限。
+// board API v2:/api/boss-simulator/board 只读查询(查询投影契约)+ 写路由。
+// 安全边界(全仓库约定):不做 host 认证;写路由闸门统一走 withRouteGate(宿主闸门 → 同源 → JSON CT)。
+// 每条路由显式声明允许的方法,其余方法一律 405(不再"不看方法一律当写入口")。
 import { randomUUID } from 'node:crypto'
 import { queryBoard, projectTaskDetail } from './core/query.mjs'
-import { stopAll, recordStopOperation } from './core/global-control.mjs'
+import { stopAll, resumeAll, recordStopOperation } from './core/global-control.mjs'
 import { createSettings, saveSettings } from './core/settings.mjs'
-import { interruptTask } from './core/orchestrator.mjs'
-import { createTask, defineWorkItem, authorizeTask } from './core/task.mjs'
+import { interruptTask, forceStop } from './core/orchestrator.mjs'
 import { ADMIN_PRESET_ID } from './presets.mjs'
-import { sendJson, rejectCrossOrigin, readJsonBody } from './http.mjs'
+import { sendJson, readJsonBody, rejectMethod } from './http.mjs'
+
+const METHODS = {
+  board: ['GET'],
+  admin: ['POST'],
+  interrupt: ['POST'],
+  settings: ['GET', 'POST'],
+}
+
+// 命令 payload 指纹:递归按键排序;键序重排不改变同一次命令的幂等身份
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item) ?? 'null').join(',')}]`
+  if (value && typeof value === 'object') {
+    const entries = Object.keys(value).sort()
+      .filter((key) => value[key] !== undefined)
+      .map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`)
+    return `{${entries.join(',')}}`
+  }
+  return JSON.stringify(value)
+}
 
 export function createBoardApi({ store, drive, now = Date.now, serverEpoch = randomUUID() }) {
   async function handleBoard(req, res, url = new URL(req.url ?? '/api/boss-simulator/board', 'http://local')) {
+    if (rejectMethod(req, res, METHODS.board)) return
     try {
       const [aggregates, control, adminBinding] = await Promise.all([store.listAggregates(), store.loadControl(), store.loadAdminBinding()])
+      // 读面 stale 收敛:超过失联阈值的在飞 Run 按已断投影(不写盘),
+      // 否则看板会随时间与写入时机不同给出两套事实(刷新前显示执行中,任何写动作后变中断)
       const taskId = url.searchParams.get('taskId')
       if (taskId) {
         const aggregate = aggregates.find((a) => a.taskId === taskId)
@@ -28,11 +50,18 @@ export function createBoardApi({ store, drive, now = Date.now, serverEpoch = ran
         sendJson(res, 200, store.settings ? await store.loadSettings() : createSettings(now))
         return
       }
+      const numberParam = (name) => {
+        if (!params.has(name)) return undefined
+        const raw = params.get(name)
+        return raw === '' ? Number.NaN : Number(raw)
+      }
       const queried = queryBoard(aggregates, control, {
         workspaceId: params.get('workspaceId') ?? undefined,
         search: params.get('search') ?? undefined,
         cursor: params.get('cursor') ?? undefined,
         limit: params.has('limit') ? Number(params.get('limit')) : undefined,
+        since: numberParam('since'),
+        until: numberParam('until'),
         now,
         serverEpoch,
       })
@@ -49,6 +78,7 @@ export function createBoardApi({ store, drive, now = Date.now, serverEpoch = ran
   // PAGE-20 管理员会话入口:创建空管理员会话并登记绑定,幂等收养;绝不发送 prompt。
   let adminCreateInFlight = null
   async function handleAdmin(req, res) {
+    if (rejectMethod(req, res, METHODS.admin)) return
     try {
       const body = await readJsonBody(req, res)
       if (body === null) return
@@ -84,6 +114,7 @@ export function createBoardApi({ store, drive, now = Date.now, serverEpoch = ran
   }
 
   async function handleInterrupt(req, res) {
+    if (rejectMethod(req, res, METHODS.interrupt)) return
     try {
       const body = await readJsonBody(req, res)
       if (body === null) return
@@ -91,7 +122,47 @@ export function createBoardApi({ store, drive, now = Date.now, serverEpoch = ran
         sendJson(res, 400, { error: '缺少 commandId' })
         return
       }
-      const payloadHash = body.payloadHash ?? JSON.stringify(body)
+      // payload 指纹只由服务端计算:客户端 payloadHash 字段不可信且不参与指纹
+      const { payloadHash: _clientPayloadHash, ...commandPayload } = body
+      const payloadHash = stableStringify(commandPayload)
+      // 强制停止:会话不可达时的显式出口;确认字符串与任务标识必须一致才执行
+      if (body.confirm === 'force-stop') {
+        if (!body.taskId || body.taskId !== body.confirmTaskId) {
+          sendJson(res, 400, { error: '强制停止须同时给出 taskId 与相同的 confirmTaskId', code: 'CONFIRMATION_REQUIRED' })
+          return
+        }
+        const outcome = await forceStop(store, body.taskId, {
+          reason: body.reason ?? 'force_stop', confirm: true, commandId: body.commandId, payloadHash,
+        })
+        if (!outcome.ok) {
+          sendJson(res, outcome.code === 'NOT_FOUND' ? 404 : 409, { error: outcome.message, code: outcome.code })
+          return
+        }
+        // 响应按当前控制态给出:历史命令重放命中时任务可能已被恢复,不得继续宣称已停
+        const controlState = outcome.aggregate.control.state
+        sendJson(res, 200, {
+          accepted: true, forceStopped: controlState === 'paused', controlState,
+          pendingStop: controlState === 'stopping', cancelErrors: [], reconcileErrors: [], replayed: outcome.replayed === true,
+        })
+        return
+      }
+      // 全局解除:全局停止不是一次性闩锁;新任务在被停止后仍须有明确放行路径
+      if (body.global && body.resume === true) {
+        let envelope = null
+        await store.updateControl((control) => {
+          envelope = resumeAll(control, { commandId: body.commandId, payloadHash, sourceRef: body.sourceRef })
+          return envelope.ok ? envelope.result.state : control
+        })
+        if (!envelope.ok) {
+          sendJson(res, 409, { error: envelope.message })
+          return
+        }
+        sendJson(res, 200, {
+          accepted: true, globalResumed: true, globalStopped: false,
+          globalStopGeneration: envelope.result.result.globalStopGeneration, replayed: envelope.result.replayed,
+        })
+        return
+      }
       if (body.global) {
         const stopTargets = (await store.listAggregates()).filter(task => !['completed', 'cancelled'].includes(task.businessState)).map(task => task.taskId)
         let envelope = null
@@ -137,16 +208,16 @@ export function createBoardApi({ store, drive, now = Date.now, serverEpoch = ran
       }
       const outcome = await interruptTask(store, aggregate, { sessionAdapter: drive?.sessionAdapter, reason: body.reason ?? 'user_interrupt', commandId: body.commandId })
       if (!outcome.ok) return sendJson(res, 409, { error: outcome.message })
-      sendJson(res, 200, { accepted: true, controlState: outcome.aggregate.control.state, pendingStop: !outcome.stopConfirmed, cancelErrors: outcome.cancelErrors, reconcileErrors: outcome.reconcileErrors ?? [] })
+      sendJson(res, 200, { accepted: true, controlState: outcome.aggregate.control.state, pendingStop: !outcome.stopConfirmed, cancelErrors: outcome.cancelErrors, reconcileErrors: outcome.reconcileErrors ?? [], forceStopAllowed: !outcome.stopConfirmed })
     } catch (error) {
       sendJson(res, error.statusCode ?? 500, { error: error.message })
     }
   }
 
   async function handleSettings(req, res) {
+    if (rejectMethod(req, res, METHODS.settings)) return
     try {
       if (req.method === 'GET') {
-        if (rejectCrossOrigin(req, res)) return
         sendJson(res, 200, store.settings ? await store.loadSettings() : createSettings(now))
         return
       }
@@ -174,61 +245,9 @@ export function createBoardApi({ store, drive, now = Date.now, serverEpoch = ran
     }
   }
 
-  // 测试入口允许创建、派发，不允许从请求体直接写入报告事实。
-  async function handleDrive(req, res) {
-    try {
-      if (!drive?.sessionAdapter) {
-        sendJson(res, 501, { error: '会话适配未装配' })
-        return
-      }
-      const body = await readJsonBody(req, res)
-      if (body === null) return
-      const control = await store.loadControl()
-      if (body.action === 'create') {
-        if (await store.loadAggregate(body.taskId)) {
-          sendJson(res, 409, { error: `任务已存在: ${body.taskId}` })
-          return
-        }
-        const created = createTask({
-          taskId: body.taskId, title: body.title ?? body.taskId, projectWorkspaceId: body.projectWorkspaceId ?? 'default',
-          definition: body.definition ?? { goal: body.goal ?? '测试目标' }, now,
-        })
-        if (!created.ok) {
-          sendJson(res, 400, { error: created.message })
-          return
-        }
-        let agg = created.result
-        const def = defineWorkItem(agg, { workItemId: body.workItemId ?? 'w1', title: body.workItemTitle ?? '子项一' })
-        if (!def.ok) {
-          sendJson(res, 400, { error: def.message })
-          return
-        }
-        agg = def.result.aggregate
-        agg = authorizeTask(agg, { sourceMessageRef: { sessionId: 'drive', messageId: body.requestId ?? 'drive' } }).result.aggregate
-        await store.saveAggregate(agg)
-        sendJson(res, 200, { ok: true, taskId: agg.taskId, businessState: agg.businessState })
-        return
-      }
-      if (body.action === 'dispatch') {
-        const outcome = await drive.dispatch({
-          ...body,
-          runId: body.runId ?? randomUUID(),
-          requestId: body.requestId ?? randomUUID(),
-          phase: body.phase ?? 'implement',
-          content: body.content ?? `任务 ${body.taskId}/${body.workItemId}`,
-        })
-        sendJson(res, 200, outcome)
-        return
-      }
-      sendJson(res, 400, { error: 'action 须为 create/dispatch' })
-    } catch (error) {
-      sendJson(res, error.statusCode ?? 500, { error: error.message })
-    }
-  }
-
   const handleInterruptWithGate = handleInterrupt
   async function gatedInterrupt(req, res) {
     return drive?.withExecution ? drive.withExecution(() => handleInterruptWithGate(req, res)) : handleInterruptWithGate(req, res)
   }
-  return { handleBoard, handleAdmin, handleInterrupt: gatedInterrupt, handleSettings, handleDrive }
+  return { handleBoard, handleAdmin, handleInterrupt: gatedInterrupt, handleSettings }
 }

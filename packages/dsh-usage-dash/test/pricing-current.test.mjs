@@ -62,6 +62,8 @@ function fixture() {
   mod.apply({
     effect: fn => fn(),
     locale: { register() {} },
+    // 宿主 client ctx 的反射取服务:本夹具没有 sessions 服务,面板按无子代理数据面降级
+    get: () => undefined,
     slots: { inject: (_name, fn) => fn(), register: (entry, component) => slots.set(entry.name, component) },
     configForms: { get: () => ({ getSnapshot: () => ({ value: undefined }), subscribe: () => () => {}, mutate: async () => true }) },
   })
@@ -193,6 +195,33 @@ test('P11 Given another editor has a draft, When save publishes, Then draft stay
   group().props.onModelChange('draft/model'); await f.settle()
   const pending = f.save(a); f.resolve(f.saves[0], price(2)); await pending; await f.settle()
   assert.equal(group().props.group.model, 'draft/model')
+}))
+
+// C2:保存在飞期间同一编辑器继续编辑,服务器返回不能覆盖新输入或冒充已保存
+test('C2 Given save in flight When same editor edits Then server reply does not overwrite draft', t => withFixture(t, async f => {
+  const editor = f.editor()
+  f.gets.forEach(item => f.resolve(item, price(1))); await f.settle()
+  const group = () => nodes(editor.tree).find(n => n.type?.name === 'PricingModelGroup')
+  const pending = f.save(editor)
+  group().props.onModelChange('draft/model'); await f.settle()
+  f.resolve(f.saves[0], price(2)); await pending; await f.settle()
+  assert.equal(group().props.group.model, 'draft/model')
+  assert.doesNotMatch(f.text(editor.tree), /已保存/)
+}))
+
+test('C2b Given save in flight When add a model group Then server reply does not remove it', t => withFixture(t, async f => {
+  const editor = f.editor()
+  f.gets.forEach(item => f.resolve(item, price(1))); await f.settle()
+  const groups = () => nodes(editor.tree).filter(n => n.type?.name === 'PricingModelGroup')
+  const before = groups().length
+  const pending = f.save(editor)
+  const add = nodes(editor.tree).find(n => n.type === 'button' && text(n) === '添加模型')
+  assert.ok(add, '编辑器应提供添加模型按钮')
+  add.props.onClick(); await f.settle()
+  assert.equal(groups().length, before + 1)
+  f.resolve(f.saves[0], price(2)); await pending; await f.settle()
+  assert.equal(groups().length, before + 1, '保存回包不得抹掉在飞新增的模型组')
+  assert.doesNotMatch(f.text(editor.tree), /已保存/)
 }))
 
 for (const [tab, endpoint] of [['小时', 'hours'], ['分钟', 'minutes']]) {

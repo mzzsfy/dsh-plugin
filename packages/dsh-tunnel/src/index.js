@@ -7,17 +7,19 @@
 // (0.2.1 为函数, 0.2.2 为 { resource })。升级握手同层分发, 故任意 WS 路径可用。
 // 规格: docs/设计-隧道改造.md; 安全边界: DEVELOPMENT/dsh-api-alignment.md。
 
+import { randomUUID } from 'node:crypto'
 import http from 'node:http'
 import net from 'node:net'
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { homedir, networkInterfaces } from 'node:os'
 import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import { setupCommonTools, createChangeNotifier } from '@mzzsfy/dsh-common-tools/host'
 import { createApi, MESSAGES, ROUTE_PREFIX as API_PREFIX } from './api.mjs'
-import { withHostGate } from './route-gate.mjs'
+import { probeTcpPort, scanListeningPorts } from './discovery.mjs'
+import { withRouteGate } from './route-gate.mjs'
 
 export const name = 'dsh-tunnel'
 
@@ -34,13 +36,19 @@ const REDIRECT_MIN = 300
 const REDIRECT_MAX = 399
 const STORE_FILE = 'tunnels.json'
 const STORE_TMP_SUFFIX = '.tmp'
+// rename 的临时文件若被外部清理, 重建重试的写尝试总次数
+const STORE_WRITE_ATTEMPTS = 3
 const WARN_TAG = 'dsh-tunnel: '
+const ENTRY_LABEL_CONFLICT = '隧道名与入口域首标签冲突'
 
 const ENTRY_PATH = 'path'
 const ENTRY_SUBDOMAIN = 'subdomain'
 const VALID_ENTRIES = new Set([ENTRY_PATH, ENTRY_SUBDOMAIN])
 const SETTINGS_NS = 'tunnel'
 const SETTINGS_UNAVAILABLE = '设置服务不可用'
+// 已建立的 upgrade 连接不经过 matchHost, 按周期复核信任面并回收被晚信任覆盖的连接
+const TRUST_RECONCILE_MS = 1_000
+const HEALTH_CACHE_TTL_MS = 3_000
 
 // 监听层安装标记: 只装一次, 代际切换靠载体重定向, 旧包装退化为纯穿透
 const LISTENER_PROP = 'dshTunnelListener'
@@ -48,13 +56,14 @@ const LISTENER_PROP = 'dshTunnelListener'
 const DISPATCH_PROP = 'dshTunnelDispatch'
 // 超时载体: 同代际切换, 配置变更后旧包装器读到新值
 const TIMEOUT_PROP = 'dshTunnelTimeout'
-const OWN_SOCKETS_PROP = 'dshTunnelSockets'
 const TIMED_OUT_MARK = Symbol.for('dsh-tunnel.timedOut')
 
 const renderJson = (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }]
 
 // 逐跳头不透传: 连接管理由两端的 node http 栈各自负责
 const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'transfer-encoding', 'upgrade', 'te', 'trailer', 'proxy-authorization', 'proxy-authenticate'])
+// 升级面仅这两个逐跳头属于握手本身, 必须保留
+const UPGRADE_HANDSHAKE_HEADERS = new Set(['connection', 'upgrade'])
 // Connection 头里点名的自定义逐跳头同样不得透传(RFC 9110 §7.6.1)
 function connectionTokensOf(value) {
   return new Set(String(value ?? '').split(',').map((token) => token.trim().toLowerCase()).filter(Boolean))
@@ -67,9 +76,7 @@ const TIMEOUT_MAX_MS = 60 * 1000
 const timeoutField = () => z.number().step(1).min(TIMEOUT_MIN_MS).max(TIMEOUT_MAX_MS).default(DEFAULT_CONNECT_TIMEOUT)
   .description('等待目标响应头的超时, 头到即解除(SSE 等长流不受影响)')
 const aiToolsField = () => z.boolean().default(true)
-  .description('允许 ai 调用隧道工具(tunnel_open/list/close), 关闭即向 ai 注销; 看板与 REST 管理不受影响')
-const sidebarTabField = () => z.boolean().default(false)
-  .description('看板移入 better-sidebar 侧边栏(需已安装; 关闭时始终使用主界面)')
+  .description('允许 ai 调用隧道工具(tunnel_open/list/ports/close), 关闭即向 ai 注销; 设置页与 REST 管理不受影响')
 
 // 字段级 volatile 标记: 0.1.7+ 该字段进自动配置节并支持 loader 原地热更;
 // 旧宿主 schemastery 无 volatile 方法, 特性检测原样返回(dsh-maintain 同构)
@@ -80,13 +87,11 @@ export const Config = z.object({
   dataDir: z.string().default(join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'dsh-tunnel'))
     .description('隧道表持久化目录'),
   aiTools: volatileField(aiToolsField()),
-  sidebarTab: volatileField(sidebarTabField()),
 })
 
 export const SETTINGS_SCHEMA = z.object({
   connectTimeoutMs: timeoutField(),
   aiTools: aiToolsField(),
-  sidebarTab: sidebarTabField(),
 })
 
 function validateName(value) {
@@ -95,6 +100,102 @@ function validateName(value) {
 
 function validatePort(port) {
   return Number.isInteger(port) && port >= PORT_MIN && port <= PORT_MAX
+}
+
+const AUTO_NAME_PREFIX = 'app'
+const TUNNEL_NAME_RE_MAX_BASE = 32
+// 自动名只用进程名做提示, 最终仍落回 TUNNEL_NAME_RE; 端口后缀保证短且唯一。
+function autoNameFor(port, processName) {
+  const base = String(processName ?? '')
+    .replace(/\.[^.]+$/, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  const safeBase = NAME_HAS_LETTER_RE.test(base) ? base : AUTO_NAME_PREFIX
+  const suffix = '-' + port
+  const clipped = safeBase.slice(0, TUNNEL_NAME_RE_MAX_BASE - suffix.length).replace(/-+$/g, '') || AUTO_NAME_PREFIX
+  return clipped + suffix
+}
+
+function uniqueTunnelName(rows, base, port) {
+  const first = autoNameFor(port, base)
+  if (!rows.has(first)) return first
+  for (let index = 2; ; index += 1) {
+    const candidate = `${first}-${index}`
+    if (!rows.has(candidate)) return candidate
+  }
+}
+
+function statusOf(row, health) {
+  if (row.enabled === false) return 'disabled'
+  if (row.error !== undefined) return 'route_error'
+  if (health?.state === 'online') return 'online'
+  if (health?.state === 'offline') return 'offline'
+  return 'unknown'
+}
+
+function localOriginOf(webServer) {
+  let host = String(webServer.host ?? '127.0.0.1')
+  if (host === '' || host === '0.0.0.0' || host === '::') host = '127.0.0.1'
+  if (host.includes(':') && !host.startsWith('[')) host = `[${host}]`
+  return `${protocolOf(webServer)}://${host}:${webServer.port}`
+}
+
+function isPrivateIPv4(address) {
+  const parts = String(address).split('.').map(Number)
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false
+  return parts[0] === 10
+    || (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31)
+    || (parts[0] === 192 && parts[1] === 168)
+}
+
+function isVirtualInterface(name) {
+  return /(vEthernet|docker|br-|vmnet|virtualbox|wsl|hyper-v|tailscale|zerotier|loopback)/i.test(String(name))
+}
+
+function lanOriginOf(webServer) {
+  const host = String(webServer.host ?? '')
+  const wildcard = host === '' || host === '0.0.0.0' || host === '::'
+  if (!wildcard) {
+    if (host === 'localhost' || host === '::1' || host.startsWith('127.')) return undefined
+    const literal = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
+    return `${protocolOf(webServer)}://${literal}:${webServer.port}`
+  }
+  for (const [name, entries] of Object.entries(networkInterfaces())) {
+    if (isVirtualInterface(name)) continue
+    for (const entry of entries ?? []) {
+      if (entry.family === 'IPv4' && entry.internal !== true && isPrivateIPv4(entry.address)) {
+        return `${protocolOf(webServer)}://${entry.address}:${webServer.port}`
+      }
+    }
+  }
+  return undefined
+}
+
+function accessUrlFor(record, origin, port) {
+  if (record.entry === ENTRY_PATH) return origin + PATH_PREFIX + record.name + '/'
+  const protocol = origin.startsWith('https:') ? 'https' : 'http'
+  return `${protocol}://${record.name}.localhost:${port}/`
+}
+
+// 502/504 给浏览器的可读页: 隧道名与目标端口都来自本进程数据, 仍做 HTML 转义后输出。
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]))
+}
+
+function respondProxyError(req, res, record, status, message) {
+  if (!String(req.headers.accept ?? '').includes('text/html')) {
+    respondJson(res, status, { ok: false, error: message })
+    return
+  }
+  const title = status === 504 ? '目标响应超时' : '目标服务不可达'
+  const html = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>${title}</title>`
+    + '<style>body{font:14px/1.6 system-ui,sans-serif;max-width:560px;margin:12vh auto;padding:0 24px;color:#222}'
+    + 'h1{font-size:20px}p{color:#555}code{background:#f3f3f3;padding:1px 5px;border-radius:4px}</style>'
+    + `<h1>${title}</h1><p>隧道 <code>${escapeHtml(record.name)}</code> 连不上本机端口 <code>${record.targetPort}</code>。</p>`
+    + `<p>${escapeHtml(message)}</p><p>确认服务已启动后刷新此页。</p></html>`
+  res.writeHead(status, { 'content-type': 'text/html; charset=utf-8' })
+  res.end(html)
 }
 
 // 首标签取值: 无点主机名不参与子域名匹配(裸 localhost 不劫持)
@@ -110,6 +211,16 @@ function firstLabelOf(hostHeader) {
   return at === -1 ? undefined : hostname.slice(0, at)
 }
 
+// 子域名隧道名与入口域首标签相同即整入口劫持: Host 分流先于宿主全部路由(含 /api/*), GUI 随之消失。
+// 比对面只取宿主 connection.trustedHosts(实际到达并被信任的 Host 授权), 不自建 Host 白名单。
+function conflictingEntryHost(trustedHosts, name) {
+  if (!Array.isArray(trustedHosts)) return undefined
+  for (const entry of trustedHosts) {
+    if (firstLabelOf(entry) === name) return entry
+  }
+  return undefined
+}
+
 // strip 隧道前缀: 前缀本身映射 '/', 其余保留前导 '/' 携带查询串
 function targetPathOf(reqUrl, prefix) {
   const url = new URL(reqUrl, 'http://x')
@@ -117,12 +228,17 @@ function targetPathOf(reqUrl, prefix) {
   return rest + url.search
 }
 
-function forwardedHeaders(req, proto, { keepHopByHop = false } = {}) {
+// 升级面只保留握手头(connection/upgrade/sec-websocket-*)与端到端头:
+// Content-Length/Transfer-Encoding 会让上游把 101 后的字节误当消息体,
+// 其余逐跳头与 Connection 点名头同样不得透传。
+function forwardedHeaders(req, proto, { upgrade = false } = {}) {
   const headers = {}
   const connectionTokens = connectionTokensOf(req.headers.connection)
   for (const [key, value] of Object.entries(req.headers)) {
     if (key.startsWith('x-forwarded-') || FORWARDED_LIE_HEADERS.includes(key)) continue
-    if (!keepHopByHop && (HOP_BY_HOP.has(key) || connectionTokens.has(key))) continue
+    const handshake = upgrade && (UPGRADE_HANDSHAKE_HEADERS.has(key) || key.startsWith('sec-websocket-'))
+    if (!handshake && (HOP_BY_HOP.has(key) || connectionTokens.has(key))) continue
+    if (upgrade && key === 'content-length') continue
     headers[key] = value
   }
   // 无 Host 头的请求(HTTP/1.0 等)缺源值时跳过, undefined 头会使 http.request 抛错
@@ -132,16 +248,23 @@ function forwardedHeaders(req, proto, { keepHopByHop = false } = {}) {
   return headers
 }
 
-// 唯一响应体改写: 同源根绝对路径补前缀(排除协议相对 //), 其余原样
+// 唯一响应体改写: 同源根绝对路径补前缀(排除协议相对 //), 已在本隧道前缀下的不动。
+// 前缀边界按 URL pathname 的路径段判定: /p/app2 不属于隧道 /p/app;
+// 查询串与锚点不参与判定, 也不得被二次拼接(/p/app?x、/p/app#f 已是本隧道路径)。
 function rewriteLocation(proxyRes, prefix) {
   const location = proxyRes.headers.location
   if (
-    proxyRes.statusCode >= REDIRECT_MIN && proxyRes.statusCode <= REDIRECT_MAX
-    && typeof location === 'string' && location.startsWith('/')
-    && !location.startsWith('//') && !location.startsWith(prefix)
-  ) {
-    proxyRes.headers.location = prefix + location
+    proxyRes.statusCode < REDIRECT_MIN || proxyRes.statusCode > REDIRECT_MAX
+    || typeof location !== 'string' || !location.startsWith('/') || location.startsWith('//')
+  ) return
+  let pathname
+  try {
+    pathname = new URL(location, 'http://x').pathname
+  } catch {
+    return
   }
+  if (pathname === prefix || pathname.startsWith(prefix + '/')) return
+  proxyRes.headers.location = prefix + location
 }
 
 function respondJson(res, status, payload) {
@@ -149,10 +272,28 @@ function respondJson(res, status, payload) {
   res.end(JSON.stringify(payload))
 }
 
+function touchStats(record) {
+  if (record?.stats === undefined) return
+  record.stats.requests += 1
+  record.stats.lastAccessAt = new Date().toISOString()
+}
+
+function noteProxyStatus(record, status, error) {
+  if (record?.stats === undefined) return
+  record.stats.lastStatus = status
+  if (error !== undefined) {
+    record.stats.errors += 1
+    record.stats.lastError = error
+  }
+}
+
 function forwardHttp(req, res, { record, url, timeoutMs, proto }) {
+  touchStats(record)
   const proxyReq = http.request({
-    host: '127.0.0.1',
+    host: 'localhost',
     port: record.targetPort,
+    autoSelectFamily: true,
+    autoSelectFamilyAttemptTimeout: 250,
     method: req.method,
     path: url,
     headers: forwardedHeaders(req, proto),
@@ -166,6 +307,7 @@ function forwardHttp(req, res, { record, url, timeoutMs, proto }) {
     proxyReq.destroy()
   })
   proxyReq.on('response', (proxyRes) => {
+    noteProxyStatus(record, proxyRes.statusCode)
     // 仅路径模式改写 Location: 子域名根部署下同源根绝对路径本就正确
     if (record.entry === ENTRY_PATH) rewriteLocation(proxyRes, PATH_PREFIX + record.name)
     const headers = {}
@@ -182,7 +324,8 @@ function forwardHttp(req, res, { record, url, timeoutMs, proto }) {
   proxyReq.on('error', (error) => {
     if (res.headersSent) return res.destroy()
     const status = socketTimedOut(proxyReq) ? 504 : 502
-    respondJson(res, status, { ok: false, error: `目标不可达: ${error.message}` })
+    noteProxyStatus(record, status, error.message)
+    respondProxyError(req, res, record, status, `目标不可达: ${error.message}`)
   })
   // 客户端在响应任意阶段断开都回收上游连接(aborted 只覆盖请求体阶段, SSE/GET 不触发)
   res.on('close', () => {
@@ -200,14 +343,16 @@ function markTimedOut(proxyReq) {
   proxyReq[TIMED_OUT_MARK] = true
 }
 
-// 升级透传: 重建请求头直写目标 socket(握手头 connection/upgrade/sec-websocket-* 必须
-// 原样保留), 之后双向管道; 任一侧关闭即双向回收(否则正常关闭会留下目标侧悬挂连接)
-function forwardUpgrade(req, socket, head, { url, timeoutMs, proto, targetPort }) {
-  const headerLines = Object.entries(forwardedHeaders(req, proto, { keepHopByHop: true }))
+// 升级透传: 重建请求头直写目标 socket(握手头 connection/upgrade/sec-websocket-* 与
+// 端到端头保留, Content-Length/Transfer-Encoding/逐跳头丢弃), 之后双向管道;
+// 任一侧关闭即双向回收(否则正常关闭会留下目标侧悬挂连接)
+function forwardUpgrade(req, socket, head, { record, url, timeoutMs, proto }) {
+  touchStats(record)
+  const headerLines = Object.entries(forwardedHeaders(req, proto, { upgrade: true }))
     .map(([key, value]) => `${key}: ${value}`)
     .join('\r\n')
   const headText = `${req.method} ${url} HTTP/1.1\r\n${headerLines}\r\n\r\n`
-  const upstream = net.connect({ host: '127.0.0.1', port: targetPort })
+  const upstream = net.connect({ host: 'localhost', port: record.targetPort, autoSelectFamily: true, autoSelectFamilyAttemptTimeout: 250 })
   const destroyAll = () => {
     upstream.destroy()
     socket.destroy()
@@ -215,8 +360,13 @@ function forwardUpgrade(req, socket, head, { url, timeoutMs, proto, targetPort }
   let established = false
   upstream.setTimeout(timeoutMs, destroyAll)
   // 目标首字节(101 握手)到达即解除空闲计时, 建立后的长连接不受连接超时误杀
-  upstream.once('data', () => { established = true; upstream.setTimeout(0) })
-  upstream.on('error', () => {
+  upstream.once('data', () => {
+    established = true
+    upstream.setTimeout(0)
+    noteProxyStatus(record, 101)
+  })
+  upstream.on('error', (error) => {
+    noteProxyStatus(record, 502, error.message)
     // 握手前失败回一个明确的 502, 比让客户端只看到连接被重置可诊断
     if (!established && socket.writable) {
       socket.end('HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n')
@@ -258,13 +408,30 @@ function loadStore(dataDir) {
   }
 }
 
+// 临时文件按写入者唯一(pid+随机): 固定 .tmp 名会被同 home 的并发实例抢占,
+// 前者 rename 时临时文件已消失(ENOENT), 或把半截内容改名成目标
+function storeTempPath(path) {
+  return `${path}.${process.pid}.${randomUUID()}${STORE_TMP_SUFFIX}`
+}
+
 // 写盘失败告警: 隧道本次会话可用, 重启后消失, open 仍返回成功
 function saveStore(dataDir, rows) {
+  const path = storePath(dataDir)
   try {
-    mkdirSync(dataDir, { recursive: true })
-    const path = storePath(dataDir)
-    writeFileSync(path + STORE_TMP_SUFFIX, JSON.stringify(rows, null, 2))
-    renameSync(path + STORE_TMP_SUFFIX, path)
+    for (let attempt = 1; ; attempt += 1) {
+      const tmp = storeTempPath(path)
+      try {
+        mkdirSync(dataDir, { recursive: true })
+        writeFileSync(tmp, JSON.stringify(rows, null, 2))
+        renameSync(tmp, path)
+        return
+      } catch (error) {
+        // 临时文件被外部清理时重建再试; 其它错误直接上抛告警
+        if (error?.code !== 'ENOENT' || attempt >= STORE_WRITE_ATTEMPTS) throw error
+      } finally {
+        rmSync(tmp, { force: true })
+      }
+    }
   } catch (error) {
     console.warn(`${WARN_TAG}隧道表写盘失败: ${error.message}`)
   }
@@ -315,8 +482,11 @@ function installListener(webServer, server) {
   server.on('upgrade', (req, socket, head) => {
     const match = dispatch('upgrade', req)
     if (match !== undefined) {
-      trackUpgradedSocket(webServer, server, socket)
-      forwardUpgrade(req, socket, head, { ...match, timeoutMs: readTimeout(webServer), proto: protocolOf(webServer), targetPort: match.record.targetPort })
+      // 按当前代际的 socket 集合登记: 旧代 dispose 只回收自己接入的连接
+      const generation = webServer[DISPATCH_PROP]
+      trackUpgradedSocket(webServer, socket, generation, match.record)
+      generation?.watchTrust?.()
+      forwardUpgrade(req, socket, head, { ...match, timeoutMs: readTimeout(webServer), proto: protocolOf(webServer) })
       return
     }
     for (const listener of originals.upgrade) listener.call(server, req, socket, head)
@@ -325,12 +495,23 @@ function installListener(webServer, server) {
 }
 
 // 宿主按 upgradedSockets 收尾关闭流程; 拦截来的连接不登记会让 server.close() 挂死
-function trackUpgradedSocket(webServer, server, socket) {
-  if (!(server[OWN_SOCKETS_PROP] instanceof Set)) server[OWN_SOCKETS_PROP] = new Set()
-  const own = server[OWN_SOCKETS_PROP]
-  own.add(socket)
-  socket.once('close', () => own.delete(socket))
-  // 宿主按自己的 upgradedSockets 收尾, 两边都登记: 宿主关闭与插件停用各有一条回收链
+function trackUpgradedSocket(webServer, socket, generation, record) {
+  const own = generation?.sockets
+  if (own instanceof Set) {
+    own.add(socket)
+    socket.once('close', () => own.delete(socket))
+  }
+  // 子域名 upgrade 另记隧道名: 信任面晚到后按名字复核并关闭既有连接
+  if (record?.entry === ENTRY_SUBDOMAIN && generation?.hostSockets instanceof Map) {
+    generation.hostSockets.set(socket, record.name)
+    socket.once('close', () => generation.hostSockets.delete(socket))
+  }
+  // path upgrade 同样按隧道名登记, close 时一起回收
+  if (record?.entry === ENTRY_PATH && generation?.pathSockets instanceof Map) {
+    generation.pathSockets.set(socket, record.name)
+    socket.once('close', () => generation.pathSockets.delete(socket))
+  }
+  // 宿主按自己的 upgradedSockets 收尾, 两条回收链各管各的代际
   if (webServer.upgradedSockets instanceof Set) {
     webServer.upgradedSockets.add(socket)
     socket.once('close', () => webServer.upgradedSockets.delete(socket))
@@ -393,6 +574,15 @@ export function apply(ctx, config) {
   // rows = 磁盘真值(含激活失败的行); tunnels = 本次活动表(分发只读它)
   const rows = new Map()
   const tunnels = new Map()
+  const healthCache = new Map()
+  const healthInFlight = new Map()
+  const healthEpoch = new Map()
+  const emptyStats = () => ({ requests: 0, errors: 0, lastAccessAt: null, lastStatus: null, lastError: null })
+  const statsOf = (row) => (row.stats ??= emptyStats())
+  // 已建立 upgrade 的隧道名台账: 信任面变化与 close 都按名字回收
+  const hostSockets = new Map()
+  // path 与 subdomain 分表: path socket 不受入口域信任面影响, 但 close 必须回收
+  const pathSockets = new Map()
 
   function registerRoutes(record) {
     return webServer.register({
@@ -409,24 +599,109 @@ export function apply(ctx, config) {
 
   // 激活单行: 失败不影响既有隧道, 由调用方决定保留还是回滚行
   function activate(row) {
+    if (row.enabled === false) return
+    statsOf(row)
     if (row.entry === ENTRY_PATH) row.disposeRoutes = registerRoutes(row)
     tunnels.set(row.name, row)
   }
 
-  function deactivate(name) {
-    const row = tunnels.get(name)
-    if (row === undefined) return
-    row.disposeRoutes?.()
-    delete row.disposeRoutes
-    tunnels.delete(name)
+  // 隧道被摘除/关闭时,既有 path/subdomain upgrade 也必须一起回收
+  function closeTunnelSockets(name) {
+    for (const sockets of [hostSockets, pathSockets]) {
+      for (const [socket, tunnelName] of [...sockets]) {
+        if (tunnelName !== name) continue
+        sockets.delete(socket)
+        socket.destroy()
+      }
+    }
   }
 
-  const persist = () => saveStore(dataDir, [...rows.values()].map(({ createdAt, entry, name, targetPort }) => ({ createdAt, entry, name, targetPort })))
+  function deactivate(name) {
+    const row = tunnels.get(name)
+    if (row !== undefined) {
+      row.disposeRoutes?.()
+      delete row.disposeRoutes
+      tunnels.delete(name)
+    }
+    closeTunnelSockets(name)
+  }
+
+  const persist = () => saveStore(dataDir, [...rows.values()].map(({ createdAt, enabled, entry, name, targetPort }) => ({ createdAt, enabled: enabled !== false, entry, name, targetPort })))
+
+  // 入口域首标签冲突: 服务缺失(非 web 传输/旧宿主)即无从判断, 放行原行为。
+  // 每次现读 trustedHosts: 信任面可能晚于插件装载才就绪, 静态快照会漏掉晚信任。
+  const readTrustedHosts = () => {
+    try {
+      return ctx.get('connection')?.trustedHosts
+    } catch {
+      return undefined
+    }
+  }
+  const entryHostInConflict = (tunnelName) => conflictingEntryHost(readTrustedHosts(), tunnelName)
+  const conflictReason = (name, clash) => `${ENTRY_LABEL_CONFLICT}: ${name} 是 ${clash} 的首标签, 该名字会把整个入口(含 /api/*)劫持到隧道目标`
+
+  // 运行期首次发现冲突即从活动表摘除并留 error; 信任面恢复后由周期核对重新激活
+  function suspendConflictedHost(row, clash) {
+    const reason = conflictReason(row.name, clash)
+    const changed = row.error !== reason || tunnels.has(row.name)
+    row.error = reason
+    if (tunnels.has(row.name)) deactivate(row.name)
+    // 已建立的子域名 upgrade 不走 matchHost, 同一次发现即断开
+    closeTunnelSockets(row.name)
+    if (changed) changes.refresh()
+  }
+
+  function invalidateHealth(name) {
+    healthEpoch.set(name, (healthEpoch.get(name) ?? 0) + 1)
+    healthCache.delete(name)
+    healthInFlight.delete(name)
+  }
+
+  async function probeRowHealth(row) {
+    if (row.enabled === false || row.error !== undefined || !tunnels.has(row.name)) return undefined
+    const cached = healthCache.get(row.name)
+    if (cached !== undefined && Date.now() - cached.at < HEALTH_CACHE_TTL_MS) return cached.value
+    const pending = healthInFlight.get(row.name)
+    if (pending !== undefined) return pending
+    const port = row.targetPort
+    const epoch = healthEpoch.get(row.name) ?? 0
+    const task = probeTcpPort(port)
+      .then((value) => {
+        const current = rows.get(row.name)
+        if (current?.targetPort === port && (healthEpoch.get(row.name) ?? 0) === epoch) {
+          healthCache.set(row.name, { at: Date.now(), value })
+        }
+        return value
+      })
+      .finally(() => healthInFlight.delete(row.name))
+    healthInFlight.set(row.name, task)
+    return task
+  }
+
+  function rowView(row, health) {
+    return {
+      name: row.name,
+      entry: row.entry,
+      access: row.entry === ENTRY_SUBDOMAIN ? `${row.name}.*` : PATH_PREFIX + row.name,
+      targetPort: row.targetPort,
+      enabled: row.enabled !== false,
+      active: tunnels.has(row.name),
+      status: statusOf(row, health),
+      createdAt: row.createdAt ?? null,
+      stats: statsOf(row),
+      ...(row.error === undefined ? {} : { error: row.error }),
+      ...(health === undefined ? {} : { health }),
+    }
+  }
 
   const api = {
     open(args) {
-      if (!validateName(args.name) || !validatePort(args.targetPort)) {
-        return { ok: false, error: '参数不合法: name 须为小写字母/数字/连字符(≤32 位, 且至少含一个字母), targetPort 须为 1..65535 整数' }
+      if (!validatePort(args.targetPort)) {
+        return { ok: false, error: '参数不合法: targetPort 须为 1..65535 整数' }
+      }
+      const requestedName = typeof args.name === 'string' && args.name.trim() !== '' ? args.name.trim() : undefined
+      if (requestedName !== undefined && !validateName(requestedName)) {
+        return { ok: false, error: '参数不合法: name 须为小写字母/数字/连字符(≤32 位, 且至少含一个字母)' }
       }
       const entry = args.entry ?? ENTRY_PATH
       if (!VALID_ENTRIES.has(entry)) {
@@ -436,39 +711,157 @@ export function apply(ctx, config) {
       if (args.targetPort === hostPort) {
         return { ok: false, error: `targetPort 不得为宿主监听端口 ${hostPort}(自代理环)` }
       }
-      if (rows.has(args.name)) return { ok: false, error: `隧道名已占用: ${args.name}` }
-      const row = { name: args.name, targetPort: args.targetPort, entry, createdAt: new Date().toISOString() }
+      const name = requestedName ?? uniqueTunnelName(rows, AUTO_NAME_PREFIX, args.targetPort)
+      // 仅子域名入口按 Host 分流, 名等于入口首标签即劫持整个 GUI; 路径入口只在 /p/<名> 下, 无此冲突
+      if (entry === ENTRY_SUBDOMAIN) {
+        const clash = entryHostInConflict(name)
+        if (clash !== undefined) {
+          return { ok: false, error: `${conflictReason(name, clash)}, 请换名` }
+        }
+      }
+      const existing = rows.get(name)
+      // 活动行才占用名字; 未激活行允许原地重激活(占位释放后同名 open 不得被死条目永久拒绝)
+      if (existing !== undefined && tunnels.has(name)) {
+        return { ok: false, error: `隧道名已占用: ${name}` }
+      }
+      const row = existing ?? {
+        name,
+        targetPort: args.targetPort,
+        entry,
+        enabled: true,
+        createdAt: new Date().toISOString(),
+      }
+      const previous = existing === undefined ? undefined : { targetPort: existing.targetPort, entry: existing.entry, enabled: existing.enabled }
+      if (existing !== undefined) {
+        existing.targetPort = args.targetPort
+        existing.entry = entry
+        existing.enabled = true
+      }
       try {
         activate(row)
       } catch (error) {
+        if (existing !== undefined && previous !== undefined) {
+          existing.targetPort = previous.targetPort
+          existing.entry = previous.entry
+          existing.enabled = previous.enabled
+          existing.error = String(error.message)
+        }
         return { ok: false, error: `路由注册失败: ${error.message}` }
       }
+      delete row.error
+      invalidateHealth(row.name)
       rows.set(row.name, row)
       persist()
       changes.refresh()
-      return entry === ENTRY_SUBDOMAIN
-        ? { ok: true, name: row.name, entry, host: `${row.name}.localhost`, port: webServer.port }
-        : { ok: true, name: row.name, entry, path: PATH_PREFIX + row.name, port: webServer.port }
-    },
-    list() {
-      return {
+      const origin = localOriginOf(webServer)
+      const lanOrigin = lanOriginOf(webServer)
+      const outcome = {
         ok: true,
-        tunnels: [...rows.values()].map(({ createdAt, entry, error, name, targetPort }) => ({
-          name,
-          entry,
-          access: entry === ENTRY_SUBDOMAIN ? `${name}.*` : PATH_PREFIX + name,
-          targetPort,
-          active: tunnels.has(name),
-          createdAt,
-          ...(error === undefined ? {} : { error }),
-        })),
+        name: row.name,
+        entry,
+        port: webServer.port,
+        enabled: true,
+        url: accessUrlFor(row, origin, webServer.port),
       }
+      if (entry === ENTRY_SUBDOMAIN) {
+        outcome.host = `${row.name}.localhost`
+      } else {
+        outcome.path = PATH_PREFIX + row.name
+        if (lanOrigin !== undefined) outcome.lanUrl = lanOrigin + PATH_PREFIX + row.name + '/'
+      }
+      return outcome
+    },
+    async list(args = {}) {
+      // 状态查询也按当前信任面校正, 避免未发生请求时把已失效的隧道报成 active
+      reconcileTrustedHosts()
+      const list = [...rows.values()]
+      const healths = args.probe === true ? await Promise.all(list.map((row) => probeRowHealth(row))) : []
+      return { ok: true, tunnels: list.map((row, index) => rowView(row, healths[index])) }
+    },
+    async update(args) {
+      const name = args?.name
+      const patch = args?.patch
+      if (typeof name !== 'string' || patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
+        return { ok: false, error: '参数不合法: name 与 patch 必填' }
+      }
+      if (Object.prototype.hasOwnProperty.call(patch, 'name')) return { ok: false, error: '隧道名不可修改' }
+      const allowed = new Set(['targetPort', 'entry', 'enabled'])
+      for (const key of Object.keys(patch)) {
+        if (!allowed.has(key)) return { ok: false, error: `不支持修改字段: ${key}` }
+      }
+      if (Object.keys(patch).length === 0) return { ok: false, error: 'patch 不能为空' }
+      const row = rows.get(name)
+      if (row === undefined) return { ok: false, error: `隧道不存在: ${name}` }
+      const next = { targetPort: row.targetPort, entry: row.entry, enabled: row.enabled !== false }
+      if (patch.targetPort !== undefined) {
+        if (!validatePort(patch.targetPort)) return { ok: false, error: 'targetPort 须为 1..65535 整数' }
+        if (patch.targetPort === Number(webServer.port)) return { ok: false, error: `targetPort 不得为宿主监听端口 ${webServer.port}(自代理环)` }
+        next.targetPort = patch.targetPort
+      }
+      if (patch.entry !== undefined) {
+        if (!VALID_ENTRIES.has(patch.entry)) return { ok: false, error: `entry 不合法: 须为 ${ENTRY_PATH} 或 ${ENTRY_SUBDOMAIN}` }
+        next.entry = patch.entry
+      }
+      if (patch.enabled !== undefined) {
+        if (typeof patch.enabled !== 'boolean') return { ok: false, error: 'enabled 须为布尔' }
+        next.enabled = patch.enabled
+      }
+      if (next.entry === ENTRY_SUBDOMAIN) {
+        const clash = entryHostInConflict(name)
+        if (clash !== undefined) return { ok: false, error: `${conflictReason(name, clash)}, 请换名` }
+      }
+      const previous = { targetPort: row.targetPort, entry: row.entry, enabled: row.enabled !== false }
+      const wouldChangeRoute = previous.targetPort !== next.targetPort || previous.entry !== next.entry
+      const wasActive = tunnels.has(name)
+      if ((wouldChangeRoute || !next.enabled) && wasActive) deactivate(name)
+      row.targetPort = next.targetPort
+      row.entry = next.entry
+      row.enabled = next.enabled
+      if (next.enabled && (!wasActive || wouldChangeRoute)) {
+        try {
+          activate(row)
+        } catch (error) {
+          row.targetPort = previous.targetPort
+          row.entry = previous.entry
+          row.enabled = previous.enabled
+          if (previous.enabled) {
+            try { activate(row) } catch { row.error = String(error.message) }
+          }
+          changes.refresh()
+          return { ok: false, error: `路由注册失败: ${error.message}` }
+        }
+      }
+      if (next.enabled) delete row.error
+      invalidateHealth(name)
+      persist()
+      changes.refresh()
+      return { ok: true, ...rowView(row) }
+    },
+    async listPorts(args = {}) {
+      const result = await scanListeningPorts({
+        refresh: args.refresh === true,
+        excludePorts: [Number(webServer.port)],
+      })
+      if (result.supported !== true) return result
+      const items = result.items
+        .filter((item) => (args.all === true ? item.system !== true : item.dev === true))
+        .map((item) => ({
+          ...item,
+          tunnelNames: [...rows.values()].filter((row) => row.enabled !== false && row.targetPort === item.port).map((row) => row.name),
+        }))
+      return { ...result, items }
+    },
+    async probePort(port) {
+      if (!validatePort(port)) return { ok: false, error: 'port 须为 1..65535 整数' }
+      const health = await probeTcpPort(port)
+      return { ok: true, listening: health.state === 'online', health }
     },
     close(args) {
       const row = rows.get(args.name)
       if (row === undefined) return { ok: true, removed: false }
       deactivate(args.name)
       rows.delete(args.name)
+      invalidateHealth(args.name)
       persist()
       changes.refresh()
       return { ok: true, removed: true }
@@ -484,6 +877,12 @@ export function apply(ctx, config) {
     if (label === undefined) return undefined
     const record = tunnels.get(label)
     if (record === undefined || record.entry !== ENTRY_SUBDOMAIN) return undefined
+    // 晚信任/动态信任变更: 每次按当前 trustedHosts 复核首标签冲突, 冲突即不劫持入口
+    const clash = entryHostInConflict(label)
+    if (clash !== undefined) {
+      suspendConflictedHost(record, clash)
+      return undefined
+    }
     return { record, url: req.url }
   }
   const matchPathUpgrade = (req) => {
@@ -496,6 +895,55 @@ export function apply(ctx, config) {
   }
   // 代际令牌: 重载时新代先装载、旧代后回收, dispose 只清自己的载体
   const dispatch = (kind, req) => (kind === 'upgrade' ? (matchHost(req) ?? matchPathUpgrade(req)) : matchHost(req))
+  dispatch.sockets = new Set()
+  dispatch.hostSockets = hostSockets
+  dispatch.pathSockets = pathSockets
+  let trustTimer
+
+  // 处理路径与定时器都会调用: 冲突行挂起, 恢复行重新激活, 已被覆盖的 upgrade 立即断开。
+  // path 与 subdomain 走同一条重试路径: 激活失败的行在占位释放/信任面恢复后自动恢复。
+  const reconcileTrustedHosts = () => {
+    for (const row of rows.values()) {
+      if (row.enabled === false) continue
+      if (row.entry === ENTRY_SUBDOMAIN) {
+        const clash = entryHostInConflict(row.name)
+        if (clash !== undefined) {
+          const reason = conflictReason(row.name, clash)
+          if (tunnels.has(row.name)) suspendConflictedHost(row, clash)
+          else if (row.error !== reason) {
+            row.error = reason
+            changes.refresh()
+          }
+          continue
+        }
+      }
+      if (!tunnels.has(row.name) && row.error !== undefined) {
+        delete row.error
+        try {
+          activate(row)
+          changes.refresh()
+        } catch (error) {
+          row.error = String(error.message)
+        }
+      }
+    }
+    for (const [socket, name] of [...hostSockets]) {
+      if (entryHostInConflict(name) === undefined) continue
+      hostSockets.delete(socket)
+      socket.destroy()
+    }
+    if (hostSockets.size === 0 && trustTimer !== undefined) {
+      clearInterval(trustTimer)
+      trustTimer = undefined
+    }
+  }
+  // 周期核对只在有子域名 upgrade 连接时运行, 空载不占定时器
+  const startTrustWatch = () => {
+    if (trustTimer !== undefined || hostSockets.size === 0) return
+    trustTimer = setInterval(reconcileTrustedHosts, TRUST_RECONCILE_MS)
+    trustTimer.unref?.()
+  }
+  dispatch.watchTrust = startTrustWatch
   const timeoutOf = () => connectTimeoutMs
   webServer[DISPATCH_PROP] = dispatch
   webServer[TIMEOUT_PROP] = timeoutOf
@@ -519,8 +967,25 @@ export function apply(ctx, config) {
       console.warn(`${WARN_TAG}隧道 ${raw.name} 的 targetPort 为宿主监听端口 ${webServer.port}(自代理环), 已跳过`)
       continue
     }
-    const row = { name: raw.name, targetPort: raw.targetPort, entry: raw.entry ?? ENTRY_PATH, createdAt: raw.createdAt }
+    const row = {
+      name: raw.name,
+      targetPort: raw.targetPort,
+      entry: raw.entry ?? ENTRY_PATH,
+      enabled: raw.enabled !== false,
+      createdAt: raw.createdAt ?? null,
+    }
     rows.set(row.name, row)
+    if (row.enabled === false) continue
+    // 恢复同样按当前信任面判冲突: 磁盘行可能先于 trustedHosts 就绪落盘(晚信任),
+    // 此时激活会永久劫持入口; 行留盘并标 error, 下次激活重试。
+    if (row.entry === ENTRY_SUBDOMAIN) {
+      const clash = entryHostInConflict(row.name)
+      if (clash !== undefined) {
+        row.error = conflictReason(row.name, clash)
+        console.warn(`${WARN_TAG}隧道 ${row.name} 激活失败, 保留待下次激活重试: ${row.error}`)
+        continue
+      }
+    }
     try {
       activate(row)
     } catch (error) {
@@ -532,9 +997,9 @@ export function apply(ctx, config) {
   const tools = [
     defineTool({
       name: 'tunnel_open',
-      description: '打开穿透隧道, 把本机 targetPort 反向代理到 dsh 入口。entry=subdomain(有多个域名映射到 dsh 时首选): 子域名首标签命中隧道名即全路径全协议透传, 应用按根路径正常启动, 任意 WebSocket 路径可用, 访问地址 <name>.<你的域名>; 本机浏览器可用 <name>.localhost:<port>。entry=path: /p/<name>/ 子路径 strip 转发, 应用需支持子路径部署(vite --base / jupyter base_url / gradio root_path / streamlit baseUrlPath), 由你以正确 base 参数启动目标应用; WebSocket 任意路径同样可用, 无需声明。隧道名须至少含一个字母(纯数字名会与纯 IP 访问的首段撞上), 并避开 dsh 入口域名的首标签。',
+      description: '打开穿透隧道, 把本机 targetPort 反向代理到 dsh 入口。name 可省略, 自动生成 app-<port>。entry=subdomain(有多个域名映射到 dsh 时首选): 子域名首标签命中隧道名即全路径全协议透传, 应用按根路径正常启动, 任意 WebSocket 路径可用, 访问地址 <name>.<你的域名>; 本机浏览器可用 <name>.localhost:<port>。entry=path: /p/<name>/ 子路径 strip 转发, 应用需支持子路径部署(vite --base / jupyter base_url / gradio root_path / streamlit baseUrlPath), 由你以正确 base 参数启动目标应用; WebSocket 任意路径同样可用, 无需声明。返回 url(本机)与 lanUrl(同网段设备, 仅 path 入口)。',
       parameters: {
-        name: { type: 'string', required: true, description: '隧道名: 小写字母/数字/连字符, ≤32 位, 至少含一个字母' },
+        name: { type: 'string', description: '可选隧道名: 小写字母/数字/连字符, ≤32 位, 至少含一个字母; 省略则自动命名' },
         targetPort: { type: 'number', required: true, description: '目标本地端口 1..65535' },
         entry: { type: 'string', description: "'path'(默认, /p/<name> 子路径)或 'subdomain'(<name>.* 全路径透传)" },
       },
@@ -549,6 +1014,9 @@ export function apply(ctx, config) {
             path: { type: 'string' },
             host: { type: 'string' },
             port: { type: 'number' },
+            enabled: { type: 'boolean' },
+            url: { type: 'string' },
+            lanUrl: { type: 'string' },
             error: { type: 'string' },
           },
         },
@@ -560,8 +1028,10 @@ export function apply(ctx, config) {
     }),
     defineTool({
       name: 'tunnel_list',
-      description: '列出当前隧道(名称/入口形态/访问地址/目标端口/是否激活)。',
-      parameters: {},
+      description: '列出当前隧道(名称/入口形态/访问地址/目标端口/启用状态/运行期统计)。默认不探测目标; probe=true 时对每条活动隧道做一次 TCP 探活并返回 online/offline。',
+      parameters: {
+        probe: { type: 'boolean', description: '是否探测目标端口; 默认 false' },
+      },
       output: {
         schema: {
           type: 'object',
@@ -573,8 +1043,38 @@ export function apply(ctx, config) {
         },
         render: renderJson,
       },
-      async execute() {
-        return api.list()
+      async execute(args) {
+        return api.list(args ?? {})
+      },
+    }),
+    defineTool({
+      name: 'tunnel_ports',
+      description: '列出本机正在监听、可能适合开放为隧道的端口(端口/绑定地址/进程/是否候选/已使用的隧道名)。默认只返回开发候选; all=true 返回全部非系统监听。',
+      parameters: {
+        all: { type: 'boolean', description: '是否包含非候选的普通监听; 默认 false' },
+        refresh: { type: 'boolean', description: '绕过发现缓存重新扫描' },
+        limit: { type: 'number', description: '最多返回条数 1..50, 默认 20' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: true,
+          properties: {
+            ok: { type: 'boolean' },
+            supported: { type: 'boolean' },
+            reason: { type: 'string' },
+            scannedAt: { type: 'string' },
+            items: { type: 'array', items: { type: 'object', additionalProperties: true } },
+            truncated: { type: 'boolean' },
+          },
+        },
+        render: renderJson,
+      },
+      async execute(args) {
+        const limit = Number.isInteger(args?.limit) ? Math.min(50, Math.max(1, args.limit)) : 20
+        const result = await api.listPorts(args ?? {})
+        if (result.supported !== true) return { ...result, items: [], truncated: false }
+        return { ...result, items: result.items.slice(0, limit), truncated: result.items.length > limit }
       },
     }),
     defineTool({
@@ -613,13 +1113,14 @@ export function apply(ctx, config) {
   })
   ctx.on('loader/volatile-update', applyPreferences)
 
-  const UI_PREF_KEYS = ['aiTools', 'sidebarTab']
+  const UI_PREF_KEYS = ['aiTools']
   const uiBooleanError = (keys) => keys.join('/') + ' 须为布尔'
-  const readUi = () => ({ aiTools: aiToolsNow(), sidebarTab: readPref('sidebarTab') === true })
+  const readUi = () => ({ aiTools: aiToolsNow() })
   const persistPatch = async (patch) => {
     const svc = settingsRef.current
     if (svc) {
-      svc.update(SETTINGS_NS, patch)
+      // 落盘失败必须回给调用方(400), 不得成为未捕获 rejection 终止进程
+      await svc.update(SETTINGS_NS, patch)
       return true
     }
     const editor = ctx.get('configEditor')
@@ -646,14 +1147,15 @@ export function apply(ctx, config) {
     tunnelsApi: api,
     readUi,
     updateUi,
+    lanOrigin: () => lanOriginOf(webServer),
     logSystem: (line) => console.warn(`${WARN_TAG}${line}`),
   })
   ctx.effect(() => {
     const disposeApiRoute = webServer.register({
       kind: 'prefix',
       path: API_PREFIX,
-      // 管理面回问宿主闸门;转发面(/p/*)服务别的应用,不能拦
-      handler: withHostGate(ctx, async (req, res) => {
+      // 管理面回问宿主闸门并叠写路由门;转发面(/p/*)服务别的应用,不能拦
+      handler: withRouteGate(ctx, async (req, res) => {
         try {
           await restApi.handle(req, res)
         } catch (error) {
@@ -675,10 +1177,14 @@ export function apply(ctx, config) {
     // 载体置空即纯穿透: 监听层常驻, 禁用后全体原路放行; 只清本代令牌, 不误伤新代
     if (webServer[DISPATCH_PROP] === dispatch) webServer[DISPATCH_PROP] = undefined
     if (webServer[TIMEOUT_PROP] === timeoutOf) webServer[TIMEOUT_PROP] = undefined
-    const own = server[OWN_SOCKETS_PROP]
-    if (own instanceof Set) {
-      for (const socket of own) socket.destroy()
-      own.clear()
+    // 只回收本代接入的 upgrade socket: 新代连接在它自己的集合里, 不得误杀
+    if (trustTimer !== undefined) {
+      clearInterval(trustTimer)
+      trustTimer = undefined
     }
+    for (const socket of dispatch.sockets) socket.destroy()
+    dispatch.sockets.clear()
+    hostSockets.clear()
+    pathSockets.clear()
   }
 }

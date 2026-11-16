@@ -273,6 +273,13 @@ window.__ModuleLoader__.load({
           { className: 'kw-card' },
           React.createElement('div', { className: 'kw-card__head' }, React.createElement('span', { className: 'kw-card__title' }, '恢复项')),
           switchRow(
+            'enforceClosure',
+            '强制结案标记',
+            '正常结束的回合必须带 TASK_DONE / TASK_BLOCKED,改过文件必须 present;关闭后不再补发结案提醒,系统提示词不变',
+            config.enforceClosure !== false,
+            (next) => patch('enforceClosure', next),
+          ),
+          switchRow(
             'scanOnBoot',
             '重启后接着跑',
             '宿主启动时扫描上次没结案的会话',
@@ -296,7 +303,7 @@ window.__ModuleLoader__.load({
           switchRow(
             'classify',
             '区分永久错误',
-            '鉴权失败、余额不足、模型不存在这类重试无用的错误直接放弃',
+            '默认所有 API 错误都会重试;开启后只放弃上下文超限、参数非法等请求结构错误;鉴权、余额、模型不存在等上游级错误仍会重试',
             config.classify,
             (next) => patch('classify', next),
           ),
@@ -311,9 +318,10 @@ window.__ModuleLoader__.load({
             React.createElement('span', { className: 'kw-card__meta' }, '按触发原因分别配置'),
           ),
           textField('continueText', '出错后', config.continueText, (next) => patch('continueText', next)),
-          textField('continueTextInterrupted', '重启后', config.continueTextInterrupted, (next) =>
+          textField('continueTextInterrupted', '中断后', config.continueTextInterrupted, (next) =>
             patch('continueTextInterrupted', next),
           ),
+          textField('restartText', 'dsh 重启后', config.restartText, (next) => patch('restartText', next)),
           textField('continueTextSilent', '空回合', config.continueTextSilent, (next) =>
             patch('continueTextSilent', next),
           ),

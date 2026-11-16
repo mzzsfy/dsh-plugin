@@ -21,13 +21,57 @@ test.after(async () => {
 })
 
 const mod = await import('../src/index.js')
-const { apply, resolveDataDir } = mod
+const { apply, resolveDataDir, createRuntimeCache } = mod
+const { DEFAULT_MAX_CONCURRENT, DEFAULT_TICK_MS } = await import('../src/config.mjs')
 
 test('index:数据目录默认 ~/.dsh/cron-board,env 可覆盖', () => {
   assert.equal(resolveDataDir({}), join(homedir(), '.dsh', 'cron-board'))
   assert.equal(resolveDataDir({ DSH_CRON_BOARD_DATA_DIR: 'X:\\tmp\\cb' }), 'X:\\tmp\\cb')
   // 空白覆盖不生效,回默认
   assert.equal(resolveDataDir({ DSH_CRON_BOARD_DATA_DIR: '   ' }), join(homedir(), '.dsh', 'cron-board'))
+})
+
+test('P2-18: 装配失败即复位,后续请求重新装配(瞬时故障不熔断)', async () => {
+  // Given 首次装配抛错(磁盘不可用等瞬时故障)
+  let attempts = 0
+  const cache = createRuntimeCache(async () => {
+    attempts += 1
+    if (attempts === 1) throw new Error('数据目录不可写')
+    return { api: {}, scheduler: {} }
+  })
+  // When 首个请求
+  await assert.rejects(cache.get(), /数据目录不可写/)
+  // Then 下一次请求重新装配成功(旧实现保留 rejected promise,后续每请求立即失败)
+  assert.deepEqual(Object.keys(await cache.get()), ['api', 'scheduler'])
+  // Then 成功后同一实例复用,不再重复装配
+  await cache.get()
+  assert.equal(attempts, 2)
+})
+
+test('P2-18: 装配单例首连并发只装配一次', async () => {
+  let attempts = 0
+  const cache = createRuntimeCache(async () => {
+    attempts += 1
+    await new Promise((resolve) => setImmediate(resolve))
+    return attempts
+  })
+  const [a, b] = await Promise.all([cache.get(), cache.get()])
+  assert.deepEqual([a, b], [1, 1])
+  assert.equal(attempts, 1)
+})
+
+test('P3:设置项全部自带中文说明,logKeepPerJob 默认取常量不再写字面量', () => {
+  const schema = mod.Config
+  assert.ok(schema && schema.dict, 'Config 缺 schema dict')
+  // Then 每个设置项都有说明(设置页直接呈现 meta.description)
+  for (const [key, sub] of Object.entries(schema.dict)) {
+    assert.equal(typeof sub.meta?.description, 'string', key + ' 缺 description')
+    assert.ok(sub.meta.description.length > 0, key + ' 的 description 为空')
+  }
+  // Then 默认值与常量同源(改常量即改默认,两处字面量不再各自漂移)
+  assert.equal(schema.dict.logKeepPerJob.meta.default, mod.DEFAULT_LOG_KEEP_PER_JOB)
+  assert.equal(schema.dict.tickSeconds.meta.default, DEFAULT_TICK_MS / 1000)
+  assert.equal(schema.dict.maxConcurrent.meta.default, DEFAULT_MAX_CONCURRENT)
 })
 
 test('index:apply 注册 prefix 路由且请求走通(列表接口)', async () => {
@@ -68,6 +112,31 @@ test('index:apply 注册 prefix 路由且请求走通(列表接口)', async () =
   await handler(req, res)
   assert.equal(res.status, 404)
   assert.ok(res.payload.error)
+})
+
+test('index:写路由接线 withRouteGate——无 JSON content-type 的 POST 在业务面之前 400', async () => {
+  const routes = new Map()
+  const ctx = {
+    effect(fn) { fn() },
+    inject() {},
+    get() { return undefined },
+    webServer: {
+      register(route) {
+        routes.set(route.path, route.handler)
+        return () => {}
+      },
+    },
+  }
+  apply(ctx)
+  const handler = routes.get('/api/cron-board')
+  assert.ok(handler)
+  const res = { status: null, payload: null }
+  res.writeHead = (status) => { res.status = status }
+  res.end = (text) => { res.payload = JSON.parse(text) }
+  const req = { method: 'POST', url: 'http://localhost/api/cron-board/envs' }
+  await handler(req, res)
+  assert.equal(res.status, 400)
+  assert.match(res.payload.error, /content-type/)
 })
 
 // 装配桩:webServer + settings + timer + 会话服务,记录注册与 interval 形态
@@ -314,6 +383,7 @@ test('index:tick 到期任务被调度执行(端到端装配)', async (t) => {
     const req = new EventEmitter()
     req.method = 'POST'
     req.url = 'http://localhost' + path
+    req.headers = { 'content-type': 'application/json' }
     // 装配层初始化后才挂读体监听:桩事件须延后发射(真实 http 流自带缓冲,无此问题)
     setTimeout(() => {
       req.emit('data', Buffer.from(JSON.stringify(body)))
@@ -388,12 +458,21 @@ function makeRc17Ctx({ configStore = {}, configEditorAvailable = true, configure
     },
   }
   const effects = []
+  const listeners = new Map()
+  const intervals = []
   const ctx = {
     calls,
     fiber: { entry: { options: { id: 'cron-board', name: '@mzzsfy/dsh-cron-board' } } },
     effect(fn) {
       effects.push(fn)
       fn()
+    },
+    on(event, listener) {
+      listeners.set(event, listener)
+      return () => { if (listeners.get(event) === listener) listeners.delete(event) }
+    },
+    emit(event, ...args) {
+      listeners.get(event)?.(...args)
     },
     get(name) {
       if (name === 'settings') return settingsService
@@ -406,7 +485,13 @@ function makeRc17Ctx({ configStore = {}, configEditorAvailable = true, configure
     },
     inject(deps, fn) {
       if (deps[0] === 'timer') {
-        fn({ interval(intervalFn) { return () => {} } })
+        fn({
+          interval(intervalFn, ms) {
+            const entry = { fn: intervalFn, ms, disposed: false }
+            intervals.push(entry)
+            return () => { entry.disposed = true }
+          },
+        })
       }
       if (deps[0] === 'settings') {
         fn({
@@ -425,7 +510,7 @@ function makeRc17Ctx({ configStore = {}, configEditorAvailable = true, configure
       },
     },
   }
-  return { ctx, routes, config, configStore, calls, effects }
+  return { ctx, routes, config, configStore, calls, effects, intervals }
 }
 
 // ui-settings 请求走 prefix 路由(api.handle 按 method+segments 分发);
@@ -462,10 +547,27 @@ test('Config 导出契约:根级 volatile 包装,validate 产整节单 ref,默�
   assert.equal(section.logKeepPerJob, 200)
   assert.equal(section.maskEnvInPrompt, false)
   assert.equal(section.sidebarTab, false)
+  assert.equal(section.showAutomationTasks, false)
   // When 显式值校验
   // Then 值透传
-  const provided = mod.Config['~standard'].validate({ sidebarTab: true }).value.get()
+  const provided = mod.Config['~standard'].validate({ sidebarTab: true, showAutomationTasks: true }).value.get()
   assert.equal(provided.sidebarTab, true)
+  assert.equal(provided.showAutomationTasks, true)
+})
+
+test('0.1.7 形态:tickSeconds 经 loader/volatile-update 重建 interval', () => {
+  // Given 0.1.7 宿主:timer 按 30s 武装
+  const { ctx, config, intervals, configStore } = makeRc17Ctx({ configStore: { tickSeconds: 30 } })
+  apply(ctx, config)
+  assert.equal(intervals.length, 1)
+  assert.equal(intervals[0].ms, 30 * 1000)
+  // When 设置节热更(tickSeconds 30→60),loader 广播 volatile-update
+  configStore.tickSeconds = 60
+  ctx.emit('loader/volatile-update')
+  // Then 旧 interval 被释放,新 interval 按新周期武装
+  assert.equal(intervals.length, 2)
+  assert.equal(intervals[0].disposed, true)
+  assert.equal(intervals[1].ms, 60 * 1000)
 })
 
 test('0.1.7 形态:ui-settings GET 读 config 节值(ref 解包),非默认值', async (t) => {
@@ -483,6 +585,7 @@ test('0.1.7 形态:ui-settings GET 读 config 节值(ref 解包),非默认值', 
   // Then 返回 config 节值
   assert.equal(res.status, 200)
   assert.equal(res.payload.ui.sidebarTab, true)
+  assert.equal(res.payload.ui.showAutomationTasks, false)
 })
 
 test('0.1.7 形态:ui-settings POST 经 configEditor.edit 落 fiber.entry 且持久合并', async (t) => {

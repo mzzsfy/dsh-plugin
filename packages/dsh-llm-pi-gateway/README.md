@@ -15,22 +15,22 @@ dsh plugin --profile web add @mzzsfy/dsh-llm-pi-gateway
 | 协议 | gateway 行为 | 上游提取位置 |
 | --- | --- | --- |
 | Chat Completions (`openai-completions`) | 补 `session_id`、`x-client-request-id` 请求头，值为原始 DSH `sessionId` | request_header `session_id` 或 `x-client-request-id` |
-| Responses (`openai-responses`) | 原 options 透传，保留 pi-ai 原生行为 | 当前验证的 pi-ai 默认发送上述两个头及请求体顶层 `prompt_cache_key` |
+| Responses (`openai-responses`) | 原 options 透传，保留 pi-ai 原生行为 | 实测 pi-ai `1.5.2` 发送 `session-id`、`x-client-request-id` 头及请求体顶层 `prompt_cache_key` |
 | Anthropic Messages (`anthropic-messages`) | 注入派生 `metadata.user_id`，格式为 `<prefix>:<40 位小写十六进制>`，默认前缀 `dsh` | —(本包按 sessionId 本地派生后注入,不从上游提取；上游亲和以 Anthropic 服务端 metadata 策略为准) |
 
-Chat 补齐规则：仅在开关开启、owner 活跃、`sessionId` 为非空字符串且 `cacheRetention !== 'none'` 时生效。`options.headers` 和模型描述的 `model.headers` 中，大小写无关的显式同名键均优先，包括用于抑制头的 `null`；只补缺失键，不改写输入。请求中会发送原始 sessionId，规则沿用 Responses 的会话键语义。同会话多轮保持相同值，不同会话使用不同值。
+Chat 补齐规则：仅在开关开启、owner 活跃、`sessionId` 为非空字符串且 `cacheRetention !== 'none'` 时生效。`options.headers` 和模型描述的 `model.headers` 中，大小写无关的显式同名键均优先，包括用于抑制头的 `null`；只补缺失键，不改写输入。请求中会发送原始 sessionId（与 Responses 原生会话键同语义：裸会话 id，不是派生标记）；Chat 侧头名为 `session_id`，与 Responses 侧的 `session-id` 不同名。同会话多轮保持相同值，不同会话使用不同值。
 
-Responses 表中的原生键已在 DSH `0.2.1-rc.2`、pi-ai `1.3.0` 的通用自定义 endpoint 上验证；原生行为由宿主所带 pi-ai 决定（当前 0.2.2 线宿主随附 pi-ai 1.5.x）。该版本 `cacheRetention: 'none'` 会抑制这些自动键，关闭 gateway 开关不会关闭 Responses 原生行为。
+Responses 的原生键已在 DSH `0.2.2-rc.3` / pi-ai `1.5.2` 的通用自定义 endpoint 上验证（`session-id` + `x-client-request-id` 与顶层 `prompt_cache_key`）。0.8.1 留档在 pi-ai `1.3.0` 上按 `session_id` 断言通过，两代头名不同：探针按 `session_id ?? headers['session-id']` 兼容取键，文档以当前实测头名为准。原生行为由宿主所带 pi-ai 决定。该版本 `cacheRetention: 'none'` 会抑制这些自动键，关闭 gateway 开关不会关闭 Responses 原生行为。
 
-Anthropic 标记由 sessionId 派生，不包含原始 sessionId；同 owner 内同会话缓存标记，修改 prefix 后已见会话保留原值，新会话使用新前缀。它使用 Anthropic 的 metadata 字段，不构造 Claude Code 的账号身份格式。Chat 不新增 `metadata`、`prompt_cache_key`、`prompt_cache_retention`、`x-session-id` 或 `x-session-affinity`。
+Anthropic 标记由 sessionId 派生，不包含原始 sessionId；同 owner 内按 prefix+会话缓存标记（缓存有界，超上限按最久未用淘汰，被淘汰的会话按当前 prefix 重算），修改 prefix 后同一会话的下一轮请求即按新前缀重算（上游看到的标记随之变化，Chat 头不受影响）。它使用 Anthropic 的 metadata 字段，不构造 Claude Code 的账号身份格式。Chat 不新增 `metadata`、`prompt_cache_key`、`prompt_cache_retention`、`x-session-id` 或 `x-session-affinity`。
 
 上游亲和提取规则必须匹配实际字段。例如 `prompt_cache_key` 在请求体顶层，`metadata.prompt_cache_key` 无法提取它。字段到达上游只证明可供提取；实际路由亲和仍取决于上游规则、候选渠道和缓存状态。
 
 ## 装饰边界
 
-通过 `llm.directory` 中 `settingsNs === 'llm-pi-ai'` 的 entry 识别官方 route，以 `entry.provider` 查询 adapter registration 并核对 registration `provider.id`。原型 wrapper 为每次调用复制 snapshot；Models 可装饰时创建 Proxy facade，owner 仅绑定被授权的 adapter 实例。同原型的未授权实例和不同原型共享 Models 的实例均保持隔离。
+通过 `llm.directory` 中 `settingsNs === 'llm-pi-ai'` 的 entry 识别官方 route，以 `entry.provider` 查询 adapter registration 并核对 registration `provider.id`。原型 wrapper 为有活跃 owner 的调用复制 snapshot；Models 可装饰时创建 Proxy facade，facade 的 `streamSimple` 每次调用重新解析该 adapter 实例的活跃 owner，因此已保存的旧 facade 在 owner dispose 后旁路、reapply 后跟随新 owner。无活跃 owner 的调用（同原型未授权实例、owner dispose 后）直接以原 options 与原 snapshot 调用原始方法，不复制 snapshot、不建 facade。同原型的未授权实例和不同原型共享 Models 的实例均保持隔离。
 
-授权在 sweep 时累加，route 移除不立即撤销已授权实例，持续至所属 gateway dispose。adapter 原型缺少目标方法或不接受 shadow 时旁路；Models 不是对象或 streamSimple 不是函数时保留原 Models，不创建 facade。对已授权、活跃且开启注入的 Chat/Anthropic 请求，满足其余注入条件但缺有效 sessionId 时，按实际模型告警一次并透传；Responses 和未知协议始终由 gateway 原样透传。
+授权在 sweep 时累加，route 移除不立即撤销已授权实例，持续至所属 gateway dispose。原型 wrapper 的身份存于装饰缓存；缓存命中时核对原型方法仍是本 wrapper，被宿主或其他装饰器替换后按当前方法重新包装，避免注入静默失效；重复 sweep、同引用重复 patch 与省略 `isActive` 的重复 patch 均不重复登记 owner（缺省活性判定为模块级常量，与显式传入同一引用等价）。adapter 原型缺少目标方法或不接受 shadow 时旁路；`llm.adapters` 中 registration 缺失、为 null 或 adapter 非对象时跳过该条，不阻断其余官方 adapter 的 sweep。Models 不是对象或 streamSimple 不是函数时保留原 Models，不创建 facade。对已授权、活跃且开启注入的 Chat/Anthropic 请求，满足其余注入条件但缺有效 sessionId 时，按实际模型告警一次（去重表有界，淘汰后再出现才重复告警）并透传；Responses 和未知协议始终由 gateway 原样透传。
 
 ## 验证
 

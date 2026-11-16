@@ -30,14 +30,40 @@ test('上游返回429后同额度组后续调用不触达网络', async () => {
   executor.dispose()
 })
 
-test('实例配置 proxy 时 fetch 选项携带该代理 dispatcher', async () => {
+test('实例配置 proxy 时请求走 proxyFetch(undici.fetch)并携带 dispatcher', async () => {
+  const proxied = [], direct = []
+  const registry = createRegistry([{ descriptor, probe() {}, async quotes(req, ctx) { await ctx.fetch('http://fixture'); return { items: [] } } }])
+  const executor = createExecutor({ registry, budget: { reserve() {} }, env: { DSH_STOCK_TUSHARE_TOKEN: 'fake' }, fetch: (url, opts) => { direct.push(opts?.dispatcher ?? null); return Promise.resolve({}) }, proxyFetch: (url, opts) => { proxied.push(opts?.dispatcher || null); return Promise.resolve({}) }, proxyFactory: url => ({ proxyUrl: url }) })
+  await executor.run({ ...provider('a', 'fake'), proxy: 'http://127.0.0.1:7890' }, 'quotes', {})
+  assert.equal(proxied[0]?.proxyUrl, 'http://127.0.0.1:7890', '代理请求必须走 undici 自己的 fetch, 并带 dispatcher')
+  assert.equal(direct.length, 0, '带 dispatcher 的请求不得交给内置 fetch')
+  await executor.run(provider('b', 'fake'), 'quotes', {})
+  assert.equal(direct[0], null, '无代理实例改用内置 fetch 且不带 dispatcher')
+  assert.equal(proxied.length, 1)
+  executor.dispose()
+})
+
+test('P1-10 代理账号密码取自凭据服务并在运行时注入 URL', async () => {
   const seen = []
   const registry = createRegistry([{ descriptor, probe() {}, async quotes(req, ctx) { await ctx.fetch('http://fixture'); return { items: [] } } }])
-  const executor = createExecutor({ registry, budget: { reserve() {} }, env: { DSH_STOCK_TUSHARE_TOKEN: 'fake' }, fetch: (url, opts) => { seen.push(opts?.dispatcher || null); return Promise.resolve({}) }, proxyFactory: url => ({ proxyUrl: url }) })
-  await executor.run({ ...provider('a', 'fake'), proxy: 'http://127.0.0.1:7890' }, 'quotes', {})
-  assert.equal(seen[0]?.proxyUrl, 'http://127.0.0.1:7890', 'fetch option 带 dispatcher(内含代理 URL)')
-  await executor.run(provider('b', 'fake'), 'quotes', {})
-  assert.equal(seen[1], null, '无代理实例不带 dispatcher')
+  const secret = ['alice', 's3cret'].join(':')
+  const resolveCredential = async ref => ref === 'DSH_STOCK_PROXY' ? secret : undefined
+  const executor = createExecutor({ registry, budget: { reserve() {} }, env: {}, resolveCredential, fetch: (url, opts) => { seen.push(opts?.dispatcher || null); return Promise.resolve({}) }, proxyFetch: (url, opts) => { seen.push(opts?.dispatcher || null); return Promise.resolve({}) }, proxyFactory: url => ({ proxyUrl: url }) })
+  await executor.run({ ...provider('a', 'fake'), credentialRef: null, proxy: 'http://proxy.corp:8080', proxyCredentialRef: 'DSH_STOCK_PROXY' }, 'quotes', {})
+  const expected = new URL('http://proxy.corp:8080'); expected.username = 'alice'; expected.password = 's3cret'
+  assert.equal(seen[0]?.proxyUrl, expected.toString(), '账号密码只在 dispatcher URL 中出现')
+  // 凭据缺失时明确 AUTH, 不能悄悄直连
+  await assert.rejects(() => executor.run({ ...provider('b', 'fake'), credentialRef: null, proxy: 'http://proxy.corp:8080', proxyCredentialRef: 'MISSING_PROXY' }, 'quotes', {}), e => e.code === 'AUTH')
+  executor.dispose()
+})
+
+test('P2-63 成功请求后不残留超时定时器', async () => {
+  const pending = new Map(); let seq = 0
+  const timers = { setTimeout(fn, ms) { const id = ++seq; pending.set(id, { fn, ms }); return id }, clearTimeout(id) { pending.delete(id) } }
+  const registry = createRegistry([{ descriptor, probe() {}, async quotes(req, ctx) { await ctx.fetch('http://fixture'); return { items: [] } } }])
+  const executor = createExecutor({ registry, budget: { reserve() {} }, env: { DSH_STOCK_TUSHARE_TOKEN: 'fake' }, timers, fetch: async () => ({}) })
+  await executor.run(provider('a', 'fake'), 'quotes', {})
+  assert.equal(pending.size, 0, 'finally 必须清掉 controller 自己的 8 秒超时计时器')
   executor.dispose()
 })
 

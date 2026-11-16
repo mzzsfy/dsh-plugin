@@ -26,8 +26,10 @@ window.__ModuleLoader__.load({
     }
 
     // 与 package.json 同锁(仓库测试守):hello 首帧上报,也是消费方读取的版本面
-    const VERSION = '0.5.1'
-    // 帧协议版本:改动帧集合即递增,host 回支持集,无交集即停用总线
+    const VERSION = '0.5.2'
+    // 帧协议版本:改动帧集合即递增,host 回支持集,无交集即停用总线。
+    // browser 单文件模块不能 import src/protocol.mjs,字面量与该文件同值由
+    // test/protocol.test.mjs 锁;单边抬高会让本端协商无交集、静默停用总线
     const PROTOCOL = 1
 
     // Toast 持续时长与栈上限:展示期定值;突发事件裁剪最旧条目
@@ -36,7 +38,16 @@ window.__ModuleLoader__.load({
     // 非 sticky 条目将近乎永久驻留且无关闭按钮,超界值一律回落默认
     const HOLD_MS_MAX = 2 ** 31 - 1
     const TOAST_MAX = 4
-    const KINDS = ['info', 'ok', 'error']
+    const KINDS = ['info', 'ok', 'warn', 'error']
+    // 形态值域:消费方按 appearance 选择视觉形态,未知值回落默认 toast
+    const APPEARANCES = ['toast', 'panel', 'minimal', 'accent', 'progress']
+    // 状态图标内轮廓:同一 16px 圆里换笔画,配合 --dct-tone 的四种语义色区分事件
+    const ICON_PATHS = {
+      info: 'M8 7.2v4.4M8 5v.1',
+      ok: 'M5.2 8.2l2 2 3.6-4',
+      warn: 'M8 4.8v3.8M8 11v.1',
+      error: 'M5.6 5.6l4.8 4.8M10.4 5.6l-4.8 4.8',
+    }
     const HOST_ID = 'dsh-common-tools-toast-host'
     const STYLE_ID = 'dsh-common-tools-toast-style'
     // 层级假设的显式化:承诺"高于设置全屏层"绑定此值,宿主层级调整时回归核对
@@ -45,9 +56,10 @@ window.__ModuleLoader__.load({
     const TIP_Z_INDEX = 1100
 
     // 视觉令牌层:色彩、圆角、阴影一律经 --dct-* 引宿主语义别名,规则内不写裸色与 fallback;
-    // 状态只用 ok / danger 强调左侧边框,不给状态底色,避免状态底色与文字对比失效。
+    // 状态色只经左侧边框、accent 浅底与倒计时底部进度条表达,不覆盖文案颜色,避免状态底色与文字对比失效。
     // 尺码对齐宿主原生 toast(dsh-web-frontend ._toast_):14/22、radius-lg、padding 12/16、
     // max-width 640/48、内部 gap 10、top 40;插件只多加状态色边与关闭按钮。
+    // 形态(toast/panel/minimal/accent/progress)只改视觉密度与强调方式,不改堆叠位置与文案结构。
     const CSS = [
       '.dsh-toast-stack { position:fixed; left:50%; top:40px; transform:translateX(-50%); z-index:' + TOAST_Z_INDEX + ';',
       '  display:flex; flex-direction:column; align-items:center; gap:8px; pointer-events:none;',
@@ -55,8 +67,9 @@ window.__ModuleLoader__.load({
       '  --dct-panel-bg:var(--dsw-alias-bg-layer-1); --dct-text:var(--dsw-alias-label-primary);',
       '  --dct-border:var(--dsw-alias-border-l2);',
       '  --dct-ok:var(--dsw-alias-state-success-primary); --dct-danger:var(--dsw-alias-state-error-primary);',
+      '  --dct-warn:var(--dsw-alias-state-warn-primary); --dct-accent:var(--dsw-alias-brand-primary);',
       '  --dct-hover:var(--dsw-alias-interactive-bg-hover); --dct-focus:var(--dsw-alias-state-business-primary);',
-      '  --dct-radius-sm:var(--dsw-radius-sm); --dct-radius-lg:var(--dsw-radius-lg);',
+      '  --dct-radius-sm:var(--dsw-radius-sm); --dct-radius-md:var(--dsw-radius-md); --dct-radius-lg:var(--dsw-radius-lg);',
       '  --dct-shadow:var(--dsw-shadow-lv3); }',
       '.dsh-toast { pointer-events:auto; box-sizing:border-box; display:flex; align-items:safe center; gap:10px;',
       '  width:max-content; max-width:min(640px, calc(100vw - 48px)); max-height:60vh; overflow:auto; overflow-wrap:anywhere;',
@@ -64,12 +77,34 @@ window.__ModuleLoader__.load({
       '  border-radius:var(--dct-radius-lg); box-shadow:var(--dct-shadow);',
       '  background:var(--dct-bg); color:var(--dct-label);',
       '  font-family:inherit; font-size:14px; line-height:22px;',
+      '  --dct-tone:var(--dct-accent); --dct-hold-ms:' + TOAST_HOLD_MS + 'ms;',
       '  animation:dsh-toast-in 0.18s ease-out; }',
       '.dsh-toast--panel { background:var(--dct-panel-bg); color:var(--dct-text); border:1px solid var(--dct-border); border-inline-start-width:4px; }',
-      '.dsh-toast--ok { border-inline-start-color:var(--dct-ok); }',
-      '.dsh-toast--error { border-inline-start-color:var(--dct-danger); }',
+      '.dsh-toast--info { --dct-tone:var(--dct-accent); }',
+      '.dsh-toast--ok { --dct-tone:var(--dct-ok); border-inline-start-color:var(--dct-tone); }',
+      '.dsh-toast--warn { --dct-tone:var(--dct-warn); border-inline-start-color:var(--dct-tone); }',
+      '.dsh-toast--error { --dct-tone:var(--dct-danger); border-inline-start-color:var(--dct-tone); }',
+      // 极简细条:无阴影无描边,只留 2px 状态竖线,字号与留白各降一档,和卡片类形态拉开密度差
+      '.dsh-toast--minimal { background:var(--dct-panel-bg); color:var(--dct-text); box-shadow:none;',
+      '  border:0; border-inline-start:2px solid var(--dct-tone); border-radius:var(--dct-radius-sm);',
+      '  font-size:12px; line-height:18px; padding:6px 10px; gap:6px; max-width:min(480px, calc(100vw - 48px)); }',
+      // 状态强调:状态色 14% 掺入面板底并整圈描边,图标换成状态色徽章,不靠左侧竖线
+      '.dsh-toast--accent { background:color-mix(in srgb, var(--dct-tone) 14%, var(--dct-panel-bg)); color:var(--dct-text);',
+      '  border:1px solid var(--dct-tone); border-radius:var(--dct-radius-md); font-weight:500; }',
+      '.dsh-toast--accent .dsh-toast__icon { width:24px; height:24px; margin-top:0; border-radius:var(--dct-radius-sm);',
+      '  background:color-mix(in srgb, var(--dct-tone) 12%, transparent); }',
+      // 倒计时:面板形态 + 底部状态色进度条,左侧不再重复状态色;消退动画只挂在带展示期的 countdown 修饰类上,
+      // 展示期由消费方 holdMs 经内联 --dct-hold-ms 传入,常驻条目停在满格
+      '.dsh-toast--progress { background-color:var(--dct-panel-bg); color:var(--dct-text); border:1px solid var(--dct-border);',
+      '  border-radius:var(--dct-radius-md);',
+      '  background-image:linear-gradient(var(--dct-tone), var(--dct-tone)); background-repeat:no-repeat;',
+      '  background-position:left bottom; background-size:100% 3px; }',
+      '.dsh-toast--countdown { animation:dsh-toast-in 0.18s ease-out, dsh-toast-drain var(--dct-hold-ms) linear forwards; }',
       '.dsh-toast--click { cursor:pointer; }',
       '.dsh-toast__text { white-space:pre-line; min-width:0; }',
+      // 图标是形态的主要区分点:面板/强调/倒计时带图标,原生浮条与极简细条不显示
+      '.dsh-toast__icon { flex:none; align-self:flex-start; margin-top:3px; display:inline-flex; align-items:center; justify-content:center; color:var(--dct-tone); }',
+      '.dsh-toast--toast .dsh-toast__icon, .dsh-toast--minimal .dsh-toast__icon { display:none; }',
       '.dsh-toast__close { flex:none; display:inline-flex; align-items:center; min-height:24px;',
       '  border:0; background:transparent; color:inherit; cursor:pointer;',
       '  font-family:inherit; font-size:14px; font-weight:500; line-height:22px; padding:0 8px;',
@@ -77,6 +112,8 @@ window.__ModuleLoader__.load({
       '.dsh-toast__close:hover { background:var(--dct-hover); }',
       '.dsh-toast__close:focus-visible { outline:2px solid var(--dct-focus); outline-offset:2px; }',
       '@keyframes dsh-toast-in { from { transform:translateY(-8px); opacity:0; } to { transform:translateY(0); opacity:1; } }',
+      '@keyframes dsh-toast-drain { from { background-size:100% 3px; } to { background-size:0% 3px; } }',
+      // 减弱动态:下方 .dsh-toast 的 animation:none 按源序覆盖倒计时动画,进度条停在满格
       '@media (prefers-reduced-motion: reduce) { .dsh-toast { animation:none; } }',
       // 通用悬浮提示:定位与视觉迁移自 dsh-usage-dash 的 .ud-tip(1:1 同构,类名改 dct-)
       // 提示 portal 到 body,不在 .dsh-toast-stack 内,故令牌自带于规则上,不依赖 toast 作用域
@@ -113,6 +150,10 @@ window.__ModuleLoader__.load({
       return KINDS.indexOf(kind) >= 0 ? kind : 'info'
     }
 
+    function normalizeAppearance(appearance) {
+      return APPEARANCES.indexOf(appearance) >= 0 ? appearance : 'toast'
+    }
+
     // 展示期:sticky 常驻不计时;非 sticky 取调用方有限正值,否则默认
     // (Infinity / 超钳位上界的值经浏览器 WebIDL 钳为约 24.8 天,近乎永久驻留,
     // 与展示期意图相反,必须拦;Node 语义才是溢出钳 1ms,勿混)
@@ -141,13 +182,15 @@ window.__ModuleLoader__.load({
     }
 
     // 入栈即返回单调 id;超上限裁最旧(含 sticky,极端场景下错误提示让位于新通知),
-    // 被裁条目的自动消失计时同步撤销;非 sticky 条目入栈即挂自动消失计时
+    // 被裁条目的自动消失计时同步撤销;非 sticky 条目入栈即挂自动消失计时。
+    // 展示期记在条目上:倒计时形态按同一时长驱动进度条,视觉与自动消失同源
     function show(text, opts) {
       if (typeof text !== 'string' || text.trim() === '') return null
       const sticky = Boolean(opts && opts.sticky)
       const onClick = typeof (opts && opts.onClick) === 'function' ? opts.onClick : undefined
-      const appearance = opts?.appearance === 'panel' ? 'panel' : 'toast'
-      const entry = { id: ++seq, text, kind: normalizeKind(opts && opts.kind), appearance, sticky, onClick, timer: undefined }
+      const appearance = normalizeAppearance(opts?.appearance)
+      const holdMs = sticky ? undefined : resolveHoldMs(opts)
+      const entry = { id: ++seq, text, kind: normalizeKind(opts && opts.kind), appearance, holdMs, sticky, onClick, timer: undefined }
       const merged = items.concat(entry)
       if (merged.length > TOAST_MAX) {
         for (const dropped of merged.slice(0, merged.length - TOAST_MAX)) clearTimer(dropped)
@@ -160,7 +203,7 @@ window.__ModuleLoader__.load({
       } catch (error) {
         console.warn('dsh-common-tools(toast): 容器挂载失败,待下次触发自愈: ' + (error instanceof Error ? error.message : String(error)))
       }
-      if (!sticky) entry.timer = setTimeout(() => dismiss(entry.id), resolveHoldMs(opts))
+      if (!sticky) entry.timer = setTimeout(() => dismiss(entry.id), holdMs)
       return entry.id
     }
 
@@ -244,11 +287,19 @@ window.__ModuleLoader__.load({
       const activate = item.onClick === undefined
         ? undefined
         : () => { dismiss(item.id); item.onClick() }
+      // 倒计时形态把本条展示期交给 CSS 动画,其余形态不挂内联样式;常驻条目无展示期,不加修饰类
+      const countdown = item.appearance === 'progress' && item.holdMs !== undefined
+      const style = countdown ? { '--dct-hold-ms': item.holdMs + 'ms' } : undefined
       return h('div', {
-        className: 'dsh-toast dsh-toast--' + item.kind + ' dsh-toast--' + item.appearance + (activate !== undefined ? ' dsh-toast--click' : ''),
+        className: 'dsh-toast dsh-toast--' + item.kind + ' dsh-toast--' + item.appearance + (countdown ? ' dsh-toast--countdown' : '') + (activate !== undefined ? ' dsh-toast--click' : ''),
         role: 'alert',
+        style,
         onClick: activate,
       },
+        h('span', { className: 'dsh-toast__icon', 'aria-hidden': 'true' },
+          h('svg', { viewBox: '0 0 16 16', width: 16, height: 16, fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round' },
+            h('circle', { cx: 8, cy: 8, r: 6.2 }),
+            h('path', { d: ICON_PATHS[item.kind] }))),
         h('span', { className: 'dsh-toast__text' }, item.text),
         item.sticky
           ? h('button', {
@@ -268,6 +319,8 @@ window.__ModuleLoader__.load({
     const CONNECT_TIMEOUT_MS = 10 * 1000
     // 旧 host 收到未知帧即关连接:hello 发出后在此窗内被关即判定为老帧模式
     const HELLO_GRACE_MS = 3000
+    // UTF-8 字节长按协议消息计算:编码器单例复用,避免每帧 new TextEncoder
+    const TEXT_ENCODER = new TextEncoder()
     const busState = (window.__dshCommonToolsBus ??= {
       socket: null, owners: new Set(), subscriptions: new Set(), ready: new Set(), retry: null, timeout: null, attempts: 0, revision: 0, closing: false,
       // hello: idle 未探测 / sent 已发待回 / ok 已协商 / legacy 旧 host 无需探测 / unsupported 协议无交集
@@ -290,10 +343,20 @@ window.__ModuleLoader__.load({
       try { Promise.resolve(callback(...args)).catch(warn) } catch (error) { warn(error) }
     }
 
+    // 根 payload 可序列化判定:帧对象由本模块构造,根 payload 是唯一业务键,其余
+    // 键值不受调用方控制;JSON.stringify 丢弃 undefined/函数/Symbol 值后根 payload
+    // 键不出现,故复用生成文本判定即可,不解析整帧(发送热路径)。不变量:根 payload
+    // 在文本中以 `"payload":` 出现当且仅当它被真正序列化。
+    function assertSerializablePayload(value, text) {
+      if (Object.hasOwn(value, 'payload') && !text.includes('"payload":')) {
+        throw new TypeError('common-tools: payload 必须可序列化为 JSON')
+      }
+    }
+
     function send(frame) {
       const text = JSON.stringify(frame)
-      if (Object.hasOwn(frame, 'payload') && !Object.hasOwn(JSON.parse(text), 'payload')) throw new TypeError('common-tools: payload 必须可序列化为 JSON')
-      if (new TextEncoder().encode(text).length + busState.socket.bufferedAmount > MAX_BYTES) {
+      assertSerializablePayload(frame, text)
+      if (TEXT_ENCODER.encode(text).length + busState.socket.bufferedAmount > MAX_BYTES) {
         throw new Error('common-tools: 消息或发送积压超过上限')
       }
       busState.socket.send(text)
@@ -519,13 +582,65 @@ window.__ModuleLoader__.load({
       return { left, top, side, arrowX }
     }
 
+    // 定位度量缓存:面板查询、边界矩形与提示尺寸只在会话开始/布局变化时重算,
+    // 指针移动全部命中缓存,避免每次 mousemove 做全文档查询与强制布局。
+    function createTipMetrics(panelSelector) {
+      let panel = null
+      let bounds = null
+      let size = null
+      // 面板元素解析单点:面板被移除/替换后下次取用时重查,ResizeObserver 也观察它
+      const panelElement = () => {
+        if (panel === null || panel.isConnected === false) {
+          panel = panelSelector && typeof document !== 'undefined' ? document.querySelector(panelSelector) : null
+        }
+        return panel
+      }
+      return {
+        selector: panelSelector,
+        panelElement,
+        measure(tip, fresh = false) {
+          if (!fresh && size !== null) return size
+          const next = { width: tip.offsetWidth, height: tip.offsetHeight }
+          size = size !== null && size.width === next.width && size.height === next.height ? size : next
+          return size
+        },
+        panelBounds(fresh = false) {
+          if (!fresh && bounds !== null) return bounds
+          const element = panelElement()
+          const rect = element ? element.getBoundingClientRect() : null
+          if (rect && rect.width > 0) {
+            // 面板可能比视口大或部分滚出视口:夹取边界必须同时受视口约束,
+            // 否则提示会落在面板可见区域之外
+            bounds = {
+              left: Math.max(rect.left, 0),
+              top: Math.max(rect.top, 0),
+              right: Math.min(rect.right, window.innerWidth),
+              bottom: Math.min(rect.bottom, window.innerHeight),
+            }
+          } else {
+            bounds = { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight }
+          }
+          return bounds
+        },
+      }
+    }
+
+    // ResizeObserver 可能缺失(旧 WebView/测试夹具):缺失时退化为窗口 resize 与内容变化重测
+    function createTipResizeObserver(callback) {
+      return typeof ResizeObserver === 'function' ? new ResizeObserver(callback) : null
+    }
+
     function Tooltip({ anchor, children, panelSelector }) {
       const tipRef = useRef(null)
+      const metricsRef = useRef(null)
       const [pos, setPos] = useState(null)
       const [shown, setShown] = useState(false)
       const hasContent = children != null && (!Array.isArray(children) || children.length > 0)
       const active = Boolean(anchor && hasContent)
       const pointerMode = anchor?.kind === 'point'
+      if (metricsRef.current === null || metricsRef.current.selector !== panelSelector) {
+        metricsRef.current = createTipMetrics(panelSelector)
+      }
       // 提示可能先于任何 toast 出现:样式注入不能依赖 toast mount;
       // 用 layout effect 在首帧绘制前注入,避免首次 hover 无样式一闪
       useLayoutEffect(() => {
@@ -535,49 +650,48 @@ window.__ModuleLoader__.load({
         const timer = setTimeout(() => setShown(active), active ? TIP_SHOW_DELAY_MS : TIP_HIDE_DELAY_MS)
         return () => clearTimeout(timer)
       }, [active])
-      const placeAt = useCallback((at) => {
+      const placeAt = useCallback((at, fresh = false) => {
         const tip = tipRef.current
         if (!tip || !at) return
-        // 面板存在时以面板为夹取边界,提示不飘出弹窗;面板外场景用视口
-        const panel = panelSelector && typeof document !== 'undefined' ? document.querySelector(panelSelector) : null
-        const panelRect = panel ? panel.getBoundingClientRect() : null
-        const bounds = panelRect && panelRect.width > 0
-          ? panelRect
-          : { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight }
-        const next = tipPlacement(at, { width: tip.offsetWidth, height: tip.offsetHeight }, bounds)
+        const metrics = metricsRef.current
+        const next = tipPlacement(at, metrics.measure(tip, fresh), metrics.panelBounds(fresh))
         setPos((prev) => (prev && next && prev.left === next.left && prev.top === next.top
           && prev.side === next.side && prev.arrowX === next.arrowX ? prev : next))
-      }, [panelSelector])
-      const place = useCallback(() => placeAt(anchor), [placeAt, anchor])
+      }, [])
+      const place = useCallback((fresh) => placeAt(anchor, fresh === true), [placeAt, anchor])
       useLayoutEffect(() => {
-        place()
-      }, [place, shown])
-      // 指针模式由 mousemove 直接定位:同一元素内移动也跟手,且每帧只提交一次位置
+        place(true)
+      }, [place, shown, children])
+      // 指针模式由 mousemove 直接定位:同一元素内移动也跟手,位置经度量缓存复用
       useEffect(() => {
         if (!pointerMode) return undefined
         const onMove = (event) => placeAt({ kind: 'point', x: event.clientX, y: event.clientY })
         window.addEventListener('mousemove', onMove)
         return () => window.removeEventListener('mousemove', onMove)
       }, [pointerMode, placeAt])
+      // 滚动与缩放只接一处定位监听;元素锚点是快照,滚动即失效,收起即可,不做无用定位
       useEffect(() => {
         if (!anchor) return undefined
-        window.addEventListener('scroll', place, true)
-        window.addEventListener('resize', place)
-        const observer = new ResizeObserver(() => place())
-        if (tipRef.current) observer.observe(tipRef.current)
-        return () => {
-          window.removeEventListener('scroll', place, true)
-          window.removeEventListener('resize', place)
-          observer.disconnect()
-        }
-      }, [place, anchor])
-      // 元素锚点是快照:滚动后原矩形失效,直接收起,重新悬停时由消费方给新矩形
-      useEffect(() => {
-        if (!anchor || pointerMode) return undefined
-        const onScroll = () => setShown(false)
+        const onResize = () => place(true)
+        const onScroll = pointerMode ? () => place(true) : () => setShown(false)
+        window.addEventListener('resize', onResize)
         window.addEventListener('scroll', onScroll, true)
-        return () => window.removeEventListener('scroll', onScroll, true)
-      }, [anchor, pointerMode])
+        return () => {
+          window.removeEventListener('resize', onResize)
+          window.removeEventListener('scroll', onScroll, true)
+        }
+      }, [place, anchor, pointerMode])
+      // 提示节点可能随 active 切换或内容替换重建:每次渲染重连观察器,
+      // 确保新节点与面板节点都被观察,而不是只观察首次 effect 时的旧节点
+      useEffect(() => {
+        if (!anchor) return undefined
+        const observer = createTipResizeObserver(() => place(true))
+        if (!observer) return undefined
+        if (tipRef.current) observer.observe(tipRef.current)
+        const panel = metricsRef.current.panelElement()
+        if (panel) observer.observe(panel)
+        return () => observer.disconnect()
+      })
       const visible = shown && pos !== null && active
       if (!active) return null
       const box = h('div', {

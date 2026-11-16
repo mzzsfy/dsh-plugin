@@ -183,8 +183,45 @@ test('用量阈值: 读数 utilization 缺失的窗口跳过评估不崩', () =>
   const reading = { kind: 'quota', windows: [{ label: '5小时', utilization: null, resetsAt: 'T1' }] }
   // When 评估该账号
   const result = evaluateAccount({ account: quotaAccount(reading), rule, state, seq: 1, ts: 1000 })
-  // Then 无事件无异常
+  // Then 无事件无异常,峰值保持 null 而非 Number(null)=0
   assert.equal(result.events.length, 0)
+  assert.equal(result.state.windows['5小时'].peak, null)
+})
+
+// P2-04:上游偶发缺 resetTime 不得丢轮转基线,否则该窗口此后永久解除武装
+test('窗口重置: resetsAt 一时缺失保留旧基线,恢复后仍能识别新窗口并重新武装', () => {
+  // Given 阈值 90,首轮 92 触发解除武装,基线 T1
+  const rule = { quotaThresholdPct: 90, balanceThreshold: null, resetNotice: true }
+  let state = createNotifyState()
+  state = evaluateAccount({ account: quotaAccount(quotaReading(92, 'T1')), rule, state, seq: 1, ts: 1000 }).state
+  // When 某轮上游缺 resetTime(null)
+  const glitched = evaluateAccount({ account: quotaAccount(quotaReading(5, null)), rule, state, seq: 2, ts: 2000 })
+  // Then 不误报重置、不覆盖旧基线、不改变武装状态
+  assert.equal(glitched.events.length, 0)
+  assert.equal(glitched.state.windows['5小时'].resetsAt, 'T1', '缺失读数不得覆盖已知基线')
+  assert.equal(glitched.state.windows['5小时'].armed, false)
+  // When resetTime 恢复且确实轮转到 T2
+  const rotated = evaluateAccount({ account: quotaAccount(quotaReading(5, 'T2')), rule, state: glitched.state, seq: 3, ts: 3000 })
+  // Then 识别轮转、报告上一窗口峰值并重新武装,配额通知不会永久失效
+  assert.equal(rotated.events.length, 1)
+  assert.equal(rotated.events[0].kind, KIND_RESET)
+  assert.equal(rotated.events[0].text, '[dsh] 账号A 5小时窗口已重置,上一窗口峰值用量 92%')
+  assert.equal(rotated.state.windows['5小时'].armed, true)
+  assert.equal(rotated.state.windows['5小时'].resetsAt, 'T2')
+})
+
+test('窗口重置: 旧状态 resetsAt 为 null 而本次恢复值时按疑似轮转重新武装', () => {
+  // Given 旧版本落库的窗口状态:resetsAt 已丢、已解除武装、峰值 88
+  const rule = { quotaThresholdPct: 90, balanceThreshold: null, resetNotice: true }
+  const state = { windows: { '5小时': { resetsAt: null, peak: 88, armed: false } }, balanceArmed: true }
+  // When 本次读数带回 resetTime 且利用率回落
+  const next = evaluateAccount({ account: quotaAccount(quotaReading(10, 'T1')), rule, state, seq: 1, ts: 1000 })
+  // Then 按疑似轮转报告上一窗口峰值并重新武装,不继续永久静默
+  assert.equal(next.events.length, 1)
+  assert.equal(next.events[0].kind, KIND_RESET)
+  assert.equal(next.events[0].text, '[dsh] 账号A 5小时窗口已重置,上一窗口峰值用量 88%')
+  assert.equal(next.state.windows['5小时'].armed, true)
+  assert.equal(next.state.windows['5小时'].peak, 10)
 })
 
 // ---- 余额阈值沿触发 ----
@@ -366,36 +403,17 @@ test('投影: 环形容量截断与 TTL 过期', () => {
   assert.deepEqual(projection.list().map((unit) => unit.id), ['c'])
 })
 
-test('投影: push 递增版本, wait 在版本追平时挂起至唤醒或超时', async () => {
+test('投影: push 递增版本,快照返回全量(无挂起通道)', () => {
   // Given 空投影
   const projection = createProjection({})
-  // Then 初始版本为 0
   assert.equal(projection.version(), 0)
-  // When push 一条后以落后 cursor 挂起
-  projection.push({ id: 'a', ts: 1 })
-  assert.equal(await projection.wait(0, 60 * 1000), 1, '版本已超前 cursor 应立即返回')
-  // When 以追平 cursor 挂起再 push 第二条;绑定短 timer 防唤醒失效退化为超时假绿
-  const pending = projection.wait(1, 60 * 1000)
-  const raceGuard = new Promise((resolve) => { setTimeout(() => resolve('timeout'), 500) })
-  projection.push({ id: 'b', ts: 2 })
-  // Then 挂起在唤醒而非超时路径收尾,且版本单调
-  assert.equal(await Promise.race([pending.then(() => 'woken'), raceGuard]), 'woken')
-  assert.equal(await pending, 2)
-})
-
-test('投影: wait 超时以当前版本收尾, dispose 唤醒全部等待者', async () => {
-  // Given 空投影与两个挂起等待者
-  const projection = createProjection({})
-  const timeoutMs = 10
-  const timedOut = projection.wait(0, timeoutMs)
-  const disposed = projection.wait(0, 60 * 1000)
-  const raceGuard = new Promise((resolve) => { setTimeout(() => resolve('timeout'), 500) })
-  // When 超时窗口经过后 dispose
-  assert.equal(await timedOut, 0, '超时应以当前版本收尾不报错')
-  projection.dispose()
-  // Then 剩余等待者在 dispose 即被唤醒(非等满超时)
-  assert.equal(await Promise.race([disposed.then(() => 'woken'), raceGuard]), 'woken')
-  assert.equal(await disposed, 0)
+  // When push 两条(时间戳用当前时刻,避免读侧 TTL 清理)
+  const now = Date.now()
+  projection.push({ id: 'a', ts: now })
+  projection.push({ id: 'b', ts: now })
+  // Then 版本单调递增且列表为全量
+  assert.equal(projection.version(), 2)
+  assert.deepEqual(projection.list().map((unit) => unit.id), ['a', 'b'])
 })
 
 test('认领决策: 无锁认领 / 有效他锁跳过 / 过期锁接管 / done 终态', () => {
@@ -452,6 +470,32 @@ test('sendWebhook: HTTP 失败不抛出, 错误随结果返回(fire-and-forget �
   assert.match(result.detail, /unreachable/)
 })
 
+// 终验缺陷 3:目标地址的 userinfo 会随上游错误信息进 detail,测试投递把明细回给面板
+test('sendWebhook: 错误明细里的目标地址 userinfo 不进 detail', async () => {
+  const user = 'hook-user-' + 'secret'
+  const pass = 'hook-pass-' + 'secret'
+  const url = 'https://' + user + ':' + pass + '@hooks.example.com/a'
+  const result = await sendWebhook({ url, payload: {}, fetchImpl: async () => { throw new Error('connect failed: ' + url) } })
+  assert.equal(result.ok, false)
+  assert.equal(result.detail.includes(user), false, '用户名位凭据不得进 detail')
+  assert.equal(result.detail.includes(pass), false, '密码位凭据不得进 detail')
+  assert.equal(result.detail.includes('[已隐藏]'), true)
+  // 存量不可解析地址同样按文本形态兜底脱敏
+  const legacy = 'https://' + user + ':' + pass + '@'
+  const legacyResult = await sendWebhook({ url: legacy, payload: {}, fetchImpl: async () => { throw new Error('invalid target ' + legacy) } })
+  assert.equal(legacyResult.detail.includes(user), false, '不可解析地址的用户名位凭据同样要遮住')
+  assert.equal(legacyResult.detail.includes(pass), false, '不可解析地址的密码位凭据同样要遮住')
+})
+
+test('webhookUrl 校验: 拒绝带 userinfo 的地址, 合法地址照常通过', () => {
+  const url = 'https://' + 'hook-user-' + 'secret' + ':' + 'hook-pass-' + 'secret' + '@hooks.example.com/a'
+  const rejected = validateNotifyPatch({ webhookUrl: url })
+  assert.equal(rejected.ok, false)
+  assert.match(rejected.reason, /不含用户信息/)
+  assert.equal(validateNotifyPatch({ webhookUrl: 'https://hooks.example.com/a' }).ok, true)
+  assert.equal(validateNotifyPatch({ webhookUrl: '' }).ok, true)
+})
+
 test('读侧归一: 残缺配置回退默认值', () => {
   // Given 字段类型异常的 settings 读数
   const resolved = resolvedNotifySettings({ enabled: 'yes', quotaThresholdPct: -5, balanceThreshold: 'x', imTargets: 'bad', webhookUrl: 42 })
@@ -463,15 +507,18 @@ test('读侧归一: 残缺配置回退默认值', () => {
   assert.equal(resolved.webhookUrl, '')
 })
 
-test('面板回显: publicNotify 返回 webhookUrl 原文', () => {
+test('面板回显: publicNotify 只回显 webhook 已配置标记,不回传目标地址', () => {
   // Given 已配置 webhook 的归一配置
   const resolved = resolvedNotifySettings({ webhookUrl: 'https://hooks.example.com/private' })
   // When 转面板可见形态
   const view = publicNotify(resolved)
-  // Then 原文随响应回显, webhookConfigured 已移除
-  assert.equal(view.webhookUrl, 'https://hooks.example.com/private')
-  assert.equal('webhookConfigured' in view, false)
+  // Then 地址不出现, 仅凭布尔标记表达已配置
+  assert.equal(view.webhookConfigured, true)
+  assert.equal('webhookUrl' in view, false)
+  assert.equal(JSON.stringify(view).includes('hooks.example.com'), false)
   assert.equal(view.toast, true)
+  // 未配置时标记为 false
+  assert.equal(publicNotify(resolvedNotifySettings({})).webhookConfigured, false)
 })
 
 test('botId 校验: 合法字符集与长度', () => {

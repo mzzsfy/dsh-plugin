@@ -97,9 +97,11 @@ test('诊断_开启_按周期上报', () => {
   clock.advance(1)
   assert.equal(fetchCalls.length, 1)
   const { url, options } = fetchCalls[0]
-  assert.ok(url.startsWith('/api/dsh-bug-perf/diag?d='))
+  assert.equal(url, '/api/dsh-bug-perf/diag')
+  assert.equal(options.method, 'POST')
   assert.equal(options.keepalive, true)
-  const payload = JSON.parse(decodeURIComponent(url.slice(url.indexOf('?d=') + 3)))
+  assert.equal(options.headers['content-type'], 'application/json')
+  const payload = JSON.parse(options.body)
   assert.equal(typeof payload.at, 'number')
   assert.equal(payload.path, '/chat')
   assert.equal(typeof payload.totals.opened, 'number')
@@ -162,4 +164,54 @@ test('诊断_上报异步失败_静默', async () => {
   plugin.__test.startDiagReporting({ win: notOk.win, clock, diag: notOkDiag, options: { enabled: true, reportEvery: 1 } })
   assert.doesNotThrow(() => clock.advance(plugin.__test.DIAG_SAMPLE_MS))
   await Promise.resolve()
+})
+
+function fakeSocketClass() {
+  return class FakeSocket {
+    static CONNECTING = 0
+    static OPEN = 1
+    static CLOSING = 2
+    static CLOSED = 3
+    constructor(url) {
+      this.url = String(url)
+      this.readyState = 1
+      this.sent = []
+      this.listeners = new Map()
+    }
+    send(data) { this.sent.push(String(data)) }
+    addEventListener(type, fn) {
+      const list = this.listeners.get(type) ?? []
+      list.push(fn)
+      this.listeners.set(type, list)
+    }
+    dispatch(type, event) {
+      for (const fn of this.listeners.get(type) ?? []) fn(event)
+    }
+  }
+}
+
+// Given 页面反复建立会话流连接, When 连接数超过诊断上限, Then sockets 按环形缓冲淘汰旧条目
+test('诊断_连接统计_环形上限', () => {
+  const plugin = loadPlugin()
+  const clock = fakeClock()
+  const FakeSocket = fakeSocketClass()
+  const win = { WebSocket: FakeSocket, location: { href: 'https://dsh.example/' } }
+  const diag = plugin.__test.createDiag(clock)
+  const installed = plugin.__test.installSocketKeepAlive({
+    win,
+    options: { enabled: true, intervalMs: 1500 },
+    clock,
+    diag,
+  })
+  assert.equal(installed.installed, true)
+  const total = plugin.__test.DIAG_MAX_SOCKETS + 5
+  for (let index = 0; index < total; index += 1) {
+    const socket = new win.WebSocket('/api/remote.mux')
+    socket.dispatch('close', { code: 1000 })
+  }
+  assert.equal(diag.sockets.length, plugin.__test.DIAG_MAX_SOCKETS)
+  assert.equal(diag.totals.opened, total)
+  assert.equal(diag.totals.closed, total)
+  assert.ok(diag.sockets.every((socket) => socket.closed === true))
+  installed.dispose()
 })

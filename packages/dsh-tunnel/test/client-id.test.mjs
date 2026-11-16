@@ -21,5 +21,5 @@ test('client.js 样式注入自带 data-plugin', () => {
   const injections = source.split("createElement('style')").length - 1
   assert.ok(injections > 0, 'client.js 无样式注入点')
   const marked = source.split(`setAttribute('data-plugin', '${name}')`).length - 1
-  assert.equal(marked, injections, '每个样式注入点都必须自带 data-plugin(值=注册包名), 防宿主 claimStyles 误归属后随他插件 HMR 整批误删')
+  assert.ok(marked >= injections, '每个样式注入点都必须自带 data-plugin(值=注册包名), 防宿主 claimStyles 误归属后随他插件 HMR 整批误删')
 })

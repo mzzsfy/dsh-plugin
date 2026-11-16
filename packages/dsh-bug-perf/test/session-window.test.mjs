@@ -141,6 +141,17 @@ test('历史窗口_安装_实现以服务实例为receiver', async () => {
   assert.equal(calls[0].signal, signal)
 })
 
+// 调用方经转发对象调用时 receiver 必须原样传下去: 宿主按 invocation 逐项过滤时会按实例身份判定
+test('历史窗口_安装_保留调用方receiver', async () => {
+  const { controller, calls } = makeController()
+  const { ctx } = makeContext(controller)
+  installSessionWindow(ctx, { isEnabled: () => true, readWindow: () => WINDOW })
+  const delegate = { page: controller.page, follow: controller.follow, events: controller.events }
+  await delegate.page(hostRequest(), undefined)
+  assert.equal(calls[0].receiver, delegate)
+  assert.equal(calls[0].request.maxMessages, 200)
+})
+
 test('历史窗口_安装_非首参原样转发', async () => {
   const { controller, calls } = makeController()
   const signal = new AbortController().signal
@@ -202,6 +213,25 @@ test('历史窗口_重复安装_不叠加包装', async () => {
   await controller.follow(hostRequest(), undefined)
   assert.equal(calls.length, 1)
   assert.equal(calls[0].request.maxMessages, 500)
+})
+
+// HMR 两代重叠: 新代看到活跃 marker 不能直接放弃, 旧代卸载后必须由新代接管窗口限制
+test('历史窗口_HMR两代重叠_旧代卸载后新代接管', async () => {
+  const { controller, calls } = makeController()
+  const original = controller.page
+  const first = makeContext(controller)
+  installSessionWindow(first.ctx, { isEnabled: () => true, readWindow: () => WINDOW })
+  const firstPatched = controller.page
+  const second = makeContext(controller)
+  installSessionWindow(second.ctx, { isEnabled: () => true, readWindow: () => ({ maxMessages: 120, minMessages: 20, minTurns: 1 }) })
+  assert.equal(controller.page, firstPatched, '旧代仍活跃时新代不得叠加包装')
+  first.disposers.forEach((dispose) => dispose())
+  assert.notEqual(controller.page, firstPatched, '旧代卸载后新代必须接管')
+  await controller.page(hostRequest(), undefined)
+  assert.equal(calls[0].request.maxMessages, 120)
+  assert.deepEqual(calls[0].request.turnWindow, { minMessages: 20, minTurns: 1 })
+  second.disposers.forEach((dispose) => dispose())
+  assert.equal(controller.page, original)
 })
 
 test('历史窗口_卸载_不误删后来者的包装', async () => {

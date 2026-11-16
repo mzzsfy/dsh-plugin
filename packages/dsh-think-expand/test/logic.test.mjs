@@ -21,7 +21,7 @@ function clientLogic() {
   const factory = new Function(
     '"use strict";'
       + section
-      + '; return { STATE_RUNNING, STATE_OK, createRegistry, plan, planFinal, registerCurrent, capMap, capSet, needsReattach, SEEN_MAP_CAP, EXPANDED_CAP, prefixOf, matchMark, findSeenKey, isCurrent, putSeen, findRow, PIN_THRESHOLD_PX, isPinned, shouldPinRestore, createToolsRegistry, planTools };',
+      + '; return { STATE_RUNNING, STATE_OK, createRegistry, plan, planFinal, hasForeignExpandedRow, registerCurrent, capMap, capSet, needsReattach, SEEN_MAP_CAP, EXPANDED_CAP, prefixOf, matchMark, findSeenKey, isCurrent, isTakeoverRow, putSeen, findRow, PIN_THRESHOLD_PX, isPinned, shouldPinRestore, createToolsRegistry, planTools };',
   )
   return factory()
 }
@@ -37,7 +37,7 @@ const collapseOf = (result, index) =>
   result.actions.filter((a) => a.index === index && a.kind === 'collapse').length
 
 function defineScenarios(prefix, L) {
-  const { createRegistry, plan, planFinal, registerCurrent, STATE_RUNNING, STATE_OK, capMap, needsReattach, SEEN_MAP_CAP, PIN_THRESHOLD_PX, isPinned, shouldPinRestore, createToolsRegistry, planTools, putSeen } = L
+  const { createRegistry, plan, planFinal, hasForeignExpandedRow, registerCurrent, STATE_RUNNING, STATE_OK, capMap, needsReattach, SEEN_MAP_CAP, PIN_THRESHOLD_PX, isPinned, shouldPinRestore, createToolsRegistry, planTools, putSeen } = L
 
   // 滚动度量构造:{ scrollHeight, scrollTop, clientHeight }
   const metrics = (scrollHeight, scrollTop, clientHeight) => ({ scrollHeight, scrollTop, clientHeight })
@@ -172,6 +172,16 @@ function defineScenarios(prefix, L) {
     assert.equal(reg.read.size, 1)
   })
 
+  test(prefix + '插件展开记录仍在但 current 缺失:闩锁收起不得登记已读', () => {
+    const reg = createRegistry()
+    reg.expanded.add(5)
+    // 目标行曾由插件展开(expanded 记录),但 current 已丢失;宿主重置 aria 收起
+    // 且闩锁仍在,应重展开而不是按已读永久压制
+    const result = plan(reg, [row(OK, 'A', false, true, true, 5)])
+    assert.equal(expandOf(result, 0), 1)
+    assert.equal(reg.read.size, 0)
+  })
+
   test(prefix + '流式结束保留展开', () => {
     const reg = createRegistry()
     plan(reg, [row(RUNNING, 'A')])
@@ -231,7 +241,7 @@ function defineScenarios(prefix, L) {
     assert.equal(expandOf(result, 2), 1)
   })
 
-  test(prefix + '尾部兜底:存在手动展开行不收手动行,且不再开目标(单条约束让位手动)', () => {
+  test(prefix + '尾部兜底:存在手动展开行时收起插件行且不开目标(手动意图优先)', () => {
     const reg = createRegistry()
     plan(reg, [row(OK, 'A'), row(OK, 'B')])
     const result = plan(reg, [row(OK, 'A', true, true, false, 7), row(OK, 'B', true, true, true)])
@@ -373,6 +383,27 @@ function defineScenarios(prefix, L) {
     assert.equal(normal.actions.length, 0)
   })
 
+  test(prefix + '手动行与新末行并存:插件不收回手动行,新目标仍展开', () => {
+    const reg = createRegistry()
+    // 用户先手动展开较旧行:识别为 manual,插件不干预
+    const manual = plan(reg, [row(OK, '旧行', true, true, false, 3)])
+    assert.equal(manual.actions.length, 0)
+    assert.equal(reg.manual.size, 1)
+    // 新末行出现:插件展开新行,手动行保持展开(两行并存,手动行不计入单条约束)
+    const next = plan(reg, [row(OK, '旧行', true, true, false, 3), row(RUNNING, '新行', false, true, false, 4)])
+    assert.equal(collapseOf(next, 0), 0)
+    assert.equal(expandOf(next, 1), 1)
+  })
+
+  test(prefix + '首扫守卫:非末条展开行阻止末行自动展开', () => {
+    const rows = [row(OK, '旧行', true), row(OK, '末行')]
+    assert.equal(hasForeignExpandedRow(rows, (item) => item.headable), true)
+    assert.equal(hasForeignExpandedRow([row(OK, '末行', true)], (item) => item.headable), false)
+    assert.equal(hasForeignExpandedRow([], (item) => item.headable), false)
+    const result = planFinal(rows)
+    assert.equal(result.actions.length, 0)
+  })
+
   test(prefix + '打开会话展开最后一条', () => {
     const result = planFinal([row(OK, 'A'), row(OK, 'B')])
     assert.equal(expandOf(result, 1), 1)
@@ -461,6 +492,17 @@ function defineScenarios(prefix, L) {
     assert.equal(collapseOf(result, 0), 0)
   })
 
+  test(prefix + '工具机:current 缺失时手动展开行仍先登记 manual,不被目标收编', () => {
+    const reg = createToolsRegistry()
+    const result = planTools(reg, [
+      toolRow(true, true, false, 3),
+      toolRow(false, true, false, 4),
+    ])
+    assert.equal(reg.manual.size, 1, '手动行不依赖 current 是否在场')
+    assert.equal(collapseOf(result, 0), 0, '手动行不得被收编收起')
+    assert.equal(expandOf(result, 1), 1)
+  })
+
   test(prefix + '工具机:插件展开旧行被新目标行接管收起', () => {
     const reg = createToolsRegistry()
     const first = planTools(reg, [toolRow(false, true, false, 1)])
@@ -507,11 +549,14 @@ function defineScenarios(prefix, L) {
     assert.equal(reg.current, null)
   })
 
-  test(prefix + '工具机:suppressManual 首扫既存展开行视为中性', () => {
+  test(prefix + '工具机:suppressManual 首扫既存展开行视为中性且不登记 current', () => {
     const reg = createToolsRegistry()
     const result = planTools(reg, [toolRow(true, true, false, 9)], { suppressManual: true })
     assert.equal(result.actions.length, 0)
     assert.equal(reg.manual.size, 0)
+    assert.equal(reg.current, null, '首扫既存展开行不得登记为插件 current')
+    assert.equal(reg.marks.size, 0)
+    assert.equal(reg.expanded.size, 0)
   })
 
   test(prefix + '工具机:与思考机状态互不串扰(独立 registry)', () => {
@@ -589,7 +634,7 @@ function logicInternals() {
   const factory = new Function(
     '"use strict";'
       + stripped
-      + '; return { prefixOf, matchMark, findSeenKey, isCurrent, putSeen, findRow };',
+      + '; return { prefixOf, matchMark, findSeenKey, isCurrent, isTakeoverRow, putSeen, findRow };',
   )
   return factory()
 }
@@ -601,14 +646,14 @@ test('LOGIC 段与 logic.mjs 逐函数源码一致(归一化注释与空白,含�
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/\/\/[^\n]*/g, '')
     .replace(/\s+/g, '')
-  for (const name of ['plan', 'planFinal', 'createRegistry', 'capMap', 'needsReattach', 'registerCurrent', 'isPinned', 'shouldPinRestore', 'createToolsRegistry', 'planTools']) {
+  for (const name of ['plan', 'planFinal', 'hasForeignExpandedRow', 'createRegistry', 'capMap', 'capSet', 'needsReattach', 'registerCurrent', 'isPinned', 'shouldPinRestore', 'createToolsRegistry', 'planTools']) {
     assert.equal(
       normalize(client[name].toString()),
       normalize(logic[name].toString()),
       'LOGIC 段与 logic.mjs 漂移: ' + name,
     )
   }
-  for (const name of ['prefixOf', 'matchMark', 'findSeenKey', 'isCurrent', 'putSeen', 'findRow']) {
+  for (const name of ['prefixOf', 'matchMark', 'findSeenKey', 'isCurrent', 'isTakeoverRow', 'putSeen', 'findRow']) {
     assert.equal(
       normalize(client[name].toString()),
       normalize(internals[name].toString()),

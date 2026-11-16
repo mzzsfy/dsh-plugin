@@ -10,6 +10,16 @@ export const WEBHOOK_TIMEOUT_MS = 10 * 1000
 // 容差内视为同窗口静默跟随
 export const RESET_DRIFT_TOLERANCE_MS = 60 * 1000
 
+// 读数转数值:null/undefined/空串/布尔视为缺失(NaN),避免 Number(null)/Number('') 变 0
+function finiteNumber(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : NaN
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : NaN
+  }
+  return NaN
+}
+
 export const KIND_QUOTA = 'quota'
 export const KIND_BALANCE = 'balance'
 export const KIND_RESET = 'reset'
@@ -57,7 +67,7 @@ export function normalizeNotifyState(raw) {
     state.windows[label] = {
       resetsAt: typeof entry.resetsAt === 'string' ? entry.resetsAt : null,
       // peak=null 是"无峰值"语义,不得经 Number(null) 伪装成 0
-      peak: entry.peak === null || entry.peak === undefined ? null : (Number.isFinite(Number(entry.peak)) ? Number(entry.peak) : null),
+      peak: entry.peak === null || entry.peak === undefined ? null : (Number.isFinite(finiteNumber(entry.peak)) ? finiteNumber(entry.peak) : null),
       armed: entry.armed !== false,
     }
   }
@@ -67,7 +77,8 @@ export function normalizeNotifyState(raw) {
 const PERCENT_BASE = 100
 
 // 窗口轮转判定:resetsAt 数值差超容差才算轮转;parse 失败无法证伪,保守按轮转。
-// 容差内静默跟随,峰值与武装状态不重建
+// 容差内静默跟随,峰值与武装状态不重建。任一侧缺失不在此函数判定:
+// 缺失读数不覆盖已知基线,旧基线为 null 而新值出现时按疑似轮转处理(见 evaluateQuota)。
 function windowRotated(prevResetsAt, resetsAt) {
   const driftMs = Math.abs(Date.parse(resetsAt) - Date.parse(prevResetsAt))
   return !(Number.isFinite(driftMs) && driftMs < RESET_DRIFT_TOLERANCE_MS)
@@ -93,14 +104,19 @@ function evaluateQuota({ account, rule, state, reading, events, next }) {
   for (const window of reading.windows || []) {
     const label = String(window.label || '')
     if (label.length === 0) continue
-    const utilization = Number(window.utilization)
-    const resetsAt = typeof window.resetsAt === 'string' ? window.resetsAt : null
+    // 缺失读数不得经 Number(null)/Number('') 伪装成 0:显式判空后转数值,非法值按无读数跳过
+    const utilization = finiteNumber(window.utilization)
+    const incomingResetsAt = typeof window.resetsAt === 'string' ? window.resetsAt : null
     const prev = state.windows[label] || null
+    const prevResetsAt = prev !== null && typeof prev.resetsAt === 'string' ? prev.resetsAt : null
+    // 上游偶发缺 resetTime 时保留已知基线,否则基线丢失后轮转判定永久失效(配额通知解除武装)
+    const resetsAt = incomingResetsAt === null && prev !== null ? prevResetsAt : incomingResetsAt
     let armed = prev === null ? true : prev.armed !== false
     let peak = prev === null ? null : prev.peak
-    // 窗口轮转:两侧 resetsAt 均有效、字符串不等且数值差超容差;上一窗口峰值随 reset 事件上报
-    if (prev !== null && resetsAt !== null && prev.resetsAt !== null && prev.resetsAt !== resetsAt
-      && windowRotated(prev.resetsAt, resetsAt)) {
+    // 窗口轮转:两侧都有值时比较数值漂移;旧基线缺失而本次恢复值时按疑似轮转重新武装
+    const rotated = prev !== null && resetsAt !== null &&
+      (prevResetsAt === null || (prevResetsAt !== resetsAt && windowRotated(prevResetsAt, resetsAt)))
+    if (rotated) {
       if (rule.resetNotice !== false && prev.peak !== null) {
         events.push({
           kind: KIND_RESET,
@@ -135,9 +151,9 @@ function evaluateQuota({ account, rule, state, reading, events, next }) {
 // 可用余额口径:remaining 优先,缺失(null/undefined 同视)回落 total
 // (deepseek 无 remaining,total 即余额);null 不得经 Number() 伪装成 0。
 function availableOf(entry) {
-  const remaining = entry.remaining === null || entry.remaining === undefined ? NaN : Number(entry.remaining)
+  const remaining = finiteNumber(entry.remaining)
   if (Number.isFinite(remaining)) return remaining
-  const total = entry.total === null || entry.total === undefined ? NaN : Number(entry.total)
+  const total = finiteNumber(entry.total)
   return Number.isFinite(total) ? total : null
 }
 
@@ -146,7 +162,8 @@ function evaluateBalance({ account, rule, state, reading, events, next }) {
   const entry = (reading.entries || []).find((item) => availableOf(item) !== null)
   if (entry === undefined || rule.balanceThreshold === null || rule.balanceThreshold === undefined) return
   const available = availableOf(entry)
-  const threshold = Number(rule.balanceThreshold)
+  const threshold = finiteNumber(rule.balanceThreshold)
+  if (!Number.isFinite(threshold)) return
   let armed = state.balanceArmed !== false
   if (armed && available <= threshold) {
     armed = false
@@ -219,13 +236,61 @@ export function imBoundBotIds(list) {
 }
 
 const WEBHOOK_SCHEMES = ['https:', 'http:']
+const REDACTED = '[已隐藏]'
+
+// 非空 userinfo 视为凭据(https://token:@host 的 token 在用户名位),按两段各自收集
+function urlUserInfoSecrets(value) {
+  if (typeof value !== 'string' || value.length === 0) return []
+  try {
+    const parsed = new URL(value)
+    const secrets = []
+    for (const part of [parsed.username, parsed.password]) {
+      if (part.length === 0) continue
+      secrets.push(part)
+      try {
+        const decoded = decodeURIComponent(part)
+        if (decoded !== part) secrets.push(decoded)
+      } catch {
+        // 百分号编码非法时只保留原形态
+      }
+    }
+    return secrets
+  } catch {
+    // 存量配置可能有不可解析的地址:按文本形态兜底收集 userinfo 段
+    const match = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#\s@]+)@/.exec(value)
+    if (match === null) return []
+    const secrets = [match[1]]
+    for (const part of match[1].split(':')) {
+      if (part.length === 0) continue
+      secrets.push(part)
+      try {
+        const decoded = decodeURIComponent(part)
+        if (decoded !== part) secrets.push(decoded)
+      } catch {
+        // 百分号编码非法时只保留原形态
+      }
+    }
+    return secrets
+  }
+}
+
+// 上游错误信息可能原样带回目标地址:进 detail 前遮住 userinfo 凭据
+function redactUserInfo(text, url) {
+  if (typeof text !== 'string' || text.length === 0) return text
+  let out = text
+  for (const secret of urlUserInfoSecrets(url)) out = out.split(secret).join(REDACTED)
+  return out
+}
 
 function isValidWebhookUrl(value) {
   if (typeof value !== 'string') return false
   const trimmed = value.trim()
   if (trimmed.length === 0) return true
   try {
-    return WEBHOOK_SCHEMES.indexOf(new URL(trimmed).protocol) >= 0
+    const parsed = new URL(trimmed)
+    if (WEBHOOK_SCHEMES.indexOf(parsed.protocol) < 0) return false
+    // userinfo 会随投递地址进错误明细与日志,且不属于 webhook 的正常形态:直接拒绝
+    return parsed.username.length === 0 && parsed.password.length === 0
   } catch {
     return false
   }
@@ -262,7 +327,7 @@ export function validateNotifyPatch(patch) {
     next.toast = patch.toast
   }
   if ('webhookUrl' in patch) {
-    if (!isValidWebhookUrl(patch.webhookUrl)) return { ok: false, reason: 'webhookUrl 须为 http(s) URL 或空串' }
+    if (!isValidWebhookUrl(patch.webhookUrl)) return { ok: false, reason: 'webhookUrl 须为不含用户信息的 http(s) URL 或空串' }
     next.webhookUrl = String(patch.webhookUrl).trim()
   }
   if ('imTargets' in patch) {
@@ -306,18 +371,10 @@ export function normalizeAccountNotify(raw) {
 // ---- 投影 / 认领 / webhook(turn-notify 同构语义) ----
 
 // 通知投影:环形容量 + 读取时过期清理;now 注入便于测试。
-// version 单调递增支撑长轮询:push 与 bump 各递增一次并唤醒全部等待者,
-// wait 在无更新版本时挂起至唤醒或超时,超时与 dispose 均以当前版本收尾不报错。
+// 读侧恒为全量快照,变更通知由公共 WS 总线承担(长轮询已废除,不保留挂起通道)。
 export function createProjection({ capacity = PROJECTION_CAPACITY, ttlMs = PROJECTION_TTL_MS, now = Date.now }) {
   const ring = []
   let version = 0
-  const waiters = new Set()
-  const settle = (waiter) => {
-    clearTimeout(waiter.timer)
-    waiters.delete(waiter)
-    waiter.resolve(version)
-  }
-  const wakeAll = () => { for (const waiter of [...waiters]) settle(waiter) }
   return {
     push(unit) {
       const current = now()
@@ -325,22 +382,8 @@ export function createProjection({ capacity = PROJECTION_CAPACITY, ttlMs = PROJE
       ring.push(unit)
       while (ring.length > capacity) ring.shift()
       version += 1
-      wakeAll()
-    },
-    bump() {
-      version += 1
-      wakeAll()
     },
     version: () => version,
-    wait(cursor, timeoutMs) {
-      if (version > cursor) return Promise.resolve(version)
-      return new Promise((resolve) => {
-        const waiter = { resolve, timer: null }
-        waiter.timer = setTimeout(() => settle(waiter), timeoutMs)
-        waiters.add(waiter)
-      })
-    },
-    dispose: wakeAll,
     list() {
       const current = now()
       while (ring.length > 0 && current - ring[0].ts > ttlMs) ring.shift()
@@ -381,18 +424,21 @@ export function buildWebhookPayload(unit) {
 
 // webhook 直发:未配置跳过;任何失败不抛出(fire-and-forget,不重试)。
 // 返回真实投递结果供测试按钮呈现,真实通知路径以 void 忽略。
-export async function sendWebhook({ url, payload, fetchImpl = fetch }) {
+export async function sendWebhook({ url, payload, fetchImpl = fetch, signal }) {
   if (typeof url !== 'string' || url.trim().length === 0) return { ok: false, detail: '未配置 webhook' }
   try {
+    const timeoutSignal = AbortSignal.timeout(WEBHOOK_TIMEOUT_MS)
+    const requestSignal = signal === undefined ? timeoutSignal : AbortSignal.any([signal, timeoutSignal])
     const response = await fetchImpl(url.trim(), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
+      signal: requestSignal,
     })
     return { ok: response.ok, detail: 'HTTP ' + response.status }
   } catch (error) {
-    return { ok: false, detail: error && error.message ? error.message : String(error) }
+    const message = error && error.message ? error.message : String(error)
+    return { ok: false, detail: redactUserInfo(message, url) }
   }
 }
 
@@ -401,10 +447,10 @@ export function resolvedNotifySettings(raw) {
   const source = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
   const fallback = defaultNotifySettings()
   const bool = (value, fallbackValue) => (typeof value === 'boolean' ? value : fallbackValue)
-  const pct = Number(source.quotaThresholdPct)
+  const pct = finiteNumber(source.quotaThresholdPct)
   const balance = source.balanceThreshold === null || source.balanceThreshold === undefined
     ? null
-    : Number(source.balanceThreshold)
+    : finiteNumber(source.balanceThreshold)
   return {
     enabled: bool(source.enabled, fallback.enabled),
     quotaThresholdPct: Number.isFinite(pct) && pct > 0 && pct <= PERCENT_BASE ? pct : fallback.quotaThresholdPct,
@@ -416,7 +462,8 @@ export function resolvedNotifySettings(raw) {
   }
 }
 
-// 面板可见配置:webhookUrl 原文随响应回显,面板所见即所存。
+// 面板可见配置:webhookUrl 属 secret,响应只回显是否已配置,不把目标地址交给浏览器;
+// 修改需重新输入完整地址,清除走显式空串写入
 export function publicNotify(resolved) {
   return {
     enabled: resolved.enabled,
@@ -425,7 +472,7 @@ export function publicNotify(resolved) {
     resetNotice: resolved.resetNotice,
     toast: resolved.toast,
     imTargets: resolved.imTargets,
-    webhookUrl: resolved.webhookUrl,
+    webhookConfigured: typeof resolved.webhookUrl === 'string' && resolved.webhookUrl.trim().length > 0,
   }
 }
 

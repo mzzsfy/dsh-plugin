@@ -5,7 +5,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, readFile, writeFile, readdir } from 'node:fs/promises'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
@@ -159,6 +159,28 @@ function response() {
   return state
 }
 
+test('进程树终止:taskkill spawn 带 windowsHide/error 监听,spawn 失败不冒泡', skipMissingDeps, () => {
+  const { killTree } = indexModule
+  const calls = []
+  const listeners = {}
+  const fakeChild = {
+    on(event, listener) { listeners[event] = listener; return fakeChild },
+    unref() {},
+  }
+  const spawnImpl = (command, args, options) => {
+    calls.push({ command, args, options })
+    return fakeChild
+  }
+  killTree(4321, { spawnImpl, platform: 'win32' })
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].command, 'taskkill')
+  assert.deepEqual(calls[0].args, ['/pid', '4321', '/T', '/F'])
+  assert.equal(calls[0].options.windowsHide, true, 'taskkill 不得闪窗')
+  assert.equal(typeof listeners.error, 'function', '必须监听 spawn error,否则 ENOENT 成为未捕获异常')
+  assert.doesNotThrow(() => listeners.error(new Error('ENOENT')))
+  assert.doesNotThrow(() => killTree(1, { spawnImpl: () => { throw new Error('spawn failed') }, platform: 'win32' }))
+})
+
 // ── 历史输入路由(GET /api/context/inputs;工作区持久缓存)──
 
 function getRequest(query) {
@@ -178,6 +200,7 @@ function getRequest2(url, method) {
 function request(sessionId, method = 'POST') {
   const req = new EventEmitter()
   req.method = method
+  req.headers = { 'content-type': 'application/json' }
   if (method !== 'GET') {
     process.nextTick(() => {
       req.emit('data', Buffer.from(JSON.stringify({ sessionId })))
@@ -212,12 +235,13 @@ function makeHistoryCtx() {
   })
 }
 
-// 后台对齐是异步的:轮询等待响应满足条件(默认 aligned 翻真,可断言数据就绪)
+// 后台对齐是异步的:轮询等待响应满足条件(默认 aligned 翻真,可断言数据就绪)。
+// predicate 可为异步(如等待缓存文件被清除),每轮之间留 100ms 给后台车道推进
 async function requestUntil(handlers, query, predicate, maxMs = 3000) {
   for (let waited = 0; waited <= maxMs; waited += 100) {
     const res = response()
     await handlers.get('/api/context/inputs')(getRequest(query), res)
-    if (predicate(res.body)) return res
+    if (await predicate(res.body)) return res
     await new Promise((resolve) => setTimeout(resolve, 100))
   }
   throw new Error('条件未满足: ' + query)
@@ -232,6 +256,7 @@ async function postJson(handlers, routePath, body) {
   const req = new EventEmitter()
   req.method = 'POST'
   req.url = routePath
+  req.headers = { 'content-type': 'application/json' }
   const res = response()
   const done = handlers.get(routePath)(req, res)
   req.emit('data', Buffer.from(JSON.stringify(body), 'utf8'))
@@ -240,11 +265,12 @@ async function postJson(handlers, routePath, body) {
   return res
 }
 
-// POST 原始体夹具:发非法 JSON 用
-async function postRaw(handlers, routePath, raw) {
+// POST 原始体夹具:发非法 JSON / 非 JSON content-type 用
+async function postRaw(handlers, routePath, raw, headers = { 'content-type': 'application/json' }) {
   const req = new EventEmitter()
   req.method = 'POST'
   req.url = routePath
+  req.headers = headers
   const res = response()
   const done = handlers.get(routePath)(req, res)
   req.emit('data', Buffer.from(raw, 'utf8'))
@@ -372,6 +398,43 @@ test('历史输入路由:工作区缓存已存在时,当前会话范围只做本
   })
 })
 
+test('历史输入路由:session 范围取 extracts 全集,不受工作区 200 条截断', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async (cacheDir) => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'cx-hist-extract-'))
+    const artifactPath = path.join(dir, 's1.jsonl.zstd')
+    await writeFile(artifactPath, 'log-bytes')
+    try {
+      const { stat } = await import('node:fs/promises')
+      const info = await stat(artifactPath)
+      const full = Array.from({ length: HISTORY_INPUT_LIMIT + 30 }, (_, index) => ({ text: '会话输入' + index, at: index + 1 }))
+      await ensureCacheDir(cacheDir)
+      // 全局 entries 已按工作区 200 条截断:老会话 s1 只剩最早一条;
+      // 该会话全量在 extracts.s1.entries(每会话独立指纹记录)
+      await writeWorkspaceCache(cacheDir, 'C:\\x', {
+        entries: [{ text: '会话输入0', at: 1, sid: 's1' }],
+        extracts: {
+          s1: { v: HISTORY_EXTRACT_VERSION, mtimeMs: info.mtimeMs, size: info.size, entries: full },
+        },
+      })
+      const { handlers } = makeCtx({
+        headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+        agents: new Map(),
+        sessionPersistence: { locate: () => ({ path: artifactPath }) },
+        readSessions: { s1: [] },
+      })
+      const res = response()
+      await handlers.get('/api/context/inputs')(getRequest('?sessionId=s1&scope=session'), res)
+      assert.equal(res.status, 200)
+      assert.ok(res.body.inputs.length >= HISTORY_INPUT_LIMIT, 'session 范围应有完整 200 条窗口')
+      assert.equal(res.body.inputs[0].text, '会话输入' + (HISTORY_INPUT_LIMIT + 29), '保留最新条目')
+      assert.ok(res.body.inputs.some((item) => item.text === '会话输入150'), '不得只剩全局截断后的最早一条')
+      assert.equal(res.body.inputs.some((item) => item.text === '会话输入' + (HISTORY_INPUT_LIMIT + 30)), false, '超出上限的更新条目被截断')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
 test('历史输入路由:产物尚未落盘(指纹缺失)退回整工作区对齐,不空转', skipMissingDeps, async () => {
   await withHistoryCacheDir(async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'cx-hist-unmaterialized-'))
@@ -458,17 +521,113 @@ test('历史输入路由:对齐与既有缓存合并——旧条目保留、新�
     await writeWorkspaceCache(cacheDir, 'C:\\x', {
       entries: [
         { text: '更早的输入', at: 100, sid: 's1' },
-        { text: '已消失会话的输入', at: 50, sid: 'gone' },
+        // 另一个仍有来源的会话的旧条目:合并时不得丢(已删除会话的条目见下一条用例)
+        { text: '第二条的旧条目', at: 50, sid: 's2' },
       ],
       extracts: {},
     })
     const { handlers } = makeHistoryCtx()
     const res = await requestUntil(handlers, '?sessionId=s1&scope=workspace',
       (body) => body.aligned && body.inputs.some((item) => item.text === '最新输入'))
-    assert.deepEqual(res.body.inputs.map((item) => item.text), ['最新输入', '第二条', '更早的输入', '已消失会话的输入'])
+    assert.deepEqual(res.body.inputs.map((item) => item.text), ['最新输入', '第二条', '更早的输入', '第二条的旧条目'])
     const sessionRes = await requestUntil(handlers, '?sessionId=s1&scope=session',
       (body) => body.aligned && body.inputs.some((item) => item.text === '最新输入'))
     assert.deepEqual(sessionRes.body.inputs.map((item) => item.text), ['最新输入', '更早的输入'])
+  })
+})
+
+test('历史输入路由:已删除会话的输入在对齐时清除,磁盘缓存与响应都不再保留', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async (cacheDir) => {
+    // 缓存里留着已删除会话 gone 的两条输入(它不在宿主清单里):旧版本靠时间挤出,
+    // 而 gone 的最早条目会被聚合首条保护永久钉住
+    await ensureCacheDir(cacheDir)
+    await writeWorkspaceCache(cacheDir, 'C:\\x', {
+      entries: [
+        { text: '已删除会话开场', at: 1, sid: 'gone' },
+        { text: '已删除会话最近', at: 800, sid: 'gone' },
+        { text: '存活会话输入', at: 100, sid: 's1' },
+        // 无 sid 的早期条目无从判归属,保留
+        { text: '无溯源旧条目', at: 50 },
+      ],
+      extracts: { gone: { v: HISTORY_EXTRACT_VERSION, mtimeMs: 0, size: 0, entries: [{ text: '已删除会话最近', at: 800 }] } },
+    })
+    const { handlers } = makeCtx({
+      headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+      agents: new Map(),
+      readSessions: { s1: [userMessageEvent('存活会话输入', 100)] },
+    })
+    const res = await requestUntil(handlers, '?sessionId=s1&scope=workspace',
+      (body) => body.aligned && body.inputs.every((item) => item.sid !== 'gone'))
+    assert.deepEqual(res.body.inputs.map((item) => item.text), ['存活会话输入', '无溯源旧条目'])
+    const cached = JSON.parse(await readFile(workspaceCacheFile(cacheDir, 'C:\\x'), 'utf8'))
+    assert.equal(cached.entries.some((entry) => entry.sid === 'gone'), false, '已删除会话条目已从缓存清除')
+    assert.equal(cached.extracts.gone, undefined, '已删除会话提取记录一并清除')
+  })
+})
+
+test('历史输入路由:已删除会话的开场条目不再被首条保护钉在 limit 之外', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async (cacheDir) => {
+    // 存活会话的新条目填满 200 条窗口:旧实现里 gone 的最早条目由首条保护追加在
+    // 截断之后,永远留在浮层里(时间挤出对它无效)
+    const live = Array.from({ length: HISTORY_INPUT_LIMIT }, (_, index) => ({ text: '存活输入' + index, at: 1000 + index, sid: 's1' }))
+    await ensureCacheDir(cacheDir)
+    await writeWorkspaceCache(cacheDir, 'C:\\x', {
+      entries: [{ text: '已删除会话开场', at: 1, sid: 'gone' }, ...live],
+      extracts: {},
+    })
+    const { handlers } = makeCtx({
+      headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+      agents: new Map(),
+      readSessions: { s1: live.map((entry) => userMessageEvent(entry.text, entry.at)) },
+    })
+    const res = await requestUntil(handlers, '?sessionId=s1&scope=workspace',
+      (body) => body.aligned && body.inputs.every((item) => item.sid !== 'gone'))
+    assert.equal(res.body.inputs.length, HISTORY_INPUT_LIMIT, 'limit 之外只有存活会话首条保护,不追加已删除会话条目')
+    assert.equal(res.body.inputs.some((item) => item.text === '已删除会话开场'), false)
+  })
+})
+
+test('历史输入路由:窗口外的存活会话条目不被白名单误删(白名单取全量主会话)', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async (cacheDir) => {
+    // 101 个存活主会话:最老的 s0 落在扫描窗口外,其既有条目不参与重解压但必须保留
+    const total = HISTORY_SESSION_SCAN_LIMIT + 1
+    const headers = Array.from({ length: total }, (_, index) => ({ id: 's' + (total - 1 - index), cwd: 'C:\\x', createdAt: 0 }))
+    const oldest = 's0'
+    await ensureCacheDir(cacheDir)
+    await writeWorkspaceCache(cacheDir, 'C:\\x', {
+      entries: [{ text: '窗口外老会话输入', at: 10, sid: oldest }],
+      extracts: {},
+    })
+    const readSessions = {}
+    for (let index = 1; index < total; index += 1) readSessions['s' + index] = [userMessageEvent('输入' + index, 1000 + index)]
+    const { handlers, readCounts } = makeCtx({ headers, agents: new Map(), readSessions })
+    const res = await requestUntil(handlers, '?sessionId=s1&scope=workspace',
+      (body) => body.aligned && body.inputs.some((item) => item.text === '输入1'))
+    assert.ok(res.body.inputs.some((item) => item.text === '窗口外老会话输入'), '窗口外存活会话的既有条目不得被白名单剔除')
+    assert.equal(readCounts.get(oldest), undefined, '窗口外会话不再重解压')
+  })
+})
+
+test('历史输入路由:工作区会话全被删除后缓存整份清除,不残留在全部工作区范围', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async (cacheDir) => {
+    // C:\x 的会话已被删除(清单里没有该 cwd 的会话),它的缓存只能由 global 轮询清理
+    await writeWorkspaceCache(cacheDir, 'C:\\x', {
+      entries: [{ text: '已删除会话输入', at: 500, sid: 'gone' }],
+      extracts: {},
+    })
+    const { handlers } = makeCtx({
+      headers: [{ id: 's3', cwd: 'C:\\other', createdAt: 0 }],
+      agents: new Map(),
+      readSessions: { s3: [userMessageEvent('别的工作区输入', 900)] },
+    })
+    // 先让 C:\other 建缓存,global 才有对照:只剩它的条目,不得混入已删除工作区的残留
+    await requestUntilAligned(handlers, '?sessionId=s3&scope=workspace')
+    const res = await requestUntil(handlers, '?sessionId=s3&scope=global',
+      (body) => body.aligned && body.inputs.every((item) => item.text !== '已删除会话输入'))
+    assert.deepEqual(res.body.inputs.map((item) => item.text), ['别的工作区输入'], '全局范围不得再聚合已删除工作区的残留')
+    // 删除而非写空:空文件会留在 global 轮询的缓存清单里反复触发该工作区对齐
+    const cacheFile = workspaceCacheFile(cacheDir, 'C:\\x')
+    assert.equal((await readdir(cacheDir)).includes(path.basename(cacheFile)), false, '缓存文件整份移除')
   })
 })
 
@@ -545,6 +704,167 @@ test('历史输入路由:运行中会话参与对齐(实时追加),缓存上限�
     assert.ok(readCounts.get('running1') >= 1, '运行中会话被对齐解压')
     const sessionRes = await requestUntilAligned(handlers, '?sessionId=running1&scope=session')
     assert.ok(sessionRes.body.inputs.length > 0, 'session 范围可取运行中会话自身输入')
+  })
+})
+
+test('历史输入路由:运行→停止后产物再追加,session 范围不得停在停止前内存快照', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'cx-hist-stop-'))
+    const artifactPath = path.join(dir, 'session.jsonl.zstd')
+    await writeFile(artifactPath, 'log-v1')
+    try {
+      const agents = new Map([['s1', { status: 'running' }]])
+      const readSessions = { s1: [userMessageEvent('运行中输入', 100)] }
+      const { handlers, readCounts } = makeCtx({
+        headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+        agents,
+        sessionPersistence: { locate: () => ({ path: artifactPath }) },
+        readSessions,
+      })
+      // 运行中:提取结果只进内存(runtimeExtracts),不落 extracts
+      const running = await requestUntilAligned(handlers, '?sessionId=s1&scope=session')
+      assert.deepEqual(running.body.inputs.map((item) => item.text), ['运行中输入'])
+      // 停止后宿主 flush 出最终尾段(产物增长),内存记录不再更新
+      agents.set('s1', { status: 'idle' })
+      readSessions.s1 = [userMessageEvent('运行中输入', 100), userMessageEvent('停止后输入', 200)]
+      await writeFile(artifactPath, 'log-v1-plus-final-tail')
+      const afterStop = response()
+      await handlers.get('/api/context/inputs')(getRequest('?sessionId=s1&scope=session'), afterStop)
+      assert.equal(afterStop.body.aligned, true, '聚焦对齐完成即对齐')
+      assert.deepEqual(afterStop.body.inputs.map((item) => item.text), ['停止后输入', '运行中输入'],
+        '停止后必须读产物最终态,内存快照不得盖住停止后追加的尾部')
+      const readsAfterStop = readCounts.get('s1')
+      // 产物未再变化:磁盘 extracts 指纹命中,后续请求零解压
+      const steady = response()
+      await handlers.get('/api/context/inputs')(getRequest('?sessionId=s1&scope=session'), steady)
+      assert.deepEqual(steady.body.inputs.map((item) => item.text), ['停止后输入', '运行中输入'])
+      assert.equal(readCounts.get('s1'), readsAfterStop, '停止后指纹已落盘,稳定读取不再解压')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+test('历史输入路由:后端无 stat/locate 观测能力时不 400,session 范围逐次重读并自建缓存', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async (cacheDir) => {
+    const readSessions = { s1: [userMessageEvent('第一轮输入', 100)] }
+    const { handlers, logger } = makeCtx({
+      headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+      agents: new Map(),
+      // 第三方后端不提供 stat/locate:旧实现直调 locate 抛 TypeError,请求被打成 400
+      sessionPersistence: {},
+      readSessions,
+    })
+    const first = response()
+    await handlers.get('/api/context/inputs')(getRequest('?sessionId=s1&scope=session'), first)
+    assert.equal(first.status, 200, '定位能力缺失不得拒绝请求')
+    assert.equal(first.body.aligned, true, '聚焦对齐落定即对齐')
+    assert.deepEqual(first.body.inputs.map((item) => item.text), ['第一轮输入'])
+    // 无指纹可判新鲜度:每次请求重新读取产物(否则新输入永远不可见)
+    readSessions.s1 = [userMessageEvent('第一轮输入', 100), userMessageEvent('第二轮输入', 200)]
+    const second = response()
+    await handlers.get('/api/context/inputs')(getRequest('?sessionId=s1&scope=session'), second)
+    assert.equal(second.body.aligned, true)
+    assert.deepEqual(second.body.inputs.map((item) => item.text), ['第二轮输入', '第一轮输入'])
+    assert.ok(logger.warns.some((line) => line.includes('locate')), '定位降级必须落 warn,不得静默')
+    const cached = JSON.parse(await readFile(workspaceCacheFile(cacheDir, 'C:\\x'), 'utf8'))
+    assert.ok(cached.extracts.s1, '聚焦对齐自建 extracts 记录(无指纹也保留该会话全集)')
+  })
+})
+
+test('历史输入路由:locate 抛错按不可定位降级,workspace/session 两路径均不中断', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const { handlers, logger } = makeCtx({
+      headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+      agents: new Map(),
+      // locate 方法在场但抛错(部分后端按 header 形态抛):私有钩子异常不得打断对齐
+      sessionPersistence: { locate: () => { throw new TypeError('locate is not a function') } },
+      readSessions: { s1: [userMessageEvent('无定位输入', 100)] },
+    })
+    const workspace = await requestUntilAligned(handlers, '?sessionId=s1&scope=workspace')
+    assert.deepEqual(workspace.body.inputs.map((item) => item.text), ['无定位输入'], '批量对齐走无指纹路径')
+    const session = response()
+    await handlers.get('/api/context/inputs')(getRequest('?sessionId=s1&scope=session'), session)
+    assert.equal(session.status, 200)
+    assert.equal(session.body.aligned, true)
+    assert.deepEqual(session.body.inputs.map((item) => item.text), ['无定位输入'])
+    assert.ok(logger.warns.some((line) => line.includes('stat/locate')), '观测能力缺失必须可见(warn)')
+  })
+})
+
+test('历史输入路由:旧代产物(migration-required)经 stat 快照指向真实历史文件,不落空指纹', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async (cacheDir) => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'cx-oldgen-'))
+    try {
+      // 旧代真实产物:历史代文件名与当前代不同;locate 按当前代拼出的路径不存在
+      const oldPath = path.join(dir, 's1.session.v3.jsonl')
+      const oldBody = '{"header":1}\n{"event":0}\n'
+      await writeFile(oldPath, oldBody)
+      const bogusPath = path.join(dir, 's1.session.v4.jsonl.zstd')
+      let locateCalls = 0
+      const snapshots = [{
+        header: { id: 's1', cwd: 'C:\\x', createdAt: 0 },
+        formatStatus: 'migration-required',
+        revision: 'rev-old',
+        sizeBytes: Buffer.byteLength(oldBody),
+        location: { kind: 'jsonl', path: oldPath },
+      }]
+      const sessionPersistence = {
+        stat: async (id) => snapshots.find((snapshot) => snapshot.header.id === String(id)),
+        list: async () => snapshots,
+        locate: () => { locateCalls += 1; return { kind: 'jsonl', path: bogusPath } },
+      }
+      const { handlers, readCounts } = makeCtx({
+        headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+        agents: new Map(),
+        sessionPersistence,
+        readSessions: { s1: [userMessageEvent('旧代输入', 100)] },
+      })
+      const first = await requestUntilAligned(handlers, '?sessionId=s1&scope=workspace')
+      assert.deepEqual(first.body.inputs.map((item) => item.text), ['旧代输入'])
+      const cached = JSON.parse(await readFile(workspaceCacheFile(cacheDir, 'C:\\x'), 'utf8'))
+      assert.ok(cached.extracts.s1.mtimeMs > 0, '旧代产物指纹必须取真实文件 mtime,不得占位 0')
+      assert.equal(cached.extracts.s1.size, Buffer.byteLength(oldBody), '指纹 size 取真实历史文件大小')
+      const readsAfterBulk = readCounts.get('s1')
+      const session = response()
+      await handlers.get('/api/context/inputs')(getRequest('?sessionId=s1&scope=session'), session)
+      assert.equal(session.body.aligned, true)
+      assert.equal(readCounts.get('s1'), readsAfterBulk, 'stat 快照指纹命中后不得重解压')
+      assert.equal(locateCalls, 0, '公共 stat/list 可用时不得调用私有 locate')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+test('历史输入路由:后端仅提供公共 list 快照时,旧代产物同样建立真实指纹', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async (cacheDir) => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'cx-oldgen-list-'))
+    try {
+      const oldPath = path.join(dir, 's1.session.v3.jsonl')
+      const oldBody = '{"header":1}\n{"event":0}\n'
+      await writeFile(oldPath, oldBody)
+      const snapshot = {
+        header: { id: 's1', cwd: 'C:\\x', createdAt: 0 },
+        formatStatus: 'migration-required',
+        revision: 'rev-old',
+        sizeBytes: Buffer.byteLength(oldBody),
+        location: { kind: 'jsonl', path: oldPath },
+      }
+      const { handlers } = makeCtx({
+        headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+        agents: new Map(),
+        sessionPersistence: { list: async () => [snapshot] },
+        readSessions: { s1: [userMessageEvent('仅 list 快照输入', 100)] },
+      })
+      const first = await requestUntilAligned(handlers, '?sessionId=s1&scope=workspace')
+      assert.deepEqual(first.body.inputs.map((item) => item.text), ['仅 list 快照输入'])
+      const cached = JSON.parse(await readFile(workspaceCacheFile(cacheDir, 'C:\\x'), 'utf8'))
+      assert.ok(cached.extracts.s1.mtimeMs > 0, '仅 list 快照也须用真实文件 mtime 建指纹')
+      assert.equal(cached.extracts.s1.size, Buffer.byteLength(oldBody))
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })
 
@@ -822,6 +1142,37 @@ test('历史输入路由:子 agent 会话自身请求返回空且已对齐,不�
     }
   })
 })
+
+test('历史输入路由:子会话视图下 workspace/global 照常聚合,只有 session 范围置空', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async (cacheDir) => {
+    await ensureCacheDir(cacheDir)
+    await writeWorkspaceCache(cacheDir, 'C:\\x', {
+      entries: [{ text: '人类输入', at: 200, sid: 's1' }],
+      extracts: {},
+    })
+    const { handlers } = makeCtx({
+      headers: [
+        { id: 'sub1', cwd: 'C:\\x', createdAt: 0, origin: 'subagent' },
+        { id: 's1', cwd: 'C:\\x', createdAt: 0 },
+      ],
+      agents: new Map(),
+      readSessions: { sub1: [userMessageEvent('子代理任务提示', 100)] },
+      // 缓存已建时 workspace 范围直接读缓存;后台对齐会碰 s1 产物,给它空产物即可
+      sessionPersistence: { locate: () => ({ path: 'C:\\nonexistent.jsonl.zstd' }) },
+    })
+    for (const scope of ['workspace', 'global']) {
+      const res = response()
+      await handlers.get('/api/context/inputs')(getRequest('?sessionId=sub1&scope=' + scope), res)
+      assert.equal(res.status, 200, scope)
+      assert.equal(res.body.aligned, true, scope + ' 应已对齐')
+      assert.ok(res.body.inputs.some((item) => item.text === '人类输入'), scope + ' 不得被子会话请求整体置空')
+    }
+    const sessionRes = response()
+    await handlers.get('/api/context/inputs')(getRequest('?sessionId=sub1&scope=session'), sessionRes)
+    assert.deepEqual(sessionRes.body, { inputs: [], aligned: true }, 'session 范围仍应置空')
+  })
+})
+
 
 test('历史输入路由:窗口放宽后最近 SCAN 个主会话全部参与对齐(超过旧 20 窗口)', skipMissingDeps, async () => {
   await withHistoryCacheDir(async () => {
@@ -1147,12 +1498,13 @@ test('常用提示词:自定义顺序下新收藏仍插最前,既有相对顺序
 
 // ── 路由层横切守卫:方法白名单 / JSON 体 / 系统级错误收敛 / 非字符串 text ──
 
-test('横切守卫:10 条路由方法白名单,白名单外一律 405', skipMissingDeps, async () => {
+test('横切守卫:12 条路由方法白名单,白名单外一律 405', skipMissingDeps, async () => {
   await withHistoryCacheDir(async () => {
     const { handlers } = makeCtx({ headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
     const getOnly = '/api/context/inputs'
-    const postOnly = ['/api/context/prompts/toggle', '/api/context/prompts/reorder']
+    const postOnly = ['/api/context/prompts/toggle', '/api/context/prompts/rename', '/api/context/prompts/reorder', '/api/context/git-clone']
     const dualMethods = ['/api/context/history-enabled', '/api/context/history-button-enabled', '/api/context/steer-recall-enabled', '/api/context/fork-enabled', '/api/context/fork-auto-resend-enabled', '/api/context/copy-sid-enabled', '/api/context/clone-enabled']
+    assert.equal(1 + postOnly.length + dualMethods.length, 12, '路由总数须与实现一致')
     // GET-only 路由:POST 拒绝
     const inputsPost = response()
     await handlers.get(getOnly)(request('s1'), inputsPost)
@@ -1163,25 +1515,126 @@ test('横切守卫:10 条路由方法白名单,白名单外一律 405', skipMiss
       await handlers.get(routePath)(getRequest2(routePath, 'GET'), toggleGet)
       assert.equal(toggleGet.status, 405)
     }
-    // 双方法路由(GET+POST):白名单外方法拒绝
+    // 双方法路由(GET+POST):白名单外方法拒绝。写方法的共享闸门先校验 JSON
+    // content-type,探针必须带 JSON 头才走到方法白名单(缺头由闸门 400,见 route-gate 用例)
     for (const routePath of dualMethods) {
       const res = response()
-      await handlers.get(routePath)(getRequest2(routePath, 'PUT'), res)
+      const put = new EventEmitter()
+      put.method = 'PUT'
+      put.url = routePath
+      put.headers = { 'content-type': 'application/json' }
+      await handlers.get(routePath)(put, res)
       assert.equal(res.status, 405, routePath + ' 应拒绝 PUT')
     }
   })
 })
 
-test('横切守卫:10 条 POST 路由的非法 JSON 请求体统一 400(badJsonBody)', skipMissingDeps, async () => {
+test('横切守卫:11 条 POST 路由的非法 JSON 请求体统一 400(badJsonBody)', skipMissingDeps, async () => {
   await withHistoryCacheDir(async () => {
     const { handlers } = makeCtx({ headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
-    const postPaths = ['/api/context/prompts/toggle', '/api/context/prompts/reorder', '/api/context/history-enabled', '/api/context/history-button-enabled', '/api/context/steer-recall-enabled', '/api/context/fork-enabled', '/api/context/fork-auto-resend-enabled', '/api/context/copy-sid-enabled', '/api/context/clone-enabled', '/api/context/git-clone']
+    const postPaths = ['/api/context/prompts/toggle', '/api/context/prompts/rename', '/api/context/prompts/reorder', '/api/context/history-enabled', '/api/context/history-button-enabled', '/api/context/steer-recall-enabled', '/api/context/fork-enabled', '/api/context/fork-auto-resend-enabled', '/api/context/copy-sid-enabled', '/api/context/clone-enabled', '/api/context/git-clone']
+    assert.equal(postPaths.length, 11, 'POST 路由数须与实现一致')
     for (const routePath of postPaths) {
       const res = await postRaw(handlers, routePath, '{oops')
       assert.equal(res.status, 400, routePath + ' 非法 JSON 应回 400')
       assert.equal(res.body.error, MESSAGES.badJsonBody)
     }
   })
+})
+
+test('横切守卫:POST 跨源 403、非 JSON content-type 400,业务不执行', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const { handlers } = makeCtx({ headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
+    const routePath = '/api/context/history-enabled'
+    const req = new EventEmitter()
+    req.method = 'POST'
+    req.url = routePath
+    req.headers = { host: '127.0.0.1:3080', origin: 'http://evil.example', 'content-type': 'application/json' }
+    const cross = response()
+    await handlers.get(routePath)(req, cross)
+    assert.equal(cross.status, 403, '跨源写请求必须 403')
+    const nonJson = await postRaw(handlers, routePath, '{"enabled":false}', { 'content-type': 'text/plain' })
+    assert.equal(nonJson.status, 400, '非 JSON content-type 必须 400')
+    const read = response()
+    await handlers.get(routePath)(getRequest2(routePath, 'GET'), read)
+    assert.equal(read.body.enabled, true, '被拒绝的写请求不得改动设置')
+  })
+})
+
+test('横切守卫:请求体恰好 64KiB 通过、+1 字节回 413(分块累计边界不偏)', skipMissingDeps, async () => {
+  const { readBody } = indexModule
+  const { EventEmitter: Emitter } = await import('node:events')
+  const BODY_MAX_BYTES = 64 * 1024
+  const emitInChunks = (req, totalBytes, chunkBytes) => {
+    for (let sent = 0; sent < totalBytes; sent += chunkBytes) {
+      req.emit('data', Buffer.alloc(Math.min(chunkBytes, totalBytes - sent), 0x61))
+    }
+  }
+  // 恰好上限:4 × 16KiB 分块累计等于上限,整串送达
+  const exact = new Emitter()
+  exact.pause = () => {}
+  const exactPromise = readBody(exact)
+  emitInChunks(exact, BODY_MAX_BYTES, 16 * 1024)
+  exact.emit('end')
+  const text = await exactPromise
+  assert.equal(Buffer.byteLength(text, 'utf8'), BODY_MAX_BYTES, '上限字节必须完整送达')
+  // 上限 +1:同样分块路径必须拒绝,且不销毁 socket(响应仍要能送出)
+  const over = new Emitter()
+  let destroyed = false
+  over.destroy = () => { destroyed = true }
+  over.pause = () => {}
+  const overPromise = readBody(over)
+  emitInChunks(over, BODY_MAX_BYTES, 16 * 1024)
+  over.emit('data', Buffer.alloc(1))
+  await assert.rejects(overPromise, (error) => error.statusCode === 413 && /超过上限/.test(error.message))
+  assert.equal(destroyed, false, '超限不得销毁 socket(否则 413 响应送不出)')
+})
+
+test('横切守卫:请求体读取时限绑定 30s 真实数值', () => {
+  // 半开体用例按常量自身步进假时钟,常量被改小仍会自洽通过;真实时限只在此钉住
+  assert.equal(indexModule.BODY_READ_TIMEOUT_MS, 30 * 1000)
+})
+
+test('横切守卫:半开体按时限拒绝为 408 超时', skipMissingDeps, async (t) => {
+  const { readBody, BODY_READ_TIMEOUT_MS } = indexModule
+  const { EventEmitter: Emitter } = await import('node:events')
+  // 半开体:data 后既无 end 也无 close,按总时限拒绝
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const stalledReq = new Emitter()
+  stalledReq.pause = () => {}
+  const stalledPromise = readBody(stalledReq)
+  stalledReq.emit('data', Buffer.from('{}'))
+  t.mock.timers.tick(BODY_READ_TIMEOUT_MS)
+  await assert.rejects(stalledPromise, (error) => error.statusCode === 408 && /超时/.test(error.message))
+  t.mock.timers.reset()
+})
+
+test('横切守卫:请求 aborted/close(未 complete)按中止拒绝为 400,毫秒级收敛不落到读取时限', skipMissingDeps, async () => {
+  const { readBody } = indexModule
+  const { EventEmitter: Emitter } = await import('node:events')
+  const drive = {
+    aborted: (req) => req.emit('aborted'),
+    // close 在正常 end 后也会触发:未 complete 才是客户端中途断开
+    closed: (req) => { req.complete = false; req.emit('close') },
+  }
+  // 中止收敛预算:与读取时限差一个量级以上,退化成时限分支时必然超出
+  const ABORT_LATENCY_BUDGET_MS = 1 * 1000
+  for (const [name, trigger] of Object.entries(drive)) {
+    const req = new Emitter()
+    req.pause = () => {}
+    const started = performance.now()
+    const promise = readBody(req)
+    trigger(req)
+    const error = await promise.then(
+      () => assert.fail(`${name} 不得 resolve(悬挂 Promise 会占住 clone 单飞行锁)`),
+      (rejected) => rejected,
+    )
+    const elapsedMs = performance.now() - started
+    assert.ok(elapsedMs < ABORT_LATENCY_BUDGET_MS, `${name} 须毫秒级收敛,实测 ${elapsedMs.toFixed(1)}ms`)
+    // 400(中止)与 408(时限超时)是两条不同分支:篡改中止监听会退化成 30s 后 408
+    assert.equal(error.statusCode, 400, `${name} 应按客户端中止回 400`)
+    assert.match(error.message, /请求已中止/)
+  }
 })
 
 test('横切守卫:带错误码的系统级错误收敛为固定文案并进服务端日志', skipMissingDeps, async () => {

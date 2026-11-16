@@ -208,3 +208,26 @@ test('Given 未配置费用 When 悬浮 Token 视图 Then 只展示用量及有�
   const f = fixture({ data: [unpriced] }); f.select('p/a'); f.hover()
   assert.deepEqual(f.rows(), ['所选用量: 1,000 tok', 'p/a: 1,000 tok'])
 })
+
+test('Given 未定价槽 When 金额视图悬浮 Then 费用显示占位而不冒充 ¥0.00', () => {
+  const { cost, byCostModel, otherCostByModel, ...unpriced } = slot
+  const f = fixture({ money: true, data: [unpriced] }); f.hover()
+  assert.deepEqual(f.rows().slice(0, 2), ['估算费用: —', 'p/a: —'])
+  assert.doesNotMatch(f.tip(), /¥0\.00/)
+})
+
+test('Given 槽内部分模型未定价 When 金额视图悬浮 Then 已定价给金额、未定价给占位', () => {
+  const data = [{
+    ...slot,
+    cost: 3,
+    byCostModel: { 'p/a': 2, [OTHER]: 1 },
+    otherCostByModel: { 'p/c': 0.75 },
+  }]
+  const f = fixture({ money: true, data }); f.hover()
+  const rows = f.rows()
+  assert.equal(rows[0], '估算费用: ≈ ¥3.00')
+  assert.ok(rows.includes('p/b: —'))
+  assert.ok(rows.includes('p/c: ≈ ¥0.75'))
+  assert.ok(rows.includes('p/d: —'))
+  assert.doesNotMatch(f.tip(), /p\/b: ≈ ¥0\.00|p\/d: ≈ ¥0\.00/)
+})

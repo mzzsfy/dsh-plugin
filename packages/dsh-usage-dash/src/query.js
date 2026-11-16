@@ -14,7 +14,7 @@ const DAY_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/
 const HOUR_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}$/
 const MINUTE_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/
 
-// 妗朵覆鍓嶇紑瀹?D 娈靛畾浣嶆棩妗?M 琛屾埅鍙栫埗 H 妗?
+// 桶键前缀宽度:D 段定位日桶,M 行截取父 H 桶
 const DAY_KEY_WIDTH = 'YYYY-MM-DD'.length
 const HOUR_KEY_WIDTH = 'YYYY-MM-DDTHH'.length
 
@@ -39,10 +39,10 @@ const nextMinute = (date) => {
   return next
 }
 
-// 鍒嗛挓妗剁矑搴?鏋氫妇涓庢《閿叡鐢ㄥ悓涓€姝ラ暱,from 蹇呴』瀵归綈妗惰竟鐣?
+// 分钟桶粒度:枚举与桶键共用同一步长,from 必须对齐桶边界
 const MINUTE_STEP_MINUTES = 10
 
-// pattern 閿氬畾妗朵覆澶栧舰,suffix 琛ュ叏涓烘湰鍦版椂鍖哄彲瑙ｆ瀽鏃ユ湡涓?format 鍥炶鏍￠獙鍒嗛噺鍚堟硶鎬?
+// pattern 锚定桶串外形,suffix 补全为本地时区可解析日期,format 回读校验分量合法性
 const BUCKET_FORMS = {
   [GRANULARITY_DAILY]: { pattern: DAY_KEY_PATTERN, suffix: 'T00:00:00', format: formatDate, step: nextDay },
   [GRANULARITY_HOURLY]: { pattern: HOUR_KEY_PATTERN, suffix: ':00:00', format: formatHour, step: nextHour },
@@ -106,8 +106,8 @@ function countSessions(sessionRows) {
   return ids.size
 }
 
-// 閫熷害閰嶅鍒嗗瓙:decode 鍙ｅ緞鍙?decodeTokens;瀛橀噺鏃ф牸寮忚(甯︽椂闀挎棤 decodeTokens)
-// 鍥炶惤 outputTokens,鑱氬悎闅忔柊鏁版嵁鑷劧鏀舵暃
+// 速度配对分子:decode 口径取 decodeTokens;存量旧格式行(带时长无 decodeTokens)
+// 回落 outputTokens,聚合随新数据自然收敛
 const speedTokensOf = (row) => (row.durationMs ? row.decodeTokens ?? row.outputTokens : 0)
 
 export function aggregateRange(rows, g, from, to, sessionRows = []) {
@@ -118,16 +118,16 @@ export function aggregateRange(rows, g, from, to, sessionRows = []) {
   const providerTotals = new Map()
   // 活跃天 = 有 token 产出的自然日(桶键按日去重,跨粒度统一口径)
   const activeDays = new Set()
-  // 妲界骇閰嶅:妗朵覆 鈫?閫熷害瀵?{decodeTokens, durationMs} 涓庨瀛楀 {ttftMs, ttftSteps},
+  // 档级配对:桶串 → 速度对 {decodeTokens, durationMs} 与首字对 {ttftMs, ttftSteps},
   const slotSpeeds = new Map()
   const slotTtfts = new Map()
   for (const row of rows) {
     const slot = slotByKey.get(row.bucket)
-    // 妗朵覆鏈惤鍦ㄦ灇涓惧簭鍒?濡傛敼绮掑害鍓嶇殑鍘嗗彶娈嬭)涓嶅彲褰掑睘,璺宠繃闃插穿
+    // 桶串未落在枚举序列(如改粒度前的历史残行)不可归属,跳过防崩
     if (!slot) continue
     const tokens = rowTokens(row)
     addRowToSlot(slot, row, tokens)
-    // 绾?timing 琛?闆?token 妗?+ decode 閰嶅)涓嶅弬涓庡綊灞?浣嗕粛杩涢厤瀵硅仛鍚?
+    // 纯 timing 行(零 token 桶 + decode 配对)不参与归属,但仍进配对聚合
     if (tokens > 0) {
       activeDays.add(row.bucket.slice(0, DAY_KEY_WIDTH))
       slot.byModel[row.model] = (slot.byModel[row.model] ?? 0) + tokens
@@ -186,9 +186,9 @@ export function aggregateRange(rows, g, from, to, sessionRows = []) {
     totals.cacheHit += slot.cacheHit
     totals.cacheMiss += slot.cacheMiss
   }
-  // speed = decode 閰嶅鍙ｅ緞(decodeTokens 梅 鏃堕暱绉?;ttft = 棣?token 寤惰繜
-  // 鍔犳潈骞冲潎(姣);浠呴厤瀵规暟鎹瓨鍦ㄧ殑鏉＄洰鎸傚瓧娈?鏃犳暟鎹潯鐩笉鎸?
-  // 绾?timing 琛屽彲鑳戒骇鐢?0-token 鏉＄洰,鍒楄〃淇濇寔鍙惈 token 琛?瀛橀噺濂戠害)
+  // speed = decode 配对口径(decodeTokens ÷ 时长秒);ttft = 首 token 延迟
+  // 加权平均(毫秒);仅配对数据存在的条目挂字段,无数据条目不挂
+  // 纯 timing 行可能产生 0-token 条目,列表保持只含 token 行(存量契约)
   const models = [...modelTotals.entries()]
     .filter(([, agg]) => agg.tokens > 0)
     .map(([model, agg]) => ({
@@ -231,34 +231,35 @@ export function aggregateRange(rows, g, from, to, sessionRows = []) {
   return result
 }
 
-// 鑱氬悎璁′环鐨勬Ы瀹氫綅:D 鎶樺彔鍒版棩妲?H/M 鍗虫湰妲?璁′环涓€寰嬪彇琛屾墍灞?H 妲借捣鐐?
+// 聚合计价的桶定位:D 折叠到日槽,H/M 即本桶;计价一律取行所属 H 桶起点
 const COST_SLOT_KEYS = {
   [GRANULARITY_DAILY]: (bucket) => bucket.slice(0, DAY_KEY_WIDTH),
   [GRANULARITY_HOURLY]: (bucket) => bucket,
   [GRANULARITY_MINUTE]: (bucket) => bucket,
 }
 
-// 鑱氬悎璁′环:浠ュ彲瑙佹Ы涓哄敮涓€鍙ｅ緞,cost 琛屾寜 H 妲借捣鐐瑰尮閰嶄环鏍煎悗绱姞;
-// 妲界骇閫愭ā鍨嬫媶鍒?costByModel 渚涢噾棰濇煴鐘跺浘鎸夋ā鍨嬪爢鍙?
-export function attachCosts(result, costRows, granularity, rules) {
+// 聚合计价:以可见槽为唯一口径,cost 行按 H 桶起点匹配价格后累加;
+// 档级逐模型拆分,costByModel 供金额柱状图按模型堆叠。
+// 日档的历史日可能只剩日桶行(H 桶仅保留 HOUR_RETENTION_DAYS),这些日按日桶起点计价兜底。
+export function attachCosts(result, costRows, granularity, rules, fallbackRows = []) {
   // 未配置规则不是零价:不挂 cost/unpriced,避免汇总卡把「未计价」显示成 ¥0.00
   if (!Array.isArray(rules) || rules.length === 0) return result
   const slotKeyOf = COST_SLOT_KEYS[granularity]
   const slotOfDay = new Map(result.daily.map((slot) => [slot.day, slot]))
   const slotCosts = new Map()
   const slotCostsByModel = new Map()
-  const modelCosts = new Map(result.models.map((entry) => [entry.model, 0]))
+  // 只记录真正命中价格的模型:未命中规则保持无 cost 字段,与无规则路径同形,
+  // 避免客户端把「未定价」渲染成确定的 ¥0.00
+  const modelCosts = new Map()
   const unpricedHours = new Set()
-  for (const row of costRows) {
+  const daysWithHourly = new Set()
+  const recordCost = (row, date) => {
     const slot = slotOfDay.get(slotKeyOf(row.bucket))
-    if (!slot || rowTokens(row) === 0) continue
-    const hourKey = row.bucket.slice(0, HOUR_KEY_WIDTH)
-    const date = parseBucketKey(hourKey, BUCKET_FORMS[GRANULARITY_HOURLY])
-    if (!date) continue
+    if (!slot || rowTokens(row) === 0) return
     const price = matchPrice(rules, row.model, date)
     if (!price) {
-      unpricedHours.add(hourKey)
-      continue
+      unpricedHours.add(granularity === GRANULARITY_MINUTE ? row.bucket.slice(0, HOUR_KEY_WIDTH) : row.bucket)
+      return
     }
     const cost = costOf(price, row)
     slotCosts.set(slot.day, (slotCosts.get(slot.day) ?? 0) + cost)
@@ -268,14 +269,31 @@ export function attachCosts(result, costRows, granularity, rules) {
       slotCostsByModel.set(slot.day, perModel)
     }
     perModel.set(row.model, (perModel.get(row.model) ?? 0) + cost)
-    if (modelCosts.has(row.model)) modelCosts.set(row.model, modelCosts.get(row.model) + cost)
+    modelCosts.set(row.model, (modelCosts.get(row.model) ?? 0) + cost)
   }
-  const daily = result.daily.map((slot) => ({
-    ...slot,
-    cost: slotCosts.get(slot.day) ?? 0,
-    costByModel: Object.fromEntries(slotCostsByModel.get(slot.day) ?? []),
-  }))
-  const cost = daily.reduce((sum, slot) => sum + slot.cost, 0)
-  const models = result.models.map((entry) => ({ ...entry, cost: modelCosts.get(entry.model) }))
-  return { ...result, daily, models, cost, unpriced: unpricedHours.size }
+  for (const row of costRows) {
+    const slot = slotOfDay.get(slotKeyOf(row.bucket))
+    if (!slot || rowTokens(row) === 0) continue
+    daysWithHourly.add(slot.day)
+    const date = parseBucketKey(row.bucket.slice(0, HOUR_KEY_WIDTH), BUCKET_FORMS[GRANULARITY_HOURLY])
+    if (date) recordCost(row, date)
+  }
+  for (const row of fallbackRows) {
+    const slot = slotOfDay.get(slotKeyOf(row.bucket))
+    if (!slot || rowTokens(row) === 0 || daysWithHourly.has(slot.day)) continue
+    const date = parseBucketKey(row.bucket, BUCKET_FORMS[GRANULARITY_DAILY])
+    if (date) recordCost(row, date)
+  }
+  const daily = result.daily.map((slot) => {
+    const slotCost = slotCosts.get(slot.day)
+    if (slotCost === undefined) return slot
+    return { ...slot, cost: slotCost, costByModel: Object.fromEntries(slotCostsByModel.get(slot.day) ?? []) }
+  })
+  const pricedSlots = daily.filter((slot) => slot.cost !== undefined)
+  const cost = pricedSlots.reduce((sum, slot) => sum + slot.cost, 0)
+  const models = result.models.map((entry) => {
+    const modelCost = modelCosts.get(entry.model)
+    return modelCost === undefined ? entry : { ...entry, cost: modelCost }
+  })
+  return { ...result, daily, models, ...(pricedSlots.length > 0 ? { cost } : {}), unpriced: unpricedHours.size }
 }

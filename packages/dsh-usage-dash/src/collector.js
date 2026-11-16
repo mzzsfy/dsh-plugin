@@ -88,10 +88,28 @@ export function assistantStreamFirstTokenTime(stream) {
   return undefined
 }
 
+// 官方 tokenUsage 的 usageOf 同构:assistant/message 顶层 usage 优先,
+// assistant/message 与 assistant/attempt 都回落到流内最后一个 usage chunk
+function lastUsageInStream(stream) {
+  if (!Array.isArray(stream)) return undefined
+  for (let index = stream.length - 1; index >= 0; index -= 1) {
+    const record = stream[index]
+    if (record?.type === 'chunk' && record.chunk?.type === 'usage') return record.chunk.usage
+  }
+  return undefined
+}
+
+function usageOf(event) {
+  if (event.type === 'assistant/message' && event.data?.usage !== undefined) return event.data.usage
+  if (event.type !== 'assistant/message' && event.type !== 'assistant/attempt') return undefined
+  return lastUsageInStream(event.data?.stream)
+}
+
 // 会话内单 pass 折叠:跟踪每个 (turn,step) 槽的最新报告,只把首次发射交 store
 export class UsageFold {
   constructor() {
     this.seen = new Map()
+    this.seenSources = new Map()
     // (turn,step) 模型启动时刻:仅 step/start 设定(官方口径 TTFT 含失败尝试,
     // 不随 retry-started 重置);(turn,step) 首 token 时刻:由首个产出 token
     // 的 attempt 锁定,存活于步内重试。时长均为官方 decode 口径:durationMs
@@ -120,11 +138,29 @@ export class UsageFold {
         turn: true,
       }
     }
-    if (event.type === 'step/start' || event.type === 'llm/retry-started') {
-      // step/start 恰开一次模型调用,retry-started 标记每次实际启动的重试;
-      // 请求只由标记计数,与 token 样本双计;时长起点不随重试重置
+    if (event.type === 'step/start') {
+      // step/start 恰开一次模型调用;请求只由标记计数,与 token 样本双计;
+      // 时长起点不随重试重置
       const key = this.keyOf(event)
-      if (event.type === 'step/start' && key !== null) this.starts.set(key, event.time)
+      if (key !== null) this.starts.set(key, event.time)
+      return {
+        time: event.time,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        request: true,
+      }
+    }
+    if (event.type === 'llm/retry-started') {
+      // retry 关闭本步的替换槽:下一 attempt 的 usage 重新成为首样本;
+      // 官方 tokenUsage 保留失败 attempt 已报的用量,因此只清槽不撤回样本
+      const key = this.keyOf(event)
+      if (key !== null) {
+        this.seen.delete(key)
+        this.seenSources.delete(key)
+        this.timingDone.delete(key)
+      }
       return {
         time: event.time,
         inputTokens: 0,
@@ -141,14 +177,16 @@ export class UsageFold {
         const first = assistantStreamFirstTokenTime(event.data?.stream)
         if (typeof first === 'number') this.firstTokens.set(key, first)
       }
-      return null
+      const usage = usageOf(event)
+      return usage ? this.replaceSample(event, usage) : null
     }
     if (event.type === 'assistant/chunk') {
       const usage = event.data?.chunk?.type === 'usage' ? event.data.chunk.usage : undefined
       return usage ? this.replaceSample(event, usage) : null
     }
     if (event.type === 'assistant/message') {
-      return event.data?.usage ? this.replaceSample(event, event.data.usage) : null
+      const usage = usageOf(event)
+      return usage ? this.replaceSample(event, usage) : null
     }
     return null
   }
@@ -172,6 +210,27 @@ export class UsageFold {
         }
       : undefined
     const prev = key !== null ? this.seen.get(key) : undefined
+    const sample = {
+      time: event.time,
+      inputTokens: usage.inputTokens ?? 0,
+      outputTokens: usage.outputTokens ?? 0,
+      cacheReadTokens: usage.cacheReadTokens ?? 0,
+      cacheWriteTokens: usage.cacheWriteTokens ?? 0,
+    }
+    // attempt 的 usage 可能是流式部分值;后续 message 是权威完成值,
+    // 同键以 message 覆盖 attempt,按差值修正已落库样本
+    if (prev && event.type === 'assistant/message' && this.seenSources.get(key) === 'assistant/attempt') {
+      const delta = {
+        time: event.time,
+        inputTokens: sample.inputTokens - prev.inputTokens,
+        outputTokens: sample.outputTokens - prev.outputTokens,
+        cacheReadTokens: sample.cacheReadTokens - prev.cacheReadTokens,
+        cacheWriteTokens: sample.cacheWriteTokens - prev.cacheWriteTokens,
+      }
+      this.seen.set(key, sample)
+      this.seenSources.set(key, event.type)
+      return this.emitCorrection(delta, timing, usage, key)
+    }
     // 首样本生效:内部无条件跟踪最新报告,但交 store 的只有首次发射;
     // 首 token 时刻不在 chunk 事件上,token 先发后由后续报告补纯 timing 增量,
     // 已补发的键不重复补(timingDone 独立集合持久跟踪,防重复报告双计);
@@ -187,15 +246,22 @@ export class UsageFold {
     const sum = (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0)
       + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
     if (sum <= 0) return null
-    const sample = {
-      time: event.time,
-      inputTokens: usage.inputTokens ?? 0,
-      outputTokens: usage.outputTokens ?? 0,
-      cacheReadTokens: usage.cacheReadTokens ?? 0,
-      cacheWriteTokens: usage.cacheWriteTokens ?? 0,
+    if (key !== null) {
+      this.seen.set(key, sample)
+      this.seenSources.set(key, event.type)
     }
-    if (key !== null) this.seen.set(key, sample)
     return this.emitSample(sample, timing, key)
+  }
+
+  emitCorrection(delta, timing, usage, key) {
+    if (timing === undefined || this.timingDone.has(key)) return delta
+    this.timingDone.add(key)
+    if (timing.decodeable && timing.durationMs > 0) {
+      delta.decodeTokens = usage.outputTokens
+      delta.durationMs = timing.durationMs
+    }
+    if (timing.ttftMs !== undefined) delta.ttftMs = timing.ttftMs
+    return delta
   }
 
   emitSample(sample, timing, key) {
@@ -255,7 +321,14 @@ export class UsageCollector {
     this.started = false
     this.liveMarked = new Set()
     this.liveMarkBuffer = new Map()
+    // 本 boot 每会话首个实时事件的 seq:store 的实时累积器正是从它开始累积,
+    // 重建时的重放上界必须取它,取当前尾部会把实时拥区间再重放一遍造成双计
+    this.liveStarts = new Map()
     this.liveMarkFlushScheduled = false
+    // 扫描串行链:新 rescan 先中止旧扫描,再排队等旧扫描退出后执行,
+    // 避免 backfill 见 running 直接返回造成静默空转
+    this.scanChain = Promise.resolve()
+    this.scanControllers = new Set()
     this.scanController = null
     this.resetInFlight = null
     this.#state = {
@@ -333,12 +406,12 @@ export class UsageCollector {
       if (!sample) return
       // turn 标记落合成行不归因;其余样本先取本调用 source,再取会话路由
       if (!sample.turn) sample.model = fromSource ?? this.routeFor(sid)
-      void this.store.record(sample).catch((error) => {
+      void this.store.record(sample, { live: true }).catch((error) => {
         this.pushLog('record', error?.message ?? String(error))
       })
       // 会话索引只记真实会话:派生会话的回合/请求/token 仍照常统计
       if (sid !== UNKNOWN_SESSION_ID && !isDerivedSessionHeader(session?.header)) {
-        void this.store.recordSession(sid, sample.time).catch((error) => {
+        void this.store.recordSession(sid, sample.time, { live: true }).catch((error) => {
           this.pushLog('record', error?.message ?? String(error))
         })
       }
@@ -375,7 +448,9 @@ export class UsageCollector {
   markLiveSession(sid, firstSeq) {
     if (sid === UNKNOWN_SESSION_ID || this.liveMarked.has(sid)) return
     this.liveMarked.add(sid)
-    this.liveMarkBuffer.set(sid, typeof firstSeq === 'number' ? firstSeq : SEQ_UNKNOWN)
+    const seq = typeof firstSeq === 'number' ? firstSeq : SEQ_UNKNOWN
+    this.liveStarts.set(sid, seq)
+    this.liveMarkBuffer.set(sid, seq)
     if (this.liveMarkFlushScheduled) return
     this.liveMarkFlushScheduled = true
     queueMicrotask(() => {
@@ -390,30 +465,61 @@ export class UsageCollector {
     })
   }
 
-  // 单控制器槽:boot 回扫、reset 重扫共用,新扫描先中止旧扫描
+  // 扫描任务串行入队:同一时刻只有一个回扫/补索引在跑,后到任务等前者退出
+  enqueueScan(run) {
+    const pending = this.scanChain.then(run, run)
+    this.scanChain = pending.then(() => {}, () => {})
+    return pending
+  }
+
+  beginScan() {
+    const controller = new AbortController()
+    this.scanControllers.add(controller)
+    this.scanController = controller
+    return controller
+  }
+
+  endScan(controller) {
+    this.scanControllers.delete(controller)
+    if (this.scanController === controller) this.scanController = null
+  }
+
+  // boot 回扫、reset 重扫共用:新扫描先中止旧扫描,再排队等旧扫描退出后执行
   async rescan() {
     this.scanController?.abort()
-    const controller = new AbortController()
-    this.scanController = controller
-    await this.store.readyPromise()
-    // 适配发生在宿主服务边界:回扫主体只面向 ArchiveReader 内部契约
-    const reader = createArchiveReader(this.ctx.sessionPersistence)
-    await this.backfill(reader, this.ctx.sessions, controller.signal)
+    const controller = this.beginScan()
+    return this.enqueueScan(async () => {
+      try {
+        await this.store.readyPromise()
+        // 适配发生在宿主服务边界:回扫主体只面向 ArchiveReader 内部契约
+        const reader = createArchiveReader(this.ctx.sessionPersistence)
+        await this.backfill(reader, this.ctx.sessions, controller.signal)
+      } finally {
+        this.endScan(controller)
+      }
+    })
   }
 
   abort() {
-    this.scanController?.abort()
+    for (const controller of this.scanControllers) controller.abort()
   }
 
-  // wipe 时刻为每个活跃会话取日志长度作重放上界:回扫恰好重建 [0,watermark)
-  // 一次,watermark 起的事件仍归在跑的实时路径;seq 读不出沿用旧游标边界,
-  // 无则 -1 哨兵。死会话不进边界,全量重放即精确。并发调用合并为一次重建
+  // wipe 后回扫只重建 [0,watermark) 一次,watermark 起归实时路径。本 boot 已实时
+  // 采过样的会话必须用「本 boot 实时起点」:store 的实时累积器正是从该 seq 起累积,
+  // 取当前尾部会把 [实时起点, 尾部) 既重放又由累积器回填 → 双计(重启后固化)。
+  // 起点不可知(-1 哨兵)时按同一哨兵重放零事件:宁漏不冒双计。
+  // 无实时增量的会话取日志尾部;seq 读不出沿用旧游标边界,无则 -1。
+  // 死会话不进边界,全量重放即精确。并发调用合并为一次重建
   resetAndRescan() {
     if (this.resetInFlight) return this.resetInFlight
     this.resetInFlight = (async () => {
       const previous = await this.store.liveSequences()
       const boundaries = new Map()
       for (const handle of this.ctx.sessions.list()) {
+        if (this.liveStarts.has(handle.id)) {
+          boundaries.set(handle.id, this.liveStarts.get(handle.id))
+          continue
+        }
         const seq = handle.seq
         if (typeof seq === 'number' && Number.isFinite(seq) && seq >= 0) {
           boundaries.set(handle.id, seq)
@@ -454,7 +560,10 @@ export class UsageCollector {
       this.#state.skippedTotal = 0
       this.#state.recordTotal = 0
       this.#state.skipCounts = emptySkipCounts()
-      const workerCount = Math.min(DEFAULT_BACKFILL_CONCURRENCY, Math.max(1, targets.length))
+      // 半写孤儿行:等首个会话读取成功后再清库;未成功前串行扫描,防并发写入新旧混账
+      const orphanResetPending = this.store.orphanResetPending === true
+      const workerCount = orphanResetPending ? 1 : Math.min(DEFAULT_BACKFILL_CONCURRENCY, Math.max(1, targets.length))
+      let orphanResetDone = !orphanResetPending
       let next = 0
       const completed = []
       const flushCompleted = async () => {
@@ -489,6 +598,11 @@ export class UsageCollector {
           let route = ''
           try {
             const inspection = await reader.readLog(header.id, signal)
+            // 回扫已成功读完第一个会话:半写孤儿行可以安全清理,随后按本轮结果重建
+            if (!orphanResetDone) {
+              await this.store.clearOrphanRows()
+              orphanResetDone = true
+            }
             const inheritedCut = inspection.inheritedEventCount
             const derived = inspection.derived === true
             for (const event of inspection.events) {
@@ -534,9 +648,14 @@ export class UsageCollector {
     await this.store.readyPromise()
     if (!this.store.hasBucketRows?.() || this.store.hasSessionRows?.()) return
     this.scanController?.abort()
-    const controller = new AbortController()
-    this.scanController = controller
-    await this.indexSessions(reader, controller.signal)
+    const controller = this.beginScan()
+    return this.enqueueScan(async () => {
+      try {
+        await this.indexSessions(reader, controller.signal)
+      } finally {
+        this.endScan(controller)
+      }
+    })
   }
 
   async indexSessions(reader, signal) {

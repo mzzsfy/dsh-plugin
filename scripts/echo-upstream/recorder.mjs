@@ -12,12 +12,23 @@ export function createRecorder(logPath, maxBytes = MAX_LOG_BYTES) {
   }
 }
 
+const SENSITIVE_HEADER = /^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key)$/i
+
+// 凭据头只留键名:留档是调试证据,不是密钥仓库
+function redactHeaders(headers) {
+  const copy = {}
+  for (const [name, value] of Object.entries(headers ?? {})) {
+    copy[name] = SENSITIVE_HEADER.test(name) ? '<redacted>' : value
+  }
+  return copy
+}
+
 export function record(recorder, request, parsedBody, scenario) {
   recorder({
     at: new Date().toISOString(),
     method: request.method,
     path: request.url,
-    headers: request.headers,
+    headers: redactHeaders(request.headers),
     body: parsedBody,
     scenario,
   })

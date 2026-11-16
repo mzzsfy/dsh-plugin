@@ -1,6 +1,8 @@
 // 会话适配:公开 sessionController API 的薄封装。业务判定留在核心状态机。
 // QueueAction 的移除动作名以宿主 types 为准(dsh-api-session-controller types.d.ts updateQueue)
 const QUEUE_ACTION_REMOVE = { kind: 'remove' }
+// 历史分页窗口:与宿主 page() 的 maxMessages 语义一致,只影响单次往返条数
+const FOLLOW_PAGE_MESSAGES = 100
 
 export function createSessionAdapter({ sessionController }) {
   // 执行与验收绑定工作区,使用宿主标准 agentPreset 组合。
@@ -46,22 +48,32 @@ export function createSessionAdapter({ sessionController }) {
   }
 
   // 事件监听同时返回 snapshot 历史和后续 durable 事件,由调用方按本次 requestId 过滤。
-  async function* followSessionEvents(sessionId, signal) {
+  // afterSeq 为增量游标:已消费的事件不再回放,重连代价与本次新增事件同阶而非会话长度。
+  async function* followSessionEvents(sessionId, signal, { afterSeq = -1 } = {}) {
+    let cursor = Number.isSafeInteger(afterSeq) ? afterSeq : -1
     for await (const frame of sessionController.follow({ address: { kind: 'session', sessionId } }, signal)) {
       if (frame.type === 'snapshot') {
         let records = [...frame.records]
         let hasMore = frame.hasMore
+        // 只向下翻到游标之后:更早历史已消费过
         while (hasMore) {
           const beforeSeq = records[0]?.event?.seq
           if (!Number.isSafeInteger(beforeSeq)) throw new Error('截断的会话日志缺少分页游标')
-          const page = await sessionController.page({ address: { kind: 'session', sessionId }, throughSeq: frame.cursor, beforeSeq, maxMessages: 100 })
+          if (beforeSeq <= cursor + 1) break
+          const page = await sessionController.page({ address: { kind: 'session', sessionId }, throughSeq: frame.cursor, beforeSeq, maxMessages: FOLLOW_PAGE_MESSAGES })
           if (!page.records.length) throw new Error('会话历史分页未推进')
           if (page.records[0].event.seq >= beforeSeq) throw new Error('会话历史分页游标重复')
           records = [...page.records, ...records]
           hasMore = page.hasMore
         }
-        for (const record of records) yield record.event
+        for (const record of records) {
+          if (record.event.seq <= cursor) continue
+          cursor = record.event.seq
+          yield record.event
+        }
       } else if (frame.type === 'event') {
+        if (frame.event.seq <= cursor) continue
+        cursor = frame.event.seq
         yield frame.event
       }
     }

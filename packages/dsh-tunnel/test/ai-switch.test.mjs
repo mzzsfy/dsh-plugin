@@ -1,4 +1,4 @@
-// 「允许 ai 使用」开关注册面 BDD: 开关决定 tunnel_open/list/close 是否向 ai 注册,
+// 「允许 ai 使用」开关注册面 BDD: 开关决定 tunnel_open/list/ports/close 是否向 ai 注册,
 // 关闭即注销(干净禁用), GUI/REST 同表不受影响。覆盖双形态读写:
 // legacy 设置节(watch 回写)与 0.1.7+ volatile ref(loader 原地热更 + loader/volatile-update)。
 import test from 'node:test'
@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import { busStub, resetBusStub } from './_mocks.common-tools.mjs'
 import { FakeHost } from './support/fake-host.mjs'
 
-const TOOL_NAMES = ['tunnel_open', 'tunnel_list', 'tunnel_close']
+const TOOL_NAMES = ['tunnel_open', 'tunnel_list', 'tunnel_ports', 'tunnel_close']
 
 // 工具注册面桩: 只关心「谁被注册/何时被注销」
 function createToolsService() {
@@ -106,10 +106,12 @@ async function callApi(webServer, method, path, body) {
   req.method = method
   req.url = '/api/tunnel' + path
   req.headers = { host: 'localhost:3080', ...(body === undefined ? {} : { 'content-type': 'application/json' }) }
-  const res = { status: null, payload: null }
+  const res = { status: null, payload: null, finishListeners: [] }
   res.writeHead = (status) => { res.status = status }
+  res.on = (event, listener) => { if (event === 'finish') res.finishListeners.push(listener) }
   res.end = (text) => {
     try { res.payload = JSON.parse(text) } catch { res.payload = null }
+    for (const listener of res.finishListeners) listener()
   }
   const done = route.handler(req, res)
   process.nextTick(() => {
@@ -122,7 +124,7 @@ async function callApi(webServer, method, path, body) {
 
 const openTunnel = (webServer) => callApi(webServer, 'POST', '/tunnels', { name: 'app', targetPort: 80 })
 
-test('默认注册三件工具, status 暴露 aiTools 开', async () => {
+test('默认注册四件工具, status 暴露 aiTools 开', async () => {
   const { webServer, tools, dispose } = await applyPlugin()
   try {
     assert.deepEqual(tools.names().sort(), [...TOOL_NAMES].sort())
@@ -168,7 +170,6 @@ test('0.1.7 形态: volatile ref 初值生效, volatile-update 驱动翻转', as
   let aiValue = false
   const { tools, events, dispose } = await applyPlugin({
     aiTools: volatileRef(() => aiValue),
-    sidebarTab: volatileRef(false),
     connectTimeoutMs: volatileRef(5 * 1000),
   })
   try {
@@ -238,6 +239,19 @@ test('写路径服务缺失降级: updateUi 返回 ok:false', async () => {
   } finally { dispose() }
 })
 
+// legacy 通道写失败必须回给调用方: 不 await 时 rejection 逃逸成未捕获异常(可终止进程), 写盘失败还被当成功
+test('legacy 写失败: Given settings.update 拒绝 Then 400 且注册面不翻转', async () => {
+  const settings = createSettingsService()
+  settings.service.update = async () => { throw new Error('设置写盘失败') }
+  const { webServer, tools, dispose } = await applyPlugin({}, { settings: settings.service })
+  try {
+    const res = await callApi(webServer, 'POST', '/ui-settings', { aiTools: false })
+    assert.equal(res.status, 400)
+    assert.match(res.payload.error, /设置写盘失败/)
+    assert.deepEqual(tools.names().sort(), [...TOOL_NAMES].sort(), '写失败不得翻转注册面')
+  } finally { dispose() }
+})
+
 test('插件停用回收工具注册', async () => {
   const { tools, dispose } = await applyPlugin()
   assert.deepEqual(tools.names().sort(), [...TOOL_NAMES].sort())
@@ -245,12 +259,26 @@ test('插件停用回收工具注册', async () => {
   assert.deepEqual(tools.names(), [])
 })
 
-test('Config volatile 标记面: 三个偏好字段 live, dataDir 不进 UI', async () => {
+test('Config volatile 标记面: 偏好字段 live, dataDir 不进 UI', async () => {
   const { Config, SETTINGS_SCHEMA } = await import('../src/index.js')
   assert.equal(Config.dict.aiTools.meta.volatile, true)
-  assert.equal(Config.dict.sidebarTab.meta.volatile, true)
   assert.equal(Config.dict.connectTimeoutMs.meta.volatile, true)
   assert.equal(Config.dict.dataDir.meta.volatile, undefined)
   assert.equal(SETTINGS_SCHEMA.dict.aiTools.meta.default, true)
   assert.equal(SETTINGS_SCHEMA.dict.dataDir, undefined, 'legacy 设置节不收环境路径')
+})
+
+test('dataDir 默认值跟随 DSH_HOME', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-tunnel-home-'))
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  try {
+    // Config 的默认值在模块求值期读取环境,必须用新实例验证而不是读已缓存模块
+    const { Config } = await import(`../src/index.js?dsh-home=${Date.now()}`)
+    assert.equal(Config({}).dataDir, join(home, 'dsh-tunnel'))
+  } finally {
+    if (previous === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previous
+    rmSync(home, { recursive: true, force: true })
+  }
 })

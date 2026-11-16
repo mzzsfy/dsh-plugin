@@ -149,20 +149,27 @@ window.__ModuleLoader__.load({
 
     const PATHMAP_URL = '/api/shell-select/pathmap'
     let pathMap = null
-    let pathMapRequested = false
+    let pathMapPromise = null
+    let pathMapWarned = false
     function loadPathMap() {
-      if (pathMapRequested) return
-      pathMapRequested = true
-      fetch(PATHMAP_URL, { headers: { accept: 'application/json' } })
+      if (pathMap !== null) return Promise.resolve(pathMap)
+      pathMapPromise ??= fetch(PATHMAP_URL, { headers: { accept: 'application/json' } })
         .then((response) => response.ok ? response.json() : null)
         .then((facts) => {
           if (facts && typeof facts.platform === 'string') pathMap = facts
-          else pathMapRequested = false
+          return pathMap
         })
         .catch((error) => {
-          pathMapRequested = false
-          console.warn('shell-select: pathmap fetch failed: ' + (error instanceof Error ? error.message : String(error)))
+          // POSIX/headless 路由不存在属预期形态,只告警一次
+          if (!pathMapWarned) {
+            pathMapWarned = true
+            console.warn('shell-select: pathmap fetch failed: ' + (error instanceof Error ? error.message : String(error)))
+          }
+          return null
         })
+        // 失败不锁定:下次调用重试(路由行尚未激活的时序窗口)
+        .finally(() => { pathMapPromise = null })
+      return pathMapPromise
     }
     // LOGIC-END loadPathMap
 
@@ -215,6 +222,7 @@ window.__ModuleLoader__.load({
       '  border:.5px solid var(--sls-card-border); border-radius:var(--sls-radius-md); }',
       '.sls-entry__head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }',
       '.sls-entry__title { font-size:14px; line-height:22px; font-weight:600; }',
+      '.sls-entry__actions { display:flex; align-items:center; gap:8px; margin-left:auto; flex:none; }',
       '.sls-entry input[type="radio"] { accent-color:var(--sls-accent); }',
       '.sls-grid { display:grid; grid-template-columns:120px minmax(0,1fr); gap:4px 12px; align-items:center; }',
       '.sls-grid__label { font-size:13px; line-height:20px; color:var(--sls-text-sub); }',
@@ -237,6 +245,7 @@ window.__ModuleLoader__.load({
       '.sls-badge--bad { color:var(--sls-danger); background:var(--sls-danger-wash); }',
       '.sls-badge--default { color:var(--sls-accent); background:var(--sls-accent-wash); }',
       '.sls-hint { font-size:13px; line-height:20px; color:var(--sls-text-sub); white-space:pre-wrap; overflow-wrap:anywhere; }',
+      '.sls-hint--wide { grid-column:2; }',
       '.sls-error { font-size:12px; line-height:18px; color:var(--sls-text-sub); white-space:pre-wrap; }',
       '.sls-args { font-family:var(--sls-mono); }',
       '.sls-rules { display:flex; flex-direction:column; gap:12px; padding:10px; background:var(--sls-card);',
@@ -303,7 +312,7 @@ window.__ModuleLoader__.load({
       '.sls-tv__out--inline { border:.5px solid var(--sls-border); border-radius:var(--sls-radius-sm); }',
       '.sls-tv__inspect { display:flex; align-items:center; gap:4px; min-height:24px; padding:0 10px; border:none; border-top:.5px solid var(--sls-border); background:transparent; color:var(--sls-text-sub); cursor:pointer; font-size:11px; line-height:18px; }',
       '.sls-tv__inspect:hover { background:var(--sls-hover); color:var(--sls-text); }',
-      '@media (max-width:640px) { .sls-grid { grid-template-columns:1fr; gap:4px; } .sls-entry { padding:16px; } }',
+      '@media (max-width:640px) { .sls-grid { grid-template-columns:minmax(0,1fr); gap:4px; } .sls-hint--wide { grid-column:1 / -1; } .sls-entry { padding:16px; } }',
     ].join('\n')
 
     function h(type, props) {
@@ -755,7 +764,6 @@ window.__ModuleLoader__.load({
     function editableSection(section) {
       const { resolved, ...config } = section
       return {
-        config,
         entries: config.shells.map((entry, index) => {
           const argsText = argsTextOf(entry.args ?? [])
           const envText = envTextOf(entry.env ?? {})
@@ -832,10 +840,17 @@ window.__ModuleLoader__.load({
             if (issue !== undefined) throw new Error(`第 ${index + 1} 条正则非法：${issue}`)
           }
           const deny = form.rules.map((rule) => rule.value).filter((rule) => rule !== '')
-          const result = await api(API.config, { method: 'POST', body: JSON.stringify({ ...form.config, shells, default: defaultId, deny }) })
+          // 写协议只收三个可写字段:未知键服务端一律 400(执行预算等其余字段
+          // 由宿主设置面维护,写路径整份保留,不随表单往返)
+          const result = await api(API.config, { method: 'POST', body: JSON.stringify({ shells, default: defaultId, deny }) })
           clientCatalog = { default: result.resolved.default, byId: Object.fromEntries(result.resolved.shells.map((entry) => [entry.id, entry.id])) }
           setForm((current) => ({ ...current, dirty: false }))
-          setNotice('已保存，默认客户端与工具描述即时生效')
+          // 三态:执行面刷新失败 / 无活跃执行面(未接管) / 即时生效
+          setNotice(result.refreshFailed === true
+            ? '已保存；执行面刷新失败，重开插件或重启后生效'
+            : result.noExecutor === true
+              ? '已保存；当前无活跃执行面（未接管），重开插件或重启后生效'
+              : '已保存，默认客户端与工具描述即时生效')
           try {
             const section = await api(API.config)
             setForm(editableSection(section))
@@ -894,14 +909,15 @@ window.__ModuleLoader__.load({
                   checked: form.defaultId === entry.id && entry.id.length > 0, disabled: busy || entry.id.trim() === '',
                   title: '设为默认客户端(模型缺省 shell 参数时使用)',
                   onChange: () => editForm((current) => ({ ...current, defaultId: entry.id })),
-                }), h('span', { className: 'sls-hint' }, '默认')),
+                }), h('span', { className: 'sls-hint' }, '设为默认')),
               h('span', { className: 'sls-badge' + (entry.available === true ? ' sls-badge--ok' : entry.available === false ? ' sls-badge--bad' : ''),
                 title: entry.resolved ? '解析路径:' + entry.resolved : '路径尚未解析',
               }, entry.available === true ? '可用' : entry.available === false ? '不可用' : '未知'),
               entry.id === form.defaultId && entry.id !== '' ? h('span', { className: 'sls-badge sls-badge--default' }, '默认') : null,
               h('span', { style: { flex: 1 } }),
-              h('button', { type: 'button', className: 'sls-btn', disabled: busy || entry.path.trim() === '', title: '检查该路径是否存在', onClick: () => probe(entry) }, '探测路径'),
-              h('button', { type: 'button', className: 'sls-btn sls-btn--danger', disabled: busy, 'aria-label': `移除客户端 ${index + 1}`, title: '移除该条目', onClick: () => removeEntry(entry.key) }, '移除')),
+              h('div', { className: 'sls-entry__actions' },
+                h('button', { type: 'button', className: 'sls-btn', disabled: busy || entry.path.trim() === '', title: '检查该路径是否存在', onClick: () => probe(entry) }, '探测路径'),
+                h('button', { type: 'button', className: 'sls-btn sls-btn--danger', disabled: busy, 'aria-label': `移除客户端 ${index + 1}`, title: '移除该条目', onClick: () => removeEntry(entry.key) }, '移除'))),
             h('div', { className: 'sls-grid' },
               h('span', { className: 'sls-grid__label' }, 'id'),
               input('id', 'id', 'pwsh / git-bash / …(模型看到的 shell 参数值,亦作显示名)'),
@@ -915,7 +931,7 @@ window.__ModuleLoader__.load({
               input('路径', 'path', '留空自动探测,如 C:\\Program Files\\Git\\bin\\bash.exe'),
               h('span', { className: 'sls-grid__label' }, '参数'),
               input('参数', 'argsText', '留空用形态默认;空格分隔,引号包住含空格参数,{command} 为命令占位'),
-              h('span', { className: 'sls-hint', style: { gridColumn: '2' } }, "空格参数加引号；控制字符用 $'…' 转义，仅解析不执行。"),
+              h('span', { className: 'sls-hint sls-hint--wide' }, "空格参数加引号；控制字符用 $'…' 转义，仅解析不执行。"),
               ...(entry.kind === 'bash' ? [
                 h('span', { className: 'sls-grid__label' }, '登录壳'),
                 h('label', { className: 'sls-row sls-switch', title: '-lc 登录壳拉起 /etc/profile(只注入 /usr/bin;/mingw64/bin 需在下方的环境里配 MSYSTEM=MINGW64)' },
@@ -927,7 +943,7 @@ window.__ModuleLoader__.load({
               ...(entry.kind === 'wsl' ? [h('span', { className: 'sls-grid__label' }, '发行版'), input('发行版', 'distro', '留空用默认发行版,如 Ubuntu-22.04')] : []),
               h('span', { className: 'sls-grid__label' }, '环境'),
               input('环境', 'envText', '每行 K=V,如 MSYSTEM=MINGW64;wsl 形自动经 WSLENV 透传', 'textarea'),
-              h('span', { className: 'sls-hint', style: { gridColumn: '2' } }, '每行 K=V；换行值用双引号及 \\n，双引号内反斜线写 \\\\。')))
+              h('span', { className: 'sls-hint sls-hint--wide' }, '每行 K=V；换行值用双引号及 \\n，双引号内反斜线写 \\\\。')))
         }),
         h('div', { className: 'sls-rules' },
           h('div', { className: 'sls-rules__head' }, h('span', { className: 'sls-rules__title' }, '命令黑名单'),
@@ -963,10 +979,29 @@ window.__ModuleLoader__.load({
         if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
         else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
         else window.__navicIconQueue = [NAV_ICON]
-        ctx.slots.inject('settings.section', () => ctx.slots.register(
-          { name: 'settings.section', id: 'shell-select', order: 82, label: 'Shell 管理' },
-          () => React.createElement(ShellSelectApp),
-        ))
+        // 设置分区只在宿主数据面在场时注册:web 行按平台门控(POSIX/headless 整行
+        // 不挂),无条件注册只会在侧栏留下一张永远"加载失败"的空页。平台事实只有
+        // pathmap 一处(POSIX 上路由不存在);路由由 web 行 apply 注册,页面可能先于
+        // 它加载,失败再探一次,仍拿不到事实即判定数据面不在场。
+        const SECTION_PROBE_ATTEMPTS = 2
+        const SECTION_PROBE_RETRY_MS = 500
+        let alive = true
+        ctx.effect(() => () => { alive = false }, 'shell-select settings section lifetime')
+        void (async () => {
+          for (let attempt = 0; attempt < SECTION_PROBE_ATTEMPTS; attempt += 1) {
+            const facts = await loadPathMap()
+            if (!alive) return
+            if (facts !== null) {
+              if (facts.platform !== 'win32') return
+              ctx.slots.inject('settings.section', () => ctx.slots.register(
+                { name: 'settings.section', id: 'shell-select', order: 82, label: 'Shell 管理' },
+                () => React.createElement(ShellSelectApp),
+              ))
+              return
+            }
+            if (attempt < SECTION_PROBE_ATTEMPTS - 1) await new Promise((resolve) => setTimeout(resolve, SECTION_PROBE_RETRY_MS))
+          }
+        })()
         installPathRescue(ctx)
         ctx.effect(() => {
           const style = document.createElement('style')

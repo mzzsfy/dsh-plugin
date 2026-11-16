@@ -163,11 +163,29 @@ async function applyEntryChange(change, content, current, temp, platform) {
   await rename(temp, change.path)
 }
 
-async function writeEntry(change, restore = false, platform = process.platform) {
+// 文件型命令入口(temp+rename):直接写目标在半途崩溃会留下截断的 dsh.cmd/dsh.ps1,
+// 先写同目录临时文件并读回校验,再 rename 原子覆盖目标;失败时旧入口保持完整,
+// mode 随临时文件带入(与 symlink 分支同一临时名规则,残留由下次写前拦住)。
+async function replaceEntryFile(path, content, mode, fileOps = {}) {
+  const temp = path + '.maintain-next'
+  if (await optionalStat(temp)) throw new Error('残留临时命令入口: ' + temp)
+  const writeFileImpl = fileOps.writeFileImpl ?? writeFile
+  const readFileImpl = fileOps.readFileImpl ?? readFile
+  const renameImpl = fileOps.renameImpl ?? rename
+  try {
+    await writeFileImpl(temp, content, { mode })
+    if (await readFileImpl(temp, 'utf8') !== content) throw new Error('命令入口写临时文件读回失败')
+    await renameImpl(temp, path)
+    if (await readFileImpl(path, 'utf8') !== content) throw new Error('命令入口读回失败')
+  } finally {
+    if (await optionalStat(temp)) await unlink(temp)
+  }
+}
+
+export async function writeEntry(change, restore = false, platform = process.platform, fileOps = {}) {
   const content = restore ? change.before : change.after
   if (change.kind === 'file') {
-    await writeFile(change.path, content, { mode: change.mode })
-    if (await readFile(change.path, 'utf8') !== content) throw new Error('命令入口读回失败')
+    await replaceEntryFile(change.path, content, change.mode, fileOps)
     return
   }
   const temp = change.path + '.maintain-next'

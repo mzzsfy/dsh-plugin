@@ -16,7 +16,7 @@ const SELECTOR_AV = '[class$="_av"]'
 const SELECTOR_ALL = SELECTOR_CELL + ',' + SELECTOR_AV
 const SELECTOR_MARKED = '[data-navic]'
 const SELECTOR_LABEL = '.VOzbGW_navLabel'
-const NAVLIST_SCROLL_CSS = '.VOzbGW_navList{flex:1 1 0;min-height:0;overflow-y:auto;scrollbar-width:thin}'
+const NAVLIST_SCROLL_CSS = '@media (min-width:768px){.VOzbGW_navList{flex:1 1 0;min-height:0;overflow-y:auto;scrollbar-width:thin}}'
 
 function fakeRaf() {
   const pending = new Map()
@@ -43,6 +43,7 @@ function makeOfficialSvg({ gear = 'legacy' } = {}) {
     style: { display: '' },
     innerHTML: '',
     remove() {},
+    contains(node) { return node === this },
     getAttribute(name) { return spriteRef && name === 'data-icon' ? 'dsw-icon-settings-outline-medium' : null },
     querySelector(sel) {
       if (spriteRef) return sel.includes('#dsw-icon-settings-outline') ? { nodeName: 'use' } : null
@@ -90,6 +91,7 @@ function makeCell(label, { gear = 'legacy', navic = '' } = {}) {
 }
 
 // 头像槽桩:原子节点 + 所在行 + 父容器(applyAvatar 经父容器扫描行内注入);
+// injected 物化为真实兄弟节点:decideAvatar 的幂等判据只看槽的下一元素。
 // rowFound=false 模拟 row1 锚点缺失
 function makeAvatar({ name = 'plugin', rowFound = true, navic = '' } = {}) {
   const av = {
@@ -105,6 +107,19 @@ function makeAvatar({ name = 'plugin', rowFound = true, navic = '' } = {}) {
     insertAdjacentHTML(position, html) {
       av.injectedCount += 1
       av.lastInjectedHtml = html
+      const injected = {
+        dataset: { navic: '1' },
+        innerHTML: html,
+        remove() {
+          const at = av.parentInjections.indexOf(injected)
+          if (at >= 0) av.parentInjections.splice(at, 1)
+        },
+      }
+      // 注入紧跟槽体:数组首位即槽的下一元素(幂等判据只看邻接节点)
+      av.parentInjections.unshift(injected)
+    },
+    get nextElementSibling() {
+      return av.parentInjections.length === 0 ? null : av.parentInjections[0]
     },
     parentElement: {
       querySelectorAll(sel) {
@@ -436,6 +451,154 @@ test('声明持久层:重装恢复走安全门,同值注册幂等,恶意值不�
   }
 })
 
+// P1-13:属性级载荷(style / fill 外链 url / xlink:href / href / onload / SMIL)
+// 走真实 register 入口同样被拒;合法本地渐变引用照常生效——安全门是四重白名单
+// 而非一刀切,能力边界见 README「声明机制」。
+test('registerIcons 属性门:属性级载荷拒收,合法本地渐变声明生效', () => {
+  const cell = makeCell('目标分区')
+  const { win, doc, raf } = loadClient()
+  doc.cells.push(cell)
+  const unload = boot(win.__loaded, doc)
+  const payloads = [
+    '<svg><path style="background:url(https://evil.example/x)" d="M0 0L1 1"/></svg>',
+    '<svg style="position:fixed"><path d="M0 0L1 1"/></svg>',
+    '<svg><path fill="url(https://evil.example/p.svg#g)" d="M0 0L1 1"/></svg>',
+    '<svg><path stroke="url(//evil.example/p.svg#g)" d="M0 0L1 1"/></svg>',
+    '<svg><path xlink:href="https://evil.example/x.svg#a" d="M0 0L1 1"/></svg>',
+    '<svg><path href="https://evil.example/x.svg#a" d="M0 0L1 1"/></svg>',
+    '<svg onload="alert(1)"></svg>',
+    '<svg><animate attributeName="href" to="https://evil.example/x.svg#a"/></svg>',
+    '<svg><style>@import url("https://evil.example/x.css")</style></svg>',
+  ]
+  try {
+    raf.flush()
+    doc.marked.push(cell.official) // 假文档的 [data-navic] 查询走登记表,记账节点入表
+    for (const payload of payloads) {
+      win.__navicIcons.register({ 目标分区: payload })
+      assert.equal(win.__navicIconDeclarations.目标分区, undefined, '载荷未过门: ' + payload)
+    }
+    raf.flush()
+    assert.equal(
+      cell.official.innerHTML,
+      logic.svgInner(logic.FALLBACK[logic.poolIndexOf('目标分区')]),
+      '载荷未过门时贴图走默认兜底,畸形属性未进入官方 svg',
+    )
+    const gradient = '<svg><defs><linearGradient id="g"><stop offset="0" stop-color="#0af"/><stop offset="1" stop-color="currentColor"/></linearGradient></defs><path fill="url(#g)" d="M0 0L1 1"/></svg>'
+    win.__navicIcons.register({ 目标分区: gradient })
+    raf.flush()
+    assert.equal(win.__navicIconDeclarations.目标分区, gradient, '合法声明归一化写入')
+    assert.equal(cell.official.innerHTML, logic.svgInner(gradient), '合法声明就地生效')
+    assert.equal(cell.official.dataset.navic, '目标分区', '记账保留')
+  } finally {
+    unload()
+  }
+})
+
+// 零绘制声明(空 svg / 仅 defs / 仅 title+desc / 几何缺失)不是图标:声明被撤销,
+// 官方齿轮与头像槽都回落默认管线。历史缺陷是零绘制值过门 → svgInner 得空串 →
+// 写进官方 innerHTML 且记账后永久空白(nav 槽)与空注入(头像槽)。
+test('零绘制声明回落默认管线:nav 槽与头像槽都不写空内容,且撤销声明后可自愈', () => {
+  const cell = makeCell('目标分区')
+  const av = makeAvatar({ name: '零绘制插件' })
+  const { win, doc, raf } = loadClient()
+  doc.cells.push(cell)
+  doc.avatars.push(av)
+  const unload = boot(win.__loaded, doc)
+  try {
+    raf.flush()
+    // 假文档的 [data-navic] 查询走登记表:真实 DOM 里两处记账节点都会被查到
+    doc.marked.push(cell.official, av)
+    const navDefault = logic.svgInner(logic.FALLBACK[logic.poolIndexOf('目标分区')])
+    const avatarDefault = logic.themedIcon('零绘制插件')
+    assert.equal(avatarDefault, logic.GLYPHS.cube, '头像槽默认管线命中「插件」关键词(非哈希,防断言自证)')
+    const zeroDraw = [
+      '<svg width="16" height="16" viewBox="0 0 16 16"></svg>',
+      '<svg><defs><linearGradient id="g"><stop offset="0" stop-color="#fff"/></linearGradient></defs></svg>',
+      '<svg><defs><path d="M0 0L1 1"/></defs></svg>',
+      '<svg><title>零绘制</title><desc>说明</desc></svg>',
+      '<svg><path/></svg>',
+      '<svg><path d="M0 0"/></svg>',
+    ]
+    win.__navicIcons.register({ 目标分区: 'bell', 零绘制插件: 'wrench' })
+    raf.flush()
+    assert.equal(cell.official.innerHTML, logic.svgInner(logic.GLYPHS.bell), '合法声明生效(nav 槽)')
+    assert.equal(av.lastInjectedHtml, logic.GLYPHS.wrench, '合法声明生效(头像槽)')
+    for (const markup of zeroDraw) {
+      win.__navicIcons.register({ 目标分区: markup, 零绘制插件: markup })
+      assert.equal(win.__navicIconDeclarations.目标分区, undefined, 'nav 槽零绘制声明未入注册表: ' + markup)
+      assert.equal(win.__navicIconDeclarations.零绘制插件, undefined, '头像槽零绘制声明未入注册表: ' + markup)
+      raf.flush()
+      assert.equal(cell.official.innerHTML, navDefault, 'nav 槽回落默认管线且非空: ' + markup)
+      assert.equal(av.lastInjectedHtml, avatarDefault, '头像槽回落默认管线: ' + markup)
+      assert.notEqual(logic.svgInner(av.lastInjectedHtml), '', '头像槽注入内容非空')
+      assert.equal(cell.official.dataset.navic, '目标分区', 'nav 槽记账保留')
+      assert.equal(av.dataset.navic, '零绘制插件', '头像槽记账保留')
+    }
+  } finally {
+    unload()
+  }
+})
+
+// 旧版本写在页面上的零绘制记账(navic 相等、内容为空/仅 defs/仅 title)必须自愈,
+// 只认 innerHTML==='' 会把非空的 defs/title 残留判成已完成改写而永久空白
+test('零绘制残留记账自愈:空壳/仅 defs/仅 title 的旧内容按默认管线重写', () => {
+  const staleCases = ['', '<defs><path d="M0 0L1 1"/></defs>', '<title>零绘制</title>']
+  for (const stale of staleCases) {
+    const cell = makeCell('目标分区', { gear: 'legacy', navic: '目标分区' })
+    const { win, doc, raf } = loadClient()
+    doc.cells.push(cell)
+    cell.official.innerHTML = stale
+    const unload = boot(win.__loaded, doc)
+    try {
+      raf.flush()
+      assert.equal(
+        cell.official.innerHTML,
+        logic.svgInner(logic.FALLBACK[logic.poolIndexOf('目标分区')]),
+        '零绘制残留被默认管线图形替换: ' + JSON.stringify(stale),
+      )
+      win.__navicIcons.register({ 触发二扫: 'bell' })
+      raf.flush()
+      assert.equal(cell.official.dataset.navic, '目标分区', '重写后记账不变')
+    } finally {
+      unload()
+    }
+  }
+})
+
+// 头像槽幂等旧判据只看记账 + 行内隐藏:注入节点被 React 摘掉或内容为空壳时不再重贴
+test('头像槽自愈:注入节点被摘掉或为空壳时重贴并回归幂等', () => {
+  const av = makeAvatar({ name: 'plugin-a' })
+  const { win, doc, raf } = loadClient()
+  doc.avatars.push(av)
+  const unload = boot(win.__loaded, doc)
+  try {
+    raf.flush()
+    const expected = logic.themedIcon('plugin-a')
+    assert.equal(av.injectedCount, 1, '首帧注入')
+    assert.equal(av.lastInjectedHtml, expected)
+    // React 重渲染摘掉注入节点:记账与行内隐藏都还在
+    av.parentInjections.length = 0
+    win.__navicIcons.register({ 触发重扫: 'bell' })
+    raf.flush()
+    assert.equal(av.injectedCount, 2, '注入节点丢失后重贴')
+    assert.equal(av.lastInjectedHtml, expected)
+    // 旧版本零绘制声明写下的空壳注入
+    av.parentInjections.length = 0
+    av.parentInjections.push({ dataset: { navic: '1' }, innerHTML: '', remove() {} })
+    win.__navicIcons.register({ 触发三扫: 'bell' })
+    raf.flush()
+    assert.equal(av.injectedCount, 3, '空壳注入后重贴')
+    // 注入内容可绘制后回归幂等
+    win.__navicIcons.register({ 触发四扫: 'bell' })
+    raf.flush()
+    assert.equal(av.injectedCount, 3, '正常注入后不再重贴')
+    assert.equal(av.dataset.navic, 'plugin-a', '记账不变')
+    assert.equal(av.style.display, 'none', '行内隐藏保持')
+  } finally {
+    unload()
+  }
+})
+
 test('恢复守卫:持久层被写成数组/字符串/null 时跳过恢复且不抛,注册功能不受损', () => {
   for (const bad of [['bell'], 'bell', null]) {
     const { win, doc } = loadClient()
@@ -517,6 +680,110 @@ test('replacePass:第三方自供图行回退我方残留恢复官方原样', ()
     assert.equal(cell.official.dataset.navic, undefined, '记账清除')
     assert.equal(cell.official.dataset.navicYield, '插件市场', '留 yield 永不重入')
     assert.equal(cell.official.innerHTML, '<use href="#dsw-icon-settings-outline-medium"></use>', '官方 sprite 原样重建')
+    assert.deepEqual(Object.keys(cell.official.dataset).sort(), ['navicYield'], '回退后三条 data-* 只剩 yield(navic 删、无备份)')
+  } finally {
+    unload()
+  }
+})
+
+// 残留清理在裁决入口且无条件:外部供给格/让位格不产生决策,清理不能挂在 apply 之后。
+// 0.1.x 注入制的兄弟节点(data-navic="1")在这两类格上若无此入口就永久残留双图。
+test('replacePass:外部供给格与 yield 格无决策时残留也被清除', () => {
+  const cases = [
+    ['外部供给格', (cell) => { cell.dataset.marketNavIcon = '' }],
+    ['yield 格', (cell) => { cell.official.dataset.navicYield = '插件市场' }],
+  ]
+  for (const [name, prepare] of cases) {
+    const cell = makeCell('插件市场', { gear: 'sprite' })
+    prepare(cell)
+    const stale = {
+      dataset: { navic: '1' },
+      remove() {
+        const at = cell.svgs.indexOf(stale)
+        if (at >= 0) cell.svgs.splice(at, 1)
+      },
+    }
+    cell.svgs.push(stale)
+    const { win, doc, raf } = loadClient()
+    doc.cells.push(cell)
+    const unload = boot(win.__loaded, doc)
+    try {
+      raf.flush()
+      assert.equal(cell.svgs.includes(stale), false, name + ':升级残留被清除')
+      assert.equal(cell.svgs.length, 1, name + ':官方 svg 保留(首个 svg 不移除)')
+      assert.equal(cell.official.dataset.navic, '', name + ':零决策不写记账')
+      assert.equal(cell.official.innerHTML, '', name + ':官方内容未动')
+    } finally {
+      unload()
+    }
+  }
+})
+
+// 改写路径同样先清残留:0.1.x 升级格首次进入 0.2.x 时不得同时留下注入节点与我方改写
+test('replacePass:改写路径裁决前清除升级残留', () => {
+  const cell = makeCell('插件市场')
+  const stale = {
+    dataset: { navic: '1' },
+    remove() {
+      const at = cell.svgs.indexOf(stale)
+      if (at >= 0) cell.svgs.splice(at, 1)
+    },
+  }
+  cell.svgs.push(stale)
+  const { win, doc, raf } = loadClient()
+  doc.cells.push(cell)
+  const unload = boot(win.__loaded, doc)
+  try {
+    raf.flush()
+    assert.equal(cell.svgs.includes(stale), false, '残留清除')
+    assert.equal(cell.svgs.length, 1, '只剩官方 svg')
+    assert.equal(cell.official.dataset.navic, '插件市场', '改写记账正常')
+    assert.ok(cell.official.innerHTML.length > 0, '官方 svg 内容被改写')
+  } finally {
+    unload()
+  }
+})
+
+// 图标内容里的嵌套 svg 也可能带纯标记(安全门允许嵌套 svg 与 data-navic):
+// 清残留只认 primary 之外的直接兄弟,误删嵌套节点会把当前图标掏空
+test('replacePass:图标内部嵌套 svg(纯标记)不被清除', () => {
+  const cell = makeCell('插件市场', { gear: 'sprite', navic: '插件市场' })
+  const nested = {
+    dataset: { navic: '1' },
+    remove() {
+      const at = cell.svgs.indexOf(nested)
+      if (at >= 0) cell.svgs.splice(at, 1)
+    },
+  }
+  nested.parentElement = cell.official
+  cell.official.parentElement = {}
+  cell.official.contains = (node) => node === nested
+  cell.svgs.push(nested)
+  const { win, doc, raf } = loadClient()
+  doc.cells.push(cell)
+  const unload = boot(win.__loaded, doc)
+  try {
+    raf.flush()
+    assert.ok(cell.svgs.includes(nested), '嵌套 svg 保留(不是 0.1.x 注入残留)')
+    assert.equal(cell.official.dataset.navic, '插件市场', '改写记账保持')
+  } finally {
+    unload()
+  }
+})
+
+// 回退只认两条线索:navicOrig 备份 / data-icon 自描述重建;都没有就零动作,
+// 不猜官方原样(猜错即把第三方当前图标覆盖成畸形内容)。
+test('replacePass:外部供给格无备份可重建时零动作', () => {
+  const cell = makeCell('插件市场', { gear: 'legacy', navic: '插件市场' })
+  cell.dataset.marketNavIcon = ''
+  const { win, doc, raf } = loadClient()
+  doc.cells.push(cell)
+  const unload = boot(win.__loaded, doc)
+  try {
+    raf.flush()
+    assert.equal(cell.official.dataset.navic, '插件市场', '残留记账保留(无可信原样)')
+    assert.equal(cell.official.dataset.navicYield, undefined, '不写 yield:未回退,下一轮仍可重试')
+    assert.equal(cell.official.innerHTML, '', '官方内容未动')
   } finally {
     unload()
   }

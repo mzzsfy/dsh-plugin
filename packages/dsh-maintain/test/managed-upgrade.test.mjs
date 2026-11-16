@@ -149,20 +149,30 @@ test('同prefix并发仅一个安装；损坏或古老锁不能TTL放行', async
 
 test('npm超时将槽隔离，下一请求不得直接复用', async t => {
   const f = await setup(t)
-  await assert.rejects(f.api.performManagedUpgrade({ ...f, runningPackage: f.originalPackage, targetVersion: '2.0.0', install: async () => ({ ok: false, timedOut: true, stderrTail: 'timeout' }) }), /timeout/)
+  const error = await f.api.performManagedUpgrade({ ...f, runningPackage: f.originalPackage, targetVersion: '2.0.0', install: async () => ({ ok: false, timedOut: true, stderrTail: 'timeout' }) }).then(() => null, (thrown) => thrown)
+  assert.match(error.message, /timeout/)
+  // 状态不确定标记必须透传给调用方(否则 index 不会强制退出宿主)
+  assert.equal(error.indeterminate, true)
+  assert.equal(error.switched, false)
   await assert.rejects(f.api.performManagedUpgrade({ ...f, runningPackage: f.originalPackage, targetVersion: '2.0.0' }), /锁|隔离|进行中/)
   assert.deepEqual(f.events, [])
 })
 
 test('候选验证显式失败不得切换', async t => {
   const f = await setup(t)
-  await assert.rejects(f.api.performManagedUpgrade({ ...f, runningPackage: f.originalPackage, targetVersion: '2.0.0', validate: async () => ({ ok: false, code: 1, stderrTail: 'ELSPROBLEMS' }) }), /ELSPROBLEMS/)
+  const error = await f.api.performManagedUpgrade({ ...f, runningPackage: f.originalPackage, targetVersion: '2.0.0', validate: async () => ({ ok: false, code: 1, stderrTail: 'ELSPROBLEMS' }) }).then(() => null, (thrown) => thrown)
+  assert.match(error.message, /ELSPROBLEMS/)
+  // 可判定的失败不保留锁,也不得以 indeterminate 触发强制退出
+  assert.equal(error.indeterminate, false)
   await assert.rejects(realpath(f.layout.link), { code: 'ENOENT' })
 })
 
 test('候选验证超时必须保留锁', async t => {
   const f = await setup(t)
-  await assert.rejects(f.api.performManagedUpgrade({ ...f, runningPackage: f.originalPackage, targetVersion: '2.0.0', validate: async () => ({ ok: false, timedOut: true, stillRunning: true, stderrTail: 'timeout' }) }), /timeout/)
+  const error = await f.api.performManagedUpgrade({ ...f, runningPackage: f.originalPackage, targetVersion: '2.0.0', validate: async () => ({ ok: false, timedOut: true, stillRunning: true, stderrTail: 'timeout' }) }).then(() => null, (thrown) => thrown)
+  assert.match(error.message, /timeout/)
+  assert.equal(error.indeterminate, true)
+  assert.equal(error.switched, false)
   assert.match(await readFile(join(f.layout.root, 'upgrade.lock'), 'utf8'), /operationId/)
   const state = JSON.parse(await readFile(join(f.layout.root, 'state.json'), 'utf8'))
   assert.equal(state.phase, 'indeterminate')
@@ -170,10 +180,12 @@ test('候选验证超时必须保留锁', async t => {
 
 test('入口切换回滚失败保留锁并标记不可判定', async t => {
   const f = await setup(t)
-  await assert.rejects(f.api.performManagedUpgrade({
+  const error = await f.api.performManagedUpgrade({
     ...f, runningPackage: f.originalPackage, targetVersion: '2.0.0',
-    activate: async () => { const error = new Error('rollback failed'); error.rollbackFailed = true; throw error },
-  }), /rollback failed/)
+    activate: async () => { const thrown = new Error('rollback failed'); thrown.rollbackFailed = true; throw thrown },
+  }).then(() => null, (thrown) => thrown)
+  assert.match(error.message, /rollback failed/)
+  assert.equal(error.indeterminate, true)
   assert.match(await readFile(join(f.layout.root, 'upgrade.lock'), 'utf8'), /operationId/)
   const state = JSON.parse(await readFile(join(f.layout.root, 'state.json'), 'utf8'))
   assert.equal(state.phase, 'indeterminate')

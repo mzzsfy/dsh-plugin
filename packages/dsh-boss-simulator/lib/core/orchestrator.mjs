@@ -1,52 +1,12 @@
 // PKG-2 受管会话编排:执行/停止闭环。组合 core 状态机与 sessionAdapter;
 // 入口驱动"实施→独立验收→结案→中断恢复"链,不做角色自主调度。
-import { applyCommand, actionKeyOf } from './command.mjs'
 import {
-  ACTIVE_RUN_STATES, checkExecutionPermission, recordRun, hasActiveRuns,
-  stopTask, confirmStopped, requestResume, confirmResume,
+  ACTIVE_RUN_STATES, expireStaleRuns, forceStopTask as forceStopAggregate, isStaleRun,
+  stopTask, confirmStopped,
 } from './task.mjs'
+import { isSessionGoneError } from './session-errors.mjs'
 
-// 派发:许可校验→会话确保→prompt 受理→Run 落盘;受理失败 Run 标 rejected
-export async function dispatchRun(store, aggregate, { runId, workItemId, phase, actorRole, requestId, content, sessionAdapter, globalControl, sessionWorkspaceId, sessionCwd }) {
-  const perm = checkExecutionPermission(aggregate, globalControl, { workItemId, phase, actorRole })
-  if (!perm.ok) return perm
-  // 会话落点:显式指定优先,缺省跟随任务工作区(CAP-01: 不改普通 workspace)
-  const sessionTarget = sessionCwd !== undefined ? { cwd: sessionCwd } : { workspaceId: sessionWorkspaceId ?? aggregate.projectWorkspaceId }
-  let prompt
-  let sessionId
-  try {
-    const session = await sessionAdapter.ensureSession(sessionTarget)
-    sessionId = session.sessionId
-    const reportInstruction = JSON.stringify({
-      runId,
-      phase,
-      actorRole,
-      requiredCriterionIds: aggregate.workItems[workItemId]?.requiredCriterionIds ?? [],
-      schema: { summary: 'non-empty string', verdict: actorRole === 'reviewer' ? ['pass', 'issues'] : ['ready_for_review', 'needs_help'], coveredCriterionIds: 'unique non-empty string[]', issues: 'string[] of non-empty items', evidence: 'string[] of non-empty items' },
-    })
-    const instruction = `完成当前阶段后，将最终结构化结果作为单独 JSON 文本消息提交，不要附加 Markdown。报告上下文：${reportInstruction}`
-    const blocks = typeof content === 'string'
-      ? [{ type: 'text', text: `${content}\n\n${instruction}` }]
-      : [...content, { type: 'text', text: instruction }]
-    prompt = await sessionAdapter.dispatchPrompt({ sessionId, requestId, content: blocks })
-  } catch (error) {
-    return { ok: false, code: 'DISPATCH_FAILED', message: String(error?.message ?? error), stack: error?.stack, runId }
-  }
-  if (!prompt?.accepted) {
-    const rejected = recordRun(aggregate, { runId, workItemId, phase, actorRole, sessionId, requestId, slotKey: perm.result.slotKey, globalControl }).result.aggregate
-    return { ok: false, code: prompt?.code ?? 'PROMPT_REJECTED', message: prompt?.message ?? '投递被拒绝', aggregate: { ...rejected, runs: markRun(rejected.runs, runId, 'rejected') } }
-  }
-  const outcome = applyCommand(
-    aggregate,
-    { causeId: requestId, actionKey: actionKeyOf(['run.dispatch', aggregate.taskId, workItemId, phase]), payloadHash: JSON.stringify({ runId, sessionId, requestId }) },
-    (agg) => {
-      const recorded = recordRun(agg, { runId, workItemId, phase, actorRole, sessionId, requestId, slotKey: perm.result.slotKey, globalControl })
-      return { aggregate: { ...recorded.result.aggregate, runs: markRun(recorded.result.aggregate.runs, runId, 'submitted') }, result: { runId, sessionId, turnId: prompt.turnId ?? null } }
-    },
-  )
-  return outcome.ok ? { ok: true, ...outcome.result.result, aggregate: outcome.result.aggregate } : outcome
-}
-
+// 报告解析:只接受纯 JSON 文本且字段与阶段角色严格匹配,不做容错 stripping。
 export function parseRunReport(content, run) {
   const text = Array.isArray(content) ? content.filter((block) => block?.type === 'text').map((block) => block.text).join('\n').trim() : ''
   if (!text) return { ok: false, message: 'assistant 消息没有文本报告' }
@@ -73,10 +33,6 @@ export function parseRunReport(content, run) {
   return { ok: true, report }
 }
 
-function markRun(runs, runId, state) {
-  return { ...runs, [runId]: { ...runs[runId], state } }
-}
-
 // 事件归并:回合边界只记录执行状态,不推导报告或业务验收事实。
 export function applySessionEvent(aggregate, { runId, type, at }) {
   const run = aggregate.runs[runId]
@@ -88,8 +44,15 @@ export function applySessionEvent(aggregate, { runId, type, at }) {
   }
   const next = transitions[type]
   if (next === undefined) return { ok: false, code: 'INVALID_ARGUMENT', message: `未知事件类型: ${type}` }
-  if (next === run.state) return { ok: true, replayed: true, aggregate }
-  return { ok: true, aggregate: { ...aggregate, runs: { ...aggregate.runs, [runId]: { ...run, state: next, startedAt: type === 'turn.start' ? (at ?? run.startedAt) : run.startedAt } } } }
+  // 事件时间是失联(stale)判定的唯一依据:无论状态是否变化都要推进
+  const lastEventAt = Number.isFinite(at) && at > (run.lastEventAt ?? -Infinity) ? at : run.lastEventAt
+  // 终态 Run 只接受活体时间刷新:迟到回合事件不得把 settled/interrupted/rejected 复活成在飞
+  if (!ACTIVE_RUN_STATES.has(run.state)) {
+    if (lastEventAt === run.lastEventAt) return { ok: true, replayed: true, aggregate }
+    return { ok: true, aggregate: { ...aggregate, runs: { ...aggregate.runs, [runId]: { ...run, lastEventAt } } } }
+  }
+  if (next === run.state && lastEventAt === run.lastEventAt) return { ok: true, replayed: true, aggregate }
+  return { ok: true, aggregate: { ...aggregate, runs: { ...aggregate.runs, [runId]: { ...run, state: next, lastEventAt, startedAt: type === 'turn.start' ? (at ?? run.startedAt) : run.startedAt } } } }
 }
 
 // 停止许可先落盘;取消受理与运行体停止分别记录。
@@ -104,9 +67,12 @@ export async function interruptTask(store, aggregate, { sessionAdapter, reason =
     if (!commandId && current.control.state === 'stopping') return current
     const outcome = stopTask(current, { reason })
     if (!outcome.ok) { failure = outcome; return current }
+    // 失联 Run 不需要核对会话:先按已断收敛,停止核对只剩仍新鲜的在飞会话
+    const expired = expireStaleRuns(outcome.result.aggregate)
+    const settled = expired.result?.aggregate ?? outcome.result.aggregate
     // 即使报告已落库,关联会话仍须核对队列与运行状态。
-    const needsInspection = Object.values(current.runs).some((run) => ACTIVE_RUN_STATES.has(run.state))
-    return { ...outcome.result.aggregate, control: { ...outcome.result.aggregate.control, ...(commandId ? { stopCommandIds: { ...current.control.stopCommandIds, [commandId]: { executionEpoch: outcome.result.aggregate.control.executionEpoch } } } : {}), ...(needsInspection ? { state: 'stopping', stopDetail: 'requesting' } : {}) } }
+    const needsInspection = sessionIdsForStop(settled).length > 0
+    return { ...settled, control: { ...settled.control, ...(commandId ? { stopCommandIds: { ...current.control.stopCommandIds, [commandId]: { executionEpoch: settled.control.executionEpoch } } } : {}), ...(needsInspection ? { state: 'stopping', stopDetail: 'requesting' } : {}) } }
   })
   if (failure) return failure
   if (replayReceipt && (replayReceipt.stopConfirmed === true || replayReceipt.executionEpoch !== stopped.control.executionEpoch)) return { ok: true, aggregate: stopped, replayed: true, receipt: replayReceipt, stopConfirmed: replayReceipt.stopConfirmed === true, cancelErrors: [] }
@@ -117,29 +83,44 @@ export async function interruptTask(store, aggregate, { sessionAdapter, reason =
   }
   const cancelErrors = []
   for (const sessionId of sessionIdsForStop(stopped)) {
-    let pendingItemIds = []
-    try {
-      const inspected = await sessionAdapter.inspectSession({ sessionId })
-      pendingItemIds = inspected.pendingItemIds
-      if (inspected.running === false && Array.isArray(pendingItemIds) && pendingItemIds.length === 0) continue
+    const observed = await inspectStopState(sessionAdapter, sessionId)
+    if (observed.stopped) continue
+    if (observed.error) cancelErrors.push(observed.error)
+    try { await sessionAdapter.cancelSession({ sessionId, pendingItemIds: observed.pendingItemIds }) }
+    catch (error) {
+      // 会话在取消瞬间被删除:目标状态已达成,不记为失败
+      if (!isSessionGoneError(error)) cancelErrors.push({ sessionId, message: String(error?.message ?? error) })
     }
-    catch (error) { cancelErrors.push({ sessionId, message: String(error?.message ?? error) }) }
-    try { await sessionAdapter.cancelSession({ sessionId, pendingItemIds }) }
-    catch (error) { cancelErrors.push({ sessionId, message: String(error?.message ?? error) }) }
   }
   if (cancelErrors.length) {
-    const updated = await store.updateAggregate(aggregate.taskId, (current) => ({ ...current, control: { ...current.control, stopDetail: 'unconfirmed', stopErrors: cancelErrors }, runs: Object.fromEntries(Object.entries(current.runs).map(([id, run]) => [id, { ...run, stopObserved: 'pending' }])) }))
+    const updated = await store.updateAggregate(aggregate.taskId, (current) => ({ ...current, control: { ...current.control, stopDetail: 'unconfirmed', stopErrors: cancelErrors }, runs: Object.fromEntries(Object.entries(current.runs).map(([id, run]) => [id, ACTIVE_RUN_STATES.has(run.state) ? { ...run, stopObserved: 'pending' } : run])) }))
     return finish({ ok: true, aggregate: updated, cancelErrors, stopConfirmed: false })
   }
   const reconciled = await reconcileStoppedTask(store, aggregate.taskId, sessionAdapter)
   return finish({ ...reconciled, cancelErrors })
 }
 
+// 核对一次会话事实:会话已不存在(宿主删除/从未创建)按"已停"返回——
+// 会话不存在即不存在在飞执行体,不是待核对状态;其余错误原样上报,不伪造已停。
+async function inspectStopState(sessionAdapter, sessionId) {
+  let observed
+  try {
+    observed = await sessionAdapter.inspectSession({ sessionId })
+  } catch (error) {
+    if (isSessionGoneError(error)) return { stopped: true, pendingItemIds: [], gone: true }
+    return { stopped: false, pendingItemIds: [], error: { sessionId, message: String(error?.message ?? error) } }
+  }
+  const pendingItemIds = Array.isArray(observed?.pendingItemIds) ? observed.pendingItemIds : []
+  return { stopped: observed?.running === false && pendingItemIds.length === 0, pendingItemIds, gone: false }
+}
+
+// 只核对仍新鲜的在飞 Run:失联 Run 由 expireStaleRuns 收敛,不再等待不可达会话
 function sessionIdsForStop(aggregate) {
+  const now = typeof aggregate.now === 'function' ? aggregate.now() : undefined
   // 只核在飞状态:settled/interrupted/rejected 已是终态,会话被删/归档不应
   // 让停止核对永远停在 unconfirmed。
   return [...new Set(Object.values(aggregate.runs)
-    .filter((run) => ACTIVE_RUN_STATES.has(run.state))
+    .filter((run) => ACTIVE_RUN_STATES.has(run.state) && !isStaleRun(run, { now }))
     .map((run) => run.sessionId))]
 }
 
@@ -150,18 +131,22 @@ export async function reconcileStoppedTask(store, taskId, sessionAdapter) {
   const inspections = new Map()
   const reconcileErrors = []
   for (const sessionId of sessionIdsForStop(snapshot)) {
-    try {
-      const observed = await sessionAdapter.inspectSession({ sessionId })
-      inspections.set(sessionId, observed)
-      if (observed.running !== false || !Array.isArray(observed.pendingItemIds) || observed.pendingItemIds.length) reconcileErrors.push({ sessionId, message: '会话仍运行或队列未清空' })
-    } catch (error) { reconcileErrors.push({ sessionId, message: String(error?.message ?? error) }) }
+    const observed = await inspectStopState(sessionAdapter, sessionId)
+    if (observed.error) { reconcileErrors.push(observed.error); continue }
+    if (observed.stopped) { inspections.set(sessionId, { running: false, pendingItemIds: [] }); continue }
+    inspections.set(sessionId, { running: true, pendingItemIds: observed.pendingItemIds })
+    reconcileErrors.push({ sessionId, message: '会话仍运行或队列未清空' })
   }
   let stopConfirmed = false
   const aggregate = await store.updateAggregate(taskId, (current) => {
     if (current.control.executionEpoch !== snapshot.control.executionEpoch || !['stopping', 'paused', 'reconciling'].includes(current.control.state) || Object.keys(current.runs).some((id) => !snapshot.runs[id])) return current
-    const next = { ...current, control: { ...current.control, stopErrors: reconcileErrors, stopDetail: reconcileErrors.length ? 'unconfirmed' : null }, runs: Object.fromEntries(Object.entries(current.runs).map(([id, run]) => {
+    const expired = expireStaleRuns(current)
+    const base = expired.result?.aggregate ?? current
+    const next = { ...base, control: { ...base.control, stopErrors: reconcileErrors, stopDetail: reconcileErrors.length ? 'unconfirmed' : null }, runs: Object.fromEntries(Object.entries(base.runs).map(([id, run]) => {
+      // 已收敛的终态 Run 保留自己的核对结论(失联收敛的 unreachable 不被覆盖)
+      if (!ACTIVE_RUN_STATES.has(run.state)) return [id, run]
       const observed = inspections.get(run.sessionId)
-      return [id, { ...run, stopObserved: observed?.running === false && observed.pendingItemIds?.length === 0 ? 'confirmed' : 'pending' }]
+      return [id, { ...run, stopObserved: observed?.running === false && observed.pendingItemIds.length === 0 ? 'confirmed' : 'pending' }]
     })) }
     if (reconcileErrors.length) return next
     stopConfirmed = true
@@ -171,13 +156,35 @@ export async function reconcileStoppedTask(store, taskId, sessionAdapter) {
   return { ok: true, aggregate, stopConfirmed, reconcileErrors }
 }
 
-// 只读核对会话事实;恢复核对不得投递新的执行输入。
-export async function resumeTask(aggregate, { resumeIntentId, sourceMessageRef, globalStopGeneration, expectedExecutionEpoch, sessionAdapter }) {
-  const requested = requestResume(aggregate, { resumeIntentId, sourceMessageRef, expectedExecutionEpoch: expectedExecutionEpoch ?? aggregate.control.executionEpoch, globalStopGeneration })
-  if (!requested.ok) return requested
-  let current = requested.result.aggregate
-  const localStore = { loadAggregate: async () => current, updateAggregate: async (_id, update) => (current = update(current)) }
-  const reconciled = await reconcileStoppedTask(localStore, current.taskId, sessionAdapter)
-  if (!reconciled.stopConfirmed) return { ok: false, code: 'RECONCILE_FAILED', message: '旧执行会话或队列尚未核清', aggregate: current }
-  return confirmResume(current, { resumeIntentId, globalStopGeneration })
+// 强制停止/放弃入口:必须显式确认;用于会话不可达且常规核对无出口的任务。
+// commandId 走任务内回执:同命令同内容重放不二次 pause/提升 epoch,异内容冲突。
+export async function forceStop(store, taskId, { reason = 'force_stop', confirm = false, commandId, payloadHash } = {}) {
+  if (confirm !== true) return { ok: false, code: 'CONFIRMATION_REQUIRED', message: '强制停止必须显式确认(confirm: true)' }
+  const snapshot = await store.loadAggregate(taskId)
+  if (!snapshot) return { ok: false, code: 'NOT_FOUND', message: `任务不存在: ${taskId}` }
+  let failure
+  let replayed = false
+  const aggregate = await store.updateAggregate(taskId, (current) => {
+    if (commandId !== undefined) {
+      const receipt = current.forceStopReceipts?.[commandId]
+      if (receipt) {
+        if (receipt.payloadHash !== payloadHash) {
+          failure = { ok: false, code: 'IDEMPOTENCY_CONFLICT', message: `相同 commandId 对应不同内容: ${commandId}` }
+          return current
+        }
+        replayed = true
+        return current
+      }
+    }
+    const outcome = forceStopAggregate(current, { reason })
+    if (!outcome.ok) { failure = outcome; return current }
+    let next = outcome.result.aggregate
+    if (commandId !== undefined) {
+      const result = { accepted: true, forceStopped: true, controlState: next.control.state, pendingStop: false, cancelErrors: [], reconcileErrors: [] }
+      next = { ...next, forceStopReceipts: { ...(current.forceStopReceipts ?? {}), [commandId]: { payloadHash, result } } }
+    }
+    return next
+  })
+  if (failure) return failure
+  return { ok: true, aggregate, stopConfirmed: true, cancelErrors: [], replayed }
 }

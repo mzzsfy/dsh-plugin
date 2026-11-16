@@ -1,61 +1,42 @@
-// client 半区测试夹具: 以真实源码 + 最小 React/DOM/总线替身驱动模块的 apply 与组件渲染。
-// 只替代环境, 不替代行为: 面板/页签是否挂载、订阅是否触发、可见性门控是否生效, 全由源码决定。
+// client 半区测试夹具: 真实源码 + 最小 React/DOM/总线替身。
+// 只替代环境, 不替代行为: settings.section 是否注册、挂载后是否请求、可见性门控是否生效, 全由源码决定。
 import { readFileSync } from 'node:fs'
 
 const source = readFileSync(new URL('../../src/client.js', import.meta.url), 'utf8')
 export const PKG = '@mzzsfy/dsh-tunnel'
 export const tick = () => new Promise((resolve) => setImmediate(resolve))
 
-const SLOT_BUCKETS = ['main', 'sidebar.panellist', 'settings.plugin.item', 'plugins.bundle.config']
-
-function findComponent(element) {
-  if (typeof element?.type === 'function') return element
-  for (const child of element?.props?.children ?? []) {
-    const found = findComponent(child)
-    if (found !== undefined) return found
-  }
-  return undefined
-}
+const SLOT_BUCKETS = ['main', 'sidebar.panellist', 'settings.plugin.item', 'plugins.bundle.config', 'settings.section']
 
 function attachRefs(element) {
   if (element === null || typeof element !== 'object') return
-  if (element.props?.ref && typeof element.props.ref === 'object') element.props.ref.current = { mockNode: true }
+  if (element.props?.ref && typeof element.props.ref === 'object') {
+    element.props.ref.current = { mockNode: true, contains: () => false }
+  }
   for (const child of element.props?.children ?? []) attachRefs(child)
 }
 
 export function createClientHarness(options = {}) {
   const state = {
     definition: null,
-    ui: { sidebarTab: false, aiTools: true, ...(options.ui ?? {}) },
+    rows: options.rows ?? [],
+    ports: options.ports ?? [],
+    lanOrigin: options.lanOrigin ?? 'http://192.168.1.7:3080',
     visibilityState: options.visibilityState ?? 'visible',
     requests: [],
     buckets: new Map(SLOT_BUCKETS.map((name) => [name, new Set()])),
-    tabs: new Set(),
     subscriptions: new Set(),
     docListeners: new Map(),
     effectDisposers: [],
     pendingEffects: [],
     componentCleanups: [],
-    pendingSidebarCallbacks: [],
-    observerCallback: null,
-    observerDisconnected: false,
     warnings: [],
   }
-
-  const sidebarService = {
-    registerTab(tab) {
-      options.onRegisterTab?.()
-      if (options.failRegisterTab === true) throw new Error('boom')
-      state.tabs.add(tab)
-      return () => state.tabs.delete(tab)
-    },
-  }
-  state.sidebar = options.sidebar === true ? sidebarService : undefined
 
   const document = {
     visibilityState: state.visibilityState,
     querySelector: () => null,
-    getElementById: () => null,
+    getElementById: () => ({ textContent: '', setAttribute() {} }),
     createElement: () => ({ style: {}, setAttribute() {}, select() {}, id: '', textContent: '' }),
     head: { appendChild() {} },
     body: { appendChild() {}, removeChild() {} },
@@ -78,37 +59,46 @@ export function createClientHarness(options = {}) {
   }
 
   const tools = {
-    setupCommonTools() {
+    createSnapshotRefresh: (refresh) => ({ refresh, dispose() {} }),
+    setupCommonTools(ctx) {
+      const owner = { active: true, subscriptions: new Set() }
+      ctx.effect(() => () => {
+        owner.active = false
+        owner.subscriptions.clear()
+      })
+      state.owner = owner
       return {
         subscribe(listener, { onReset } = {}) {
+          if (!owner.active) throw new Error('不能订阅已卸载的 ctx')
           const subscription = { listener, onReset }
+          owner.subscriptions.add(subscription)
           state.subscriptions.add(subscription)
-          return () => state.subscriptions.delete(subscription)
+          return () => { owner.subscriptions.delete(subscription); state.subscriptions.delete(subscription) }
         },
       }
     },
-    createSnapshotRefresh(refresh) {
-      return { refresh, dispose() {} }
-    },
   }
 
-  const window = { __ModuleLoader__: { load: (definition) => { state.definition = definition } } }
-
-  class FakeIntersectionObserver {
-    constructor(callback) { state.observerCallback = callback }
-    observe(node) { state.observedNode = node }
-    disconnect() { state.observerDisconnected = true }
+  const window = {
+    __ModuleLoader__: { load: (value) => { state.definition = value } },
+    location: options.location ?? { protocol: 'http:', hostname: '127.0.0.1', port: '3080', origin: 'http://127.0.0.1:3080' },
   }
 
-  new Function('window', 'document', 'fetch', 'setInterval', 'clearInterval', 'IntersectionObserver', source)(
-    window, document,
-    async (path) => {
-      state.requests.push(path)
-      const payload = path === '/api/tunnel/status' ? { ui: state.ui } : { items: [], ok: true }
+  new Function('window', 'document', 'fetch', 'setInterval', 'clearInterval', 'navigator', source)(
+    window,
+    document,
+    async (url, init = {}) => {
+      state.requests.push({ url, method: init.method ?? 'GET' })
+      let payload = { ok: true }
+      if (url.startsWith('/api/tunnel/tunnels?probe=1')) payload = { items: state.rows }
+      else if (url === '/api/tunnel/status') payload = { ui: { aiTools: true }, total: state.rows.length, lanOrigin: state.lanOrigin }
+      else if (url.startsWith('/api/tunnel/ports')) payload = { supported: true, scannedAt: '2026-11-15T10:00:00.000Z', items: state.ports }
+      else if (url.startsWith('/api/tunnel/probe')) payload = { ok: true, listening: true, health: { state: 'online' } }
       return { ok: true, status: 200, json: async () => payload }
     },
-    () => 0, () => {},
-    FakeIntersectionObserver,
+    () => 0,
+    () => {},
+    options.navigator ?? {},
   )
 
   const plugin = state.definition.factory((name) => {
@@ -118,12 +108,9 @@ export function createClientHarness(options = {}) {
   })
 
   const ctx = {
-    get: (name) => (name === 'betterSidebar' ? state.sidebar : undefined),
-    inject(names, callback) {
-      if (!names.includes('betterSidebar')) return
-      if (state.sidebar !== undefined) callback({ betterSidebar: state.sidebar })
-      else state.pendingSidebarCallbacks.push(callback)
-    },
+    fiber: { entry: { options: { name: PKG } } },
+    get: () => undefined,
+    inject() {},
     effect(fn) {
       const disposer = fn()
       if (typeof disposer === 'function') state.effectDisposers.push(disposer)
@@ -131,11 +118,9 @@ export function createClientHarness(options = {}) {
     },
     slots: {
       inject(name, fn) {
+        if (name !== 'settings.section') return () => {}
         const result = fn()
-        if (typeof result === 'function') return result
-        const first = result.next()
-        const dispose = typeof first.value === 'function' ? first.value : () => {}
-        return () => { dispose(); result.return?.() }
+        return typeof result === 'function' ? result : () => result?.return?.()
       },
       register(options_, component) {
         const entry = { options: options_, component }
@@ -145,33 +130,38 @@ export function createClientHarness(options = {}) {
     },
   }
 
+  function renderTree(element) {
+    if (element === null || element === undefined) return element
+    if (Array.isArray(element)) return element.map(renderTree)
+    if (typeof element !== 'object') return element
+    if (typeof element.type === 'function') {
+      const rendered = element.type({ ...element.props, children: element.props?.children })
+      return renderTree(rendered)
+    }
+    attachRefs(element)
+    return element
+  }
+
   return {
     state,
     requests: state.requests,
     warnings: state.warnings,
     activate() {
-      const originalWarn = console.warn
-      console.warn = (...args) => state.warnings.push(args.map(String).join(' '))
-      state.restoreWarn = () => { console.warn = originalWarn }
       plugin.apply(ctx)
     },
     dispose() {
       for (const cleanup of state.componentCleanups.splice(0)) cleanup()
       for (const disposer of state.effectDisposers.splice(0).reverse()) disposer()
-      state.restoreWarn?.()
     },
+    sectionCount: () => state.buckets.get('settings.section').size,
     panelCount: () => state.buckets.get('main').size,
     panellistCount: () => state.buckets.get('sidebar.panellist').size,
-    tabCount: () => state.tabs.size,
-    provideSidebar() {
-      state.sidebar = sidebarService
-      for (const callback of state.pendingSidebarCallbacks.splice(0)) callback({ betterSidebar: sidebarService })
-    },
-    setSidebarTab(value) {
-      state.ui = { ...state.ui, sidebarTab: value }
-    },
+    pluginCardCount: () => state.buckets.get('settings.plugin.item').size + state.buckets.get('plugins.bundle.config').size,
     publish() {
-      for (const subscription of state.subscriptions) subscription.listener()
+      for (const subscription of [...state.subscriptions]) subscription.listener(null)
+    },
+    reset() {
+      for (const subscription of [...state.subscriptions]) subscription.onReset?.()
     },
     hidePage() {
       document.visibilityState = 'hidden'
@@ -181,20 +171,12 @@ export function createClientHarness(options = {}) {
       document.visibilityState = 'visible'
       for (const listener of state.docListeners.get('visibilitychange') ?? []) listener()
     },
-    setNodeVisible(visible) {
-      state.observerCallback?.([{ isIntersecting: visible }])
-    },
-    renderPanel() {
-      const entry = [...state.buckets.get('main')][0]
-      if (entry === undefined) throw new Error('主面板未注册')
-      const tree = entry.component()
-      const nested = findComponent(tree)
-      if (nested === undefined) throw new Error('主面板未包含组件')
+    renderSection() {
+      const entry = [...state.buckets.get('settings.section')][0]
+      if (entry === undefined) throw new Error('设置分区未注册')
       state.pendingEffects = []
-      const panelTree = nested.type(nested.props)
-      attachRefs(panelTree)
-      const effects = state.pendingEffects
-      state.pendingEffects = []
+      const tree = renderTree(entry.component())
+      const effects = state.pendingEffects.splice(0)
       for (const effect of effects) {
         const cleanup = effect()
         if (typeof cleanup === 'function') state.componentCleanups.push(cleanup)

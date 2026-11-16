@@ -36,6 +36,20 @@ export function defaultAllowlistFor(platform = process.platform) {
 
 export const DEFAULT_ALLOWLIST = Object.freeze(defaultAllowlistFor())
 
+/** 白名单清洗:剔非字符串/空串/重复并 trim 后保序(读写/收敛同一口径)。 */
+export function cleanAllowlist(list) {
+  const seen = new Set()
+  const out = []
+  for (const name of Array.isArray(list) ? list : []) {
+    if (typeof name !== 'string') continue
+    const trimmed = name.trim()
+    if (trimmed === '' || seen.has(trimmed)) continue
+    seen.add(trimmed)
+    out.push(trimmed)
+  }
+  return out
+}
+
 export const Config = z.object({
   allowlist: z.array(z.string()).default([...DEFAULT_ALLOWLIST]).volatile(),
   enabled: z.boolean().default(true).volatile(),

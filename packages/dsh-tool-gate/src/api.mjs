@@ -1,8 +1,12 @@
-// HTTP 层('/api/tool-gate/*'):具名 exact 路由 + 跨源守卫 + 业务异常归一
-// 400(shell-select api.mjs 同构:exact 路由 path 唯一键,GET/POST 同
-// handler 分流)。守卫集中在 dispatch,routes 表驱动。
+// HTTP 层('/api/tool-gate/*'):具名 exact 路由 + 共享 route-gate 闸门(宿主闸门 +
+// 写方法同源/JSON content-type)+ 请求体形态校验 + 业务异常归一 400。写请求
+// 守卫与体校验集中在 writeRoute,routes 表驱动;webServer 缺席(headless)只
+// 告警跳过,不打断行。
 
-import { withHostGate } from './route-gate.mjs'
+import { withRouteGate } from './route-gate.mjs'
+import { cleanAllowlist } from './config.mjs'
+
+export { cleanAllowlist }
 
 const API_ROOT = '/api/tool-gate'
 
@@ -11,58 +15,55 @@ function sendJson(res, status, payload) {
   res.end(JSON.stringify(payload))
 }
 
-// 同源守卫:浏览器写请求恒带 Origin,与 Host 不符即拒(shell-select 同构)
-function rejectCrossOrigin(req, res) {
-  const origin = req.headers ? req.headers.origin : undefined
-  if (!origin) return false
-  const host = String((req.headers && req.headers.host) || '')
-  let sameOrigin = false
-  try {
-    sameOrigin = host.length > 0 && new URL(origin).host === host.toLowerCase()
-  } catch {
-    sameOrigin = false
-  }
-  if (sameOrigin) return false
-  sendJson(res, 403, { error: '跨源请求被拒绝' })
-  return true
-}
+// 请求体上限:超限按 413 回,不静默截断。
+const BODY_MAX_BYTES = 1024 * 1024
 
+const bodyTooLarge = () => Object.assign(new Error('请求体超过上限'), { overLimit: true })
+
+// 超限后继续丢弃流入而不销毁 socket:先 destroy 的话 413 送不出去,对端只见
+// ECONNRESET(桩测试不覆盖真实 socket,漏掉过一轮)。
 function readBody(req) {
   return new Promise((resolveBody, rejectBody) => {
+    let size = 0
+    let settled = false
     const chunks = []
+    const settle = (fn, value) => {
+      if (settled) return
+      settled = true
+      fn(value)
+    }
     req.on('data', (chunk) => {
-      chunks.push(chunk)
-      if (chunks.reduce((sum, item) => sum + item.length, 0) > 1024 * 1024) {
-        rejectBody(new Error('请求体过大'))
-        req.destroy()
+      size += chunk.length
+      if (settled) return
+      if (size > BODY_MAX_BYTES) {
+        settle(rejectBody, bodyTooLarge())
+        return
       }
+      chunks.push(chunk)
     })
-    req.on('end', () => resolveBody(Buffer.concat(chunks).toString('utf8')))
-    req.on('error', rejectBody)
+    req.on('end', () => settle(resolveBody, Buffer.concat(chunks).toString('utf8')))
+    req.on('error', (error) => settle(rejectBody, error))
   })
 }
 
-/** 白名单清洗:保序剔非字符串/空串/重复(SC-12)。 */
-export function cleanAllowlist(list) {
-  const seen = new Set()
-  const out = []
-  for (const name of Array.isArray(list) ? list : []) {
-    if (typeof name !== 'string' || name.trim() === '') continue
-    if (seen.has(name)) continue
-    seen.add(name)
-    out.push(name)
+/** 请求体白名单形态校验:缺字段/非数组/含非字符串或空白项一律 400,不静默清空。 */
+function requireAllowlist(body) {
+  if (!Array.isArray(body.allowlist)) throw new Error('allowlist 须为工具名数组')
+  if (body.allowlist.some((name) => typeof name !== 'string' || name.trim() === '')) {
+    throw new Error('allowlist 每项须为非空工具名字符串')
   }
-  return out
+  return body.allowlist
 }
 
-/** 写请求公共序列:跨源守卫 → JSON 解析(失败 400)→ 业务异常归一 400。 */
+/** 写请求公共序列(同源与 JSON content-type 已由 route-gate 判定):JSON 解析
+ * (坏体 400 / 超限 413)→ 业务异常归一 400。 */
 async function writeRoute(req, res, handler) {
-  if (rejectCrossOrigin(req, res)) return
   let body
   try {
     body = JSON.parse(await readBody(req))
-  } catch {
-    sendJson(res, 400, { error: '请求体须为 JSON' })
+  } catch (error) {
+    const overLimit = error?.overLimit === true
+    sendJson(res, overLimit ? 413 : 400, { error: overLimit ? error.message : '请求体须为 JSON' })
     return
   }
   try {
@@ -79,6 +80,10 @@ async function writeRoute(req, res, handler) {
  */
 export function mountRoutes(ctx, faces) {
   const webServer = ctx.get('webServer')
+  if (webServer === undefined || typeof webServer.register !== 'function') {
+    ctx.logger?.warn?.('tool-gate: webServer 服务不在场(headless 部署),设置页路由跳过;收敛本体不受影响')
+    return
+  }
   const routes = [
     {
       path: `${API_ROOT}/state`,
@@ -99,7 +104,7 @@ export function mountRoutes(ctx, faces) {
         }
         await writeRoute(req, res, async (body) => {
           if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new Error('请求体必须是对象')
-          sendJson(res, 200, await faces.updateAllowlist(cleanAllowlist(body.allowlist)))
+          sendJson(res, 200, await faces.updateAllowlist(cleanAllowlist(requireAllowlist(body))))
         })
       },
     },
@@ -133,6 +138,6 @@ export function mountRoutes(ctx, faces) {
     },
   ]
   for (const item of routes) {
-    ctx.effect(() => webServer.register({ kind: 'exact', path: item.path, handler: withHostGate(ctx, item.handler) }), `tool-gate ${item.path}`)
+    ctx.effect(() => webServer.register({ kind: 'exact', path: item.path, handler: withRouteGate(ctx, item.handler) }), `tool-gate ${item.path}`)
   }
 }

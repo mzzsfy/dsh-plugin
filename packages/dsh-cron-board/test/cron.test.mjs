@@ -86,8 +86,8 @@ test('cron:摘要显式后缀尾注 (UTC+N)', () => {
 test('cron:摘要无后缀尾注显示宿主偏移,显式传参可测', () => {
   // Given 宿主偏移显式传 0
   assert.equal(summarizeCron('0 9 * * *', 0), '每天 09:00(宿主 UTC+0)')
-  // Given 宿主偏移显式传 5.5(半时区宿主)
-  assert.equal(summarizeCron('0 9 * * *', 5.5), '每天 09:00(宿主 UTC+5.5)')
+  // Given 宿主偏移显式传 5.5(半时区宿主):按 ±H:MM 展示,不写成 5.5
+  assert.equal(summarizeCron('0 9 * * *', 5.5), '每天 09:00(宿主 UTC+5:30)')
 })
 
 test('cron:摘要 custom 与非 5 段兜底同样携带时区尾注', () => {

@@ -65,7 +65,7 @@ async function probeUnpublished(names) {
   const unpublished = new Set()
   await Promise.all(names.map(async (name) => {
     try {
-      const response = await fetch(`https://registry.npmjs.org/${encodeURIComponent(name)}`)
+      const response = await fetch(`https://registry.npmjs.org/${encodeURIComponent(name)}`, { signal: AbortSignal.timeout(10 * 1000) })
       if (response.status === 404) unpublished.add(name)
     } catch {
       // 网络异常:保守视为已发布
@@ -90,7 +90,17 @@ export async function installPackageExternals() {
 
 // only:裸装白名单(包短名或全名),空 = 全家桶。命中包及其 dsh.bundle 标记才入 bundles;
 // dependencies 仍全量(装而不载无副作用,verifyActivation 按 dependencies 记账依赖它)
-export async function buildProfile({ version, workRoot, hostDir, seedGateway = false, gatewayBaseURL = 'http://127.0.0.1:8578', only = [] }) {
+// stop:STOP 消费口(pnpm install 分钟级)——为真即中止构建并抛 STOPPED,由 keeper 正常收尾
+// deps 仅测试注入:替换网络探测与 pnpm 执行,不改变生产调用面
+export async function buildProfile({ version, workRoot, hostDir, seedGateway = false, gatewayBaseURL = 'http://127.0.0.1:8578', only = [], stop, deps = {} }) {
+  const run = deps.runCmd ?? runCmd
+  const probe = deps.probeUnpublished ?? probeUnpublished
+  const throwIfStopped = () => {
+    if (typeof stop === 'function' && stop() === true) {
+      throw Object.assign(new Error('构建期收到 STOP,已中止'), { code: 'STOPPED' })
+    }
+  }
+  throwIfStopped()
   const homeDir = join(workRoot, version, 'home')
   const profileDir = join(homeDir, 'profiles', 'web')
   const { bundles, all } = enumeratePackages({ hostVersion: version })
@@ -102,7 +112,8 @@ export async function buildProfile({ version, workRoot, hostDir, seedGateway = f
     const missing = [...wanted].filter((short) => !pickedBundles.some((name) => name.replace(/^@mzzsfy\//, '') === short))
     throw new Error(`--only 含非 bundle 包或拼写错误: ${missing.join(', ')}`)
   }
-  const unpublished = await probeUnpublished(all)
+  const unpublished = await probe(all)
+  throwIfStopped()
 
   mkdirSync(profileDir, { recursive: true })
   // 会话存储净化:上轮宿主进程写入的会话文件跨宿主版本不兼容(v3 文件名 +
@@ -113,6 +124,9 @@ export async function buildProfile({ version, workRoot, hostDir, seedGateway = f
   // 与 CI 全新 profile 分叉出平台假象(B3 跨轮污染实锤:本地 home 复用曾
   // 残留人工轮绑定的宿主外工作区,composer 在场假绿,linux 全新面红)
   rmSync(join(homeDir, 'storages'), { recursive: true, force: true })
+  // 各包数据目录同净:上一轮 cron 任务/usage 历史/context 缓存/rs 模板会被下一轮读到,
+  // 与 CI 全新环境分叉(DSH_*_DATA_DIR 由 run/boot-keep 指向本目录)
+  rmSync(join(workRoot, version, 'data'), { recursive: true, force: true })
   writeFileSync(join(profileDir, 'package.json'), JSON.stringify(profileManifest(pickedBundles, all, unpublished), null, 2) + '\n', 'utf8')
   writeFileSync(join(profileDir, 'cordis.yml'), '[]\n', 'utf8')
   // 默认模型条目:宿主树含 dsh-agent-default-model(0.1.7+)才注入,旧宿主
@@ -149,10 +163,6 @@ export async function buildProfile({ version, workRoot, hostDir, seedGateway = f
         '              - text',
         '          - id: echo-model-tool',
         '            name: Echo Tool Model',
-        '            input:',
-        '              - text',
-        '          - id: echo-model-call',
-        '            name: Echo Call Model',
         '            input:',
         '              - text',
         '      echo-anthropic:',
@@ -212,7 +222,8 @@ export async function buildProfile({ version, workRoot, hostDir, seedGateway = f
   }
 
   log(`[${version}] pnpm install(隔离 profile)`)
-  await runCmd('pnpm', ['install'], { cwd: profileDir })
+  await run('pnpm', ['install'], { cwd: profileDir, shouldAbort: stop })
+  throwIfStopped()
 
   // 工作副本桥:profile node_modules/@mzzsfy/* 指向仓库包(同人工隔离法 junction 挂载)
   for (const name of all) {

@@ -13,6 +13,7 @@ const REBOUND_MESSAGE = '首次运行已创建并绑定会话'
 const RECREATED_MESSAGE = '原会话丢失已重建'
 const REJECTED_MESSAGE = '会话输入投递被拒绝'
 const DELIVERED_MESSAGE = '已投递会话'
+const CANCELLED_MESSAGE = '任务已删除或执行链已停止,取消投递'
 const MODEL_UNAVAILABLE_PREFIX = '模型不可用'
 const MODEL_UNSUPPORTED_MESSAGE = '宿主会话服务不支持指定模型,任务模型设置无法生效'
 
@@ -91,16 +92,24 @@ async function validateModelSelection(sessionController, raw) {
   return { selection: checked.selection }
 }
 
-export function createSessionDriver({ getSessionController, getWorkspaceRegistry, agents, sessionQuery, reportSessionMissing }) {
+export function createSessionDriver({ getSessionController, getWorkspaceRegistry, getAgents, getSessionQuery, reportSessionMissing }) {
+  // 会话注册表在使用点实时解析:服务晚到/重载后即恢复,不做 apply 期一次性捕获;
+  // 服务或其方法缺失时等价「查不到」,不得抛错打断 pinned 自愈路径
+  function agentEntry(sessionId) {
+    const agents = getAgents ? getAgents() : undefined
+    return agents?.get?.(sessionId)
+  }
+
   // pinned 会话存在性:持久层 headers 比对(冷会话不在 agents 注册表);
   // 记录形态为官方 SessionRecord(dsh-session-query),id 在 header.id
   async function pinnedRecord(sessionId) {
-    if (!sessionQuery || typeof sessionQuery.listSessions !== 'function') {
-      const entry = agents.get(sessionId)
-      return entry ? { header: entry.session?.header } : undefined
+    const sessionQuery = getSessionQuery ? getSessionQuery() : undefined
+    if (sessionQuery && typeof sessionQuery.listSessions === 'function') {
+      const records = await sessionQuery.listSessions(ADMISSION_SIGNAL)
+      return records.find((record) => record && record.header && record.header.id === sessionId)
     }
-    const records = await sessionQuery.listSessions(ADMISSION_SIGNAL)
-    return records.find((record) => record && record.header && record.header.id === sessionId)
+    const entry = agentEntry(sessionId)
+    return entry ? { header: entry.session?.header } : undefined
   }
 
   // 子 agent 会话与主会话共用持久层,但通用会话面不接受子会话投递:
@@ -154,7 +163,9 @@ export function createSessionDriver({ getSessionController, getWorkspaceRegistry
     finally { for (const key of keys) admissions.delete(key) }
   }
 
-  async function runAdmitted({ job, env, mask, updateRecord, updateBinding }, sessionController) {
+  async function runAdmitted({ job, env, mask, updateRecord, updateBinding, isCancelled }, sessionController) {
+    const cancelled = () => typeof isCancelled === 'function' && isCancelled()
+    if (cancelled()) return { status: 'cancelled', message: CANCELLED_MESSAGE }
     const session = job.session || {}
     const isPinned = session.mode === 'pinned'
     let sessionId = isPinned ? session.pinnedSessionId : null
@@ -168,7 +179,7 @@ export function createSessionDriver({ getSessionController, getWorkspaceRegistry
       } else if (!(await pinnedUsable(sessionId))) {
         recreated = 'lost'
       } else {
-        const entry = agents ? agents.get(sessionId) : undefined
+        const entry = agentEntry(sessionId)
         if (entry && entry.status === 'running') {
           return { status: 'skipped', message: BUSY_MESSAGE }
         }
@@ -185,6 +196,7 @@ export function createSessionDriver({ getSessionController, getWorkspaceRegistry
     }
 
     if (recreated || !isPinned) {
+      if (cancelled()) return { status: 'cancelled', message: CANCELLED_MESSAGE }
       const created = await createSession(sessionController, job.workdir, session.agentPreset)
       sessionId = created.sessionId
     }
@@ -200,6 +212,8 @@ export function createSessionDriver({ getSessionController, getWorkspaceRegistry
       }
     }
 
+    // 删除/停止可能发生在建会话或模型安装之后:投递前最后自检,不再向宿主送 prompt
+    if (cancelled()) return { status: 'cancelled', message: CANCELLED_MESSAGE, sessionId }
     const submission = await sessionController.prompt({
       requestId: randomUUID(),
       sessionId,

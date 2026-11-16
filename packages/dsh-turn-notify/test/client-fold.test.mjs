@@ -61,12 +61,24 @@ test('folderRunningState 排除项:无父级 subagent、已归档、空白非当
   const workspaces = {
     items: [WS('w1', ['sub']), WS('w2', ['arch']), WS('w3', ['blank']), WS('w4', ['cur'])],
     archivedSessionIds: ['arch'],
+    phase: 'ready',
   }
   const state = pure.folderRunningState(sessions, workspaces)
   assert.equal(state.running.has('w1'), false, 'subagent 运行不标记')
   assert.equal(state.running.has('w2'), false, '已归档运行不标记')
   assert.equal(state.running.has('w3'), false, '空白非当前运行不标记')
   assert.equal(state.running.has('w4'), true, '空白且为当前会话标记')
+})
+
+test('folderRunningState 归档集合未就绪按未知:待定快照不按归档剔除,就绪后才排除', () => {
+  const sessions = { ids: ['arch'], byId: { arch: ROW('arch', { running: true }) } }
+  const pending = { items: [WS('w1', ['arch'])], archivedSessionIds: ['arch'] }
+  for (const phase of [undefined, 'pending']) {
+    const state = pure.folderRunningState(sessions, { ...pending, phase })
+    assert.ok(state.running.has('w1'), 'phase=' + String(phase) + ' 时按未知处理,不注入归档判定')
+  }
+  const ready = pure.folderRunningState(sessions, { ...pending, phase: 'ready' })
+  assert.equal(ready.running.size, 0, 'phase=ready 时归档集合才是权威')
 })
 
 test('folderRunningState 缺省守卫:快照缺失或账本悬空不抛错', () => {
@@ -141,6 +153,7 @@ test('folderRunningState 归档或空白根、孤儿和循环子代理不误标,
   assert.deepEqual([...pure.folderRunningState(sessions, ws).running], ['forked'])
   sessions.byId.child = ROW('child', { origin: 'subagent', parentId: 'root', running: true })
   ws.archivedSessionIds = ['root', 'fork']
+  ws.phase = 'ready'
   assert.equal(pure.folderRunningState(sessions, ws).running.size, 0)
 })
 
@@ -150,7 +163,7 @@ test('folderRunningState 归档子链中段:链上中段归档即截断,子代�
     mid: ROW('mid', { origin: 'subagent', parentId: 'root', running: true }),
     leaf: ROW('leaf', { origin: 'subagent', parentId: 'mid', running: true }),
   } }
-  const ws = { items: [WS('w1', ['root'])], archivedSessionIds: ['mid'] }
+  const ws = { items: [WS('w1', ['root'])], archivedSessionIds: ['mid'], phase: 'ready' }
   const state = pure.folderRunningState(sessions, ws)
   assert.equal(state.running.size, 0, '中段归档截断整链')
   const openOwners = pure.folderActivityOwners(sessions, { items: [] })
@@ -565,7 +578,7 @@ test('Given 主会话归档或离开分组, When 重新扫描, Then 释放整棵
     const cleanup = client.runEffect()
     await sleep(SCAN_SETTLE_MS)
     assert.deepEqual([...client.watched].sort(), ['a', 'child'])
-    client.setWorkspaces({ items: [WS('w1', ['a'])], archivedSessionIds: ['a'] })
+    client.setWorkspaces({ items: [WS('w1', ['a'])], archivedSessionIds: ['a'], phase: 'ready' })
     client.emitWorkspaces()
     await sleep(SCAN_SETTLE_MS)
     assert.equal(client.watched.size, 0)

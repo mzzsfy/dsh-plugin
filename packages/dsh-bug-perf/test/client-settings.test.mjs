@@ -21,7 +21,7 @@ const reactStub = {
   useEffect: () => {},
 }
 
-// Given React 与 slots 就绪, When 注册设置 UI, Then 两个官方插槽都登记且 key 正确
+// Given React 与 slots 就绪, When 注册设置 UI, Then 只登记宿主当前槽位契约里存在的 bundle 配置槽
 test('设置UI_注册官方插槽', () => {
   const plugin = loadPlugin({ modules: { react: reactStub } })
   const registrations = []
@@ -36,10 +36,11 @@ test('设置UI_注册官方插槽', () => {
   }
   const ctx = { inject: (services, callback) => { if (services.includes('slots')) callback(scope) } }
   plugin.__test.registerSettingsUi(ctx)
-  assert.deepEqual(injected.sort(), ['plugins.bundle.config', 'settings.plugin.item'])
-  const byName = Object.fromEntries(registrations.map((entry) => [entry.options.name, entry.options]))
-  assert.equal(byName['settings.plugin.item'].key, 'bug-perf')
-  assert.equal(byName['plugins.bundle.config'].key, '@mzzsfy/dsh-bug-perf')
+  // settings.plugin.item 不在 0.2.2 宿主的槽位契约里,注册它只会留下永不触发的等待
+  assert.deepEqual(injected, ['plugins.bundle.config'])
+  assert.equal(registrations.length, 1)
+  assert.equal(registrations[0].options.name, 'plugins.bundle.config')
+  assert.equal(registrations[0].options.key, '@mzzsfy/dsh-bug-perf')
   assert.equal(styleEffects.length, 1)
 })
 
@@ -75,4 +76,13 @@ test('设置UI_样式注入契约', () => {
   assert.equal(markers, creates)
   assert.match(source, /input\[type="checkbox"\]:checked \+ \.bp-switch__track/)
   assert.match(source, /input\[type="checkbox"\]:focus-visible \+ \.bp-switch__track/)
+})
+
+// Given 两类样式都带 data-plugin 归属标记, When 检查判重口径, Then 各自有独占子标记
+test('设置UI_样式判重_各自独占标记', () => {
+  assert.match(source, /style\.setAttribute\('data-style', SETTINGS_STYLE_MARKER\)/)
+  assert.match(source, /style\.setAttribute\('data-style', STUCK_STYLE_MARKER\)/)
+  assert.match(source, /const SETTINGS_STYLE_MARKER = 'settings'/)
+  assert.match(source, /const STUCK_STYLE_MARKER = 'stuck'/)
+  assert.doesNotMatch(source, /style\[data-plugin="\$\{PLUGIN_ID\}"\]/)
 })

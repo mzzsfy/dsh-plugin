@@ -24,14 +24,26 @@ export function updatedAtOf(header, activityAtMs) {
   return Math.max(header.createdAt, activityAtMs ?? 0)
 }
 
-// 取消归档全局宽限时长:恢复会话到用户发出首条消息之间的评估窗口保护,
-// 首条消息更新产物 mtime 后由阈值自然接管;只查阅不发言的会话宽限后正常归档
+// 取消归档宽限时长:恢复会话到用户发出首条消息之间的评估窗口保护,
+// 首条消息更新产物 mtime 后由阈值自然接管;只查阅不发言的会话宽限后正常归档。
+// 宽限按会话记账(恢复哪条只保护哪条),不做进程级全局短路
 export const UNARCHIVE_GRACE_MS = 10 * 60 * 1000
 
-/** 宽限期判定:取消归档后 graceMs 内暂停自动归档(用户恢复即意图信号)。 */
+/** 宽限期判定:该会话取消归档后 graceMs 内暂停自动归档(用户恢复即意图信号)。 */
 export function unarchiveGraceActive(unarchivedAtMs, nowMs, graceMs = UNARCHIVE_GRACE_MS) {
-  if (!Number.isFinite(unarchivedAtMs) || unarchivedAtMs <= 0) return false
-  return nowMs - unarchivedAtMs < graceMs
+  if (!Number.isFinite(unarchivedAtMs) || unarchivedAtMs <= 0 || !Number.isFinite(nowMs)) return false
+  // 墙钟回拨会让 now - unarchivedAt 变成负数;钳制到 0,不得因负差值放大宽限
+  const elapsedMs = Math.max(0, nowMs - unarchivedAtMs)
+  return elapsedMs < graceMs
+}
+
+/**
+ * 宽限表在册项:过滤掉已过期的 [sessionId, unarchivedAtMs] 条目,
+ * 调用方据此重建表,防长跑进程的宽限表无界增长。
+ */
+export function activeUnarchiveGraces(entries, nowMs, graceMs = UNARCHIVE_GRACE_MS) {
+  const source = entries instanceof Map ? [...entries] : []
+  return source.filter(([, unarchivedAtMs]) => unarchiveGraceActive(unarchivedAtMs, nowMs, graceMs))
 }
 
 /**
@@ -84,7 +96,15 @@ export function isDerivedSessionHeader(header) {
   return header.parentSession !== undefined && (header.delegationDepth ?? 0) >= 1
 }
 
-/** 归档面板行:session.list 行与归档集合的交集,按更新时间倒序;标题缺失回退会话 id;workspace 为所属工作区标题或 null(与 client 镜像同规);子 agent 行不入面板。 */
+/**
+ * 归档面板行:session.list 行与归档集合的交集,按更新时间倒序;标题缺失回退会话 id;
+ * workspace 为所属工作区标题或 null(与 client 镜像同规);子 agent 行不入面板。
+ *
+ * host 没有面板数据路由,面板投影的生产实现在 client.js(projectRows);本函数是
+ * 该实现的 parity 镜像/测试判据,不参与 host 运行时。保留它是为了把「旧格式派生
+ * 子会话(无 origin)也必须排除」这条 client 行数据无法覆盖的判定锁在测试里,
+ * 不得据此认为 host 会向面板兜底。
+ */
 export function projectArchiveRows({ rows, archivedIds, workspaces }) {
   const archived = new Set(archivedIds)
   return rows
@@ -103,6 +123,21 @@ export function diffArchived(previousIds, nextIds) {
   if (previousIds === undefined) return []
   const previous = new Set(previousIds)
   return nextIds.filter((id) => !previous.has(id))
+}
+
+/**
+ * 归档集合权威解箱:只有快照 phase==='ready' 时 archivedSessionIds 才是权威。
+ * 未就绪(挂载/重连中的 pending 帧)按「未知」处理——有上一次权威集合时沿用
+ * (stale),从未就绪时 phase='unknown';禁止把未知折成空集,否则面板会把
+ * 「还不知道」渲染成「没有归档会话」。client.js 有镜像实现,修改需两处同步。
+ */
+export function resolveArchivedIds(previousIds, snapshot) {
+  const ids = snapshot ? snapshot.archivedSessionIds : undefined
+  if (snapshot && snapshot.phase === 'ready' && Array.isArray(ids)) {
+    return { phase: 'ready', ids: ids.map(String) }
+  }
+  if (Array.isArray(previousIds)) return { phase: 'stale', ids: previousIds }
+  return { phase: 'unknown', ids: [] }
 }
 
 /**
@@ -178,6 +213,17 @@ export const DELETE_MESSAGES = {
 }
 
 /**
+ * 半失败文案合并:父级失败点与级联失败点都必须出现在同一条 message 里,
+ * 不许后写的覆盖先写的(覆盖会丢掉「台账失败」等关键收尾提示)。空段忽略。
+ */
+export function mergeOutcomeMessages(...messages) {
+  return messages
+    .map((message) => (message === undefined || message === null ? '' : String(message).trim()))
+    .filter((message) => message !== '')
+    .join(';')
+}
+
+/**
  * 删除收尾半失败聚合:trash 成功后的失败矩阵折叠为单一响应体。
  * 主文案优先级 detach → 归档清理 → 台账,台账失败以后缀并入前两者,运行中翻转
  * 以警告后缀并入一切形态。三形态逐键一致:{ok} / {ok,message} / {ok,partial,message}。
@@ -195,7 +241,11 @@ export function aggregateDeleteOutcome({ detachFailed = false, archiveCleanupFai
     : { ok: true }
 }
 
-/** 空白产物判定:读到 EOF 且换行数不足两行,即仅 header(或空)视为空白。 */
+/**
+ * 空白产物判定:读到 EOF 且换行数不足两行,即仅 header(或空)视为空白。
+ * headText 必须是解码后的 JSONL 文本——调用方负责按产物编码(zstd 逐帧)
+ * 解码,禁止把压缩字节直接传进来数换行。
+ */
 export function artifactLooksBlank(headText, hasMore) {
   let breaks = 0
   for (const char of headText) {

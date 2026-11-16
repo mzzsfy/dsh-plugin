@@ -7,30 +7,32 @@ test('配置拒绝重复能力路由与不同变量外的密钥字段', () => {
   assert.throws(() => parseConfiguration({ providers: [{ ...provider(), token: 'secret' }], routes: [] }))
   assert.equal(parseConfiguration({ providers: [provider()], routes: [route()] }).routes.length, 1)
 })
-// D1: Given全新安装 When取初始控制状态 Then四个免凭据源全开、八市场四能力路由齐备,配置自身合法
-test('初始控制状态内置免凭据默认实例与全市场四能力路由', () => {
+// D1: Given全新安装 When取初始控制状态 Then四个免凭据源全开、八市场五能力路由齐备,配置自身合法
+test('初始控制状态内置免凭据默认实例与全市场五能力路由', () => {
   const control = initialControl()
   const MARKETS = ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON']
   assert.equal(control.providers.length, 4, '四个免凭据源全开')
   assert.deepEqual(control.providers.map(p => p.adapterId).sort(), ['eastmoney', 'sina', 'tencent', 'xueqiu'])
   const marketInstance = control.providers.find(p => p.adapterId === 'eastmoney')
   for (const p of control.providers) { assert.equal(p.credentialRef, null, '默认实例不需要凭据'); assert.ok(p.budget.requestsPerMinute > 0) }
-  // 八市场的目录/搜索/报价/K线全部由东财承担(实测 clist 的 fs 覆盖日韩英)
-  assert.equal(control.routes.length, MARKETS.length * 4, '四能力 × 八市场')
-  for (const m of MARKETS) for (const capability of ['search', 'quotes', 'kline', 'catalog']) {
+  // 八市场的目录/搜索/报价/K线/分时全部由东财承担(实测 clist 的 fs 覆盖日韩英)
+  assert.equal(control.routes.length, MARKETS.length * 5, '五能力 × 八市场')
+  for (const m of MARKETS) for (const capability of ['search', 'quotes', 'kline', 'trend', 'catalog']) {
     const r = control.routes.find(route => route.market === m && route.capability === capability)
     assert.ok(r, `${m} 缺 ${capability} 路由`)
     assert.equal(r.primaryInstanceId, marketInstance.id, `${m}/${capability} 主源`)
   }
-  // 备用源只允许出现在报价与K线,且只在备用源探针可验证的市场
+  // 备用源只允许出现在报价与K线类能力,且只在备用源探针可验证的市场
   const BACKUP_MARKETS = ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS']
   const fallbacks = control.routes.filter(route => route.fallbackInstanceIds.length)
   const quoteBackups = fallbacks.filter(route => route.capability === 'quotes')
   const klineBackups = fallbacks.filter(route => route.capability === 'kline')
   assert.equal(quoteBackups.length, BACKUP_MARKETS.length, '报价备源覆盖沪深港美')
   assert.equal(klineBackups.length, 3, 'K线备源只覆盖沪深港(腾讯美股需先建立代码映射)')
-  assert.ok(fallbacks.every(route => ['quotes', 'kline'].includes(route.capability)), '目录与搜索不得配置备用源')
+  assert.ok(fallbacks.every(route => ['quotes', 'kline', 'trend'].includes(route.capability)), '目录与搜索不得配置备用源')
   assert.ok(fallbacks.every(route => route.failoverMode === 'network'))
+  // 分时只有东财供得出, 默认不给备源: 备源不支持分时只会把请求打给一个恒拒绝的源
+  assert.equal(fallbacks.some(route => route.capability === 'trend'), false, '分时不设备源')
   const backupOf = m => control.providers.find(p => p.adapterId === (m === 'XNAS' || m === 'XNYS' ? 'xueqiu' : 'sina')).id
   assert.ok(quoteBackups.every(route => route.fallbackInstanceIds[0] === backupOf(route.market)), '沪深港备新浪、美股备雪球')
   assert.ok(quoteBackups.every(route => BACKUP_MARKETS.includes(route.market)))
@@ -74,12 +76,37 @@ test('endpoints 覆盖块校验合法 URL 且可省略', () => {
   assert.throws(() => parseConfiguration({ providers: [{ ...provider(), endpoints: { kline: 42 } }], routes: [] }))
 })
 
-test('proxy 仅接受 http(s) URL 且可省略(反代/代理出口)', () => {
+test('proxy 仅接受 http(s) URL 且拒绝 userinfo(账号密码走 proxyCredentialRef)', () => {
   assert.doesNotThrow(() => parseConfiguration({ providers: [provider()], routes: [] }))
   assert.doesNotThrow(() => parseConfiguration({ providers: [{ ...provider(), proxy: 'http://127.0.0.1:7890' }], routes: [] }))
-  assert.doesNotThrow(() => parseConfiguration({ providers: [{ ...provider(), proxy: 'https://user:pass@proxy.corp:8443' }], routes: [] }))
+  assert.doesNotThrow(() => parseConfiguration({ providers: [{ ...provider(), proxy: 'https://proxy.corp:8443', proxyCredentialRef: 'DSH_STOCK_PROXY' }], routes: [] }))
+  // userinfo 会把账号密码带进快照与持久化, 必须在 schema 层拒绝
+  assert.throws(() => parseConfiguration({ providers: [{ ...provider(), proxy: 'https://user:pass@proxy.corp:8443' }], routes: [] }))
   assert.throws(() => parseConfiguration({ providers: [{ ...provider(), proxy: 'socks5://127.0.0.1:1080' }], routes: [] }))
   assert.throws(() => parseConfiguration({ providers: [{ ...provider(), proxy: 'not-a-url' }], routes: [] }))
+})
+
+// K2: 反代端点与代理同规 —— 端点 URL 里的 userinfo 同样会进快照/持久化, 复用同一条 no-userinfo refine
+test('K2 endpoints 拒绝 userinfo, 与代理 URL 同一条守卫', () => {
+  const endpoint = value => ({ ...provider(), endpoints: { kline: value } })
+  assert.doesNotThrow(() => parseConfiguration({ providers: [endpoint('https://mirror.example.com/kline')], routes: [] }))
+  assert.throws(() => parseConfiguration({ providers: [endpoint('https://user:pass@mirror.example.com/kline')], routes: [] }), /端点 URL 不能包含账号密码/)
+  assert.throws(() => parseConfiguration({ providers: [endpoint('https://user@mirror.example.com/kline')], routes: [] }), /端点 URL 不能包含账号密码/)
+  assert.throws(() => parseConfiguration({ providers: [endpoint('ftp://mirror.example.com/kline')], routes: [] }))
+})
+
+// K8: zod 细节不能只落成一句"字段或格式无效", 用户需要知道哪个字段错在哪
+test('K8 parseConfiguration 错误透出首个问题路径与全部 issue', () => {
+  const bad = { providers: [{ ...provider(), budget: { ...provider().budget, requestsPerMinute: -1 } }], routes: [] }
+  try {
+    parseConfiguration(bad)
+    assert.fail('应拒绝非法预算')
+  } catch (error) {
+    assert.equal(error.code, 'INVALID_CONFIGURATION')
+    assert.match(error.message, /providers\.0\.budget\.requestsPerMinute/, 'message 带字段路径')
+    assert.ok(Array.isArray(error.details) && error.details.length >= 1, 'details 带全部 issue')
+    assert.equal(error.details[0].path, 'providers.0.budget.requestsPerMinute')
+  }
 })
 
 // 只有控制记录进存储, 派生数据全放内存: 单文件因此只有一条十几 KB 的记录

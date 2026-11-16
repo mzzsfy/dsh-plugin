@@ -193,7 +193,7 @@ function makeRouteCtx() {
 }
 
 function makeRequest(method, body) {
-  const state = { method, chunks: body === undefined ? [] : [JSON.stringify(body)] }
+  const state = { method, chunks: body === undefined ? [] : [JSON.stringify(body)], headers: { 'content-type': 'application/json' } }
   state.on = (event, listener) => {
     if (event === 'data') for (const chunk of state.chunks) listener(Buffer.from(chunk))
     if (event === 'end') setImmediate(listener)
@@ -248,6 +248,39 @@ test('Given 克隆路由, When GET, Then 405', async () => {
   const getRes = makeResponse()
   await handler(makeRequest('GET'), getRes)
   assert.equal(getRes.status, 405)
+})
+
+test('Given 半开请求体, When 另一请求到达, Then 单飞行锁未被读体占住(不误报进行中)', async () => {
+  const { EventEmitter } = await import('node:events')
+  const { handlers } = makeRouteCtx()
+  const handler = handlers.get('/api/context/git-clone')
+  const stalled = new EventEmitter()
+  stalled.method = 'POST'
+  stalled.headers = { 'content-type': 'application/json' }
+  stalled.pause = () => {}
+  const stalledRes = makeResponse()
+  const stalledDone = handler(stalled, stalledRes)
+  // 首个请求体永不结束:旧实现此时已置 cloneInFlight=true,第二个请求必回「进行中」
+  const second = makeResponse()
+  await handler(makeRequest('POST', {}), second)
+  assert.equal(second.status, 400)
+  assert.match(second.body.error, /仓库地址不能为空/, '第二个请求应进入业务校验而非被单飞行误拒')
+  // 半开请求中止后正常收尾,不悬挂 Promise/定时器
+  stalled.emit('aborted')
+  await stalledDone
+  assert.equal(stalledRes.status, 400)
+  assert.match(stalledRes.body.error, /请求已中止/)
+})
+
+test('Given 请求体超限, When POST 克隆, Then 413 且响应可送达', async () => {
+  const { handlers } = makeRouteCtx()
+  const handler = handlers.get('/api/context/git-clone')
+  const req = makeRequest('POST')
+  req.chunks = [Buffer.alloc(64 * 1024 + 1, 0x20)]
+  const res = makeResponse()
+  await handler(req, res)
+  assert.equal(res.status, 413)
+  assert.match(res.body.error, /请求体超过上限/)
 })
 
 test('Given 真实 git 与不可达 .invalid 域, When POST 合法请求, Then 透出 git stderr 失败文案', async () => {
@@ -371,6 +404,7 @@ test('Given client.js 装配面, When apply, Then inject 含 uiWorkspace(实测�
       register: (options, component) => registered.push({ options, component }),
     },
     get remote() { return { session: {} } },
+    inject: (deps, register) => { if (deps.includes('remote.session') && ctx.remote.session) register(ctx) },
   }
   mod.apply(ctx)
   assert.ok(effects.some((label) => String(label).includes('clone injection')), '克隆注入效应未注册')
@@ -621,7 +655,7 @@ test('Given 工作区 header, When ensureHeaderCloneButton, Then 注入添加按
   addBtn.className = 'icon-btn'
   const holder = {
     children: [addBtn],
-    style: {},
+    style: { maxWidth: '60px' },
     querySelector(selector) {
       if (selector === 'button[aria-label=添加工作区]') return addBtn
       if (selector.includes('data-cx-clone-header-btn')) return this.children.find((c) => c.attrs && 'data-cx-clone-header-btn' in c.attrs) ?? null
@@ -668,11 +702,14 @@ test('Given 工作区 header, When ensureHeaderCloneButton, Then 注入添加按
   injected.style.display = ''
   assert.equal(ensure(docNoAdd, () => {}), true, '隐藏发生写入')
   assert.equal(injected.style.display, 'none', '应隐藏注入按钮')
+  assert.equal(holder.style.maxWidth, '60px', '隐藏分支必须还原宿主容器原 max-width')
   assert.equal(ensure(doc, () => {}), true, '复显发生写入')
   assert.notEqual(injected.style.display, 'none', '邻居恢复后应复显')
+  assert.equal(holder.style.maxWidth, 'none', '复显后重新解除裁剪')
 
   // auth 在场(allowed=false):强制隐藏已注入按钮,保持官方 3 按钮布局
   assert.equal(ensure(doc, () => {}, false), true, 'auth 在场发生隐藏写入')
   assert.equal(injected.style.display, 'none', 'auth 在场应隐藏注入按钮')
+  assert.equal(holder.style.maxWidth, '60px', 'auth 隐藏后容器必须还原官方布局')
   assert.equal(ensure(doc, () => {}, false), false, 'auth 在场隐藏幂等')
 })

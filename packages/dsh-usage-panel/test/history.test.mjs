@@ -126,6 +126,20 @@ test('场景: 读数取样产出序列键与数值', () => {
   assert.deepEqual(readingToSnapshots(balanceTotalOnly), [{ suffix: 'balance', value: 88, tier: '1h' }])
 })
 
+// P2-05:缺失读数不得写成 0(Number(null) 会污染趋势与峰值)
+test('场景: 窗口 remaining 与 utilization 均缺失不产出 0 快照', () => {
+  const quota = { kind: 'quota', windows: [{ label: '5小时', remaining: null, utilization: null }] }
+  assert.deepEqual(readingToSnapshots(quota), [])
+  // undefined 同视缺失
+  assert.deepEqual(readingToSnapshots({ kind: 'quota', windows: [{ label: '7天' }] }), [])
+  // 空串同样不得 Number('')=0
+  assert.deepEqual(readingToSnapshots({ kind: 'quota', windows: [{ label: '5小时', remaining: '', utilization: '' }] }), [])
+})
+
+test('场景: 余额 remaining 与 total 均缺失不产出 0 快照', () => {
+  assert.deepEqual(readingToSnapshots({ kind: 'balance', entries: [{ currency: 'USD', remaining: null, total: null }] }), [])
+})
+
 test('场景: 月窗口按余额快照聚合当月日历月', () => {
   const store = newSequenceStore()
   appendPoint(store, 'acct-1:balance', Date.UTC(2026, 0, 3, 0, 0), 100)

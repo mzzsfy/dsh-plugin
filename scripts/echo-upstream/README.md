@@ -18,7 +18,7 @@ node scripts/echo-upstream/cli.mjs --port 0 --log .compat/llm-requests.jsonl
 
 默认日志位于系统临时目录下的 `echo-upstream.jsonl`。指定 `--log` 时，父目录必须预先存在；模拟器不会创建目录。
 
-CLI 参数：`--port`、`--log`、`--tokens 输入,输出`、`--models a,b,c`、`--echo-user-message`。没有 HTTP 配置时保留模型后缀场景（`-think`、`-thinkslow`、`-tool`、`-call`、`-slow`、`-drop`、`-err429`、`-err500`）。
+CLI 参数：`--port`、`--log`、`--tokens 输入,输出`、`--models a,b,c`、`--echo-user-message`。没有 HTTP 配置时保留模型后缀场景（`-think`、`-thinkslow`、`-tool`、`-slow`、`-drop`、`-err429`、`-err500`）。
 
 ## 设置接下来两轮：工具调用 → 文本结束
 

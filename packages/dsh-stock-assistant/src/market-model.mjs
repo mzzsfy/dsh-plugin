@@ -2,8 +2,8 @@
 // sessions 是该市场连续竞价的时段(市场本地时间), 用来判断报价此刻处在交易中/午休/休市;
 // 只描述周内时点, 法定节假日仍以数据本身(最后一根K线的日期)为准。
 export const MARKET_META = {
-  XSHG: { currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, codePattern: /^\d{6}$/, verifiedByDefault: true, sessions: [['09:30', '11:30'], ['13:00', '15:00']], tag: '沪A' },
-  XSHE: { currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, codePattern: /^\d{6}$/, verifiedByDefault: true, sessions: [['09:30', '11:30'], ['13:00', '15:00']], tag: '深A' },
+  XSHG: { currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, codePattern: /^\d{6}$/, verifiedByDefault: true, auction: ['09:15', '09:25'], sessions: [['09:30', '11:30'], ['13:00', '15:00']], tag: '沪A' },
+  XSHE: { currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, codePattern: /^\d{6}$/, verifiedByDefault: true, auction: ['09:15', '09:25'], sessions: [['09:30', '11:30'], ['13:00', '15:00']], tag: '深A' },
   XHKG: { currency: 'HKD', timezone: 'Asia/Hong_Kong', priceScale: 2, codePattern: /^\d{4,5}$/, verifiedByDefault: true, sessions: [['09:30', '12:00'], ['13:00', '16:00']], tag: '港股' },
   XNAS: { currency: 'USD', timezone: 'America/New_York', priceScale: 2, codePattern: /^[A-Z]{1,5}$/, verifiedByDefault: true, sessions: [['09:30', '16:00']], tag: '纳斯达克' },
   XNYS: { currency: 'USD', timezone: 'America/New_York', priceScale: 2, codePattern: /^[A-Z]{1,5}$/, verifiedByDefault: true, sessions: [['09:30', '16:00']], tag: '纽交所' },
@@ -17,28 +17,100 @@ const SESSION_FORMATTERS = new Map()
 function sessionFormatter(timeZone) {
   let formatter = SESSION_FORMATTERS.get(timeZone)
   if (formatter === undefined) {
-    formatter = new Intl.DateTimeFormat('en-US', { timeZone, hour12: false, weekday: 'short', hour: '2-digit', minute: '2-digit' })
+    formatter = new Intl.DateTimeFormat('en-US', { timeZone, hourCycle: 'h23', weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
     SESSION_FORMATTERS.set(timeZone, formatter)
   }
   return formatter
 }
-
-// 报价此刻落在市场交易日的哪个阶段; 周末恒为休市, 节假日不做推断(没有日历能力时会误判)
-export function sessionStateOf(exchange, nowMs) {
-  const meta = MARKET_META[exchange]
-  if (!meta?.sessions?.length) return 'unknown'
-  const parts = sessionFormatter(meta.timezone).formatToParts(new Date(nowMs))
-  const pick = type => parts.find(part => part.type === type)?.value
-  if (pick('weekday') === 'Sat' || pick('weekday') === 'Sun') return 'closed'
-  const minutes = (Number(pick('hour')) % 24) * 60 + Number(pick('minute'))
-  const bounds = meta.sessions.map(([from, to]) => [toMinutes(from), toMinutes(to)])
-  if (minutes < bounds[0][0]) return 'preopen'
-  if (bounds.some(([from, to]) => minutes >= from && minutes < to)) return 'trading'
-  // 午休只存在于两段之间: 只比前一段的收尾会把收盘后也算成午休
-  if (bounds.some(([, to], index) => index < bounds.length - 1 && minutes >= to && minutes < bounds[index + 1][0])) return 'break'
-  return 'closed'
-}
 const toMinutes = stamp => { const [hh, mm] = stamp.split(':').map(Number); return hh * 60 + mm }
+const WEEKEND = new Set(['Sat', 'Sun'])
+function zonedParts(timeZone, nowMs) {
+  const parts = sessionFormatter(timeZone).formatToParts(new Date(nowMs))
+  const pick = type => parts.find(part => part.type === type)?.value
+  return { weekday: pick('weekday'), date: `${pick('year')}-${pick('month')}-${pick('day')}`, minutes: (Number(pick('hour')) % 24) * 60 + Number(pick('minute')) }
+}
+// 市场本地日期: 日历记录、休市判断都按证券所属市场的自然日, 不能统一用北京时间
+export const marketDate = (exchange, nowMs) => MARKET_META[exchange] ? zonedParts(MARKET_META[exchange].timezone, nowMs).date : new Date(nowMs).toISOString().slice(0, 10)
+// 某一时区的时钟文本: 分时横轴用来源时区(东财/腾讯统一按北京时间), 与在线返回的 time 同一基准
+export const clockInZone = (timeZone, unixSeconds) => {
+  const minutes = zonedParts(timeZone, unixSeconds * 1000).minutes
+  return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`
+}
+// 来源给的本地时刻(如 2026-11-16 09:30)换算成 Unix 秒: 分时的 at 必须是来源时刻, 让客户端按真实时间对齐横轴
+const STAMP_FORMATTERS = new Map()
+const stampFormatter = timeZone => {
+  let formatter = STAMP_FORMATTERS.get(timeZone)
+  if (formatter === undefined) {
+    formatter = new Intl.DateTimeFormat('en-US', { timeZone, hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    STAMP_FORMATTERS.set(timeZone, formatter)
+  }
+  return formatter
+}
+export function zonedUnixSeconds(stamp, timeZone) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(stamp)
+  if (!match || !timeZone) return null
+  const [, y, mo, d, hh, mm] = match.map(Number)
+  // 先当成 UTC 造一个候选时刻, 再用该时区的偏移把它拗回去(含夏令时)
+  const localAsUtc = Date.UTC(y, mo - 1, d, hh, mm)
+  const parts = stampFormatter(timeZone).formatToParts(new Date(localAsUtc))
+  const rendered = Object.fromEntries(parts.map(part => [part.type, part.value]))
+  const asUtc = Date.UTC(Number(rendered.year), Number(rendered.month) - 1, Number(rendered.day), Number(rendered.hour) % 24, Number(rendered.minute), Number(rendered.second))
+  return Math.floor((localAsUtc - (asUtc - localAsUtc)) / 1000)
+}
+function addDays(date, days) { const [y, m, d] = date.split('-').map(Number); return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10) }
+const isWeekend = date => { const day = new Date(`${date}T00:00:00Z`).getUTCDay(); return day === 0 || day === 6 }
+// 市场本地时刻 → epoch: 先按 UTC 构造, 再用该时区的实际偏移回推(两次足够覆盖 DST 偏移)
+function epochOf(timeZone, date, minutes) {
+  const [y, m, d] = date.split('-').map(Number)
+  const target = Date.UTC(y, m - 1, d, Math.floor(minutes / 60), minutes % 60)
+  let stamp = target
+  for (let i = 0; i < 3; i++) {
+    const local = zonedParts(timeZone, stamp)
+    const [ly, lm, ld] = local.date.split('-').map(Number)
+    const delta = target - Date.UTC(ly, lm - 1, ld, Math.floor(local.minutes / 60), local.minutes % 60)
+    if (delta === 0) break
+    stamp += delta
+  }
+  return stamp
+}
+const firstStartOf = meta => toMinutes((meta.auction || meta.sessions[0])[0])
+// 下一个交易日的首个可采集时刻; 有日历按 isOpen 跳过节假日, 无日历只能跳过周末
+function nextOpenAt(meta, fromDate, calendarDays) {
+  for (let offset = 1; offset <= 60; offset++) {
+    const date = addDays(fromDate, offset)
+    const open = calendarDays?.get(date)
+    if (open === false) continue
+    if (open === undefined && isWeekend(date)) continue
+    return epochOf(meta.timezone, date, firstStartOf(meta))
+  }
+  return epochOf(meta.timezone, addDays(fromDate, 1), firstStartOf(meta))
+}
+// 报价此刻落在市场交易日的哪个阶段, 并给出下一次可采集时刻; 节假日只由日历记录判定
+export function marketStateOf(exchange, nowMs, calendarDays = null) {
+  const meta = MARKET_META[exchange]
+  if (!meta?.sessions?.length) return { state: 'unknown' }
+  const local = zonedParts(meta.timezone, nowMs)
+  const dayOpen = calendarDays?.get(local.date)
+  if (dayOpen === false) return { state: 'closed', nextAt: nextOpenAt(meta, local.date, calendarDays) }
+  if (dayOpen === undefined && WEEKEND.has(local.weekday)) return { state: 'closed', nextAt: nextOpenAt(meta, local.date, calendarDays) }
+  const minutes = local.minutes
+  if (meta.auction) {
+    const [auctionFrom, auctionTo] = meta.auction.map(toMinutes)
+    if (minutes < auctionFrom) return { state: 'preopen', nextAt: epochOf(meta.timezone, local.date, auctionFrom) }
+    if (minutes < auctionTo) return { state: 'auction' }
+  }
+  const bounds = meta.sessions.map(([from, to]) => [toMinutes(from), toMinutes(to)])
+  if (minutes < bounds[0][0]) return { state: 'preopen', nextAt: epochOf(meta.timezone, local.date, bounds[0][0]) }
+  if (bounds.some(([from, to]) => minutes >= from && minutes < to)) return { state: 'trading' }
+  // 午休只存在于两段之间: 只比前一段的收尾会把收盘后也算成午休
+  const breakIndex = bounds.findIndex(([, to], index) => index < bounds.length - 1 && minutes >= to && minutes < bounds[index + 1][0])
+  if (breakIndex >= 0) return { state: 'break', nextAt: epochOf(meta.timezone, local.date, bounds[breakIndex + 1][0]) }
+  return { state: 'closed', nextAt: nextOpenAt(meta, local.date, calendarDays) }
+}
+// 兼容旧调用面: 只要阶段
+export function sessionStateOf(exchange, nowMs) {
+  return marketStateOf(exchange, nowMs).state
+}
 
 export function securityId(exchange, code, instrument = 'equity') {
   const meta = MARKET_META[exchange]

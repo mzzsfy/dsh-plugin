@@ -322,6 +322,27 @@ test('handle 代:宿主拒读(descriptor)降级文件直读', () => {
   })
 })
 
+test('handle 代:降级直读识别 fork 继承 cut,不重放继承前缀', () => {
+  return withDirectRoot(async (root) => {
+    seedArtifact(root, 'fork-refused', [
+      ev(0),
+      { type: 'session/end-seed', seq: 1, time: 0, data: { inherited: true } },
+      ev(2),
+      { type: 'session/end-seed', seq: 3, time: 0, data: { inherited: true } },
+      ev(4),
+    ], { isSeeded: true })
+    const persistence = {
+      async open() {
+        throw new Error('session "fork-refused" header uses unsupported descriptor version 2')
+      },
+    }
+    const reader = createArchiveReader(persistence)
+    const result = await reader.readLog('fork-refused')
+    assert.equal(result.inheritedEventCount, 3)
+    assert.equal(result.events.length, 5)
+  })
+})
+
 test('handle 代:降级直读时 header 的 origin 参与派生判定', () => {
   return withDirectRoot(async (root) => {
     seedArtifact(root, 'child-refused', [ev(0)], { origin: 'subagent', delegationDepth: 1 })

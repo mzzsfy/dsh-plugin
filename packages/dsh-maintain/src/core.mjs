@@ -181,6 +181,34 @@ export async function fetchDistTags({ registryBase, fetchImpl = fetch, timeoutMs
   return tags
 }
 
+// 单版本清单:预检只取 engines 与体积,避免把整包 metadata 留在内存。
+export async function fetchVersionManifest({ version, registryBase, fetchImpl = fetch, timeoutMs }) {
+  if (!isValidRegistryBase(registryBase)) throw new Error('registry 基地址无效: ' + registryBase)
+  if (!(Number.isFinite(timeoutMs) && timeoutMs > 0)) throw new Error('timeoutMs 必须为正数')
+  if (typeof version !== 'string' || !parseSemver(version)) throw new Error('版本号非法: ' + version)
+  const base = registryBase.trim().replace(/\/+$/, '')
+  const path = '/' + encodeURIComponent(TARGET_PACKAGE) + '/' + encodeURIComponent(version)
+  const response = await fetchImpl(base + path, {
+    headers: { accept: 'application/json' },
+    redirect: 'error',
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+  if (!response.ok) throw new Error('registry HTTP ' + response.status)
+  const text = await readBodyTextLimited(response)
+  let body
+  try {
+    body = JSON.parse(text)
+  } catch {
+    throw new Error('版本清单响应不是合法 JSON')
+  }
+  if (!body || body.name !== TARGET_PACKAGE || body.version !== version) throw new Error('版本清单与目标不符')
+  return {
+    version: body.version,
+    engines: body.engines && typeof body.engines === 'object' ? body.engines : null,
+    unpackedSize: Number.isFinite(body.dist?.unpackedSize) ? body.dist.unpackedSize : null,
+  }
+}
+
 // 运行版本事实源:运行进程 argv[1] 指向运行宿主自己的 bin.js(<包根>/lib/bin.js),
 // dirname 后上一级即包根,其 package.json 就是运行宿主清单。多副本共存时全局布局
 // 候选与 createRequire 解析都会命中其他副本(全局 0.1.5 + 副本跑旧版实测),只有

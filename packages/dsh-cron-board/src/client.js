@@ -4,13 +4,17 @@
 // 开关一律 cb-switch(规约 switch 形态);状态色语义以 STATUS_META 单一来源,与 core status-meta.mjs 镜像(parity 锁定)。
 
 /* LOGIC-BEGIN */
+// 运行状态元数据:与 core status-meta.mjs 逐字镜像(parity 锁定),状态名单见 RUN_STATUSES
+const RUN_STATUSES = ['queued', 'running', 'success', 'fail', 'timeout', 'skipped', 'interrupted', 'cancelled']
 const STATUS_META = {
+  queued: { label: '排队中', tone: 'mute' },
+  running: { label: '运行中', tone: 'run' },
   success: { label: '成功', tone: 'ok' },
   fail: { label: '失败', tone: 'bad' },
   timeout: { label: '超时', tone: 'warn' },
   skipped: { label: '跳过', tone: 'mute' },
   interrupted: { label: '中断', tone: 'mute' },
-  running: { label: '运行中', tone: 'run' },
+  cancelled: { label: '已取消', tone: 'mute' },
 }
 const TRIGGER_META = { cron: { label: '定时' }, manual: { label: '手动' } }
 const KIND_LABELS = { shell: '脚本', session: '会话' }
@@ -43,9 +47,9 @@ function formatDateTime(timestamp, timezoneOffset) {
   return shifted.getUTCFullYear() + '-' + PAD2(shifted.getUTCMonth() + 1) + '-' + PAD2(shifted.getUTCDate()) + ' ' + PAD2(shifted.getUTCHours()) + ':' + PAD2(shifted.getUTCMinutes())
 }
 
-// 浏览器所在设备的时区偏移(整小时就近取整):仅用于新建任务时固化初始时区后缀
+// 浏览器所在设备的时区偏移(小时,可含非整点):仅用于新建任务时固化初始时区后缀
 function deviceTzOffset() {
-  return Math.round(-new Date().getTimezoneOffset() / 60)
+  return -new Date().getTimezoneOffset() / 60
 }
 
 function formatDuration(ms) {
@@ -58,6 +62,159 @@ function formatDuration(ms) {
 function statusMeta(status) {
   return STATUS_META[status] || { label: status || '-', tone: 'mute' }
 }
+
+// 宿主自动化任务只读摘要:目录字段见 dsh-schedule 的 ScheduleRecord / ScheduleCatalogEntry
+const AUTOMATION_STATUS_META = {
+  active: { label: '启用', tone: 'ok' },
+  paused: { label: '暂停', tone: 'warn' },
+  inactive: { label: '停用', tone: 'mute' },
+  ended: { label: '结束', tone: 'mute' },
+}
+const HOST_AUTOMATION_NAV_ATTR = 'data-cb-hide-host-automation-nav'
+
+// 看板聚合与宿主侧栏入口共用开关:开启后隐藏宿主重复面板行,保留看板内只读分组作为唯一入口。
+// 宿主未提供 sidebar.panellist 的隐藏 API,只能按宿主稳定 aria/icon 标记做可选 CSS 隐藏。
+function syncHostAutomationNav(hidden) {
+  if (typeof document === 'undefined' || !document.documentElement) return
+  const root = document.documentElement
+  if (typeof root.setAttribute !== 'function' || typeof root.removeAttribute !== 'function') return
+  if (hidden) root.setAttribute(HOST_AUTOMATION_NAV_ATTR, '')
+  else root.removeAttribute(HOST_AUTOMATION_NAV_ATTR)
+}
+const AUTOMATION_KIND_LABELS = { after: '一次性', at: '一次性', every: '固定间隔', daily: '每日', weekly: '每周', cron: 'Cron', rrule: '自定义' }
+const WEEKDAY_LABELS = { 1: '一', 2: '二', 3: '三', 4: '四', 5: '五', 6: '六', 7: '日' }
+const WEEKDAY_CODES = { MO: '一', TU: '二', WE: '三', TH: '四', FR: '五', SA: '六', SU: '日' }
+const RRULE_ALLOWED_KEYS = {
+  DAILY: ['FREQ', 'INTERVAL', 'COUNT', 'BYHOUR', 'BYMINUTE', 'UNTIL', 'WKST'],
+  WEEKLY: ['FREQ', 'INTERVAL', 'COUNT', 'BYDAY', 'BYHOUR', 'BYMINUTE', 'UNTIL', 'WKST'],
+  MONTHLY: ['FREQ', 'INTERVAL', 'COUNT', 'BYMONTHDAY', 'BYHOUR', 'BYMINUTE', 'UNTIL', 'WKST'],
+  HOURLY: ['FREQ', 'INTERVAL', 'COUNT', 'BYMINUTE', 'UNTIL', 'WKST'],
+  MINUTELY: ['FREQ', 'INTERVAL', 'COUNT', 'UNTIL', 'WKST'],
+  YEARLY: ['FREQ', 'INTERVAL', 'COUNT', 'UNTIL', 'WKST'],
+}
+
+function automationStatusMeta(status) {
+  return AUTOMATION_STATUS_META[status] || { label: status || '-', tone: 'mute' }
+}
+
+function automationKindLabel(kind) {
+  return AUTOMATION_KIND_LABELS[kind] || kind || '-'
+}
+
+function automationTimeOf(task) {
+  if (!task || typeof task !== 'object') return '-'
+  const match = /^(\d{2}):(\d{2})/.exec(String(task.time || ''))
+  return match ? match[1] + ':' + match[2] : ''
+}
+
+function automationRRuleText(task) {
+  const rule = String(task.rrule || '')
+  const line = rule.split(/\r?\n/).find((part) => part.startsWith('RRULE:')) || rule
+  const fields = {}
+  for (const part of line.replace(/^RRULE:/, '').split(';')) {
+    const index = part.indexOf('=')
+    if (index > 0) fields[part.slice(0, index)] = part.slice(index + 1)
+  }
+  const allowed = RRULE_ALLOWED_KEYS[fields.FREQ]
+  if (!allowed || Object.keys(fields).some((key) => !allowed.includes(key))) return '自定义规则'
+  const readInteger = (key, min, max) => {
+    if (fields[key] === undefined) return undefined
+    if (!/^\d{1,6}$/.test(fields[key])) return null
+    const value = Number(fields[key])
+    return value >= min && value <= max ? value : null
+  }
+  const interval = readInteger('INTERVAL', 1, 999)
+  const count = readInteger('COUNT', 1, 999999)
+  if (interval === null || count === null) return '自定义规则'
+  if (count === 1) return '一次性'
+  if (fields.FREQ === 'WEEKLY' && fields.BYDAY) {
+    const codes = fields.BYDAY.split(',')
+    if (codes.some((code) => !WEEKDAY_CODES[code])) return '自定义规则'
+    const days = codes.map((code) => '周' + WEEKDAY_CODES[code]).join('、')
+    const dtstart = /DTSTART[^\n:]*:\d{8}T(\d{2})(\d{2})/.exec(rule)
+    const byHour = readInteger('BYHOUR', 0, 23)
+    const byMinute = readInteger('BYMINUTE', 0, 59)
+    if (byHour === null || byMinute === null) return '自定义规则'
+    const hour = byHour !== undefined ? byHour : (dtstart ? Number(dtstart[1]) : undefined)
+    const minute = byMinute !== undefined ? byMinute : (dtstart ? Number(dtstart[2]) : undefined)
+    return (interval > 1 ? '每 ' + interval + ' 周' : '每周') + ' ' + days + (hour !== undefined && minute !== undefined ? ' ' + PAD2(hour) + ':' + PAD2(minute) : '')
+  }
+  if (fields.FREQ === 'MONTHLY' && fields.BYMONTHDAY !== undefined) {
+    const day = readInteger('BYMONTHDAY', 1, 31)
+    if (day === null) return '自定义规则'
+  }
+  if (fields.FREQ === 'HOURLY' && fields.BYMINUTE !== undefined && readInteger('BYMINUTE', 0, 59) !== 0) return '自定义规则'
+  const dtstart = /DTSTART[^\n:]*:\d{8}T(\d{2})(\d{2})/.exec(rule)
+  const byHour = readInteger('BYHOUR', 0, 23)
+  const byMinute = readInteger('BYMINUTE', 0, 59)
+  if (byHour === null || byMinute === null) return '自定义规则'
+  const hour = byHour !== undefined ? byHour : (dtstart ? Number(dtstart[1]) : undefined)
+  const minute = byMinute !== undefined ? byMinute : (dtstart ? Number(dtstart[2]) : (byHour !== undefined ? 0 : undefined))
+  const time = hour !== undefined && minute !== undefined ? ' ' + PAD2(hour) + ':' + PAD2(minute) : ''
+  if (fields.FREQ === 'DAILY') return interval > 1 ? '每 ' + interval + ' 天' + time : '每天' + time
+  if (fields.FREQ === 'WEEKLY') return (interval > 1 ? '每 ' + interval + ' 周' : '每周') + time
+  if (fields.FREQ === 'MONTHLY') return (interval > 1 ? '每 ' + interval + ' 月' : '每月') + (fields.BYMONTHDAY ? ' ' + fields.BYMONTHDAY + ' 日' : '') + time
+  if (fields.FREQ === 'HOURLY') return '每 ' + interval + ' 小时'
+  if (fields.FREQ === 'MINUTELY') return '每 ' + interval + ' 分钟'
+  if (fields.FREQ === 'YEARLY') return (interval > 1 ? '每 ' + interval + ' 年' : '每年') + time
+  return '自定义规则'
+}
+
+function automationFrequency(task) {
+  if (!task || typeof task !== 'object') return '-'
+  if (task.kind === 'every') return '每 ' + formatDuration(Number(task.everySeconds) * SECOND_MS)
+  if (task.kind === 'daily') return ('每天 ' + automationTimeOf(task)).trimEnd()
+  if (task.kind === 'weekly') {
+    const days = Array.isArray(task.weekdays) ? task.weekdays.map((day) => '周' + (WEEKDAY_LABELS[day] || day)).join('、') : ''
+    const time = automationTimeOf(task)
+    return ('每周 ' + days).trimEnd() + (time ? ' ' + time : '')
+  }
+  if (task.kind === 'cron') return 'Cron ' + String(task.expression || '')
+  if (task.kind === 'rrule') return automationRRuleText(task)
+  return automationKindLabel(task.kind)
+}
+
+function automationTargetLabel(task) {
+  const target = task && typeof task === 'object' ? task.target : null
+  if (!target && task && task.sessionId) return '固定会话'
+  if (!target || typeof target !== 'object') return ''
+  if (target.kind === 'session') return '固定会话'
+  if (target.kind === 'new_once') return '新建会话复用'
+  if (target.kind === 'new') return '每次新建会话'
+  return ''
+}
+
+function timeZoneOffsetOf(timeZone, timestamp) {
+  if (!timeZone || typeof timeZone !== 'string') return undefined
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone, timeZoneName: 'longOffset', hour12: false }).formatToParts(new Date(timestamp))
+    const name = parts.find((part) => part.type === 'timeZoneName')?.value || ''
+    const match = /^GMT([+-])(\d{1,2})(?::(\d{2}))?$/.exec(name)
+    return match ? (match[1] === '-' ? -1 : 1) * (Number(match[2]) + Number(match[3] || 0) / 60) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function automationTzOffset(task, timestamp) {
+  if (!task || typeof task !== 'object') return undefined
+  if (typeof task.timeZone === 'string') return timeZoneOffsetOf(task.timeZone, timestamp)
+  const rule = String(task.rrule || '')
+  const zone = /DTSTART;TZID=([^:\n]+)/.exec(rule)?.[1]
+  if (zone) return timeZoneOffsetOf(zone, timestamp)
+  return /DTSTART[^\n]*Z/.test(rule) ? 0 : undefined
+}
+
+function automationNextText(task, now) {
+  if (!task || typeof task !== 'object') return ''
+  if (task.status === 'inactive') return '已停用'
+  if (task.status === 'ended') return '已结束'
+  if (task.status === 'paused') return '已暂停'
+  const at = Date.parse(task.scheduledAt)
+  if (!Number.isFinite(at)) return ''
+  const offset = automationTzOffset(task, at)
+  return '下次 ' + formatDateTime(at, offset === undefined ? deviceTzOffset() : offset) + ' · ' + relativeTime(at, now)
+}
 /* LOGIC-END */
 
 /* SBUILD-BEGIN */
@@ -69,9 +226,19 @@ const SB_WEEKDAY_LABELS = { '0': '日', '1': '一', '2': '二', '3': '三', '4':
 const SB_MINUTE_MAX = 59
 const SB_HOUR_MAX = 23
 const SB_INTERVAL_MIN_MINUTES = 1
+const SB_MINUTES_PER_HOUR = 60
 const SB_TZ_SUFFIX_MIN = -12
 const SB_TZ_SUFFIX_MAX = 14
 const SB_TZ_SUFFIX_PATTERN = /\s*T([+-])(\d{1,2})$/i
+
+// 时区下拉可选偏移:整点区间 + 当前值兜底 —— select 的 value 找不到对应 option 时会渲染空白,
+// 当前偏移不在区间内(非整点/脏状态)时补一项,保证选中项始终可见
+function tzSelectOptions(current, min = SB_TZ_SUFFIX_MIN, max = SB_TZ_SUFFIX_MAX) {
+  const offsets = []
+  for (let offset = min; offset <= max; offset++) offsets.push(offset)
+  if (typeof current === 'number' && Number.isFinite(current) && !offsets.includes(current)) offsets.push(current)
+  return offsets.sort((a, b) => a - b)
+}
 
 function createScheduleState(expression) {
   return {
@@ -133,16 +300,27 @@ function parseSchedule(expression) {
   return state
 }
 
-// 偏移小时数 → 后缀符号值:+8 / -5 / +0
+// 偏移小时数 → 展示值:+8 / -5 / +0;非整点(浏览器/宿主时区可能为 +5:30、+5:45)按 +5:30 展示
 function sbFormatTzOffset(offset) {
-  return (offset >= 0 ? '+' : '') + offset
+  const sign = offset >= 0 ? '+' : '-'
+  const totalMinutes = Math.round(Math.abs(offset) * SB_MINUTES_PER_HOUR)
+  const hours = Math.floor(totalMinutes / SB_MINUTES_PER_HOUR)
+  const minutes = totalMinutes % SB_MINUTES_PER_HOUR
+  return sign + hours + (minutes === 0 ? '' : ':' + String(minutes).padStart(2, '0'))
 }
 
-// 构建器状态 → cron;custom 透传剥离后手工表达式;显式时区统一附加 T±N 后缀
+// 时区后缀只支持整小时:非整点偏移不得四舍五入成错误小时(+5:30 → T+6 会整体错半小时),
+// 返回 null 由调用方回退宿主默认
+function tzSuffixOffset(offset) {
+  return Number.isInteger(offset) ? offset : null
+}
+
+// 构建器状态 → cron;custom 透传剥离后手工表达式;整点显式时区统一附加 T±N 后缀
 function buildSchedule(state) {
   const base = sbBuildBase(state)
-  if (state.timezone == null) return base
-  return base + 'T' + sbFormatTzOffset(state.timezone)
+  const offset = tzSuffixOffset(state.timezone)
+  if (offset === null) return base
+  return base + 'T' + sbFormatTzOffset(offset)
 }
 
 function sbBuildBase(state) {
@@ -195,6 +373,45 @@ function parseModelKey(key) {
   return parts[2] ? { provider: parts[0], model: parts[1], reasoningEffort: parts[2] } : { provider: parts[0], model: parts[1] }
 }
 /* MODELKEY-END */
+/* JOBPATCH-BEGIN */
+// 任务表单提交面:编辑只提交相对「打开编辑器时快照」有变化的字段(dirty),并带回该快照的
+// updatedAt 基线交给服务端乐观锁;全量重提旧快照会把他处变更(自动禁用/开关/会话绑定)静默回滚。
+const JOB_FORM_FIELDS = ['name', 'kind', 'command', 'prompt', 'workdir', 'schedule', 'timeoutMs', 'runOnce', 'enabled']
+const JOB_SESSION_FIELDS = ['mode', 'pinnedSessionId', 'agentPreset', 'modelKey']
+// 并发上限:空串 = 清空该键(提交 null,服务端删键表达「不限并发」),否则提交数值
+function jobConcurrencyValue(raw) {
+  return raw === '' ? null : Number(raw)
+}
+// 会话子对象:表单态 modelKey 在提交副本上还原为模型对象,state 内对象不得突变
+function jobSessionPayload(session) {
+  const payload = { ...session, model: parseModelKey(session.modelKey) }
+  delete payload.modelKey
+  return payload
+}
+// 新建任务:提交完整字段集
+function jobCreatePayload(form) {
+  return {
+    ...form,
+    concurrency: jobConcurrencyValue(form.concurrency),
+    ...(form.kind === 'session' ? { session: jobSessionPayload(form.session) } : { session: undefined }),
+  }
+}
+// 编辑任务:只提交 dirty 字段(+打开时的 updatedAt 基线)
+function jobUpdatePayload(baseline, current) {
+  const payload = {}
+  for (const field of JOB_FORM_FIELDS) {
+    if (current[field] !== baseline[field]) payload[field] = current[field]
+  }
+  if (current.concurrency !== baseline.concurrency) payload.concurrency = jobConcurrencyValue(current.concurrency)
+  if (current.kind === 'session') {
+    const sessionChanged = baseline.kind !== 'session'
+      || JOB_SESSION_FIELDS.some((field) => current.session[field] !== baseline.session[field])
+    if (sessionChanged) payload.session = jobSessionPayload(current.session)
+  }
+  payload.updatedAt = baseline.updatedAt
+  return payload
+}
+/* JOBPATCH-END */
 const TABS = [
   { value: 'jobs', label: '看板' },
   { value: 'envs', label: '环境变量' },
@@ -265,6 +482,20 @@ body{
 .cb-card{position:relative;display:flex;flex-direction:column;gap:var(--cb-space-2);border:.5px solid var(--cb-border);border-radius:var(--cb-radius-md);padding:var(--cb-space-4) var(--cb-space-5);cursor:pointer;overflow:hidden;background:var(--cb-card);transition:border-color .15s,background .15s}
 .cb-card:hover{border-color:var(--cb-border-strong);background:var(--cb-hover)}
 .cb-card::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--cb-status)}
+.cb-card--automation{background:var(--cb-bg-sub)}
+.cb-card--automation:hover{background:var(--cb-hover)}
+.cb-group{display:flex;flex-direction:column;gap:var(--cb-space-2);padding-top:var(--cb-space-4);border-top:.5px solid var(--cb-border)}
+.cb-group-head{display:flex;align-items:center;gap:var(--cb-space-2);flex-wrap:wrap}
+.cb-error--inline{display:flex;align-items:center;gap:var(--cb-space-3)}
+html[data-cb-hide-host-automation-nav] nav > div:has(> button[aria-label="自动化任务"]),
+html[data-cb-hide-host-automation-nav] nav > div:has(> button[aria-label="Automation tasks"]),
+html[data-cb-hide-host-automation-nav] nav > div:has(> button[aria-label="自動化タスク"]),
+html[data-cb-hide-host-automation-nav] nav > div:has(> button[aria-label="Tareas de automatización"]),
+html[data-cb-hide-host-automation-nav] nav > div:has(> button[aria-label="Tâches d'automatisation"]),
+html[data-cb-hide-host-automation-nav] nav > div:has(> button[aria-label="Automatisierungsaufgaben"]),
+html[data-cb-hide-host-automation-nav] nav > div:has(> button[aria-label="Задачи автоматизации"]),
+html[data-cb-hide-host-automation-nav] nav > div:has(> button[aria-label="Tarefas de automação"]),
+html[data-cb-hide-host-automation-nav] nav > div:has(> button > span > div[data-slot="sidebar.panellist"] svg[data-icon="dsw-icon-clock-outline-regular"]){display:none!important}
 .cb-card-row{display:flex;align-items:center;gap:var(--cb-space-3);flex-wrap:wrap}
 .cb-name{font-size:14px;font-weight:600;line-height:22px;color:var(--cb-text)}
 .cb-badge{min-height:20px;display:inline-flex;align-items:center;padding:0 8px;border-radius:999px;color:var(--cb-text-sub);background:var(--cb-bg-muted);font-size:var(--cb-font-xs);white-space:nowrap}
@@ -306,13 +537,14 @@ body{
 .cb-code{font-family:ui-monospace,SFMono-Regular,monospace;font-size:var(--cb-font-sm);color:var(--cb-text-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .cb-mask{color:var(--cb-text-sub)}
 .cb-modal-mask{position:fixed;inset:0;background:var(--cb-mask);display:flex;align-items:center;justify-content:center;z-index:60;animation:cb-fade-in .16s ease-out}
-.cb-modal{background:var(--cb-bg);color:var(--cb-text);border-radius:var(--cb-radius-lg);padding:var(--cb-space-6);max-width:640px;width:min(640px,94vw);max-height:90vh;overflow:auto;display:flex;flex-direction:column;gap:14px;box-shadow:var(--dsw-shadow-lv3);animation:cb-pop-in .2s ease-out}
+.cb-modal{background:var(--cb-bg);color:var(--cb-text);border-radius:var(--cb-radius-lg);padding:var(--cb-space-6);max-width:640px;width:min(640px,94vw);max-height:90vh;overflow:hidden;display:flex;flex-direction:column;gap:14px;box-shadow:var(--dsw-shadow-lv3);animation:cb-pop-in .2s ease-out}
 @keyframes cb-fade-in{from{opacity:0}to{opacity:1}}
 @keyframes cb-pop-in{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}
 @media (prefers-reduced-motion: reduce){.cb-modal-mask,.cb-modal{animation:none}.cb-card,.cb-row,.cb-button,.cb-pill,.cb-icon,.cb-switch__track,.cb-pc,.cb-pc__chevron{transition:none}}
 .cb-modal-head{display:flex;align-items:center;justify-content:space-between;gap:var(--cb-space-3);padding-bottom:var(--cb-space-2);border-bottom:1px solid var(--cb-border)}
 .cb-modal-title{font-size:16px;font-weight:600}
-.cb-modal-body{display:flex;flex-direction:column;gap:var(--cb-space-4)}
+.cb-modal-body{display:flex;flex-direction:column;gap:var(--cb-space-4);flex:1 1 auto;min-height:0;overflow:auto}
+.cb-modal .cb-toolbar{position:sticky;bottom:calc(-1 * var(--cb-space-6));z-index:1;background:var(--cb-bg);padding-top:var(--cb-space-3);border-bottom:0}
 .cb-section{display:flex;flex-direction:column;gap:var(--cb-space-2)}
 .cb-section-title{font-size:var(--cb-font-sm);font-weight:600;color:var(--cb-text);display:flex;align-items:center;gap:var(--cb-space-2)}
 .cb-section-title::before{content:'';width:3px;height:12px;border-radius:999px;background:var(--cb-accent)}
@@ -384,6 +616,20 @@ function noopFactory() {
   return { inject: [], apply() {} }
 }
 
+/* STYLE-ENSURE-BEGIN */
+const STYLE_ID = 'dsh-cron-board-style'
+// 样式单例:按 id 命中即原位复用,复用路径必须无条件补 data-plugin——修复前旧代节点
+// 可能缺标记,缺标记样式会被宿主 claimStyles 归属给后续材质化插件,其 HMR 重建即整批删除本包样式。
+function ensureStyle(document, css) {
+  const style = document.getElementById(STYLE_ID) || document.createElement('style')
+  style.id = STYLE_ID
+  style.setAttribute('data-plugin', '@mzzsfy/dsh-cron-board')
+  if (style.textContent !== css) style.textContent = css
+  if (style.isConnected !== true) document.head.appendChild(style)
+  return style
+}
+/* STYLE-ENSURE-END */
+
 if (typeof window !== 'undefined' && window.__ModuleLoader__) {
   window.__ModuleLoader__.load({ id: '@mzzsfy/dsh-cron-board', factory })
 
@@ -396,13 +642,11 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 
   function factory(require) {
     let React = null
-    let ReactDOMClient = null
     try {
       React = require('react')
-      ReactDOMClient = require('react-dom/client')
     } catch (error) {
       // 宿主种子表异常的防御兜底:干净禁用但必须显式报错,禁止静默
-      console.error('[cron-board] react/react-dom 加载失败,面板禁用:', error)
+      console.error('[cron-board] react 加载失败,面板禁用:', error)
       return noopFactory()
     }
     // 公共工具库为总线订阅硬消费:数据刷新唯一通道,缺失即 factory 抛错交装载层判定
@@ -418,7 +662,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       try {
         response = await fetch(API_PREFIX + endpoint, {
           method,
-          headers: body === undefined ? undefined : { 'content-type': 'application/json' },
+          // 写方法即使无体也必须带 JSON 类型:装配层 withRouteGate 对 POST/PATCH/DELETE 一律校验
+          headers: method === 'GET' ? undefined : { 'content-type': 'application/json' },
           body: body === undefined ? undefined : JSON.stringify(body),
         })
       } catch (error) {
@@ -428,6 +673,18 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       try { json = await response.json() } catch { json = null }
       if (!response.ok) return { ok: false, error: json && json.error ? json.error : '请求失败(' + response.status + ')' }
       return { ok: true, data: json }
+    }
+
+    // 文本文件导出:日志全文只在用户显式导出时取(Blob + 临时 <a download>)
+    function downloadText(name, text) {
+      const url = URL.createObjectURL(new Blob([text ?? ''], { type: 'text/plain;charset=utf-8' }))
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = name
+      anchor.rel = 'noopener'
+      anchor.click()
+      // 交还对象 URL 须在点击之后:同步撤销会让下载拿到空内容
+      setTimeout(() => URL.revokeObjectURL(url), 0)
     }
 
     const statusReaders = new WeakMap()
@@ -449,23 +706,11 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       }
     }
 
-    function ensureStyle(document) {
-      const existing = document.getElementById('dsh-cron-board-style')
-      if (existing) return
-      const style = document.createElement('style')
-      style.id = 'dsh-cron-board-style'
-      // 官方契约:插件自注样式必须自带 data-plugin,否则任意后续插件材质化时
-      // claimStyles 会把它归属给该插件,其 HMR 重建即整批误删本插件样式
-      style.setAttribute('data-plugin', '@mzzsfy/dsh-cron-board')
-      style.textContent = STYLE
-      document.head.appendChild(style)
-    }
-
     // 规约 switch:input 锚定状态选择器,视觉由 track+thumb 呈现
     function switchToggle(props) {
       return h('label', { className: 'cb-switch' },
         h('input', { type: 'checkbox', checked: props.checked, disabled: props.disabled, onChange: props.onChange,
-          'aria-label': props.ariaLabel }),
+          title: props.title, 'aria-label': props.ariaLabel }),
         h('span', { className: 'cb-switch__track' }, h('span', { className: 'cb-switch__thumb' })),
         props.label ? h('span', { className: 'cb-meta' }, props.label) : null)
     }
@@ -549,7 +794,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         if (days.length === 0) return
         onStateChange({ ...state, weekdays: days })
       }
-      const setTz = (raw) => onStateChange({ ...state, timezone: raw === 'host' ? null : Number(raw) })
+      // 时区选择:非整点偏移无后缀语法,选中即回退宿主默认(null),不留「下拉值与表达式不一致」
+      const setTz = (raw) => onStateChange({ ...state, timezone: raw === 'host' ? null : tzSuffixOffset(Number(raw)) })
       const displayTzOffset = state.timezone == null ? serverTzOffset : state.timezone
       const clockRow = (h('div', { className: 'cb-bline' },
         h('span', { className: 'cb-blabel' }, '执行时间'),
@@ -589,10 +835,11 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           state.freq === 'custom' ? null : h('span', { className: 'cb-hint' }, '由上方选择自动生成')),
         h('div', { className: 'cb-bline' },
           h('span', { className: 'cb-blabel' }, '时区'),
+          // 选项必须覆盖当前值(兜底项):select 的 value 找不到 option 时渲染空白
           h('select', { className: 'cb-select', value: state.timezone == null ? 'host' : String(state.timezone), onChange: (e) => setTz(e.target.value) },
             h('option', { value: 'host' }, '宿主默认' + (typeof serverTzOffset === 'number' ? '(UTC' + sbFormatTzOffset(serverTzOffset) + ')' : '')),
-            Array.from({ length: SB_TZ_SUFFIX_MAX - SB_TZ_SUFFIX_MIN + 1 }, (_, i) => SB_TZ_SUFFIX_MIN + i).map((offset) => h('option', { key: offset, value: String(offset) }, 'UTC' + sbFormatTzOffset(offset)))),
-          h('span', { className: 'cb-hint' }, '固定偏移不随夏令时变化;写入表达式后缀 T±N')),
+            tzSelectOptions(state.timezone).map((offset) => h('option', { key: offset, value: String(offset) }, 'UTC' + sbFormatTzOffset(offset)))),
+          h('span', { className: 'cb-hint' }, '固定偏移不随夏令时变化;写入表达式后缀 T±N(仅整小时)')),
         h('div', { className: 'cb-bline' },
           h('span', { className: 'cb-blabel' }, '即将执行'),
           preview
@@ -611,14 +858,15 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       }, [wsModel])
       const editing = Boolean(job && job.id)
       // 构建器初始状态:新建任务把设备时区偏移固化为显式后缀,
-      // 宿主环境时区异常(如 UTC)时任务仍按设备预期时刻触发;编辑存量保持原表达式语义
+      // 宿主环境时区异常(如 UTC)时任务仍按设备预期时刻触发;编辑存量保持原表达式语义。
+      // 非整点设备时区(+5:30/+5:45)无后缀语法,回退宿主默认 —— 取整成相邻整点会整体错半小时
       const [scheduleState, setScheduleState] = useState(() => {
         const parsed = parseSchedule(job ? job.schedule : '0 9 * * *')
-        if (!editing) parsed.timezone = deviceTzOffset()
+        if (!editing) parsed.timezone = tzSuffixOffset(deviceTzOffset())
         return parsed
       })
       const initialSchedule = editing ? job.schedule : buildSchedule(scheduleState)
-      const [form, setForm] = useState(() => ({
+      const buildForm = () => ({
         name: job ? job.name : '',
         kind: job ? job.kind : 'shell',
         command: job ? job.command : '',
@@ -629,6 +877,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         runOnce: job ? job.runOnce === true : false,
         concurrency: job && job.concurrency ? String(job.concurrency) : '',
         enabled: job ? job.enabled : true,
+        // 打开时的行版本:编辑提交原样带回,服务端据此做乐观锁(409)
+        updatedAt: job ? job.updatedAt : undefined,
         session: {
           mode: job && job.session ? job.session.mode : 'fresh',
           pinnedSessionId: job && job.session ? job.session.pinnedSessionId : '',
@@ -636,7 +886,10 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           // 表单态为序列化 key(分隔符见 MODELKEY 段 / '' = 跟随宿主默认),提交时还原对象
           modelKey: serializeModelKey(job && job.session ? job.session.model : undefined),
         },
-      }))
+      })
+      const [form, setForm] = useState(buildForm)
+      // dirty 比对基线:打开编辑器时的快照,生命周期内不变
+      const [initialForm] = useState(buildForm)
       const [preview, setPreview] = useState(null)
       const [previewError, setPreviewError] = useState(null)
       const [error, setError] = useState(null)
@@ -695,14 +948,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         if (saving) return
         setSaving(true)
         setError(null)
-        const payload = { ...form }
-        payload.concurrency = form.concurrency === '' ? undefined : Number(form.concurrency)
-        // 副本上还原模型对象:state 内对象不得突变,保存失败重开表单时 modelKey 仍在
-        payload.session = form.kind === 'session' ? { ...form.session } : undefined
-        if (payload.session) {
-          payload.session.model = parseModelKey(form.session.modelKey)
-          delete payload.session.modelKey
-        }
+        // 编辑只提交 dirty 字段 + updatedAt 基线;新建提交完整字段集
+        const payload = editing ? jobUpdatePayload(initialForm, form) : jobCreatePayload(form)
         const outcome = await request(editing ? 'PATCH' : 'POST', editing ? 'jobs/' + job.id : 'jobs', payload)
         setSaving(false)
         if (outcome.ok) onDone()
@@ -843,6 +1090,27 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         h('div', { className: 'cb-code' }, job.kind === 'session' ? job.prompt : job.command))
     }
 
+    // 宿主自动化任务只读卡:点击打开宿主页面管理,不在本插件内复制编辑/删除/启停
+    function AutomationTaskCard({ task, now, onOpen }) {
+      const status = automationStatusMeta(task.status)
+      const style = { '--cb-status': STATUS_TONE_COLOR[status.tone] }
+      const meta = [automationFrequency(task), automationNextText(task, now), automationTargetLabel(task)].filter(Boolean)
+      return h('div', {
+        className: 'cb-card cb-card--automation', style, role: 'button', tabIndex: 0,
+        onClick: onOpen,
+        onKeyDown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpen() } },
+      },
+        h('div', { className: 'cb-card-row' },
+          h('span', { className: 'cb-dot' }),
+          h('span', { className: 'cb-name' }, task.title || '(未命名)'),
+          h('span', { className: 'cb-badge' }, '自动化'),
+          h('span', { className: 'cb-badge' }, status.label),
+          h('div', { className: 'cb-actions' }, h('span', { className: 'cb-hint' }, '点击打开宿主页面'))),
+        h('div', { className: 'cb-card-row' },
+          meta.map((text, index) => h('span', { className: 'cb-meta', key: index }, text))),
+        task.prompt ? h('div', { className: 'cb-code' }, task.prompt) : null)
+    }
+
     // 应用内删除确认(替换 window.confirm:风格统一 + ESC 可取消)
     function ConfirmDialog({ message, onConfirm, onCancel }) {
       return h(Modal, { title: '删除确认', onClose: onCancel, width: 420 },
@@ -853,7 +1121,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           h('button', { className: 'cb-button cb-button--danger', onClick: onConfirm }, '删除')))
     }
 
-    function JobsTab({ jobs, status, now, reload, applyJobPatch, wsModel }) {
+    function JobsTab({ jobs, status, now, reload, applyJobPatch, wsModel, automationOn, automationAvailable, automationBusy, onToggleAutomation, automationTasks, automationError, onOpenAutomation }) {
       const [formJob, setFormJob] = useState(null)
       const [notice, setNotice] = useState(null)
       const [kindFilter, setKindFilter] = useState('all')
@@ -875,8 +1143,14 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         reload()
       }
       const deleteJob = async (job) => {
-        await request('DELETE', 'jobs/' + job.id)
+        const outcome = await request('DELETE', 'jobs/' + job.id)
         setPendingDelete(null)
+        if (!outcome.ok) {
+          // 失败(并发删除/写失败)必须提示并以服务端状态对账,不得宣称已删除
+          setNotice('删除失败:' + outcome.error)
+          reload()
+          return
+        }
         setNotice('已删除「' + job.name + '」')
         reload()
       }
@@ -892,8 +1166,18 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           }),
           h('div', { className: 'cb-spacer' }),
           status && !status.timerRunning ? h('span', { className: 'cb-badge', style: { color: 'var(--cb-danger)' } }, status.timerReason || '调度停用') : null,
+          switchToggle({
+            checked: automationOn,
+            disabled: automationBusy || (!automationAvailable && !automationOn),
+            onChange: (event) => onToggleAutomation(event.target.checked),
+            label: '自动化任务',
+            ariaLabel: '显示自动化任务',
+            title: automationAvailable ? '在看板下方显示宿主自动化任务(只读),并隐藏侧栏重复入口' : '宿主未提供自动化任务服务',
+          }),
           h('button', { className: 'cb-button cb-button--primary', onClick: () => setFormJob({}) }, '新建任务')),
         notice ? h('div', { className: 'cb-hint' }, notice) : null,
+        !automationOn && automationError ? h('div', { className: 'cb-error cb-error--inline', role: 'alert' },
+          h('span', null, automationError)) : null,
         visible.length === 0
           ? h('div', { className: 'cb-empty' },
               h('div', null, kindFilter === 'all' ? '还没有定时任务' : '该类型下暂无任务'),
@@ -906,6 +1190,21 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
                 onEdit: () => setFormJob(job),
                 onDelete: () => setPendingDelete(job),
               }))),
+        automationOn ? h('div', { className: 'cb-group' },
+          h('div', { className: 'cb-group-head' },
+            h('div', { className: 'cb-section-title' }, '自动化任务'),
+            h('span', { className: 'cb-hint' }, '宿主内置 · 只读'),
+            h('div', { className: 'cb-spacer' }),
+            h('button', { className: 'cb-linkbtn', onClick: onOpenAutomation }, '打开自动化任务页')),
+          automationError ? h('div', { className: 'cb-error cb-error--inline', role: 'alert' },
+            h('span', null, automationError),
+            h('button', { className: 'cb-linkbtn', onClick: reload }, '重试')) : null,
+          automationTasks === null
+            ? h('div', { className: 'cb-hint' }, '加载中…')
+            : automationTasks.length === 0
+              ? (automationError ? null : h('div', { className: 'cb-hint' }, '暂无自动化任务'))
+              : h('div', { className: 'cb-cards' },
+                  automationTasks.map((task) => h(AutomationTaskCard, { key: task.id, task, now, onOpen: onOpenAutomation })))) : null,
         pendingDelete ? h(ConfirmDialog, {
           message: '删除任务「' + pendingDelete.name + '」?运行记录与日志一并清除,操作不可撤销。',
           onConfirm: () => deleteJob(pendingDelete),
@@ -1026,7 +1325,14 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       }
       const deleteEnv = async (row) => {
         if (!window.confirm('删除变量「' + row.name + '」?')) return
-        await request('DELETE', 'envs/' + row.id)
+        const outcome = await request('DELETE', 'envs/' + row.id)
+        if (!outcome.ok) {
+          // 删除失败必须提示并以服务端状态对账,不得静默 reload 造成「已删除」错觉
+          setNotice('删除失败:' + outcome.error)
+          reload()
+          return
+        }
+        setNotice('已删除「' + row.name + '」')
         reload()
       }
       const doExport = async () => {
@@ -1066,8 +1372,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     function LogsTab({ jobs, reload, reloadFlag, serverTzOffset }) {
       const [jobId, setJobId] = useState(jobs.length > 0 ? jobs[0].id : null)
       const [runs, setRuns] = useState([])
-      const [logText, setLogText] = useState(null)
-      const [logRunId, setLogRunId] = useState(null)
+      const [notice, setNotice] = useState(null)
+      // 日志视图:{ runId, text, truncated, tailLines };服务端缺省只回尾部窗口,全文经导出按钮取
+      const [logView, setLogView] = useState(null)
       // 展示时区随所选任务:显式后缀用其偏移,无后缀用宿主默认(调度与展示同源)
       const selectedJob = jobs.find((job) => job.id === jobId)
       const displayTzOffset = scheduleTzOffset(selectedJob ? selectedJob.schedule : null) ?? (typeof serverTzOffset === 'number' ? serverTzOffset : undefined)
@@ -1081,14 +1388,37 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         return () => { alive = false }
       }, [jobId, reloadFlag])
 
+      // 任务集合变化(删除当前任务/首次加载)时复位选中项与日志视图:
+      // 保持指向已不存在的 jobId 会让运行列表与日志永久空白
+      useEffect(() => {
+        if (jobs.length === 0) {
+          setJobId(null)
+          setLogView(null)
+          return
+        }
+        if (!jobs.some((job) => job.id === jobId)) {
+          setJobId(jobs[0].id)
+          setLogView(null)
+        }
+      }, [jobs, jobId])
+
       const openLog = async (run) => {
         const outcome = await request('GET', 'runs/' + run.runId + '/log')
-        if (outcome.ok) { setLogRunId(run.runId); setLogText(outcome.data.text) }
+        if (outcome.ok) setLogView({ runId: run.runId, ...outcome.data })
+      }
+      const exportLog = async (run) => {
+        // 显式 tail=all 才取全文:大日志的常规查看不应压满内存与 DOM
+        const outcome = await request('GET', 'runs/' + run.runId + '/log?tail=all')
+        if (outcome.ok) downloadText('cron-board-' + run.runId + '.log', outcome.data.text)
       }
       const clearLog = async (run) => {
-        await request('DELETE', 'runs/' + run.runId + '/log')
-        setLogText(null)
-        setLogRunId(null)
+        const outcome = await request('DELETE', 'runs/' + run.runId + '/log')
+        if (!outcome.ok) {
+          setNotice('清空日志失败:' + outcome.error)
+          return
+        }
+        setLogView(null)
+        setNotice('已清空日志')
         reload()
       }
 
@@ -1096,7 +1426,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         h('div', { className: 'cb-toolbar' },
           h('select', { className: 'cb-select', value: jobId || '', onChange: (e) => setJobId(e.target.value) },
             jobs.map((job) => h('option', { key: job.id, value: job.id }, job.name)))),
-        runs.length === 0 ? h('div', { className: 'cb-empty' }, '该任务暂无运行记录') :
+        notice ? h('div', { className: 'cb-hint' }, notice) : null,
+        runs.length === 0 ? h('div', { className: 'cb-empty' }, jobId ? '该任务暂无运行记录' : '暂无任务') :
           h('div', { className: 'cb-table' },
             runs.map((run) => {
               const meta = statusMeta(run.status)
@@ -1112,14 +1443,18 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
                   h('button', { className: 'cb-icon', onClick: () => openLog(run) }, '日志'),
                   h('button', { className: 'cb-icon cb-button--danger', onClick: () => clearLog(run) }, '清空')))
             })),
-        logText !== null ? h(Modal, { title: '运行日志', onClose: () => setLogText(null), width: 640 },
-          h('div', { className: 'cb-log' }, logText || '(空)'),
+        logView !== null ? h(Modal, { title: '运行日志', onClose: () => setLogView(null), width: 640 },
+          logView.truncated
+            ? h('div', { className: 'cb-hint' }, '日志较长,仅载入最后 ' + logView.tailLines + ' 行;点「导出」可取全文')
+            : null,
+          h('div', { className: 'cb-log' }, logView.text || '(空)'),
           h('div', { className: 'cb-toolbar' },
             h('div', { className: 'cb-spacer' }),
-            h('button', { className: 'cb-button', onClick: () => setLogText(null) }, '关闭'))) : null)
+            h('button', { className: 'cb-button', onClick: () => exportLog(logView) }, '导出'),
+            h('button', { className: 'cb-button', onClick: () => setLogView(null) }, '关闭'))) : null)
     }
 
-    function CronBoardPanel({ bus, visible, wsModel }) {
+    function CronBoardPanel({ bus, visible, wsModel, automation }) {
       const active = visible !== false
       const [tab, setTab] = useState('jobs')
       const [jobs, setJobs] = useState([])
@@ -1127,6 +1462,13 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const [status, setStatus] = useState(null)
       const [now, setNow] = useState(Date.now())
       const [reloadFlag, setReloadFlag] = useState(0)
+      const [automationOn, setAutomationOn] = useState(false)
+      const [automationReady, setAutomationReady] = useState(() => automation.available())
+      const [automationBusy, setAutomationBusy] = useState(false)
+      const [automationTasks, setAutomationTasks] = useState(null)
+      const [automationError, setAutomationError] = useState('')
+      const automationSaving = useRef(false)
+      const statusEpoch = useRef(0)
       const refreshRef = useRef(() => {})
       const reload = useCallback(() => { refreshRef.current(); setReloadFlag((value) => value + 1) }, [])
       // 乐观更新:受控开关点击即时到位,PATCH 失败由调用方回滚;reload 拉权威态对账
@@ -1141,15 +1483,24 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         if (!active) return undefined
         let alive = true
         const load = async () => {
+          const epoch = ++statusEpoch.current
           const [jobsOutcome, envsOutcome, statusOutcome] = await Promise.all([
             request('GET', 'jobs'),
             request('GET', 'envs'),
             statusReaders.get(bus)(),
           ])
-          if (!alive) return
+          if (!alive || epoch !== statusEpoch.current) return
           if (jobsOutcome.ok) setJobs(jobsOutcome.data.items)
           if (envsOutcome.ok) setEnvs(envsOutcome.data.items)
-          if (statusOutcome.ok) setStatus(statusOutcome.data)
+          if (statusOutcome.ok) {
+            setStatus(statusOutcome.data)
+            // 总线刷新采纳服务端偏好;保存期间跳过,避免在途旧快照回滚乐观态
+            if (!automationSaving.current) {
+              const nextAutomation = statusOutcome.data.ui?.showAutomationTasks === true
+              setAutomationOn(nextAutomation)
+              syncHostAutomationNav(nextAutomation)
+            }
+          }
           setNow(Date.now())
         }
         // 数据刷新唯一通道:订阅推送总线(首连 onReset 即首拉,消息到达刷新);
@@ -1160,6 +1511,70 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         const clock = setInterval(() => setNow(Date.now()), SECOND_MS)
         return () => { alive = false; refreshRef.current = () => {}; snapshot.dispose(); unsubscribe(); clearInterval(clock) }
       }, [bus, active])
+
+      // 服务就绪态随 remote.schedule 点分 inject 到达而变化(缺失宿主上开关保持禁用)
+      useEffect(() => {
+        const update = () => setAutomationReady(automation.available())
+        update()
+        return automation.subscribe(update)
+      }, [automation])
+
+      // 宿主自动化任务只读目录:开关开启才请求;宿主 schedule/changed 事件触发重拉
+      useEffect(() => {
+        if (!active || !automationOn) {
+          setAutomationTasks(null)
+          setAutomationError('')
+          return undefined
+        }
+        let alive = true
+        const load = async () => {
+          const outcome = await automation.catalog()
+          if (!alive) return
+          if (outcome.ok) {
+            setAutomationTasks(outcome.items)
+            setAutomationError('')
+          } else {
+            setAutomationTasks([])
+            setAutomationError(outcome.error || '加载自动化任务失败')
+          }
+        }
+        load()
+        const unsubscribe = automation.subscribe(load)
+        return () => { alive = false; unsubscribe() }
+      }, [active, automationOn, reloadFlag, automation])
+
+      const toggleAutomation = useCallback(async (next) => {
+        if (automationSaving.current) return
+        automationSaving.current = true
+        statusEpoch.current += 1
+        setAutomationBusy(true)
+        setAutomationOn(next)
+        syncHostAutomationNav(next)
+        setAutomationError('')
+        try {
+          const outcome = await request('POST', 'ui-settings', { showAutomationTasks: next })
+          if (!outcome.ok || !outcome.data || outcome.data.ok !== true) {
+            setAutomationOn(!next)
+            syncHostAutomationNav(!next)
+            setAutomationError(outcome.error || (outcome.data && outcome.data.error) || '切换失败')
+            return
+          }
+          if (outcome.data.ui) {
+            const actual = outcome.data.ui.showAutomationTasks === true
+            setAutomationOn(actual)
+            syncHostAutomationNav(actual)
+          }
+        } finally {
+          automationSaving.current = false
+          setAutomationBusy(false)
+          refreshRef.current()
+        }
+      }, [])
+
+      const openAutomation = useCallback(() => {
+        const outcome = automation.openTask()
+        if (!outcome.ok) setAutomationError(outcome.error)
+      }, [automation])
 
       return h('div', { className: 'cb-panel' },
         h('header', { className: 'cb-page-head' },
@@ -1172,7 +1587,16 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           status ? h('span', { className: 'cb-meta' },
             '运行中 ' + status.scheduler.active + ' · 队列 ' + status.scheduler.queued +
             (status.nextAt ? ' · 下次 ' + relativeTime(status.nextAt, now) : '')) : null),
-        tab === 'jobs' ? h(JobsTab, { key: 'jobs', jobs, status, now, reload, applyJobPatch, wsModel }) : null,
+        tab === 'jobs' ? h(JobsTab, {
+          key: 'jobs', jobs, status, now, reload, applyJobPatch, wsModel,
+          automationOn,
+          automationAvailable: automationReady,
+          automationBusy,
+          onToggleAutomation: toggleAutomation,
+          automationTasks,
+          automationError,
+          onOpenAutomation: openAutomation,
+        }) : null,
         tab === 'envs' ? h(EnvsTab, { key: 'envs', envs, reload, applyEnvPatch }) : null,
         tab === 'logs' ? h(LogsTab, { key: 'logs', jobs, reload, reloadFlag, serverTzOffset: status ? status.serverTzOffset : undefined }) : null)
     }
@@ -1190,30 +1614,62 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     // 设置>插件页卡片:官方 PluginCard 形制(名称/描述头部 + chevron 折叠 + 行内开关);better-sidebar 在场可切换,否则仅展示禁用态
     const CARD_TITLE = '定时任务'
     const CARD_TOGGLE_LABEL = '看板移入 better-sidebar 侧边栏'
+    const CARD_AUTOMATION_LABEL = '看板显示自动化任务'
     const readSidebarTabPref = (outcome) => outcome.ok && outcome.data &&
       typeof outcome.data.ui === 'object' && outcome.data.ui !== null && outcome.data.ui.sidebarTab === true
+    const readShowAutomationPref = (outcome) => outcome.ok && outcome.data &&
+      typeof outcome.data.ui === 'object' && outcome.data.ui !== null && outcome.data.ui.showAutomationTasks === true
     const CHEVRON_DOWN = () => h('svg', { viewBox: '0 0 14 14', width: 14, height: 14, fill: 'none',
       stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true' },
       h('path', { d: 'm3.5 5.5 3.5 3.5 3.5-3.5' }))
 
-    function CronBoardPluginCard({ ctx }) {
+    function CronBoardPluginCard({ ctx, bus, automation }) {
       const [enabled, setEnabled] = useState(null)
+      const [showAutomation, setShowAutomation] = useState(null)
+      const [automationReady, setAutomationReady] = useState(() => automation.available())
       const [busy, setBusy] = useState(false)
+      const [error, setError] = useState('')
       const [open, setOpen] = useState(false)
       // 渲染时重探服务在场:better-sidebar 晚于设置页装载时,重渲染自动纠正禁用态
       const sidebarReady = ctx.get('betterSidebar') !== undefined
       useEffect(() => {
         let alive = true
-        request('GET', 'status').then((outcome) => {
-          if (alive) setEnabled(readSidebarTabPref(outcome))
-        })
-        return () => { alive = false }
-      }, [])
+        const read = async () => {
+          const outcome = await request('GET', 'status')
+          if (!alive) return
+          setEnabled(readSidebarTabPref(outcome))
+          const nextAutomation = readShowAutomationPref(outcome)
+          setShowAutomation(nextAutomation)
+          syncHostAutomationNav(nextAutomation)
+        }
+        read()
+        const unsubscribe = bus && typeof bus.subscribe === 'function' ? bus.subscribe(read, { onReset: read }) : undefined
+        return () => { alive = false; unsubscribe?.() }
+      }, [bus])
+      useEffect(() => {
+        const update = () => setAutomationReady(automation.available())
+        update()
+        return automation.subscribe(update)
+      }, [automation])
       const toggle = async () => {
         if (busy || enabled === null || !sidebarReady) return
         setBusy(true)
+        setError('')
         const outcome = await request('POST', 'ui-settings', { sidebarTab: !enabled })
         if (outcome.ok && outcome.data && outcome.data.ui) setEnabled(outcome.data.ui.sidebarTab === true)
+        else setError(outcome.error || (outcome.data && outcome.data.error) || '切换失败')
+        setBusy(false)
+      }
+      const toggleShowAutomation = async () => {
+        if (busy || showAutomation === null || (!automationReady && !showAutomation)) return
+        setBusy(true)
+        setError('')
+        const outcome = await request('POST', 'ui-settings', { showAutomationTasks: !showAutomation })
+        if (outcome.ok && outcome.data && outcome.data.ui) {
+          const actual = outcome.data.ui.showAutomationTasks === true
+          setShowAutomation(actual)
+          syncHostAutomationNav(actual)
+        } else setError(outcome.error || (outcome.data && outcome.data.error) || '切换失败')
         setBusy(false)
       }
       return h('li', { className: 'cb-pc' + (open ? ' cb-pc--open' : '') },
@@ -1234,12 +1690,25 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
                 ariaLabel: CARD_TOGGLE_LABEL,
               })),
             h('p', { className: 'cb-pc__hint' },
-              sidebarReady ? '开启后看板以侧边栏页签呈现,关闭时使用全局面板。' : '需已装载 better-sidebar 后方可切换;未装载时看板始终使用全局面板。'))) : null)
+              sidebarReady ? '开启后看板以侧边栏页签呈现,关闭时使用全局面板。' : '需已装载 better-sidebar 后方可切换;未装载时看板始终使用全局面板。'),
+            h('div', { className: 'cb-pc__rowLine' },
+              h('span', { className: 'cb-pc__rowLabel' }, CARD_AUTOMATION_LABEL),
+              switchToggle({
+                checked: showAutomation === true,
+                disabled: busy || showAutomation === null || (!automationReady && !showAutomation),
+                onChange: toggleShowAutomation,
+                ariaLabel: CARD_AUTOMATION_LABEL,
+                title: automationReady ? '显示宿主自动化任务并隐藏侧栏重复入口' : '宿主未提供自动化任务服务',
+              })),
+            h('p', { className: 'cb-pc__hint' }, automationReady
+              ? '开启后在看板下方以只读分组显示宿主「自动化任务」,并隐藏其在侧栏的重复入口;点击任务打开宿主页面管理。'
+              : '宿主未提供自动化任务服务,该开关不可用。'),
+            error ? h('p', { className: 'cb-error', role: 'alert' }, error) : null)) : null)
     }
 
     // better-sidebar tab:注册即单实例(single);只注册不主动打开,
     // 打开由用户从侧边栏目录手动进入(注册即 openTab 会在每次页面加载时抢占当前视图)
-    function registerBoardTab(ctx, service, wsModel, bus) {
+    function registerBoardTab(ctx, service, wsModel, bus, automation) {
       return ctx.effect(() => {
         const disposeTab = service.registerTab({
           id: TAB_ID,
@@ -1250,7 +1719,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             h('path', { d: 'M6 2v12M10 2v12' })),
           order: 46,
           single: true,
-          component: (props) => h(CronBoardPanel, { visible: props.visible, wsModel, bus }),
+          component: (props) => h(CronBoardPanel, { visible: props.visible, wsModel, bus, automation }),
         })
         return disposeTab
       }, 'cron-board sidebar tab')
@@ -1266,13 +1735,13 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 
     // 全局面板形态:main keyed 条目(中央面板)+ sidebar.panellist 条目(侧栏入口行),同 id 配对;
     // 页签点击切换、激活高亮均由宿主管;effect 工厂必须交付组合清理,否则互斥仲裁拆不掉条目
-    function registerMainPanel(ctx, wsModel, bus) {
+    function registerMainPanel(ctx, wsModel, bus, automation) {
       return ctx.effect(() => {
         const injectDisposers = []
         injectDisposers.push(ctx.slots.inject('main', () => ctx.slots.register({
           name: 'main',
           key: PANEL_ID,
-        }, () => h('div', { className: 'cb-main' }, h(CronBoardPanel, { wsModel, bus })))))
+        }, () => h('div', { className: 'cb-main' }, h(CronBoardPanel, { wsModel, bus, automation })))))
         injectDisposers.push(ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
           name: 'sidebar.panellist',
           id: PANEL_ID,
@@ -1283,21 +1752,68 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     }
 
     return {
-      // workspaces 由宿主 client 常驻提供;slots 供设置页分区挂载(缺失则 fiber 未激活,即干净禁用)
-      inject: ['workspaces', 'slots'],
+      // workspaces 由宿主 client 常驻提供;slots 供设置页分区挂载;layout 用于跳转宿主自动化任务页
+      inject: ['workspaces', 'slots', 'layout'],
       apply(ctx) {
         const bus = tools.setupCommonTools(ctx)
         ctx.effect(() => createStatusReader(bus), 'cron-board 共享状态快照')
-        ensureStyle(document)
+        ensureStyle(document, STYLE)
         // 工作区 model(list 即 getSnapshot/subscribe 契约的响应式模型;形态不符传 null,表单仅保留手输)
         const wsService = ctx.get('workspaces')
         const wsModel = wsService && wsService.list && typeof wsService.list.getSnapshot === 'function' ? wsService.list : null
+        // 宿主自动化任务只读门面:remote.schedule 是版本脆弱子面,点分 inject 等 assembly 挂载;
+        // 缺失时仅本功能不可用,不阻塞看板其余能力(dsh-api-alignment.md 条款 1)
+        const automation = {
+          remote: null,
+          listeners: new Set(),
+          available() { return automation.remote !== null },
+          subscribe(listener) {
+            automation.listeners.add(listener)
+            return () => { automation.listeners.delete(listener) }
+          },
+          async catalog() {
+            const remote = automation.remote
+            if (!remote) return { ok: false, error: '宿主自动化任务服务不可用' }
+            try {
+              const result = await remote.catalog()
+              if (!result || result.ok !== true) {
+                const failure = result && result.error
+                return { ok: false, error: (failure && (failure.message || failure.code)) || '加载自动化任务失败' }
+              }
+              return { ok: true, items: Array.isArray(result.value) ? result.value : [] }
+            } catch (error) {
+              return { ok: false, error: String(error && error.message || error) }
+            }
+          },
+          openTask() {
+            try {
+              ctx.layout.selectPanel('schedules')
+              return { ok: true }
+            } catch {
+              return { ok: false, error: '宿主自动化任务页面不可用' }
+            }
+          },
+        }
+        ctx.inject(['remote', 'remote.schedule'], (remoteCtx) => {
+          automation.remote = remoteCtx && remoteCtx.remote ? remoteCtx.remote.schedule : null
+          const off = remoteCtx && remoteCtx.remote && typeof remoteCtx.remote.$on === 'function'
+            ? remoteCtx.remote.$on('schedule/changed', () => {
+                for (const listener of [...automation.listeners]) listener()
+              })
+            : undefined
+          for (const listener of [...automation.listeners]) listener()
+          return () => {
+            off?.()
+            automation.remote = null
+            for (const listener of [...automation.listeners]) listener()
+          }
+        })
         // 挂载权交给用户:默认注册全局面板;设置 sidebarTab 开启且侧边栏服务在场才移入扩展槽,注册后不再自动回退
         let currentSidebar = ctx.get('betterSidebar')
         let sidebarTabOn = false
         let tabDisposer = null
         let panelDisposer = null
-        const attachBoardTab = (sidebar) => registerBoardTab(ctx, sidebar, wsModel, bus)
+        const attachBoardTab = (sidebar) => registerBoardTab(ctx, sidebar, wsModel, bus, automation)
         const applyPref = () => {
           const wantTab = sidebarTabOn && currentSidebar !== undefined
           if (wantTab && tabDisposer === null) {
@@ -1307,7 +1823,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             tabDisposer()
             tabDisposer = null
           }
-          if (!wantTab && panelDisposer === null) panelDisposer = registerMainPanel(ctx, wsModel, bus)
+          if (!wantTab && panelDisposer === null) panelDisposer = registerMainPanel(ctx, wsModel, bus, automation)
         }
         // 偏好仲裁数据源:订阅总线刷新(updateUiSettings 变更即 publish),不再周期轮询
         let prefAlive = true
@@ -1315,6 +1831,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           try {
             const outcome = await statusReaders.get(bus)()
             if (!prefAlive) return
+            syncHostAutomationNav(outcome.ok && outcome.data && outcome.data.ui && outcome.data.ui.showAutomationTasks === true)
             const next = readSidebarTabPref(outcome)
             if (next !== sidebarTabOn) {
               const previous = sidebarTabOn
@@ -1335,6 +1852,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           prefAlive = false
           prefRefresh.dispose()
           unsubscribePref()
+          syncHostAutomationNav(false)
           if (tabDisposer) tabDisposer()
           if (panelDisposer) panelDisposer()
         }, 'cron-board mount arbitration')
@@ -1342,7 +1860,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         ctx.effect(() => ctx.slots.inject('settings.plugin.item', function* () {
           yield ctx.slots.register(
             { name: 'settings.plugin.item', key: PANEL_ID, label: PANEL_LABEL },
-            () => h(CronBoardPluginCard, { ctx }),
+            () => h(CronBoardPluginCard, { ctx, bus, automation }),
           )
         }), 'cron-board settings card')
         // 插件管理页(0.1.7-rc.1+)包详情配置卡:key = 包名,管理页 ledger.bundles 判定 section
@@ -1351,7 +1869,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         ctx.effect(() => ctx.slots.inject('plugins.bundle.config', function* () {
           yield ctx.slots.register(
             { name: 'plugins.bundle.config', key: PKG_ID },
-            () => h(CronBoardPluginCard, { ctx }),
+            () => h(CronBoardPluginCard, { ctx, bus, automation }),
           )
         }), 'cron-board plugin manager card')
         ctx.inject(['betterSidebar'], (bsCtx) => {

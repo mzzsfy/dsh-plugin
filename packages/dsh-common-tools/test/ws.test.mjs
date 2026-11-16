@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { fixture, until } from './_ws-fixture.mjs'
 import { once } from 'node:events'
 import { setupCommonTools, __test } from '../src/host.js'
+import { PROTOCOL, SUPPORTED_PROTOCOLS } from '../src/protocol.mjs'
 import { readFileSync } from 'node:fs'
 import NodeWebSocket from 'ws'
 
@@ -17,9 +18,9 @@ test('Given 新 client 连接首帧 When 发送 hello Then host 回协议集与�
   const frames = []
   socket.on('message', data => frames.push(JSON.parse(data.toString())))
   await once(socket, 'open')
-  socket.send(JSON.stringify({ type: 'hello', protocol: 1, version: PKG_VERSION }))
+  socket.send(JSON.stringify({ type: 'hello', protocol: PROTOCOL, version: PKG_VERSION }))
   await until(() => frames.length === 1)
-  assert.deepEqual(frames[0], { type: 'hello', protocol: 1, protocols: [1], version: PKG_VERSION })
+  assert.deepEqual(frames[0], { type: 'hello', protocol: PROTOCOL, protocols: [...SUPPORTED_PROTOCOLS], version: PKG_VERSION })
 })
 
 test('Given 两插件通道 When 双向推送 Then 自动身份隔离且共享一条真实WS', async t => {
@@ -114,6 +115,20 @@ test('Given 分发回调同步卸载另一实例 When 同帧继续分发 Then �
   await until(() => { try { second.publish(); return false } catch { return true } })
   assert.deepEqual(received, [])
   assert.deepEqual(presence, [0])
+})
+
+test('Given Host 与 Origin 大小写变形 When 上行发布 Then 同源放行', async t => {
+  const f = await fixture(t), received = []
+  setupCommonTools(f.context()).subscribe(data => received.push(data))
+  const port = new URL(f.base).port
+  const socket = new NodeWebSocket(f.base.replace('http:', 'ws:') + '/api/bus/ws', {
+    headers: { Origin: `http://LOCALHOST:${port}`, Host: `localhost:${port}` },
+  })
+  t.after(() => socket.terminate())
+  await once(socket, 'open')
+  socket.send(JSON.stringify({ type: 'publish', plugin: '@mzzsfy/a', payload: { changed: true } }))
+  await until(() => received.length === 1)
+  assert.deepEqual(received, [{ changed: true }])
 })
 
 test('Given 明确跨源WS When 不订阅直接上行 Then 连接可达但写入被拒绝', async t => {

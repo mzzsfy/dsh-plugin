@@ -90,7 +90,10 @@ export function extractUserInputs(events) {
  * 条目可携带 sid(来源会话)用于 session 范围过滤,聚合时原样保留。
  * 首条保护:被 limit 挤出时,每个来源会话在去重后集合中的最早条目仍保留——
  * 会话开场提示词是最有复用价值也最旧的一批,时间倒序截断总会先挤掉它们;
- * 保护在去重后集合上计算,文本已被更新的会话复用时不再按旧会话重复追加。 */
+ * 保护在去重后集合上计算,文本已被更新的会话复用时不再按旧会话重复追加。
+ * 保护对输入里出现的每个 sid 无条件生效,故调用方必须先把已删除会话与子会话的
+ * 条目从输入里剔除(host 半区批量对齐按会话清单做),否则已删除会话的开场提示词
+ * 永远挤不掉。 */
 export function aggregateInputs(entries, { limit, maxChars }) {
   const latestByText = new Map()
   for (const entry of entries || []) {

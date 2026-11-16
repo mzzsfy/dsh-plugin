@@ -31,8 +31,7 @@
     }
   },
   "scripts": {
-    "test": "node --test \"test/*.test.mjs\"",
-    "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
+    "test": "node --test \"test/*.test.mjs\""
   },
   "publishConfig": {
     "access": "public",
@@ -40,23 +39,25 @@
   },
   "license": "MIT",
   "repository": {
-    "type": "object",
+    "type": "git",
     "url": "git+https://github.com/mzzsfy/dsh-plugin.git"
   },
   "files": [
     "lib",
     "src",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "README.md",
+    "兼容性测试.md"
   ],
   "dependencies": {
     "@mzzsfy/dsh-common-tools": "^0.5.0"
   },
   "peerDependencies": {
     "@deepseek-ai/schemastery": "^3.18.1",
-    "@deepseek-ai/dsh-storage-domain": ">=0.1.2-rc.1",
+    "@deepseek-ai/dsh-storage-domain": ">=0.1.1-rc.2",
     "@deepseek-ai/dsh-api-session-controller": ">=0.2.0-rc.1",
     "@deepseek-ai/dsh-tools": ">=0.1.5-rc.2",
-    "zod": "^3.23.0"
+    "zod": "^3.23.0 || ^4.0.0"
   },
   "engines": {
     "node": ">=22"

@@ -52,6 +52,10 @@ test('Given 宿主 loader 就绪, When 整源求值 client.js, Then 自注册照
   assert.equal(typeof registrations[0].factory, 'function')
 })
 
+test('Given 热力图在窄屏可能宽于容器, When 读注入样式, Then SVG 限宽并保持比例', () => {
+  assert.match(CLIENT_SOURCE, /\.ud-heat\{display:block;max-width:100%;height:auto\}/)
+})
+
 test('Given 书挡契约, When 校验首末行, Then 首行 IIFE 开、末行 IIFE 闭且声明收集非空', () => {
   const lines = CLIENT_SOURCE.split('\n')
   assert.equal(lines[0], '(() => {')

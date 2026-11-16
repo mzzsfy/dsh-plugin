@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { enumeratePackages } from '../scripts/compat/profile.mjs'
@@ -52,12 +52,18 @@ test('形态无法比较按 skip 语义放行,入口缺失包仍不入 bundles',
   assert.deepEqual(bundles, ['@mzzsfy/dsh-weird'])
 })
 
-test('真实仓库 0.1.5 基线槽过滤:四个 hostMin 包摘出,0.2.0 主测槽全量', (t) => {
-  // 全仓枚举双槽对照,锁定真实 hostMin 声明(gateway 0.2.0-rc.1 / shell-select 0.1.7-rc.1 /
-  // boss-simulator 0.2.0-rc.1 / shared-terminal 0.2.0-rc.2)
-  const full = enumeratePackages({ hostVersion: '0.2.0-rc.2' })
+test('真实仓库双槽过滤:所有 hostMin 包在基线槽摘出、主测槽全量', (t) => {
+  // 从仓库 manifest 动态枚举,新增 hostMin 包自动纳入断言,不再维护手写四包清单
+  const hostMinPackages = readdirSync(new URL('../packages/', import.meta.url))
+    .filter((name) => existsSync(new URL(`../packages/${name}/package.json`, import.meta.url)))
+    .filter((name) => {
+      const manifest = JSON.parse(readFileSync(new URL(`../packages/${name}/package.json`, import.meta.url), 'utf8'))
+      return typeof manifest.dsh?.hostMin === 'string'
+    })
+  assert.ok(hostMinPackages.length >= 9, `hostMin 包数量 ${hostMinPackages.length}`)
+  const full = enumeratePackages({ hostVersion: '0.2.2-rc.1' })
   const baseline = enumeratePackages({ hostVersion: '0.1.5-rc.3' })
-  for (const name of ['dsh-shell-select', 'dsh-llm-pi-gateway', 'dsh-boss-simulator', 'dsh-shared-terminal']) {
+  for (const name of hostMinPackages) {
     assert.ok(full.bundles.includes(`@mzzsfy/${name}`), `主测槽应含 ${name}`)
     assert.ok(!baseline.bundles.includes(`@mzzsfy/${name}`), `基线槽应摘出 ${name}`)
   }

@@ -85,6 +85,36 @@ test('Given follow snapshot 截断历史 When 订阅 Then page 补齐并按 seq 
   assert.equal(calls[0].beforeSeq, 6)
 })
 
+test('Given 已消费到 seq=4 When 重连订阅 Then 只回放游标之后的事件', async () => {
+  const calls = []
+  const controller = {
+    async *follow() { yield { type: 'snapshot', cursor: 9, hasMore: true, records: [{ event: { type: 'assistant/message', seq: 7 } }, { event: { type: 'turn/end', seq: 8 } }] } },
+    async page(request) { calls.push(request); return { hasMore: false, records: [{ event: { type: 'assistant/message', seq: 5 } }, { event: { type: 'assistant/message', seq: 6 } }] } },
+  }
+  const events = []
+  for await (const event of createSessionAdapter({ sessionController: controller }).followSessionEvents('s1', new AbortController().signal, { afterSeq: 4 })) events.push(event)
+  assert.deepEqual(events.map(event => event.seq), [5, 6, 7, 8], '游标之后的事件补齐且不重复')
+  assert.equal(calls.length, 1, '截断窗口与游标之间只翻一次')
+  assert.equal(calls[0].beforeSeq, 7)
+})
+
+test('Given 游标落后于截断窗口 When 重连订阅 Then 分页到游标边界即停', async () => {
+  const calls = []
+  const controller = {
+    async *follow() { yield { type: 'snapshot', cursor: 9, hasMore: true, records: [{ event: { type: 'turn/end', seq: 8 } }] } },
+    async page(request) {
+      calls.push(request)
+      return calls.length === 1
+        ? { hasMore: true, records: [{ event: { type: 'assistant/message', seq: 7 } }] }
+        : { hasMore: true, records: [{ event: { type: 'assistant/message', seq: 5 } }] }
+    },
+  }
+  const events = []
+  for await (const event of createSessionAdapter({ sessionController: controller }).followSessionEvents('s1', new AbortController().signal, { afterSeq: 4 })) events.push(event)
+  assert.equal(calls.length, 2)
+  assert.deepEqual(events.map(event => event.seq), [5, 7, 8])
+})
+
 test('Given idle 会话仍有排队输入 When inspectSession Then 返回真实pending队列且不判定停止', async () => {
   const calls = []
   const adapter = createSessionAdapter({ sessionController: {

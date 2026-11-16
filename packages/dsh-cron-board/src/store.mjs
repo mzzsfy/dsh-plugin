@@ -1,5 +1,7 @@
 // store:envs/jobs/runs 三份 JSON 的原子读写。读走内存缓存,写经进程内互斥链串行化,
 // 单次写 = 临时文件 + 改名(原子替换);坏文件备份 .bak 后拒绝该集合写入,防空 store 覆盖。
+// 任务行把「配置版本」与「运行时状态」分开:只有配置写推进 updatedAt(客户端乐观锁基线),
+// 调度/执行回填走 updateRuntime 只记 runtimeUpdatedAt,活跃任务不会因运行态变化而编辑 409。
 
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
@@ -39,6 +41,20 @@ function isMissing(error) {
   return Boolean(error) && error.code === 'ENOENT'
 }
 
+// 配置版本严格单调:同一毫秒内连续写也推进,避免并发 PATCH 的比较基线与新写入相同
+function nextConfigVersion(previous) {
+  const floor = Number.isFinite(previous) ? previous + 1 : 0
+  return Math.max(Date.now(), floor)
+}
+
+function applyPatch(row, patch) {
+  // undefined 值 = 显式清空(删键):JSON 落盘本就丢弃 undefined,原地保留会留下幽灵键
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) delete row[key]
+    else row[key] = value
+  }
+}
+
 // 单集合持久化:加载/读缓存/互斥链写。所有集合经 link 容器共享一条写链(link.chain 重绑),
 // 保证跨文件写序与进程内串行;损坏标记集合级隔离:单文件损坏只禁该集合写,其余集合不受连坐
 function createCollection({ file, link, idKey }) {
@@ -61,13 +77,22 @@ function createCollection({ file, link, idKey }) {
     get rows() {
       return rows
     },
+    get broken() {
+      return broken
+    },
     async load() {
       if (loaded) return
       loaded = true
       try {
         const text = await readFile(file, 'utf8')
         const parsed = JSON.parse(text)
-        if (Array.isArray(parsed)) rows = parsed
+        if (Array.isArray(parsed)) {
+          rows = parsed
+        } else {
+          // 合法 JSON 但不是数组同属损坏:不备份就继续写会把原数据整体覆盖丢失
+          broken = true
+          await rename(file, file + BAK_SUFFIX).catch(() => {})
+        }
       } catch (error) {
         if (!isMissing(error)) {
           broken = true
@@ -113,10 +138,48 @@ function createCollection({ file, link, idKey }) {
       await this.mutate((list) => {
         const row = list.find((item) => item[idKey] === id)
         if (row === undefined) return false
-        Object.assign(row, patch, { updatedAt: Date.now() })
-        updated = row
+        applyPatch(row, patch)
+        row.updatedAt = nextConfigVersion(row.updatedAt)
+        updated = { ...row }
       })
       return updated
+    },
+    // 运行时回填:不推进配置版本(updatedAt),只记 runtimeUpdatedAt
+    async updateRuntime(id, patch) {
+      let updated
+      await this.mutate((list) => {
+        const row = list.find((item) => item[idKey] === id)
+        if (row === undefined) return false
+        applyPatch(row, patch)
+        row.runtimeUpdatedAt = Date.now()
+        updated = { ...row }
+      })
+      return updated
+    },
+    // 乐观锁 CAS:比较 expectedUpdatedAt 与写入在同一临界区内完成,
+    // 两个并发 PATCH 携带同一基线只有一个能成功;expected 缺省 = 不做版本校验
+    async updateIf(id, expectedUpdatedAt, patch) {
+      const outcome = { ok: false, reason: 'missing', row: undefined }
+      await this.mutate((list) => {
+        const row = list.find((item) => item[idKey] === id)
+        if (row === undefined) return false
+        if (expectedUpdatedAt !== undefined && row.updatedAt !== expectedUpdatedAt) {
+          outcome.reason = 'conflict'
+          return false
+        }
+        if (Object.keys(patch).length === 0) {
+          outcome.ok = true
+          outcome.reason = null
+          outcome.row = { ...row }
+          return false
+        }
+        applyPatch(row, patch)
+        row.updatedAt = nextConfigVersion(row.updatedAt)
+        outcome.ok = true
+        outcome.reason = null
+        outcome.row = { ...row }
+      })
+      return outcome
     },
     async remove(id) {
       let removed = false
@@ -135,15 +198,55 @@ export async function createStore({ dir }) {
   const link = { chain: Promise.resolve() }
   const makeFile = (name) => join(dir, name)
 
-  const envs = createCollection({ file: makeFile('envs.json'), link, idKey: 'id' })
+  const envsBase = createCollection({ file: makeFile('envs.json'), link, idKey: 'id' })
   const jobsBase = createCollection({ file: makeFile('jobs.json'), link, idKey: 'id' })
   const runs = createCollection({ file: makeFile('runs.json'), link, idKey: 'runId' })
-  await Promise.all([envs.load(), jobsBase.load(), runs.load()])
+  await Promise.all([envsBase.load(), jobsBase.load(), runs.load()])
+
+  // 文本导入:清空与批量追加在同一次 mutate 内完成(单次落盘,半导入不可回滚的场景不存在)
+  const envs = {
+    get rows() {
+      return envsBase.rows
+    },
+    get broken() {
+      return envsBase.broken
+    },
+    load: () => envsBase.load(),
+    list: (filter) => envsBase.list(filter),
+    get: (id) => envsBase.get(id),
+    mutate: (fn) => envsBase.mutate(fn),
+    create: (data) => envsBase.create(data),
+    update: (id, patch) => envsBase.update(id, patch),
+    remove: (id) => envsBase.remove(id),
+    importRows(rows, { overwrite = false } = {}) {
+      return envsBase.mutate((list) => {
+        const now = Date.now()
+        if (overwrite) list.length = 0
+        for (const row of rows) {
+          list.push({
+            id: randomUUID(),
+            name: row.name,
+            value: row.value,
+            // multi 必须随导入一起落库:只存换行文本会丢失多值语义
+            multi: row.multi === true || (typeof row.value === 'string' && row.value.includes('\n')),
+            remarks: row.remarks,
+            enabled: true,
+            createdAt: now,
+            updatedAt: now,
+          })
+        }
+        return rows.length
+      })
+    },
+  }
 
   // 任务删除连带清除其运行记录(日志目录由调用方连带清理)
   const jobs = {
     get rows() {
       return jobsBase.rows
+    },
+    get broken() {
+      return jobsBase.broken
     },
     load: () => jobsBase.load(),
     list: (filter) => jobsBase.list(filter),
@@ -151,6 +254,8 @@ export async function createStore({ dir }) {
     mutate: (fn) => jobsBase.mutate(fn),
     create: (data) => jobsBase.create(data),
     update: (id, patch) => jobsBase.update(id, patch),
+    updateRuntime: (id, patch) => jobsBase.updateRuntime(id, patch),
+    updateIf: (id, expectedUpdatedAt, patch) => jobsBase.updateIf(id, expectedUpdatedAt, patch),
     async remove(id) {
       const removed = await jobsBase.remove(id)
       if (!removed) return false
@@ -186,6 +291,9 @@ export async function createStore({ dir }) {
     runs: {
       get rows() {
         return runs.rows
+      },
+      get broken() {
+        return runs.broken
       },
       list: (jobId) => (jobId ? runs.list((row) => row.jobId === jobId) : runs.list()),
       get: (runId) => runs.get(runId),

@@ -125,5 +125,6 @@ test('F16-b undo journal 按定义身份刷新:同名换对象后收敛,退场�
 
   row.dispose()
   assert.equal('deferLoading' in replacement, false, '退场必须还原当前定义对象(旧 journal 记录不得挡住回收)')
+  assert.equal('deferLoading' in original, false, '离场但仍存活的旧对象同样还原(弱引用记录不失效)')
   assert.equal(store.definitionOf('read').deferLoading, undefined, '白名单内工具始终无标')
 })

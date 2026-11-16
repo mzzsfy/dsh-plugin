@@ -1,5 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import http from 'node:http'
+import { once } from 'node:events'
 import { readFileSync } from 'node:fs'
 import { apply, registerTerminalTool, SUPPORTED_VERSIONS } from '../src/index.js'
 import { createWaitSkipRegistry } from '../src/lib/wait-skip.mjs'
@@ -59,17 +61,20 @@ test('Given missing public or private methods, When installing, Then host disabl
   }
 })
 
-test('Given the package manifest, When the support table evolves, Then peer range covers the support table and release metadata stay in lockstep', () => {
+test('Given the package manifest, When the support table evolves, Then peer floor matches hostMin and release metadata stay in lockstep', () => {
   const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   const supported = [...SUPPORTED_VERSIONS].sort()
-  // peer 是装载面(允许干净禁用的宿主代际),SUPPORTED 是功能面(实测私有结构):
-  // 功能面必须被装载面覆盖,dshReleases 的 compatible 集合与功能面精确对账
+  // peer 是装载面(宿主按 includePrerelease 的 semver 比较):下限必须与 hostMin 一致;
+  // SUPPORTED 是功能面(实测私有结构),dshReleases 只登记 hostMin 及以上代际的实测结果
   const peerRange = manifest.peerDependencies['@deepseek-ai/dsh-api-terminal-controller']
-  for (const version of supported) assert.ok(peerRange.split(' || ').includes(version), `peer 缺功能面版本 ${version}`)
+  const floorIndex = supported.indexOf(manifest.dsh.hostMin)
+  assert.equal(peerRange, `>=${manifest.dsh.hostMin}`)
+  assert.ok(floorIndex >= 0, 'hostMin 必须在功能面允许表内')
+  assert.equal(manifest.dsh.compatibility.dshReleases['0.2.0-rc.1'], 'unknown')
   assert.deepEqual(
     Object.entries(manifest.dsh.compatibility.dshReleases)
       .filter(([, status]) => status === 'compatible').map(([version]) => version).sort(),
-    supported,
+    supported.slice(floorIndex),
   )
 })
 
@@ -174,7 +179,7 @@ test('Given an oversized body, When POSTing skip, Then the route answers 413 and
   const listeners = {}
   const req = {
     method: 'POST',
-    headers: { host: 'localhost:3080' },
+    headers: { host: 'localhost:3080', 'content-type': 'application/json' },
     destroyed: false,
     on(name, listener) {
       if (name === 'data') {
@@ -193,6 +198,61 @@ test('Given an oversized body, When POSTing skip, Then the route answers 413 and
   assert.match(res.body, /超过上限/)
   assert.equal(req.paused, true, '超限须暂停流入')
   assert.equal(req.destroyed, true, 'finish 后收尾销毁')
+})
+
+test('Given a text/plain simple request, When POSTing skip, Then it is rejected before reading the body', async () => {
+  const { fixture, route, waitSkipRegistry } = installedRoute()
+  const pending = new AbortController()
+  waitSkipRegistry.register('session-a:term-a', pending)
+  const res = stubRes()
+  const req = stubReq({ sessionId: 'session-a', terminalId: 'term-a' }, { 'content-type': 'text/plain' })
+  const handled = route.handler(req, res)
+  req.emit()
+  await handled
+  assert.equal(res.statusCode, 400)
+  assert.match(res.body, /application\/json/)
+  assert.equal(pending.signal.aborted, false, '非 JSON 请求不得进入业务面')
+  fixture.dispose()
+})
+
+test('Given normal POST responses, When reusing a keep-alive connection, Then the socket is not destroyed', async () => {
+  const { fixture, route } = installedRoute()
+  const server = http.createServer((req, res) => { route.handler(req, res) })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  let connections = 0
+  server.on('connection', () => { connections += 1 })
+  const { port } = server.address()
+  const agent = new http.Agent({ keepAlive: true, maxSockets: 1 })
+  const post = () => new Promise((resolve, reject) => {
+    const body = JSON.stringify({ sessionId: 'session-a', terminalId: 'term-a' })
+    const req = http.request({
+      host: '127.0.0.1',
+      port,
+      path: '/api/shared-terminal/wait/skip',
+      method: 'POST',
+      agent,
+      headers: { host: `127.0.0.1:${port}`, 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+    }, (response) => {
+      const chunks = []
+      response.on('data', (chunk) => chunks.push(chunk))
+      response.on('end', () => resolve({ status: response.statusCode, body: Buffer.concat(chunks).toString() }))
+    })
+    req.on('error', reject)
+    req.end(body)
+  })
+  try {
+    const first = await post()
+    const second = await post()
+    assert.equal(first.status, 200)
+    assert.equal(second.status, 200)
+    assert.equal(connections, 1, '正常响应不得销毁 keep-alive 连接')
+  } finally {
+    agent.destroy()
+    server.closeAllConnections()
+    await once(server.close(), 'close')
+    fixture.dispose()
+  }
 })
 
 // ── 泵附着状态路由:client 自愈据此避免抢走 AI 的写入 ─────────────────

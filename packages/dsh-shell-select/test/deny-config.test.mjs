@@ -1,4 +1,4 @@
-﻿// deny 顶层字段:schema 往返与 updateConfig 落盘回读。
+// deny 顶层字段:schema 往返与 updateConfig 落盘回读。
 // BDD 场景见 docs/progress/feat-shell-select-deny.md 场景 7。
 
 import { test } from 'node:test'
@@ -28,6 +28,10 @@ test('schema 往返:deny 保留;allow 无消费者(deny 绝对,无豁免语义)'
 })
 
 test('updateConfig 携带 deny(wholesale replace 防静默重置,同 login 教训;写路径在 web 行)', () => {
-  assert.match(webRoutesSource, /deny: Array\.isArray\(patch\.deny\) \? patch\.deny : current\.deny/)
+  // 写协议只收 shells/default/deny 三键且严格对账:缺 deny 或非字符串数组一律
+  // 400,不静默回落旧值(回落会把"撤销 deny"的写入变成无操作)
+  assert.match(webRoutesSource, /assertWritablePatch\(patch\)/)
+  assert.match(webRoutesSource, /deny: patch\.deny/)
+  assert.match(webRoutesSource, /deny 必须是字符串数组/)
   assert.doesNotMatch(webRoutesSource, /patch\.allow/)
 })

@@ -182,11 +182,16 @@ function makeRes() {
   return res
 }
 
+const JSON_HEADERS = { 'content-type': 'application/json' }
+// 浏览器 client 全部经 api() 以 application/json 发送;写请求默认带 JSON 头,
+// 使业务用例不受共享闸门的 content-type 门影响(守卫差异由专门用例显式覆盖)
+const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+
 function makeReq(method, payload, headers) {
   const req = new EventEmitter()
   req.method = method
   req.url = '/api/turn-notify/config'
-  req.headers = { host: '127.0.0.1:3080', ...(headers || {}) }
+  req.headers = { host: '127.0.0.1:3080', ...(WRITE_METHODS.has(method) ? JSON_HEADERS : {}), ...(headers || {}) }
   const data = payload === undefined ? null : Buffer.from(JSON.stringify(payload))
   process.nextTick(() => {
     if (data !== null) req.emit('data', data)
@@ -195,8 +200,6 @@ function makeReq(method, payload, headers) {
   })
   return req
 }
-
-const JSON_HEADERS = { 'content-type': 'application/json' }
 
 function makeCtx() {
   const routes = new Map()
@@ -333,6 +336,28 @@ test('Given 双连接其一断开 When 时钟推进越过认可窗 Then 在途�
       fake += CLIENT_PRESENCE_WINDOW_MS + 1
       await emitCompletedTurn(handlers)
       assert.equal(spawns.length, 1, '全部出账,计数归零,超窗接管')
+    } finally { Date.now = realNow }
+  })
+})
+
+test('Given 长连接持续远超认可窗后断开 When 断连即事件 Then 以断连时刻重算窗口,不误判离线', async () => {
+  await withStubSpawn(async (spawns) => {
+    const { ctx, routes, handlers, setPresence } = makeCtx()
+    apply(ctx)
+    await postConfig(routes, { hostNotify: true, minTurnDurationMs: 0 })
+    const realNow = Date.now
+    let fake = 1000 * 1000
+    Date.now = () => fake
+    try {
+      setPresence(1)
+      // 长连接期间不再有 presence 回调,连接时刻早已超出认可窗
+      fake += 10 * CLIENT_PRESENCE_WINDOW_MS
+      setPresence(0)
+      await emitCompletedTurn(handlers)
+      assert.equal(spawns.length, 0, '断连后重新开始认可窗口,窗口内仍由浏览器呈现')
+      fake += CLIENT_PRESENCE_WINDOW_MS + 1
+      await emitCompletedTurn(handlers)
+      assert.equal(spawns.length, 1, '断连超过认可窗口后宿主补位')
     } finally { Date.now = realNow }
   })
 })

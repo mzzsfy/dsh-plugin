@@ -2,7 +2,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { rejectUnadmitted, withHostGate } from '../src/route-gate.mjs'
+import { rejectUnadmitted, withHostGate, withRouteGate } from '../src/route-gate.mjs'
 
 function ctxWith(connection) {
   return { get: (name) => (name === 'connection' ? connection : undefined) }
@@ -68,4 +68,51 @@ test('G6 withHostGate 放行时透传 req/res', async () => {
   const res = makeRes()
   await handler(req, res)
   assert.deepEqual(seen, [req, res])
+})
+
+function gateCtx() {
+  return ctxWith({ requestRejection: () => undefined })
+}
+
+test('G7 withRouteGate:POST/PATCH/DELETE 缺 JSON content-type 一律 400,handler 不执行', async () => {
+  for (const method of ['POST', 'PATCH', 'DELETE', 'PUT']) {
+    let called = 0
+    const handler = withRouteGate(gateCtx(), async () => { called += 1 })
+    const res = makeRes()
+    await handler({ method, headers: { host: 'localhost' } }, res)
+    assert.equal(called, 0, method + ' 缺 content-type 不得进业务')
+    assert.equal(res.status, 400)
+  }
+})
+
+test('G8 withRouteGate:application/json 精确 essence 放行,PATCH/DELETE 同样覆盖', async () => {
+  for (const method of ['POST', 'PATCH', 'DELETE', 'PUT']) {
+    let called = 0
+    const handler = withRouteGate(gateCtx(), async () => { called += 1 })
+    const res = makeRes()
+    await handler({ method, headers: { 'content-type': 'application/json; charset=utf-8' } }, res)
+    assert.equal(called, 1, method + ' 合法 JSON 必须放行')
+    assert.equal(res.status, null)
+  }
+})
+
+test('G9 withRouteGate:application/jsonp 与 text/plain 混入按非 JSON 拒绝', async () => {
+  for (const contentType of ['application/jsonp', 'text/plain; application/json', 'Application/JSONX']) {
+    const handler = withRouteGate(gateCtx(), async () => { throw new Error('不得执行') })
+    const res = makeRes()
+    await handler({ method: 'POST', headers: { 'content-type': contentType } }, res)
+    assert.equal(res.status, 400, contentType + ' 不得通过')
+  }
+})
+
+test('G10 withRouteGate:GET 不要求 content-type;写方法跨源先于 JSON 拒绝', async () => {
+  let called = 0
+  const get = withRouteGate(gateCtx(), async () => { called += 1 })
+  await get({ method: 'GET', headers: {} }, makeRes())
+  assert.equal(called, 1)
+  const post = withRouteGate(gateCtx(), async () => { called += 1 })
+  const res = makeRes()
+  await post({ method: 'POST', headers: { origin: 'http://evil.example', host: 'localhost', 'content-type': 'text/plain' } }, res)
+  assert.equal(res.status, 403, '跨源必须优先于 JSON 拒绝')
+  assert.equal(called, 1)
 })

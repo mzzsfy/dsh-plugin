@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { createApplication } from '../src/application.mjs'
 import { memoryStorage, operation, provider, route } from './helpers.mjs'
 const REF = 'DSH_STOCK_TUSHARE_TOKEN'
-const fake = { descriptor: { adapterId: 'fake', capabilities: ['quotes'], markets: ['XSHG'], instruments: ['equity'], maxQuoteBatch: 20 }, async probe() { return { status: 'ready' } }, async quotes() { return { items: [], errors: [] } } }
+const fake = { descriptor: { adapterId: 'fake', capabilities: ['quotes'], markets: ['XSHG'], instruments: ['equity'], maxQuoteBatch: 20 }, async probe(request) { return { status: 'ready', capability: request.capability } }, async quotes() { return { items: [], errors: [] } } }
 // 凭据服务的对偶: resolve 的返回值与 set/unset 的写入都落在这张表上, 用来观察插件到底写了什么
 function fakeCredentials(initial = {}) {
   const store = new Map(Object.entries(initial))
@@ -59,7 +59,7 @@ test('宿主没有凭据服务时写密钥报不支持而不是静默丢弃', as
 test('宿主给的凭据服务接口不完整时退回环境变量, 不在取数时炸掉', async () => {
   const partial = { resolve: async () => undefined }
   const seen = []
-  const echo = { descriptor: { adapterId: 'fake', capabilities: ['quotes'], markets: ['XSHG'], instruments: ['equity'], maxQuoteBatch: 20 }, async probe() { return { status: 'ready' } }, async quotes(request, ctx) { seen.push(ctx.credential()); return { items: [], errors: [] } } }
+  const echo = { descriptor: { adapterId: 'fake', capabilities: ['quotes'], markets: ['XSHG'], instruments: ['equity'], maxQuoteBatch: 20 }, async probe(request) { return { status: 'ready', capability: request.capability } }, async quotes(request, ctx) { seen.push(ctx.credential()); return { items: [], errors: [] } } }
   const app = await createApplication({ storageDomain: memoryStorage(), providers: [echo], credentials: partial, env: { [REF]: 'from-env' }, now: () => 1000 })
   await app.configuration({ ...operation(), payload: configured })
   await app.refresh({ securities: [{ id: 'XSHG:equity:600519', exchange: 'XSHG', code: '600519' }] }, new AbortController().signal)
@@ -71,7 +71,7 @@ test('执行层每次操作重新解析凭据, 换密钥不必重启插件', asy
   const credentials = fakeCredentials({ [REF]: 'first' })
   const seen = []
   let clock = 1000
-  const echo = { descriptor: { adapterId: 'fake', capabilities: ['quotes'], markets: ['XSHG'], instruments: ['equity'], maxQuoteBatch: 20 }, async probe() { return { status: 'ready' } }, async quotes(request, ctx) { seen.push(ctx.credential()); return { items: [], errors: [] } } }
+  const echo = { descriptor: { adapterId: 'fake', capabilities: ['quotes'], markets: ['XSHG'], instruments: ['equity'], maxQuoteBatch: 20 }, async probe(request) { return { status: 'ready', capability: request.capability } }, async quotes(request, ctx) { seen.push(ctx.credential()); return { items: [], errors: [] } } }
   const app = await createApplication({ storageDomain: memoryStorage(), providers: [echo], credentials, env: {}, now: () => clock })
   await app.configuration({ ...operation(), payload: configured })
   const target = { id: 'XSHG:equity:600519', exchange: 'XSHG', code: '600519' }
@@ -85,10 +85,12 @@ test('执行层每次操作重新解析凭据, 换密钥不必重启插件', asy
 
 test('凭据缺失时执行层报 AUTH 而不是把空串当密钥发出去', async () => {
   const credentials = fakeCredentials()
-  const strict = { descriptor: { adapterId: 'fake', capabilities: ['quotes'], markets: ['XSHG'], instruments: ['equity'], maxQuoteBatch: 20 }, async probe() { return { status: 'ready' } }, async quotes() { return { items: [], errors: [] } } }
+  const strict = { descriptor: { adapterId: 'fake', capabilities: ['quotes'], markets: ['XSHG'], instruments: ['equity'], maxQuoteBatch: 20 }, async probe(request) { return { status: 'ready', capability: request.capability } }, async quotes() { return { items: [], errors: [] } } }
   const app = await createApplication({ storageDomain: memoryStorage(), providers: [strict], credentials, env: {}, now: () => 1000 })
   await app.configuration({ ...operation(), payload: configured })
   const target = { id: 'XSHG:equity:600519', exchange: 'XSHG', code: '600519' }
-  await app.refresh({ securities: [target] }, new AbortController().signal).catch(() => {})
-  assert.equal(app.snapshot().quotes['XSHG:equity:600519']?.lastError?.code, 'AUTH')
+  const error = await app.refresh({ securities: [target] }, new AbortController().signal).catch(e => e)
+  assert.equal(error.code, 'AUTH')
+  // K5: peek(非自选)报价不留在常驻快照里, 失败态只随本次调用返回
+  assert.equal(app.snapshot().quotes[target.id], undefined, 'peek 报价不进常驻快照')
 })

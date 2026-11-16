@@ -37,3 +37,25 @@ test('坏正则容错:非法条目跳过,不瘫执行链', () => {
 test('多行命令整文本匹配:第一行干净也挡住后续行命中', () => {
   assert.throws(() => matchDeny('echo start\nformat c:', ['format ']), DenyError)
 })
+
+test('P3 编译缓存:同一 deny 配置数组只编译一轮,逐命令不重编译正则', () => {
+  // Given 配置快照里的 deny 数组(数组引用在两次 refresh 之间稳定)
+  let compilePasses = 0
+  const patterns = new Proxy(['format ', 'diskpart'], {
+    get(target, prop, receiver) {
+      if (prop === 'map') {
+        return (fn) => {
+          compilePasses += 1
+          return target.map(fn)
+        }
+      }
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  // When 连续匹配多条命令
+  assert.doesNotThrow(() => matchDeny('git status', patterns))
+  assert.throws(() => matchDeny('diskpart', patterns), DenyError)
+  assert.throws(() => matchDeny('format c:', patterns), DenyError)
+  // Then 只编译一轮(旧实现每条命令重编译整表)
+  assert.equal(compilePasses, 1)
+})

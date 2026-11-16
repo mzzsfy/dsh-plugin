@@ -410,12 +410,16 @@ window.__ModuleLoader__.load({
     }
 
     // 查询失败按"仍在附着"处理:宁可不自愈,也不抢走 AI 的写入
-    const pumpAttached = async (sessionId) => {
+    const pumpAttached = async (sessionId, lifecycle) => {
+      const timeout = AbortSignal.timeout(HEAL_QUERY_TIMEOUT_MS)
+      const signal = lifecycle === undefined
+        ? timeout
+        : (typeof AbortSignal.any === 'function' ? AbortSignal.any([lifecycle, timeout]) : lifecycle)
       const response = await fetch('/api/shared-terminal/pump', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ sessionId }),
-        signal: AbortSignal.timeout(HEAL_QUERY_TIMEOUT_MS),
+        signal,
       })
       if (!response.ok) return true
       const state = await response.json()
@@ -425,6 +429,8 @@ window.__ModuleLoader__.load({
     function healReadOnly(ctx) {
       if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function' || typeof setInterval !== 'function') return () => {}
       const healed = new Map()
+      const lifecycle = typeof AbortController === 'function' ? new AbortController() : undefined
+      let stopped = false
       let running = false
       // 只保留最近的上限条:重新插入以刷新顺序,超限时淘汰最旧的一条
       const remember = (sessionId, at) => {
@@ -434,7 +440,7 @@ window.__ModuleLoader__.load({
       }
       // 每轮重扫 DOM:宿主 tab 可随时增删,缓存 root 会拿到已卸载的节点
       const tick = async () => {
-        if (running || document.hidden === true) return
+        if (stopped || running || document.hidden === true) return
         running = true
         try {
           for (const root of document.querySelectorAll('[data-sidebar-terminal]')) {
@@ -443,7 +449,9 @@ window.__ModuleLoader__.load({
             const sessionId = ctx.sidebarRight.mounted?.getSnapshot()
             if (typeof sessionId !== 'string' || healed.get(sessionId) > Date.now() - HEAL_COOLDOWN_MS) continue
             // 泵附着中不抢控制权:那会让 AI 的下一次写入落空
-            if (await pumpAttached(sessionId)) continue
+            if (await pumpAttached(sessionId, lifecycle?.signal)) continue
+            // 卸载/换代后迟到的查询结果不得再点宿主按钮
+            if (stopped) return
             // 等待期间 tab 可能被卸载、状态栏按钮可能被替换、几何可能已恢复
             if (root.isConnected === false || !clipped(root)) continue
             const fresh = takeoverButton(root)
@@ -460,7 +468,11 @@ window.__ModuleLoader__.load({
         }
       }
       const timer = setInterval(tick, HEAL_INTERVAL_MS)
-      return () => clearInterval(timer)
+      return () => {
+        stopped = true
+        lifecycle?.abort()
+        clearInterval(timer)
+      }
     }
 
     return {
@@ -478,34 +490,43 @@ window.__ModuleLoader__.load({
         // 面板首帧从导航记录取 contentId/terminalId,而记录由 openContent 回执写入,回执晚于首帧。
         // 首帧拿空值就会按「新终端」把 xterm 建死,之后一直显示「此终端已不存在」。
         // 面板的内容身份在 layout 里本就确定,首帧缺参时用 layout 的 contentId 补齐即可。
-        const VIEW_PATCH = Symbol.for('@mzzsfy/dsh-shared-terminal/view-patch')
-        const patchTerminalView = () => {
+        // 包装只活在安装它的那一代 fiber 里:cleanup 在仍持有本次包装时归还宿主实现,
+        // 别的代已经换掉的实现不去覆盖(HMR 换代后每代都能装上自己的逻辑,禁用后不留残留)。
+        ctx.effect(() => {
           const holder = ctx.webTerminals
-          if (holder === undefined || holder[VIEW_PATCH] === true) return
-          const original = holder.view
-          if (typeof original !== 'function') return
+          const original = holder?.view
+          if (typeof original !== 'function') return () => {}
           const view = original.bind(holder)
-          holder[VIEW_PATCH] = true
-          holder.view = (sessionId, key, contentId, terminalId, shellPath) => {
+          const patched = (sessionId, key, contentId, terminalId, shellPath) => {
             if (contentId !== undefined) return view(sessionId, key, contentId, terminalId, shellPath)
             const tab = ctx.sidebarRight.openTabs?.getSnapshot().find((item) => item.sessionId === sessionId && item.tabId === key)
             if (tab === undefined || tab.kind !== 'terminal') return view(sessionId, key, contentId, terminalId, shellPath)
             const fill = terminalId ?? (tab.contentId.startsWith(PANEL_PREFIX) ? tab.contentId.slice(PANEL_PREFIX.length) : undefined)
             return view(sessionId, key, tab.contentId, fill, shellPath)
           }
-        }
-        // 宿主自身的 contentId→终端绑定(落 localStorage)是首帧的另一条兜底来源,建面板前先写
-        const BINDING_PREFIX = 'dsh.terminal.binding.v1.'
+          holder.view = patched
+          return () => {
+            if (holder.view === patched) holder.view = original
+          }
+        }, 'shared-terminal terminal view')
+        // 宿主的 contentId→终端绑定是首帧的另一条兜底来源,建面板前经公开接口写入;
+        // 宿主自己的 view 首帧也会落绑定,绑定接口缺失的代际只剩导航参数一条来源。
+        // 绑定只是兜底:宿主实现抛错不得阻断打开面板的主路径。
         const seedBinding = (sessionId, contentId, terminalId) => {
           try {
-            localStorage.setItem(BINDING_PREFIX + JSON.stringify([sessionId, contentId]), JSON.stringify(terminalId))
+            ctx.webTerminals?.bind?.(sessionId, contentId, terminalId)
           } catch {
-            // 存储不可用时只剩导航参数一条路,与不写绑定等价
+            // 绑定失败仍可经导航参数打开
           }
         }
         // 面板建好后宿主的终端清单可能还没刷新到新终端,view 首轮校验会判定「终端不存在」并就此定格;
-        // 隔一帧再让它自己重查一次即可恢复(清单此时已经到岸)。
+        // 隔一帧再让它自己重查一次即可恢复(清单此时已经到岸)。待发定时器随本代卸载一并清掉。
         const NUDGE_DELAYS_MS = [400, 2000]
+        const nudges = new Set()
+        ctx.effect(() => () => {
+          for (const timer of nudges) clearTimeout(timer)
+          nudges.clear()
+        }, 'shared-terminal panel nudges')
         const nudgePanel = (sessionId, address, terminalId) => {
           const tab = ctx.sidebarRight.openTabs?.getSnapshot().find((item) => item.sessionId === sessionId && item.contentId === address)
           if (tab === undefined) return
@@ -515,6 +536,15 @@ window.__ModuleLoader__.load({
             // view 未建或已销毁时无需补救
           }
         }
+        const scheduleNudge = (sessionId, address, terminalId) => {
+          for (const delay of NUDGE_DELAYS_MS) {
+            const timer = setTimeout(() => {
+              nudges.delete(timer)
+              nudgePanel(sessionId, address, terminalId)
+            }, delay)
+            nudges.add(timer)
+          }
+        }
         async function openExisting(sessionId, terminalId, alive) {
           const listed = await ctx.remote.terminal.list(sessionId)
           if (!alive() || !listed.ok || !listed.value.some((item) => item.id === terminalId)) return false
@@ -522,10 +552,9 @@ window.__ModuleLoader__.load({
           seedBinding(sessionId, address, terminalId)
           ctx.sidebarRight.openResourceIn(sessionId, address, { kind: 'terminal', params: { terminalId } })
           settlePanel(sessionId, address, terminalId)
-          for (const delay of NUDGE_DELAYS_MS) setTimeout(() => nudgePanel(sessionId, address, terminalId), delay)
+          scheduleNudge(sessionId, address, terminalId)
           return alive()
         }
-        patchTerminalView()
         ctx.slots.inject('tool.call.toolview', () => ctx.slots.register(
           { name: 'tool.call.toolview', key: 'terminal', locale: NS },
           (props) => h(TerminalToolRow, { ...props, openTerminal: (sessionId, terminalId, alive) => openExisting(sessionId, terminalId, alive) }),

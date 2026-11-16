@@ -19,10 +19,15 @@ message 记录 tool-addition/tool-removal,dsh-llm 投影层处理会话一致性
   白名单内 ⇒ `deferLoading` 不存在;白名单外 ⇒ `deferLoading === true`。
   不区分标是谁打的:白名单命中即清(覆盖插件作者声明,用户意图优先),
   白名单外即打(含插件自带 defer 声明的工具——白名单外本就应延迟)。
+  白名单入收敛前统一 `cleanAllowlist`(trim/去重/剔非字符串),与读写面和
+  设置页同一口径,禁止「显示全量注入、实际 defer」两套事实源。
 - **INV-2 原状可还原**:收敛只改 `deferLoading` 字段且每次改变前记录原状
   (undo journal);行禁用/卸载时按 journal 还原全部原状,系统回到
   「没装本包」的世界。journal 以 definition 引用为键(宿主层表清空会换代,
   层键会失联;definition 跨层共享且身份稳定),还原按 definition 逐条进行。
+  记录持 definition 弱引用:定义仍被宿主持有时(含层换代后同对象重建)照常
+  还原,离开注册表且无人持有的定义可被回收、其记录随每轮收敛的 sweep 释放
+  (强引用只增不减会让同名换定义后的旧条目常驻)。
 - **INV-3 打标即生效**:schema 投影(`schemas`/`view`)每请求实时读层条目内的
   definition。层条目两形态:0.2.2 起为 registration 包装 `{ definition, when }`,
   `deferLoading` 必须写在 `registration.definition` 上(写在 registration 本身
@@ -88,6 +93,11 @@ message 记录 tool-addition/tool-removal,dsh-llm 投影层处理会话一致性
   无关;但请求 tools 必须含该名字,见 INV-10a)。无效 pattern 返回错误文本
   不抛。owner 限定 adapter 实例(gateway 同款),同原型非授权实例透传。
 
+- **INV-13 热路径解析缓存**:折叠 rewrite 每请求读配置,严格解析(schema +
+  解箱深拷)不得逐请求重跑;按三字段当前值签名缓存解析产物,签名变化
+  (volatile 写事务换值)即失效,不得把旧开关回给新请求。签名覆盖数组内容与
+  布尔取值,缓存只服务只读解构(收敛与 rewrite)。
+
 ## GUI 场景
 
 - **SC-11 状态投影**:GET /api/tool-gate/state 返回 { enabled, allowlist,
@@ -96,11 +106,15 @@ message 记录 tool-addition/tool-removal,dsh-llm 投影层处理会话一致性
   与顶层参数骨架(name/type/required/description),供卡片展开详情。settings
   节缺失或字段为 volatile ref 时解箱并补齐出厂默认,读到的始终是三字段
   完整对象,后续写回不丢未显式修改的字段。
-- **SC-12 白名单勾选**:POST /api/tool-gate/allowlist(名字数组,清洗:
-  剔非字符串/空串/重复)→ settings.replace 落盘 → 主行收敛;响应回新 state。
+- **SC-12 白名单勾选**:POST /api/tool-gate/allowlist(名字数组;缺字段、非
+  数组、含非字符串或空串 → 400 不落盘,空数组是合法显式清空,重复名按清洗
+  语义去重;名首尾空白 trim 后落盘/回读)→ settings.replace 落盘 → 主行收敛;
+  响应回新 state。
 - **SC-13 enabled 开关**:POST /api/tool-gate/enabled → 同上链路。
-- **SC-14 守卫**:写路由跨源 403、方法不符 405、非 JSON 体 400;
-  GET 无守卫(只读)。
+- **SC-14 守卫**:共享 route-gate 接线——宿主闸门优先(未认证 401 不泄露写
+  协议细节),写路由跨源 403、方法不符 405、非 JSON content-type 400、请求体
+  超 1MB 上限 413(超限后继续丢弃流入而非销毁 socket,413 与文案经真实
+  socket 可送达);GET 无写方法守卫(只读)。
 - **SC-15 卡片呈现**:设置页「工具门」分区——enabled 开关(规约 switch
   形态,tg- 前缀)、工具清单每行开关(勾选 = 白名单)、未注册白名单名警示;
   行头为可聚焦按钮,`aria-expanded` 标记展开态,点击展开完整描述、参数
@@ -185,7 +199,8 @@ message 记录 tool-addition/tool-removal,dsh-llm 投影层处理会话一致性
   defer 态回原状)⇒ 下一轮收敛重新打标。
 - **SC-6 行退场还原**:收敛态若干工具被本包改动 ⇒ 行禁用 ⇒ journal 逐项
   还原:本包打过标的字段消失,被本包清掉的自带 defer 声明恢复;同名换对象
-  各自记录原状,退场逐条还原(旧对象即使已离场也回原状,无人观察)。
+  各自记录原状,退场逐条还原(仍存活的旧对象即使已离场也回原状,无人观察;
+  已被回收的对象记录随 sweep 释放)。
 - **SC-7 enabled=false**:`enabled` 写 false ⇒ 全部按 journal 还原并停止
   打标;写回 true ⇒ 重新收敛。
 - **SC-8 未知名白名单**:白名单 = [read, no_such_tool] ⇒ 收敛正常,

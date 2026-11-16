@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { check, parsePatchRows, rangeMismatch } from '../scripts/check-common-tools.mjs'
@@ -17,7 +17,7 @@ function tree(t, { range = '^0.4.0', row = "- insert:\n    - id: x-dsh-common-to
   write('dsh-common-tools/package.json', JSON.stringify({ name: '@mzzsfy/dsh-common-tools', version: '0.4.0' }))
   write('dsh-common-tools/src/client.js', "const VERSION = '0.4.0'\n")
   write('dsh-common-tools/src/host.js', "const PKG_VERSION = '0.4.0'\n")
-  write('dsh-x/package.json', JSON.stringify({ name: '@mzzsfy/dsh-x', dependencies: { '@mzzsfy/dsh-common-tools': range }, dsh: { client: { external } } }))
+  write('dsh-x/package.json', JSON.stringify({ name: '@mzzsfy/dsh-x', dependencies: { '@mzzsfy/dsh-common-tools': range }, dsh: { client: { external } }, files: ['src', 'cordis.patch.yml'] }))
   write('dsh-x/cordis.patch.yml', row)
   write('dsh-x/src/client.js', client)
   return root
@@ -72,10 +72,10 @@ test('Given 范围形态 When 校验 Then 只接受同 minor 且下限不高于�
   assert.match(rangeMismatch('0.4.0', '0.4.0'), /形态/)
 })
 
-test('Given 真实仓库 When 整检 Then 零问题且有十个消费方', () => {
+test('Given 真实仓库 When 整检 Then 零问题且有九个消费方', () => {
   const { problems, consumers } = check()
   assert.deepEqual(problems, [])
-  assert.equal(consumers.length, 10)
+  assert.equal(consumers.length, 9)
 })
 
 test('Given 声明要 patch 但文件不存在 When 整检 Then 报出装载行不会生效', t => {
@@ -86,6 +86,24 @@ test('Given 声明要 patch 但文件不存在 When 整检 Then 报出装载行�
     dsh: { client: { external: ['@mzzsfy/dsh-common-tools/client'] }, bundle: { patch: 'missing.yml' } },
   }))
   assert.match(check({ packagesDir: root }).problems.join('\n'), /dsh\.bundle\.patch 指向不存在/)
+})
+
+test('Given files 漏 cordis.patch.yml When 整检 Then 报出发布清单缺文件', t => {
+  const root = tree(t)
+  const manifest = JSON.parse(readFileSync(join(root, 'dsh-x/package.json'), 'utf8'))
+  manifest.files = ['src']
+  writeFileSync(join(root, 'dsh-x/package.json'), JSON.stringify(manifest))
+  assert.match(check({ packagesDir: root }).problems.join('\n'), /files 未包含 cordis\.patch\.yml/)
+})
+
+test('Given files 漏 bundle.patch 指定文件 When 整检 Then 报出发布清单缺文件', t => {
+  const root = tree(t)
+  const manifest = JSON.parse(readFileSync(join(root, 'dsh-x/package.json'), 'utf8'))
+  manifest.files = ['src']
+  manifest.dsh.bundle = { patch: 'release.yml' }
+  writeFileSync(join(root, 'dsh-x/release.yml'), readFileSync(join(root, 'dsh-x/cordis.patch.yml')))
+  writeFileSync(join(root, 'dsh-x/package.json'), JSON.stringify(manifest))
+  assert.match(check({ packagesDir: root }).problems.join('\n'), /files 未包含 release\.yml/)
 })
 
 test('Given 单行 insert 形态 When 整检 Then 报出宿主不支持', t => {

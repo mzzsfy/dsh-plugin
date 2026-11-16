@@ -69,6 +69,17 @@ test('Given ctx 已激活且快照在途 When 卸载 Then 退订并中止请求�
   assert.equal(Object.hasOwn(f.window, 'usage-panel:notify-poll:dispose'), false)
 })
 
+test('Given 总线广播 When 拉取通知快照 Then 请求固定快照路径且不携带游标参数', () => {
+  const f = fixture(), plugin = f.instantiate()
+  plugin.apply()
+  f.emit()
+  assert.equal(f.requests.length, 1)
+  assert.equal(f.requests[0].path, '/api/usage-panel/notifications')
+  assert.equal(f.requests[0].path.includes('cursor'), false)
+  assert.equal(f.requests[0].options.method, undefined)
+  plugin.dispose()
+})
+
 test('Given 旧代激活 When 新代 apply Then 仅保留新代订阅且旧代卸载不清新代令牌', () => {
   const f = fixture(), old = f.instantiate()
   old.apply(); f.emit()

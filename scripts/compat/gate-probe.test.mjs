@@ -1,9 +1,23 @@
 // 闸门探针自身:目标表覆盖全部有路由的包,且判定口径是"无 cookie 401/403 + 带 cookie 放行"
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { existsSync, readdirSync } from 'node:fs'
 import { createServer } from 'node:http'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { GATE_TARGETS, probeHostGate } from './gate-probe.mjs'
+
+const PACKAGES = fileURLToPath(new URL('../../packages', import.meta.url))
+
+function routeGatePackages() {
+  return readdirSync(PACKAGES, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .filter((entry) => existsSync(join(PACKAGES, entry.name, 'lib/route-gate.mjs'))
+      || existsSync(join(PACKAGES, entry.name, 'src/route-gate.mjs')))
+    .map((entry) => entry.name)
+    .sort()
+}
 
 function serve(handler) {
   return new Promise((resolve) => {
@@ -12,14 +26,14 @@ function serve(handler) {
   })
 }
 
-test('目标表每条都是 /api/ 下的绝对路径且包名唯一', () => {
+test('目标表每条都是 /api/ 下的绝对路径,包名唯一且覆盖全部有路由闸门的包', () => {
   const names = new Set()
   for (const [name, path] of GATE_TARGETS) {
     assert.match(path, /^\/api\/[a-z0-9-]+(\/|$)/)
     assert.equal(names.has(name), false, `重复包名 ${name}`)
     names.add(name)
   }
-  assert.ok(GATE_TARGETS.length >= 16)
+  assert.deepEqual([...names].sort(), routeGatePackages(), 'GATE_TARGETS 必须与带 route-gate.mjs 的包集合一致')
 })
 
 test('无 cookie 401 且带 cookie 200 判通过', async () => {

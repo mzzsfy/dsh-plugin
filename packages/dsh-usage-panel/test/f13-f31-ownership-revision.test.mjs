@@ -7,7 +7,7 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, stat } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -172,6 +172,34 @@ test('F31-a 修订号路由:数据持久化成功即自增并经总线广播一�
   }
 })
 
+test('F31-a2 历史路由支持 accountIds 过滤,单卡刷新不整表重传', async () => {
+  const { ctx, routes } = makeCtx()
+  apply(ctx)
+  const fetchControl = upstream()
+  try {
+    await saveAccounts(routes, [
+      { id: 'acct-h1', name: '账号H1', type: 'kimi', apiKey: 'sk-test' },
+      { id: 'acct-h2', name: '账号H2', type: 'kimi', apiKey: 'sk-test' },
+    ])
+    await call(routes, '/api/usage-panel/query', makeReq('POST', { id: 'acct-h1' }))
+    await call(routes, '/api/usage-panel/query', makeReq('POST', { id: 'acct-h2' }))
+    const all = await historyOf(routes)
+    assert.ok(Object.keys(all).some((key) => key.startsWith('acct-h1:')))
+    assert.ok(Object.keys(all).some((key) => key.startsWith('acct-h2:')))
+    // 过滤单账号:只返回该账号序列
+    const one = await call(routes, '/api/usage-panel/history?accountIds=acct-h1', makeReq('GET'))
+    assert.equal(one.status, 200)
+    assert.deepEqual(Object.keys(one.payload.sequences).sort(), Object.keys(all).filter((key) => key.startsWith('acct-h1:')).sort())
+    // 未知账号返回空集;非法 id 拒绝
+    const none = await call(routes, '/api/usage-panel/history?accountIds=acct-missing', makeReq('GET'))
+    assert.deepEqual(none.payload.sequences, {})
+    const bad = await call(routes, '/api/usage-panel/history?accountIds=bad:id', makeReq('GET'))
+    assert.equal(bad.status, 400)
+  } finally {
+    fetchControl.restore()
+  }
+})
+
 // ---- client 半区:总线桥(面板无总线句柄,桥转 window 事件供组件对账) ----
 const CLIENT_SRC = readFileSync(fileURLToPath(new URL('../src/client.js', import.meta.url)), 'utf8')
 
@@ -252,4 +280,37 @@ test('F31-b 总线桥:一次总线广播桥成一次 window 数据变更事件,�
   bridge.disposeAll()
   bridge.fire()
   assert.equal(bridge.dispatched.length, 2, '卸载后总线桥必须解除')
+})
+
+// U7:删除账号的配置已落盘,但历史清理写盘失败时不得静默吞掉(否则磁盘残留旧历史,
+// 面板看起来「删除成功」,下次任意 persist 才把它覆盖,期间导出/备份都含已删账号数据)
+test('U7 删除账号后历史落盘失败:响应告警 + 日志可见,磁盘未被静默改写', async () => {
+  const { ctx, routes } = makeCtx()
+  const warnings = []
+  ctx.logger = { warn: (text) => warnings.push(String(text)) }
+  apply(ctx)
+  const fetchControl = upstream()
+  const historyFile = join(tempDir, 'history.json')
+  try {
+    await saveAccounts(routes, [
+      { id: 'acct-a', name: 'A', type: 'kimi', apiKey: 'sk-test' },
+      { id: 'acct-b', name: 'B', type: 'kimi', apiKey: 'sk-test' },
+    ])
+    await call(routes, '/api/usage-panel/query', makeReq('POST', { id: 'acct-b' }))
+    assert.ok(Object.keys(await historyOf(routes)).some((key) => key.startsWith('acct-b:')), '删除前已有历史')
+    // 用目录占位 history.json,使历史写盘失败(配置写盘仍正常)
+    await rm(historyFile, { force: true })
+    await mkdir(historyFile)
+    const res = await saveAccounts(routes, [{ id: 'acct-a', name: 'A', type: 'kimi', apiKey: 'sk-test' }])
+    assert.equal(res.status, 200, '账号已删除,整体请求仍成功')
+    assert.equal(res.payload.ok, true)
+    // 临时文件 + rename 后,占位目录在 rename 处暴露为 EPERM/ENOTEMPTY(而非写文件处 EISDIR)
+    assert.match(String(res.payload.historyWarning), /EISDIR|EPERM|ENOTEMPTY|历史文件已损坏/, '历史落盘失败必须显式回告')
+    assert.equal(warnings.length, 1, '必须留一条日志')
+    assert.match(warnings[0], /历史落盘失败/)
+    assert.equal((await stat(historyFile)).isDirectory(), true, '失败时磁盘未被写成空表')
+  } finally {
+    fetchControl.restore()
+    await rm(historyFile, { recursive: true, force: true })
+  }
 })

@@ -4,10 +4,11 @@
 // --changed-since <sha> 限定 push 改动涉及的单包(缺省/解析失败回退全量,fail-open)。
 // 用法:node scripts/aggregate-tests.mjs [--rounds N] [--changed-since SHA]
 import {spawn, spawnSync} from 'node:child_process'
-import {mkdtempSync, readdirSync, existsSync, statSync, readFileSync, rmSync, appendFileSync, createWriteStream} from 'node:fs'
+import {mkdtempSync, mkdirSync, readdirSync, existsSync, statSync, readFileSync, rmSync, appendFileSync, createWriteStream} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join, basename} from 'node:path'
 import {createEvidenceLogDir} from './aggregate-evidence.mjs'
+import {compatEnv} from './compat/env.mjs'
 import {fileURLToPath, pathToFileURL} from 'node:url'
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const TOTAL_ROUNDS = 10
@@ -148,7 +149,9 @@ export function parseChangedPackages(lines) {
   const packages = new Set()
   for (const line of lines) {
     const segments = line.split('/')
-    if (segments[0] !== PACKAGES_DIR || segments[1] === undefined || segments[1] === '') return null
+    // packages/ 直属文件(README.md 等)不是包目录:缺第三段即无法证明包边界,
+    // 回退全量,禁止把文件名当包名导致只跑极少数单元
+    if (segments[0] !== PACKAGES_DIR || segments[1] === undefined || segments[1] === '' || segments[2] === undefined) return null
     packages.add(segments[1])
   }
   return packages.size > 0 ? packages : null
@@ -220,7 +223,32 @@ export function parseArgs(argv) {
   return args
 }
 
+// 各包数据目录环境键:继承会话环境会把测试数据写进宿主真实目录,必须逐个重定向
+const ISOLATED_DATA_ENV = {
+  DSH_CRON_BOARD_DATA_DIR: 'cron-board',
+  DSH_USAGE_PANEL_DATA_DIR: 'usage-panel',
+  DSH_HISTORY_CACHE_DIR: 'context-manager-history',
+}
+
+function unitEnv(unitHome) {
+  // 先按敏感变量族整体剔除(DSH_*/STOCK_*/ECHO_*/NODE_OPTIONS),再注入本单元 home 与
+  // 已知数据目录;只删 DSH_*DATA_DIR 会让真实 DSH_INSTALL_DIR/DSH_PROFILE_DIR/凭据穿透。
+  const env = compatEnv({
+    DSH_HOME: unitHome, USERPROFILE: unitHome, HOME: unitHome,
+    DSH_REAL_HOME: process.env.USERPROFILE || process.env.HOME,
+  })
+  for (const [key, dir] of Object.entries(ISOLATED_DATA_ENV)) {
+    env[key] = join(unitHome, 'data', dir)
+    mkdirSync(env[key], {recursive: true})
+  }
+  return env
+}
+
 function runUnit(unit, logPath, sandboxHome) {
+  // 每个单元一个 home:共用可写 home 时先跑单元写入的插件数据会被后跑单元读到,
+  // 单元独立性(FIRST)与失败归因都被破坏
+  const unitHome = join(sandboxHome, unit.name.replace(/[^A-Za-z0-9_-]/g, '_'))
+  mkdirSync(unitHome, {recursive: true})
   return new Promise(resolve => {
     const out = createWriteStream(logPath)
     out.on('error', error => {
@@ -237,7 +265,7 @@ function runUnit(unit, logPath, sandboxHome) {
     // user-data-dir 误判为默认目录, 拒绝 DevTools 调试; 浏览器测试用它恢复
     const child = spawn(unit.command[0], unit.command.slice(1), {
       cwd: unit.cwd,
-      env: {...process.env, DSH_HOME: sandboxHome, USERPROFILE: sandboxHome, HOME: sandboxHome, DSH_REAL_HOME: process.env.USERPROFILE || process.env.HOME},
+      env: unitEnv(unitHome),
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     })

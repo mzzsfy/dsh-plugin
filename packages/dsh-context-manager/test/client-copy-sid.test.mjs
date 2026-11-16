@@ -75,6 +75,7 @@ function loadClientHarness({ documentStub } = {}) {
       register: (options, component) => registered.push({ options, component }),
     },
     remote: { session: { follow: () => (async function* () { yield { type: 'snapshot', cursor: 0, records: [] }; await new Promise(() => {}) })() } },
+    inject: (deps, register) => { if (deps.includes('remote.session') && ctx.remote.session) register(ctx) },
   }
   mod.apply(ctx)
   return {

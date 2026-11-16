@@ -39,7 +39,7 @@ process.on('exit', () => {
   for (const dir of tempDataDirs) rmSync(dir, { recursive: true, force: true })
 })
 
-function createCtx(webServer, settings) {
+function createCtx(webServer, options = {}) {
   const toolsService = {
     registered: [],
     register(tool) { this.registered.push(tool); return () => {} },
@@ -50,20 +50,23 @@ function createCtx(webServer, settings) {
     if (typeof disposer === 'function') effectDisposers.push(disposer)
     return disposer
   }
+  // 宿主服务面: connection(信任闸门与 trustedHosts 源)、configEditor(0.1.7+ 写路径)
+  const services = { connection: options.connection, configEditor: options.configEditor }
   resetBusStub()
   const ctx = {
     webServer,
-    get: () => undefined,
+    fiber: options.fiber,
+    get: (name) => services[name],
     on: () => () => {},
     effect: runEffect,
-    inject: (names, callback) => callback({ tools: toolsService, settings, effect: runEffect }),
+    inject: (names, callback) => callback({ tools: toolsService, settings: options.settings, effect: runEffect }),
   }
   return { ctx, toolsService, effectDisposers, published: busStub.published }
 }
 
 export async function applyPlugin(webServer, options = {}) {
   const { apply } = await import('../../src/index.js')
-  const { ctx, toolsService, effectDisposers, published } = createCtx(webServer, options.settings)
+  const { ctx, toolsService, effectDisposers, published } = createCtx(webServer, options)
   const dataDir = options.dataDir ?? tempDataDir()
   const warnings = []
   const originalWarn = console.warn
@@ -90,7 +93,7 @@ export function toolOf(plugin, name) {
 }
 
 export const open = (plugin, args) => toolOf(plugin, 'tunnel_open').execute(args)
-export const list = (plugin) => toolOf(plugin, 'tunnel_list').execute({})
+export const list = (plugin, args = {}) => toolOf(plugin, 'tunnel_list').execute(args)
 export const close = (plugin, name) => toolOf(plugin, 'tunnel_close').execute({ name })
 
 export function storeRows(dataDir) {

@@ -74,6 +74,7 @@ function loadPlugin() {
         register: (definition, component) => { slots.push({ definition, component }); return () => {} },
       },
       remote: undefined,
+      inject: (deps, register) => { if (deps.includes('remote.session') && ctx.remote?.session) register(ctx) },
       on: () => () => {},
       effect: () => {},
     }

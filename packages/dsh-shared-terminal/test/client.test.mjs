@@ -5,9 +5,14 @@ import vm from 'node:vm'
 import { setImmediate as settled } from 'node:timers/promises'
 
 const source = readFileSync(new URL('../src/client.js', import.meta.url), 'utf8')
-function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, value: [{ id: 'term-a' }] }), fetchImpl = async () => ({ ok: true, json: async () => ({}) }), roots = [], storage = new Map() } = {}) {
+function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, value: [{ id: 'term-a' }] }), fetchImpl = async () => ({ ok: true, json: async () => ({}) }), roots = [], storage = new Map(), binding = true } = {}) {
   let definition, component
   const effects = [], calls = [], seen = [], refs = [], timers = []
+  // 面板补查定时器走假时钟:禁用后是否还留待发回调、回调是否真被取消都可判定
+  const timeouts = new Map(), cleared = []
+  const intervalCleared = []
+  const disposals = [], binds = [], refreshes = [], localWrites = []
+  let nextTimer = 0
   let index = 0, declared = false, active = true, mountedSession = 'session-a'
   const React = {
     createElement(type, props, ...children) {
@@ -34,7 +39,14 @@ function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, val
     },
   }
   const views = []
-  const webTerminals = { view(sessionId, key, contentId, terminalId) { views.push([sessionId, key, contentId, terminalId]); return { state: { getSnapshot: () => ({}) }, dispose() {} } } }
+  // 宿主 view 的原始实现:包装必须可还原,断言以它为准
+  const hostView = function view(sessionId, key, contentId, terminalId) {
+    views.push([sessionId, key, contentId, terminalId])
+    return { state: { getSnapshot: () => ({}) }, refresh: () => refreshes.push([sessionId, key, contentId, terminalId]), dispose() {} }
+  }
+  const webTerminals = { view: hostView }
+  if (binding === true) webTerminals.bind = (sessionId, contentId, terminalId) => { binds.push([sessionId, contentId, terminalId]) }
+  else if (typeof binding === 'function') webTerminals.bind = binding
   const remote = { terminal: { async list(sessionId) { seen.push(sessionId); return listed(sessionId) } } }
   // 自愈只扫 [data-sidebar-terminal];其余选择器由各用例的节点桩承担
   const documentStub = {
@@ -52,9 +64,16 @@ function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, val
       getItem: (key) => (storage.has(key) ? storage.get(key) : null),
       setItem: (key, value) => { storage.set(key, String(value)) },
     },
+    // 宿主私有键一律不该被插件直写:任何 localStorage 写入都留档供断言
+    localStorage: {
+      getItem: () => null,
+      setItem: (key, value) => { localWrites.push([key, String(value)]) },
+      removeItem: () => {},
+    },
     setInterval: (fn) => { timers.push(fn); return timers.length },
-    setTimeout: (fn, ms) => setTimeout(fn, ms),
-    clearInterval: () => {},
+    setTimeout: (fn) => { const id = ++nextTimer; timeouts.set(id, fn); return id },
+    clearTimeout: (id) => { cleared.push(id); timeouts.delete(id) },
+    clearInterval: (id) => { intervalCleared.push(id) },
     window: { __ModuleLoader__: { load(value) { definition = value } } },
   })
   assert.equal(definition.id, '@mzzsfy/dsh-shared-terminal')
@@ -64,14 +83,25 @@ function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, val
     inject(name, factory) { assert.equal(name, 'tool.call.toolview'); declared = true; factory() },
     register(meta, view) { assert.equal(declared, true); assert.equal(meta.key, 'terminal'); component = view; return () => { active = false } },
   }
-  plugin.apply({ remote, slots, sidebarRight, webTerminals, locale: { register: () => {} }, effect: (fn) => fn() })
+  // effect 的清理函数按卸载序反向执行,与 fiber 释放一致
+  const ctx = {
+    remote, slots, sidebarRight, webTerminals, locale: { register: () => {} },
+    effect(factory) { const dispose = factory(); if (typeof dispose === 'function') disposals.push(dispose); return dispose },
+  }
+  const mount = () => plugin.apply(ctx)
+  mount()
   return {
-    calls, seen, views, webTerminals, plugin, document: documentStub, storage,
+    calls, seen, views, webTerminals, plugin, hostView, binds, refreshes, localWrites, timeouts, cleared, intervalCleared,
+    document: documentStub, storage,
     setSession(id) { mountedSession = id },
     render(props) { index = 0; return component(props) },
     // 面板创建按 PANEL_GAP_MS 串行,flush 要等队列走完
     async flush() { const pending = effects.splice(0).map((effect) => effect()); await settled(); return pending },
     async heal() { for (const timer of timers) await timer() },
+    // 模拟 fiber 卸载/禁用后新代重装(HMR)
+    dispose() { for (const dispose of disposals.splice(0).reverse()) dispose() },
+    mount,
+    runPendingNudges() { for (const [id, fire] of [...timeouts]) { timeouts.delete(id); fire() } },
   }
 }
 test('Given no terminal panel, When reopening result, Then a panel is opened at the terminal address', async () => {
@@ -468,6 +498,28 @@ test('Given the terminal tab is hidden, When healing ticks, Then it is skipped',
   assert.deepEqual(clicks, [])
 })
 
+test('Given a pump query is still in flight, When the generation is disposed, Then its late answer cannot click', async () => {
+  const clicks = []
+  let release
+  let querySignal
+  const app = healingFixture({
+    roots: [fakeRoot({ clicks })],
+    fetchImpl: (url, init) => {
+      querySignal = init.signal
+      return new Promise((resolve) => { release = resolve })
+    },
+  })
+  const ticking = app.heal()
+  await settled()
+  assert.equal(typeof release, 'function', '自愈 tick 已发出泵查询')
+  app.dispose()
+  assert.deepEqual(app.intervalCleared, [1], '卸载须清掉自愈定时器')
+  assert.equal(querySignal.aborted, true, '在途查询须随代际一起中止')
+  release({ ok: true, json: async () => ({ ok: true, attached: false }) })
+  await ticking
+  assert.deepEqual(clicks, [], '卸载后迟到的泵结果不得再接管输入')
+})
+
 test('Given the panel first frame runs before navigation lands, When the terminal view mounts, Then the layout contentId fills the gap', () => {
   const app = fixture({ tabs: [{ sessionId: 'session-a', kind: 'terminal', tabId: 'tab7', contentId: 'dsh-resource://dsh-shared-terminal/panel/term-a' }] })
   app.webTerminals.view('session-a', 'tab7', undefined, undefined, undefined)
@@ -484,4 +536,87 @@ test('Given navigation already resolved, When the view mounts, Then the patch pa
   const app = fixture({})
   app.webTerminals.view('session-a', 'tab9', 'sidebar://terminal/2f1c', 'term-z', 'pwsh')
   assert.deepEqual(app.views[0], ['session-a', 'tab9', 'sidebar://terminal/2f1c', 'term-z'])
+})
+
+// ── P2-42:首帧包装的生命周期(随 fiber 安装、禁用还原) ──────────────────
+
+test('Given a disposed generation, When the host view is called again, Then the original host implementation is restored', () => {
+  const app = fixture({ tabs: [{ sessionId: 'session-a', kind: 'terminal', tabId: 'tab7', contentId: 'dsh-resource://dsh-shared-terminal/panel/term-a' }] })
+  assert.notEqual(app.webTerminals.view, app.hostView, 'apply 期间须装上首帧包装')
+  app.dispose()
+  assert.equal(app.webTerminals.view, app.hostView, '禁用/卸载须把宿主实现还回去')
+  app.webTerminals.view('session-a', 'tab7', undefined, undefined, undefined)
+  assert.deepEqual(app.views[0], ['session-a', 'tab7', undefined, undefined], '还原后宿主首帧不再被补参')
+})
+
+test('Given HMR replaces the generation, When the next generation applies, Then its own patch is installed again', () => {
+  const tabs = [{ sessionId: 'session-a', kind: 'terminal', tabId: 'tab7', contentId: 'dsh-resource://dsh-shared-terminal/panel/term-a' }]
+  const app = fixture({ tabs })
+  app.dispose()
+  assert.equal(app.webTerminals.view, app.hostView, '卸载须先还原,不留「已打过补丁」的痕迹')
+  // 旧代的还原不得留下「已打过补丁」的标记,否则新代装不上自己的包装
+  app.mount()
+  assert.notEqual(app.webTerminals.view, app.hostView, '新代须重新装上包装')
+  app.webTerminals.view('session-a', 'tab7', undefined, undefined, undefined)
+  assert.deepEqual(app.views.at(-1), ['session-a', 'tab7', 'dsh-resource://dsh-shared-terminal/panel/term-a', 'term-a'])
+  app.dispose()
+  assert.equal(app.webTerminals.view, app.hostView, '新代卸载同样要还原')
+})
+
+test('Given another owner replaced the view after this generation, When it is disposed, Then that implementation is left alone', () => {
+  const app = fixture({})
+  const foreign = function view() { return undefined }
+  app.webTerminals.view = foreign
+  app.dispose()
+  assert.equal(app.webTerminals.view, foreign, '只还原自己装的包装,不覆盖别人的实现')
+})
+
+// ── P2-43:绑定经宿主公开接口写入 ─────────────────────────────────────────
+
+test('Given an opened terminal panel, When the tab is created, Then the content binding is seeded through the public host API', async () => {
+  const app = fixture({ tabs: [] })
+  app.render(props('open'))
+  await app.flush()
+  assert.deepEqual(app.binds, [['session-a', 'dsh-resource://dsh-shared-terminal/panel/term-a', 'term-a']], '建面板前用公开 bind 预写 contentId→terminalId')
+  assert.deepEqual(app.localWrites, [], '不得手写宿主私有 localStorage 键')
+})
+
+test('Given a host generation without the binding API, When the panel opens, Then navigation still lands', async () => {
+  const app = fixture({ tabs: [], binding: false })
+  app.render(props('open'))
+  await app.flush()
+  assert.equal(app.calls.filter((call) => call[0] === 'reveal').length, 1, '绑定接口缺失不得影响开面板')
+  assert.deepEqual(app.binds, [])
+})
+
+test('Given the host bind implementation throws, When the panel opens, Then navigation still lands', async () => {
+  const app = fixture({ tabs: [], binding: () => { throw new Error('bind failed') } })
+  app.render(props('open'))
+  await app.flush()
+  assert.equal(app.calls.filter((call) => call[0] === 'reveal').length, 1, '绑定只是兜底,抛错不得阻断导航')
+})
+
+// ── P3:面板补查定时器随卸载取消 ─────────────────────────────────────────
+
+const ADDRESS = 'dsh-resource://dsh-shared-terminal/panel/term-a'
+
+test('Given a freshly opened panel, When the nudge delays elapse, Then the host view is asked to re-query once per delay', async () => {
+  const app = fixture({ tabs: [] })
+  app.render(props('open'))
+  await app.flush()
+  assert.equal(app.timeouts.size, 2, '两档延迟各排一个补查')
+  app.runPendingNudges()
+  assert.deepEqual(app.refreshes.map((call) => call[2]), [ADDRESS, ADDRESS])
+})
+
+test('Given pending panel nudges, When the generation is disposed, Then every scheduled re-query is cancelled', async () => {
+  const app = fixture({ tabs: [] })
+  app.render(props('open'))
+  await app.flush()
+  const scheduled = [...app.timeouts.keys()]
+  assert.equal(scheduled.length, 2)
+  app.dispose()
+  assert.equal(app.timeouts.size, 0, '卸载须清掉待发定时器')
+  assert.deepEqual([...app.cleared].sort((a, b) => a - b), scheduled, 'clearTimeout 须逐个作用到已排的补查')
+  assert.deepEqual(app.refreshes, [], '取消后不会有迟到补查打到宿主')
 })

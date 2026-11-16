@@ -180,12 +180,21 @@ window.__ModuleLoader__.load({
       return -1
     }
 
+    // 首扫/打开会话守卫:存在非末条展开行(归属未知,可能为用户手动或上一代插件)
+    // 时不自动展开末行,首帧不制造第二条展开。rows 为任意行形态,headable 判定可识别行。
+    function hasForeignExpandedRow(rows, headable) {
+      let last = -1
+      rows.forEach((row, index) => { if (headable(row)) last = index })
+      return rows.some((row, index) => index !== last && headable(row) && row.expanded)
+    }
+
     // 打开会话/刷新:展开最后一条可识别思考行,其余保持收起。
     // 仅依据内建字段(data-state / aria-expanded)判定,不依赖正文挂载;
     // 存在运行行(流式接管)或其他展开行(用户手动意图)时不干预。
     function planFinal(rows) {
       const actions = []
       if (rows.some((row) => row.headable && row.state === STATE_RUNNING)) return { actions }
+      if (hasForeignExpandedRow(rows, (row) => row.headable)) return { actions }
       let last = -1
       for (let index = rows.length - 1; index >= 0; index -= 1) {
         if (rows[index].headable) {
@@ -194,9 +203,6 @@ window.__ModuleLoader__.load({
         }
       }
       if (last < 0) return { actions }
-      for (let index = 0; index < rows.length; index += 1) {
-        if (index !== last && rows[index].headable && rows[index].expanded) return { actions }
-      }
       if (!rows[last].expanded) actions.push({ index: last, kind: 'expand' })
       return { actions }
     }
@@ -297,7 +303,7 @@ window.__ModuleLoader__.load({
       // (测试桩/异常形态)不记录,保持原语义。已知权衡:宽松已读按登记时文本快照
       // 前缀命中,后续回合以该全文为前缀的展开行会被压制自动展开(概率低,cap
       // 裁剪有界),换取收起意图跨重建存活。
-      if (!target.expanded && target.uid !== undefined && registry.expanded.has(target.uid)) {
+      if (!target.expanded && target.uid !== undefined && registry.expanded.has(target.uid) && !target.plugged) {
         if (target.bodyText !== '') putSeen(registry.read, undefined, target.bodyText)
         return { actions }
       }
@@ -379,10 +385,12 @@ window.__ModuleLoader__.load({
       }
 
       // 手动识别:已展开且无插件闩锁 → manual(永不干预);正文未挂载不识别。
-      // 仅在插件已展开过行(current 在场)后识别:首轮既存展开行视为中性,
-      // 与思考机"无 running 行不干预"同构,防首扫把用户历史展开误判挡住目标行
-      if (options.suppressManual !== true && registry.current !== null) {
+      // 常规扫描不依赖 current 是否在场:用户手动行先于 current 判定登记,避免被
+      // 末行目标收编后收起;首扫由 suppressManual 保持既存展开行中性。
+      if (options.suppressManual !== true) {
         for (const row of rows) {
+          // 无 current 时缺 uid 的行无法与同文本目标区分,不登记为手动,避免误挡目标
+          if (registry.current === null && row.uid === undefined) continue
           if (!row.expandable || !row.expanded || row.bodyText === '' || row.plugged) continue
           if (seenKey(registry.marks, row.uid, row.bodyText) !== null) continue
           if (isCurrentRow(row.uid, row.bodyText)) continue
@@ -458,7 +466,11 @@ window.__ModuleLoader__.load({
         actions.push({ index: targetIndex, kind: 'expand' })
         if (target.uid !== undefined) capSet(registry.expanded.add(target.uid))
       }
-      if (target.bodyText !== '') registerCurrent(registry, target.uid, target.bodyText)
+      // 与思考机同一首扫守卫:既存展开行(suppressManual)属中性,不得登记为插件
+      // current/expanded,否则下一拍常规扫描被 isCurrent 挡住,手动意图识别永久失效
+      if (target.bodyText !== '' && !(target.expanded && options.suppressManual === true)) {
+        registerCurrent(registry, target.uid, target.bodyText)
+      }
       return { actions }
     }
     /* LOGIC-END */
@@ -474,11 +486,16 @@ window.__ModuleLoader__.load({
     // 插件动作闩锁:展开记入、收起解除,语义为"自上次收起以来的插件动作",
     // 保证用户收起后再手动展开同一条能被识别为手动意图(至多一条展开契约)
     let pluginExpandedEls = new WeakSet()
+    // 首扫时既有展开行视为中性:后续常规扫描不得把它们当作新出现的外来展开行,
+    // 否则既有的"手动行与新末行并存"会被守卫误伤
+    let neutralExpandedEls = new WeakSet()
     let applyingAction = false
     // 用户手动折叠过程组的回合(回合号):该回合过程组不再由插件展开
     let manualTurns = new Set()
-    // 已自动展开过程组的回合(回合号):防同一回合重复点击
+    // 已自动展开过程组的回合(回合号):只记录点击成功,防同一回合重复点击
     let openedTurns = new Set()
+    // 过程组点击重试:宿主吞掉点击后按行头同款间隔重试,期间扫描暂停行决策
+    let pendingProcessClick = null
     // 待提交的行头点击:宿主吞掉点击(重渲染/挂载瞬态)时按间隔重试,期间扫描
     // 暂停行决策,避免把未生效点击误判成用户收起
     let pendingClick = null
@@ -565,18 +582,57 @@ window.__ModuleLoader__.load({
     // 因此不可见也不可决策;展开最新回合过程组让行重新可见。用户手动折叠过的
     // 回合不展开,已展开过的回合不重复点击。
     function ensureLatestTurnOpen(container) {
+      if (pendingProcessClick !== null) return false
       const buttons = container.querySelectorAll(SELECTOR_PROCESS)
       const last = buttons[buttons.length - 1]
       if (last === undefined) return false
       const turn = last.getAttribute(ATTR_PROCESS)
       // 宿主把过程组收起/展开多次时,点击成功后清掉记录,回合完成折叠后仍可再展开;
       // 记录只用于抑制"点了没生效"的重复点击
-      if (last.getAttribute(ATTR_EXPANDED) !== 'false') { if (turn !== null) openedTurns.delete(turn); return false }
+      if (last.getAttribute(ATTR_EXPANDED) !== 'false') {
+        if (turn !== null) openedTurns.delete(turn)
+        return false
+      }
       if (turn === null || manualTurns.has(turn) || openedTurns.has(turn)) return false
-      openedTurns.add(turn)
       applyingAction = true
       try { last.click() } finally { applyingAction = false }
+      // 点击被宿主吞掉时不在 openedTurns 留下成功记录,按固定间隔重试同一按钮;
+      // 重试期间 ensure 不再点击,行决策可继续按当前行集进行
+      if (last.getAttribute(ATTR_EXPANDED) !== 'true') {
+        pendingProcessClick = { el: last, turn, tries: 0, timer: null }
+        pendingProcessClick.timer = setTimeout(settleProcessClick, CLICK_RETRY_DELAY_MS)
+      } else {
+        openedTurns.add(turn)
+      }
       return true
+    }
+
+    // 用户手动收起不经 applyAction(闩锁解除只发生在插件 collapse 分支):
+    // 已经切换到更新回合的旧 current 行被收起时视为已读,不再恢复;仍属最新回合
+    // 的 current 收起则可能是宿主重置 aria,保留闩锁交由 plan 重展开。
+    function releaseLatchIfCollapsed(described, latestTurn) {
+      if (registry.current === null) return
+      const row = described.find((item) => item.uid === registry.current.uid)
+      if (row === undefined || row.expanded || hasHiddenAncestor(row.el)) return
+      // 进行中的回合不渲染过程组按钮时,latestTurn 仍是上一回合:当前行回合号更大
+      // 即无切换证据,按宿主重置保留闩锁。无过程组(latestTurn null)同理。
+      if (latestTurn === null || row.turn === latestTurn) return
+      const latestNumber = toTurnNumber(latestTurn)
+      const rowNumber = toTurnNumber(row.turn)
+      if (latestNumber !== null && rowNumber !== null && rowNumber > latestNumber) return
+      pluginExpandedEls.delete(row.el)
+      row.plugged = false
+    }
+
+    // 工具开关切换前,把已由宿主提交收起的 current 行按用户意图落账;常规扫描不调用,
+    // 避免把宿主重置 aria 误判成用户已读。
+    function releaseToolLatchIfCollapsed(described) {
+      if (toolsRegistry.current === null) return
+      const row = described.find((item) => item.uid === toolsRegistry.current.uid)
+      if (row !== undefined && !row.expanded && !hasHiddenAncestor(row.el)) {
+        pluginExpandedEls.delete(row.el)
+        row.plugged = false
+      }
     }
 
     // 宿主隐藏或重置已完成过程的折叠后,只恢复仍由插件负责的最新回合末行;
@@ -656,6 +712,7 @@ window.__ModuleLoader__.load({
       if (applyingAction) return
       // 用户手动操作优先:终止未完成点击的重试链,避免把收起误判成点击未提交
       if (pendingClick !== null) { clearTimeout(pendingClick.timer); pendingClick = null }
+      if (pendingProcessClick !== null) { clearTimeout(pendingProcessClick.timer); pendingProcessClick = null }
       // 最近折叠头优先:行头命中即只按行处理,不再向上找过程组头(过程组内容若包在
       // 按钮内,点击行头不得被记成收起过程组)。行头只在收到收起动作时让渡所有权
       const rowHead = event.target.closest?.(SELECTOR_HEAD)
@@ -730,6 +787,37 @@ window.__ModuleLoader__.load({
       pending.timer = setTimeout(settleClick, CLICK_RETRY_DELAY_MS)
     }
 
+    // 过程组按钮与行头同款点击重试:元素失联/用户介入/达上限即结束,成功才记 openedTurns
+    function settleProcessClick() {
+      const pending = pendingProcessClick
+      if (pending === null) return
+      if (!pending.el.isConnected || manualTurns.has(pending.turn)) {
+        pendingProcessClick = null
+        scheduleScan()
+        return
+      }
+      if (pending.el.getAttribute(ATTR_EXPANDED) === 'true') {
+        openedTurns.add(pending.turn)
+        pendingProcessClick = null
+        scheduleScan()
+        return
+      }
+      if (pending.tries >= CLICK_RETRY_LIMIT) {
+        pendingProcessClick = null
+        return
+      }
+      pending.tries += 1
+      applyingAction = true
+      try { pending.el.click() } finally { applyingAction = false }
+      if (pending.el.getAttribute(ATTR_EXPANDED) === 'true') {
+        openedTurns.add(pending.turn)
+        pendingProcessClick = null
+        scheduleScan()
+        return
+      }
+      pending.timer = setTimeout(settleProcessClick, CLICK_RETRY_DELAY_MS)
+    }
+
     // ---- 置底回补 ----
 
     const containerMetrics = (container) => ({
@@ -799,10 +887,16 @@ window.__ModuleLoader__.load({
       const thinkRows = latestThink !== undefined && manualTurns.has(String(latestThink.turn ?? ''))
         ? []
         : described.filter((row) => !manualTurns.has(String(row.turn ?? '')))
+      // 常规扫描同样沿用首扫守卫:新出现的外来展开行(非首扫中性行、非本机 current)
+      // 存在时不展开末行,避免实时扫描绕过 800ms 首扫保护制造第二条展开
+      const thinkForeign = thinkRows.filter((row) => !neutralExpandedEls.has(row.el)
+        && !(registry.current !== null && registry.current.uid === row.uid)
+        && findSeenKey(registry.manual, row.uid, row.bodyText) === null)
+      const thinkBlocked = hasForeignExpandedRow(thinkForeign, (row) => row.headable)
 
       if (!restoreHiddenCurrent(container, registry, described, latestTurn)) {
-        releaseLatchIfCollapsed(described)
-        if (thinkRows.length > 0) {
+        releaseLatchIfCollapsed(described, latestTurn)
+        if (thinkRows.length > 0 && !thinkBlocked) {
           for (const action of plan(registry, toLogicRows(thinkRows)).actions) applyAction(container, thinkRows, action)
         }
       }
@@ -817,9 +911,12 @@ window.__ModuleLoader__.load({
         const usableTools = latestTool !== undefined && manualTurns.has(String(latestTool.turn ?? ''))
           ? []
           : tools.filter((row) => !manualTurns.has(String(row.turn ?? '')))
+        const toolForeign = usableTools.filter((row) => !neutralExpandedEls.has(row.el)
+          && !(toolsRegistry.current !== null && toolsRegistry.current.uid === row.uid)
+          && findSeenKey(toolsRegistry.manual, row.uid, row.bodyText) === null)
+        const toolsBlocked = hasForeignExpandedRow(toolForeign, (row) => row.expandable)
         if (!restoreHiddenCurrent(container, toolsRegistry, tools, latestTurn)) {
-          releaseToolLatchIfCollapsed(tools)
-          if (usableTools.length > 0) {
+          if (usableTools.length > 0 && !toolsBlocked) {
             for (const action of planTools(toolsRegistry, toToolLogicRows(usableTools)).actions) applyAction(container, usableTools, action)
           }
         }
@@ -829,20 +926,8 @@ window.__ModuleLoader__.load({
     }
 
     // 用户手动收起不经 applyAction(闩锁解除只发生在插件 collapse 分支):
-    // current 行转为收起时在此解除闩锁,使"收起后再手动展开同一条"能被
-    // 识别为手动意图,不被新行出现时的接管收起强收。被宿主隐藏的行不是用户收起。
-    function releaseLatchIfCollapsed(described) {
-      if (registry.current === null) return
-      const row = described.find((item) => item.uid === registry.current.uid)
-      if (row !== undefined && !row.expanded && !hasHiddenAncestor(row.el)) pluginExpandedEls.delete(row.el)
-    }
-
-    // 工具机同款:工具 current 行被用户收起时解除闩锁
-    function releaseToolLatchIfCollapsed(described) {
-      if (toolsRegistry.current === null) return
-      const row = described.find((item) => item.uid === toolsRegistry.current.uid)
-      if (row !== undefined && !row.expanded && !hasHiddenAncestor(row.el)) pluginExpandedEls.delete(row.el)
-    }
+    // 捕获阶段点击已删除 pluginExpandedEls;这里不再按 aria 折叠臆测用户意图,
+    // 否则宿主重置 aria 会被当成已读,插件展开的末行永久不再恢复。
 
     // 展开动作落定后登记当前行,使 plan()/planTools() 识别为插件展开而非手动意图;
     // 行已收起(用户抢先)则放弃登记。machine='think'|'tools' 决定登记目标机
@@ -952,9 +1037,11 @@ window.__ModuleLoader__.load({
       registry = createRegistry()
       toolsRegistry = createToolsRegistry()
       pluginExpandedEls = new WeakSet()
+      neutralExpandedEls = new WeakSet()
       manualTurns = new Set()
       openedTurns = new Set()
       if (pendingClick !== null) { clearTimeout(pendingClick.timer); pendingClick = null }
+      if (pendingProcessClick !== null) { clearTimeout(pendingProcessClick.timer); pendingProcessClick = null }
       finalState.el = null
       finalState.awaitRegister = false
       finalState.pending = true
@@ -970,22 +1057,30 @@ window.__ModuleLoader__.load({
       const container = observedContainer
       if (container === null) return 0
       const described = collectRows(container)
+      for (const row of described) {
+        if (row.expanded) neutralExpandedEls.add(row.el)
+      }
       const gateRows = expandAll ? [...described, ...collectToolRows(container)] : described
       if (rowDecisionsBlocked(container, gateRows)) return 0
       // 首扫窗口内用户已收起最新回合过程组:该回合行不参与首扫决策
       const latestThink = described.at(-1)
       const thinkManual = latestThink !== undefined && manualTurns.has(String(latestThink.turn ?? ''))
-      const actions = thinkManual ? [] : plan(registry, toLogicRows(described), { suppressManual: true }).actions
+      const thinkBlocked = hasForeignExpandedRow(described, (row) => row.headable)
+      const actions = thinkManual || thinkBlocked ? [] : plan(registry, toLogicRows(described), { suppressManual: true }).actions
       for (const action of actions) applyAction(container, described, action)
       if (described.some((row) => row.headable)) finalState.pending = false
       // 工具机首扫同抑制(仅全部消息模式)
       if (expandAll) {
         const tools = collectToolRows(container)
+        for (const row of tools) {
+          if (row.expanded) neutralExpandedEls.add(row.el)
+        }
         const latestTool = tools.at(-1)
         const usableTools = latestTool !== undefined && manualTurns.has(String(latestTool.turn ?? ''))
           ? []
           : tools.filter((row) => !manualTurns.has(String(row.turn ?? '')))
-        const toolActions = planTools(toolsRegistry, toToolLogicRows(usableTools), { suppressManual: true }).actions
+        const toolsBlocked = hasForeignExpandedRow(usableTools, (row) => row.expandable)
+        const toolActions = toolsBlocked ? [] : planTools(toolsRegistry, toToolLogicRows(usableTools), { suppressManual: true }).actions
         for (const action of toolActions) applyAction(container, usableTools, action)
         if (usableTools.some((row) => row.expandable)) toolsFinalState.pending = false
       }
@@ -1051,6 +1146,7 @@ window.__ModuleLoader__.load({
       clearTimeout(owner.initialTimer)
       if (owner.pinFrame !== null) cancelAnimationFrame(owner.pinFrame)
       if (pendingClick !== null) { clearTimeout(pendingClick.timer); pendingClick = null }
+      if (pendingProcessClick !== null) { clearTimeout(pendingProcessClick.timer); pendingProcessClick = null }
       if (window[SLOT_KEY] === owner) delete window[SLOT_KEY]
       if (slot !== owner) return
       bodySentinel = null

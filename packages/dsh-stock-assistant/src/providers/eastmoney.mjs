@@ -1,5 +1,5 @@
 // 东财公开行情接口适配器:quotes/catalog/search/kline。非官方端点,无SLA;延迟未知,f124为来源秒级时间戳。
-import { normalizeQuote, makeSecurity, securityId, StockError, MARKET_META, sharesFromLots } from '../market-model.mjs'
+import { normalizeQuote, makeSecurity, securityId, StockError, MARKET_META, sharesFromLots, zonedUnixSeconds } from '../market-model.mjs'
 // 官方默认端点表(key 供 instance.endpoints 覆盖, 反代/镜像场景由 ctx.endpoints 提供同名 key)
 const DEFAULT_ENDPOINTS = {
   quotes: 'https://push2.eastmoney.com/api/qt/ulist.np/get',
@@ -47,7 +47,7 @@ async function getJson(ctx, url) {
   return response.json().catch(() => { throw new StockError('BAD_PAYLOAD', '来源响应不是JSON', 502) })
 }
 export const eastmoney = {
-  descriptor: { adapterId: 'eastmoney', capabilities: ['quotes', 'catalog', 'search', 'kline'], markets: ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON'], instruments: ['equity'], maxQuoteBatch: 60, credential: 'none', description: '东方财富公开接口：免凭据，八市场目录，行情/K线/搜索，非官方无SLA', endpointKeys: [{ key: 'quotes', label: '行情批量' }, { key: 'list', label: '证券目录' }, { key: 'search', label: '搜索联想' }, { key: 'kline', label: 'K线历史' }, { key: 'trend', label: '分时' }] },
+  descriptor: { adapterId: 'eastmoney', capabilities: ['quotes', 'catalog', 'search', 'kline', 'trend'], markets: ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON'], instruments: ['equity'], maxQuoteBatch: 60, credential: 'none', description: '东方财富公开接口：免凭据，八市场目录，行情/K线/分时/搜索，非官方无SLA', endpointKeys: [{ key: 'quotes', label: '行情批量' }, { key: 'list', label: '证券目录' }, { key: 'search', label: '搜索联想' }, { key: 'kline', label: 'K线历史' }, { key: 'trend', label: '分时' }] },
   async probe(request, ctx) {
     if (request.capability === 'catalog' || request.capability === 'search') {
       // 探针词按市场用代表证券代码(茅台/平安只对沪深有效, 其他市场返回 0 项会误判 denied)。
@@ -55,12 +55,16 @@ export const eastmoney = {
       if (!result.items.length) throw new StockError('NO_DATA', '来源未返回可校验数据，暂不能确认能力就绪', 422)
       return { status: 'ready', capability: request.capability, market: request.market, instrument: 'equity' }
     }
-    // kline 探针直接拉代表证券 3 根日K(实测列义/端点全链),quotes 探针沿用行情行。
-    if (request.capability === 'kline') {
+    // kline 探针直接拉代表证券 3 根日K(实测列义/端点全链), trend 探针拉当日分时, quotes 探针沿用行情行。
+    // 各能力必须探各自的上游端点: 拿行情接口冒充分时, 「分时就绪」只会是假阳性
+    if (request.capability === 'kline' || request.capability === 'trend') {
+      const capability = request.capability
       const code = PROBE_SECURITY[request.market] || '000001'
-      const result = await this.kline({ ...request, securityId: `${request.market}:equity:${code}`, code, period: '1d', adjust: 'qfq', limit: 3 }, ctx)
+      const result = await this[capability](capability === 'kline'
+        ? { ...request, securityId: `${request.market}:equity:${code}`, code, period: '1d', adjust: 'qfq', limit: 3 }
+        : { ...request, securityId: `${request.market}:equity:${code}`, code, period: 'trend', limit: 50 }, ctx)
       if (!result.candles.length) throw new StockError('NO_DATA', '来源未返回可校验数据，暂不能确认能力就绪', 422)
-      return { status: 'ready', capability: 'kline', market: request.market, instrument: 'equity' }
+      return { status: 'ready', capability, market: request.market, instrument: 'equity' }
     }
     // 美股前缀的逐个试探已收敛进 quotes,探针只需一次结果,避免探针与真实取价走两套路径
     const security = request.securities?.[0] || { exchange: request.market, code: PROBE_SECURITY[request.market] || '000001' }
@@ -152,22 +156,22 @@ export const eastmoney = {
   secidOf(request, ctx) {
     return secidFor({ exchange: request.market, code: request.code }, ctx)
   },
+  // 美股默认前缀猜错时经搜索联想解析真实 MktNum, 重试一次并缓存映射; K线与分时共用同一条兜底
+  async withUsFallback(request, ctx, buildUrl, hasData, label) {
+    let body = await getJson(ctx, buildUrl(this.secidOf(request, ctx)))
+    if (hasData(body)) return body
+    if (!isUSExchange(request.market)) throw new StockError('NO_DATA', `来源未返回此证券${label}`, 422)
+    const resolved = await this.resolveUsSecid(request, ctx)
+    if (!resolved) throw new StockError('NO_DATA', `来源未返回此证券${label}`, 422)
+    ctx.usSymbols?.set(`US:${request.code}`, resolved)
+    body = await getJson(ctx, buildUrl(`${resolved.mktNum}.${request.code}`))
+    if (!hasData(body)) throw new StockError('NO_DATA', `来源未返回此证券${label}`, 422)
+    return body
+  },
   async kline(request, ctx) {
-    if (request.period === 'trend') return this.trend(request, ctx)
-    const secid = this.secidOf(request, ctx)
-    const url = `${endpointOf(ctx, 'kline')}?secid=${secid}&fields1=f1,f2,f3&fields2=${KLINE_FIELDS}&klt=${KLT[request.period]}&fqt=1&end=20500101&lmt=${request.limit}`
-    const body = await getJson(ctx, url)
-    if (!body?.data?.klines) {
-      if (request.market !== 'XNAS' && request.market !== 'XNYS') throw new StockError('NO_DATA', '来源未返回此证券K线', 422)
-      // 美股默认前缀猜错: 经搜索联想解析真实 MktNum, 重试一次;仍失败 NO_DATA。
-      const resolved = await this.resolveUsSecid(request, ctx)
-      if (!resolved) throw new StockError('NO_DATA', '来源未返回此证券K线', 422)
-      ctx.usSymbols?.set(`US:${request.code}`, resolved)
-      const retryUrl = url.replace(`secid=${secid}`, `secid=${resolved.mktNum}.${request.code}`)
-      const retryBody = await getJson(ctx, retryUrl)
-      if (!retryBody?.data?.klines) throw new StockError('NO_DATA', '来源未返回此证券K线', 422)
-      return buildKlineResponse(request, retryBody.data, ctx)
-    }
+    const klt = KLT[request.period]
+    if (!klt) throw new StockError('INVALID_PARAM', '东财 K 线只支持日/周/月，分时请走分时能力', 400)
+    const body = await this.withUsFallback(request, ctx, secid => `${endpointOf(ctx, 'kline')}?secid=${secid}&fields1=f1,f2,f3&fields2=${KLINE_FIELDS}&klt=${klt}&fqt=1&end=20500101&lmt=${request.limit}`, body => !!body?.data?.klines, 'K线')
     return buildKlineResponse(request, body.data, ctx)
   },
   async resolveUsSecid(request, ctx) {
@@ -177,10 +181,7 @@ export const eastmoney = {
     return row ? { mktNum: row.MktNum, jys: row.JYS || null, at: ctx.now() } : null
   },
   async trend(request, ctx) {
-    const secid = this.secidOf(request, ctx)
-    const url = `${endpointOf(ctx, 'trend')}?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=${TREND_FIELDS}&iscr=0&ndays=1`
-    const body = await getJson(ctx, url)
-    if (!body?.data?.trends) throw new StockError('NO_DATA', '来源未返回此证券分时', 422)
+    const body = await this.withUsFallback(request, ctx, secid => `${endpointOf(ctx, 'trend')}?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=${TREND_FIELDS}&iscr=0&ndays=1`, body => !!body?.data?.trends, '分时')
     // 东财分时的时间戳一律按北京时间给出(八市场实测: 日股 08:00 对应东京 09:00 开盘, 英股 16:00 对应伦敦 08:00),
     // 不是市场本地时间; 之前按市场时区解释, 日韩英的横轴整体偏了几小时。
     const candles = body.data.trends.map(row => {
@@ -198,35 +199,6 @@ export const eastmoney = {
 
 function num_or_null(v) { const n = parseFloat(v); return Number.isFinite(n) ? n : null }
 
-
-// 时区格式化器按来源时区复用:分时逐行换算时,新建 formatter 的成本主导解析
-const ZONE_FORMATTERS = new Map()
-
-function zoneFormatter(timeZone) {
-  let formatter = ZONE_FORMATTERS.get(timeZone)
-  if (formatter === undefined) {
-    formatter = new Intl.DateTimeFormat('en-US', {
-      timeZone, hour12: false,
-      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
-    })
-    ZONE_FORMATTERS.set(timeZone, formatter)
-  }
-  return formatter
-}
-
-// 把指定时区的"YYYY-MM-DD HH:MM"换算成 Unix 秒, 时刻属于哪个时区由调用方给定;
-// 无时区元数据或格式不符时返回 null, 调用方回退自造时间轴
-function zonedUnixSeconds(stamp, timeZone) {
-  const match = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(stamp)
-  if (!match || !timeZone) return null
-  const [, y, mo, d, hh, mm] = match.map(Number)
-  const localAsUtc = Date.UTC(y, mo - 1, d, hh, mm)
-  const parts = zoneFormatter(timeZone).formatToParts(new Date(localAsUtc))
-  const rendered = Object.fromEntries(parts.map((part) => [part.type, part.value]))
-  const asUtc = Date.UTC(Number(rendered.year), Number(rendered.month) - 1, Number(rendered.day),
-    Number(rendered.hour) % 24, Number(rendered.minute), Number(rendered.second))
-  return Math.floor((localAsUtc - (asUtc - localAsUtc)) / 1000)
-}
 
 // klines CSV → 合同响应: 逐行解析/升序/重复拒绝; complete 由 dktotal 与请求量判定(源截断标志)。
 function buildKlineResponse(request, data, ctx) {

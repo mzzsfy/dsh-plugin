@@ -386,11 +386,12 @@ export function uploadExt(filename) {
   return match ? match[1].toLowerCase() : ''
 }
 
-// 上传校验:扩展名白名单 + 单文件上限 + 总量上限。
+// 上传校验:扩展名白名单 + 空文件 + 单文件上限 + 总量上限。
 export function validateUpload({ filename, size, totalBytes }) {
   const ext = uploadExt(filename)
   if (AUDIO_EXTS.indexOf(ext) < 0) return { ok: false, reason: '仅支持 ' + AUDIO_EXTS.join(' / ') }
-  if (!(size >= 1) || size > UPLOAD_FILE_MAX_BYTES) return { ok: false, reason: '单文件超过上限' }
+  if (!(size >= 1)) return { ok: false, reason: '文件为空' }
+  if (size > UPLOAD_FILE_MAX_BYTES) return { ok: false, reason: '单文件超过上限' }
   if (totalBytes + size > UPLOAD_TOTAL_MAX_BYTES) return { ok: false, reason: '音效总量超过上限' }
   return { ok: true, ext }
 }
@@ -455,45 +456,137 @@ export function validateMappingId(id, uploadedIds) {
   return uploadedIds.indexOf(id) >= 0 || Object.prototype.hasOwnProperty.call(BUILTIN_TONES, id)
 }
 
-// 请求体读取:超限先 reject 再断流;'close' 兜底 reject,防 destroy 后悬挂。
-export function readRawBody(req, maxBytes) {
+// 超限请求体的丢弃排空:超限不提前回 413——请求体未读完就响应会触发 TCP RST,
+// 真实 fetch 收不到 413。丢弃已读数据继续 resume 排空到 end 后再回 413;
+// 累计排空超过上限或超时才兜底中止,并以 closeConnection 让响应侧关闭连接。
+export const BODY_DRAIN_MAX_BYTES = 64 * 1024 * 1024
+export const BODY_DRAIN_TIMEOUT_MS = 5 * 1000
+// 声明体不超过上限的该倍数时,排空完成后保留 keep-alive;更大声明体 413 后不复用连接
+export const BODY_KEEPALIVE_FACTOR = 16
+
+// 请求体读取:正常路径聚合到 end;超限路径丢弃数据排空到 end 后由路由统一回 413。
+// 'close'/'error' 兜底 reject,防客户端中断后悬挂。
+export function readRawBody(req, maxBytes, { res = null, drainMaxBytes = BODY_DRAIN_MAX_BYTES, drainTimeoutMs = BODY_DRAIN_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
     let settled = false
-    const fail = (error) => {
-      if (settled) return
-      settled = true
-      reject(error)
-    }
-    const done = (value) => {
-      if (settled) return
-      settled = true
-      resolve(value)
-    }
     let size = 0
+    let drained = 0
+    let overflowed = false
+    let closeConnection = false
+    let drainTimer = null
     const chunks = []
-    req.on('data', (chunk) => {
-      size += chunk.length
-      if (size > maxBytes) {
-        fail(new Error('请求体超过上限'))
-        req.destroy()
-        return
+    const declared = typeof req.headers?.['content-length'] === 'string' ? Number(req.headers['content-length']) : NaN
+    const declaredBytes = Number.isFinite(declared) && declared >= 0 ? declared : undefined
+    const overLimit = (close) => {
+      const error = new Error('请求体超过上限')
+      error.statusCode = 413
+      if (close) error.closeConnection = true
+      return error
+    }
+    // 响应刷出后再销毁 socket,保证 413 先到客户端;无 res 时直接销毁
+    const destroyAfterResponse = () => {
+      const socket = req.socket
+      if (!socket) return
+      const destroy = () => (typeof socket.destroySoon === 'function' ? socket.destroySoon() : socket.destroy?.())
+      if (res && typeof res.once === 'function' && res.writableFinished !== true) res.once('finish', () => setImmediate(destroy))
+      else destroy()
+    }
+    const stopDrain = () => {
+      if (!overflowed) return
+      overflowed = false
+      if (drainTimer !== null) {
+        clearTimeout(drainTimer)
+        drainTimer = null
       }
-      chunks.push(chunk)
-    })
-    req.on('end', () => done(Buffer.concat(chunks)))
+      req.removeListener?.('data', onDrain)
+    }
+    const settle = (settler, value) => {
+      if (settled) return
+      settled = true
+      stopDrain()
+      req.removeListener?.('data', onData)
+      settler(value)
+    }
+    // 异常长/慢客户端兜底:不再等 end,交响应侧带 close 收尾
+    const abortDrain = () => {
+      if (settled || !overflowed) return
+      req.pause?.()
+      destroyAfterResponse()
+      settle(reject, overLimit(true))
+    }
+    function onDrain(chunk) {
+      drained += chunk.length
+      if (drained > drainMaxBytes) abortDrain()
+    }
+    const fail = (error) => settle(reject, error)
+    // 先挂兜底监听再读体:超限路径暂停/排空期间也可能收到客户端中断
     req.on('error', fail)
     req.on('close', () => {
       if (!req.readableEnded) fail(new Error('请求连接中断'))
     })
+    const startDrain = () => {
+      overflowed = true
+      chunks.length = 0
+      closeConnection = !(declaredBytes !== undefined && declaredBytes <= maxBytes * BODY_KEEPALIVE_FACTOR)
+      req.removeListener('data', onData)
+      req.on('data', onDrain)
+      drainTimer = setTimeout(abortDrain, drainTimeoutMs)
+      drainTimer.unref?.()
+      req.resume?.()
+    }
+    function onData(chunk) {
+      size += chunk.length
+      if (size > maxBytes) {
+        startDrain()
+        return
+      }
+      chunks.push(chunk)
+    }
+    req.on('data', onData)
+    req.on('end', () => {
+      if (!overflowed) {
+        settle(resolve, Buffer.concat(chunks))
+        return
+      }
+      // 请求体已完整排空:此时回 413 不会再触发 RST;声明体明显超限则不复用连接
+      if (closeConnection) destroyAfterResponse()
+      settle(reject, overLimit(closeConnection))
+    })
   })
+}
+
+// 失败原因可能原样回显请求 URL,其中 userinfo 携带账号与密码;呈现/响应前剥离。
+// 已知端点按 URL 解析精确处理:能解析即只保留 *** 的 userinfo 占位,不能解析则
+// 整体占位(不冒险回显原文);其余 URL 形状片段再按正则兜底打码。
+const URL_USERINFO = /([a-z][a-z0-9+.-]*:\/\/)[^\s/?#]*@/gi
+
+function redactEndpoint(url) {
+  try {
+    const parsed = new URL(url)
+    if (!parsed.username && !parsed.password) return url
+    parsed.username = '***'
+    parsed.password = ''
+    return parsed.href
+  } catch {
+    return '<webhook URL>'
+  }
+}
+
+export function redactUrlUserinfo(text, knownUrl) {
+  let message = String(text)
+  if (typeof knownUrl === 'string' && knownUrl.length > 0) {
+    message = message.split(knownUrl).join(redactEndpoint(knownUrl))
+  }
+  return message.replace(URL_USERINFO, '$1***@')
 }
 
 // webhook 直发:未配置跳过;任何失败不抛出(fire-and-forget,不重试)。
 // 返回真实投递结果供测试按钮呈现,真实通知路径以 void 忽略。
 export async function sendWebhook({ url, payload, fetchImpl = fetch }) {
   if (typeof url !== 'string' || url.trim().length === 0) return { ok: false, detail: '未配置 webhook' }
+  const endpoint = url.trim()
   try {
-    const response = await fetchImpl(url.trim(), {
+    const response = await fetchImpl(endpoint, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload),
@@ -501,8 +594,10 @@ export async function sendWebhook({ url, payload, fetchImpl = fetch }) {
     })
     return { ok: response.ok, detail: 'HTTP ' + response.status }
   } catch (error) {
-    // webhook 不可达不打扰主循环,失败即弃,错误信息仅供测试路径呈现
-    return { ok: false, detail: error && error.message ? error.message : String(error) }
+    // webhook 不可达不打扰主循环,失败即弃,错误信息仅供测试路径呈现;
+    // 同一 message 可能含完整请求 URL,凭据脱敏后才允许离开本函数
+    const message = error && error.message ? error.message : String(error)
+    return { ok: false, detail: redactUrlUserinfo(message, endpoint) }
   }
 }
 
@@ -625,7 +720,8 @@ export function imBoundBotIds(list) {
 }
 
 // 配置补丁校验:顶层键白名单,webhookUrl 空串(禁用)或 http(s) URL,
-// 时长须非负整数,开关须布尔,enabled 分类须已知,kindRoutes 条目须合法通道名单。
+// 时长须非负整数,开关须布尔,enabled 分类须已知,kindRoutes 须为已知分类到
+// 合法通道数组的对象(写侧严格拒绝,宽松归一仅服务历史脏数据读侧)。
 // 返回归一化后的补丁。
 export function validateConfigPatch(patch) {
   if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) return { ok: false, reason: '补丁须为对象' }
@@ -708,7 +804,21 @@ export function validateConfigPatch(patch) {
     next.enabled = { ...enabled }
   }
   if ('kindRoutes' in patch) {
-    next.kindRoutes = normalizeKindRoutes(patch.kindRoutes).routes
+    const routes = patch.kindRoutes
+    if (routes === null || typeof routes !== 'object' || Array.isArray(routes)) return { ok: false, reason: 'kindRoutes 须为对象' }
+    const nextRoutes = {}
+    for (const key of Object.keys(routes)) {
+      if (CATEGORIES.indexOf(key) < 0) return { ok: false, reason: '未知分类: ' + key }
+      const list = routes[key]
+      if (!Array.isArray(list)) return { ok: false, reason: 'kindRoutes 分类值须为数组: ' + key }
+      const seen = new Set()
+      for (const channel of list) {
+        if (typeof channel !== 'string' || CHANNELS.indexOf(channel) < 0) return { ok: false, reason: '未知通道: ' + String(channel) }
+        seen.add(channel)
+      }
+      nextRoutes[key] = [...seen]
+    }
+    next.kindRoutes = nextRoutes
   }
   return { ok: true, patch: next }
 }
@@ -716,7 +826,7 @@ export function validateConfigPatch(patch) {
 // kindRoutes 读侧归一化:分类 → 放行通道名单。非对象回空(全通道);未知分类的
 // 条目剔除、名单内未知通道剔除,余项去重保序(与 normalizeImTargets 同宽松读侧:
 // 剔除非法而非整体拒绝);全空名单等价全禁(合法,用户显式配置),与缺省键(全放行)区分。
-// 写侧校验(validateConfigPatch)对未知分类/通道拒绝,两侧严格度分工不同。
+// 写侧 validateConfigPatch 对未知分类/通道/非对象/非数组一律 400,宽松归一不回流写路径。
 export function normalizeKindRoutes(raw) {
   if (raw === null || raw === undefined || typeof raw !== 'object' || Array.isArray(raw)) return { ok: true, routes: {} }
   const routes = {}

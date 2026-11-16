@@ -45,9 +45,9 @@ import {
   trimPrompts,
   reorderPrompts,
 } from './core.mjs'
-import { ensureCacheDir, listWorkspaceCachesCached, readPrompts, readWorkspaceCache, updatePrompts, updateWorkspaceCache } from './history-cache.mjs'
+import { ensureCacheDir, listWorkspaceCachesCached, readPrompts, readWorkspaceCache, removeWorkspaceCache, updatePrompts, updateWorkspaceCache } from './history-cache.mjs'
 import { createRequire } from 'node:module'
-import { withHostGate } from './route-gate.mjs'
+import { withRouteGate } from './route-gate.mjs'
 
 export const name = 'dsh-context-manager'
 
@@ -60,10 +60,17 @@ const NAMESPACE = 'context'
 export const CLONE_BUSY_MESSAGE = '已有克隆任务进行中,请等待完成'
 
 // 进程树终止:git 在 Windows 派生子进程(git-remote-https 等),单杀留孤儿;
-// POSIX 直接 SIGKILL;进程已退出时终止动作按无害失败处理
-function killTree(pid) {
-  if (process.platform === 'win32') {
-    spawn('taskkill', ['/pid', String(pid), '/T', '/F'])
+// POSIX 直接 SIGKILL;进程已退出时终止动作按无害失败处理。taskkill 不可用时
+// spawn 会异步抛 error,必须监听否则成为未捕获异常拖垮宿主;windowsHide 防闪窗。
+export function killTree(pid, { spawnImpl = spawn, platform = process.platform } = {}) {
+  if (platform === 'win32') {
+    try {
+      const child = spawnImpl('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+      if (child && typeof child.on === 'function') child.on('error', () => {})
+      if (child && typeof child.unref === 'function') child.unref()
+    } catch {
+      // taskkill 不可用不阻断克隆失败收尾
+    }
     return
   }
   try {
@@ -118,14 +125,16 @@ function sendJson(res, status, payload) {
 }
 
 // 错误响应出口:业务错误(Error 无错误码)原样透传消息;系统级错误(带 fs 错误码,
-// message 内嵌绝对路径)收敛为固定文案,原始错误仅进服务端日志
+// message 内嵌绝对路径)收敛为固定文案,原始错误仅进服务端日志;带 statusCode 的
+// 请求体错误按状态码回(413 超限),其余一律 400
 function respondError(ctx, res, error) {
   const isSystem = Boolean(error && typeof error.code === 'string' && error.code !== '')
   if (isSystem && ctx.logger) ctx.logger.warn('context-manager 系统级错误: ' + String(error && error.stack || error))
   const message = isSystem
     ? MESSAGES.systemError
     : (error && error.message ? error.message : String(error))
-  sendJson(res, 400, { error: message })
+  const status = Number.isInteger(error?.statusCode) ? error.statusCode : 400
+  sendJson(res, status, { error: message })
 }
 
 function readSettings(ctx, config) {
@@ -160,23 +169,74 @@ async function persistToggle(ctx, patch) {
   await editor.edit(entry, (current) => ({ ...current, ...patch }))
 }
 
-function readBody(req) {
-  const BODY_MAX_BYTES = 64 * 1024
+const BODY_MAX_BYTES = 64 * 1024
+// 请求体读取时限:半开连接不得永久占住 handler(克隆单飞行由此泄漏)
+export const BODY_READ_TIMEOUT_MS = 30 * 1000
+
+function requestAbortedError() {
+  const error = new Error('请求已中止')
+  error.statusCode = 400
+  return error
+}
+
+// 请求体读取:data/end 正常路径之外监听 aborted/close/error 与总时限;超限不销毁
+// socket(销毁会让 413 响应送不出),暂停读取后由路由回错误响应。
+export function readBody(req) {
   return new Promise((resolve, reject) => {
+    let settled = false
     let size = 0
     const chunks = []
-    req.on('data', (chunk) => {
+    const finish = (settler, value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      req.off?.('data', onData)
+      req.off?.('end', onEnd)
+      req.off?.('error', onError)
+      req.off?.('aborted', onAborted)
+      req.off?.('close', onClose)
+      settler(value)
+    }
+    const onData = (chunk) => {
+      if (settled) return
       size += chunk.length
       if (size > BODY_MAX_BYTES) {
-        reject(new Error('请求体超过上限'))
-        req.destroy()
+        chunks.length = 0
+        const error = new Error('请求体超过上限')
+        error.statusCode = 413
+        req.pause?.()
+        finish(reject, error)
         return
       }
       chunks.push(chunk)
-    })
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
-    req.on('error', reject)
+    }
+    const onEnd = () => finish(resolve, Buffer.concat(chunks).toString('utf8'))
+    const onError = (error) => finish(reject, error)
+    const onAborted = () => finish(reject, requestAbortedError())
+    // close 在正常 end 后也会触发;只有未 complete 才是客户端中途断开
+    const onClose = () => {
+      if (!req.complete) finish(reject, requestAbortedError())
+    }
+    const timer = setTimeout(() => {
+      const error = new Error('请求体读取超时')
+      error.statusCode = 408
+      finish(reject, error)
+    }, BODY_READ_TIMEOUT_MS)
+    req.on('data', onData)
+    req.on('end', onEnd)
+    req.on('error', onError)
+    req.on('aborted', onAborted)
+    req.on('close', onClose)
   })
+}
+
+async function readJsonBody(req) {
+  const raw = await readBody(req)
+  try {
+    return JSON.parse(raw)
+  } catch {
+    throw new Error(MESSAGES.badJsonBody)
+  }
 }
 
 function rejectMethod(req, res, method) {
@@ -249,9 +309,89 @@ export function apply(ctx, config) {
     }
   }
 
+  // 产物定位:真源是公共 SessionPersistence 契约的 stat()/list() 快照——快照的
+  // location 由后端按实际选中的代解析,旧代产物(formatStatus=migration-required)
+  // 指向真实历史文件。locate() 是 JSONL 后端的私有诊断钩子,按当前代编码拼路径,
+  // 旧代时会指向不存在的当前代文件,只能给没有 stat/list 的旧宿主兜底。
+  // 两者都缺失或抛错按「不可定位」降级(无指纹路径),不得把请求打成 400;
+  // 降级事实落一次 warn 保持可观测(逐请求刷日志会淹没日志)
+  let locateFallbackWarned = false
+  function artifactFromSnapshot(snapshot) {
+    const location = snapshot && snapshot.location
+    if (!location || typeof location.path !== 'string') return undefined
+    return {
+      path: location.path,
+      sizeBytes: Number.isFinite(snapshot.sizeBytes) ? snapshot.sizeBytes : undefined,
+      revision: snapshot.revision,
+      formatStatus: snapshot.formatStatus,
+    }
+  }
+  // listSessions 记录在未来宿主上可能直接携带 location(当前 0.2.x 没有)
+  function artifactFromRecord(recordItem) {
+    const location = recordItem && recordItem.location
+    if (!location || typeof location.path !== 'string') return undefined
+    return { path: location.path, sizeBytes: Number.isFinite(recordItem.sizeBytes) ? recordItem.sizeBytes : undefined }
+  }
+  async function statArtifact(persistence, header) {
+    if (persistence && typeof persistence.stat === 'function') {
+      try {
+        const snapshot = await persistence.stat(header.id)
+        if (snapshot === undefined) return { status: 'missing', path: null }
+        const artifact = artifactFromSnapshot(snapshot)
+        return artifact === undefined
+          ? { status: 'missing', path: null }
+          : { status: 'ready', ...artifact }
+      } catch (error) {
+        if (!locateFallbackWarned) {
+          locateFallbackWarned = true
+          if (ctx.logger) ctx.logger.warn('context-manager 持久化 stat() 失败,尝试 locate 兜底: ' + String(error && error.stack || error))
+        }
+      }
+    }
+    if (persistence && typeof persistence.locate === 'function') {
+      try {
+        const located = persistence.locate(header)
+        if (located && typeof located.path === 'string') return { status: 'ready', path: located.path }
+      } catch {
+        // 落入下方统一告警
+      }
+    }
+    if (!locateFallbackWarned) {
+      locateFallbackWarned = true
+      if (ctx.logger) ctx.logger.warn('context-manager 持久化后端不提供 stat/locate 产物观测:历史输入对齐退化为逐次读取,不落指纹缓存')
+    }
+    return undefined
+  }
+  // 批量车道一次 list() 拿全部快照,避免逐会话 stat 的代际扫描开销;
+  // list 不可用/失败返回 undefined,由调用方逐会话 statArtifact 兜底
+  async function listArtifacts(persistence) {
+    if (!persistence || typeof persistence.list !== 'function') return undefined
+    try {
+      const snapshots = await persistence.list()
+      if (!Array.isArray(snapshots)) return undefined
+      // 旧宿主 list() 返回裸 header(无 header 字段):不能当快照用,退回逐会话观测
+      if (snapshots.length > 0 && snapshots.every((snapshot) => !snapshot || !snapshot.header)) return undefined
+      const map = new Map()
+      for (const snapshot of Array.isArray(snapshots) ? snapshots : []) {
+        const id = snapshot && snapshot.header ? String(snapshot.header.id) : undefined
+        if (id === undefined) continue
+        map.set(id, artifactFromSnapshot(snapshot) ?? null)
+      }
+      return map
+    } catch (error) {
+      if (!locateFallbackWarned) {
+        locateFallbackWarned = true
+        if (ctx.logger) ctx.logger.warn('context-manager 持久化 list() 失败,退回逐会话 stat: ' + String(error && error.stack || error))
+      }
+      return undefined
+    }
+  }
+
   // 单会话提取:产物 stat 指纹与缓存一致即复用(零解压);否则解压并更新缓存。
   // 运行中会话走内存指纹(runtimeExtracts),其余走磁盘 extracts。
-  // 指纹之外校验提取器版本:版本不符即重解压(升级后旧条目自动补齐新格式)
+  // 指纹之外校验提取器版本:版本不符即重解压(升级后旧条目自动补齐新格式)。
+  // 无指纹(后端无 stat/list 观测能力/产物未落盘)仍落 extracts 条目记录(指纹占位 0/0):
+  // session 范围需要该会话全集,而检查侧对无指纹记录不做新鲜度判定
   async function extractSession(recordItem, fingerprint, extracts, isRunning) {
     const sessionId = recordItem.header.id
     const known = isRunning ? runtimeExtracts.get(sessionId) : extracts[sessionId]
@@ -262,8 +402,14 @@ export function apply(ctx, config) {
     const snapshot = await ctx.sessionQuery.readSession(sessionId)
     const entries = extractUserInputs(snapshot.events)
     const record = { v: HISTORY_EXTRACT_VERSION, mtimeMs: fingerprint === null ? 0 : fingerprint.mtimeMs, size: fingerprint === null ? 0 : fingerprint.size, entries }
-    if (isRunning) runtimeExtracts.set(sessionId, record)
-    else if (fingerprint !== null) extracts[sessionId] = record
+    if (isRunning) {
+      runtimeExtracts.set(sessionId, record)
+    } else {
+      extracts[sessionId] = record
+      // 运行→停止:内存记录是停止前的快照,产物最终 flush 后可能已含新尾部;
+      // 停止后一律以磁盘记录为准,陈旧内存记录不得继续服务 session 范围
+      runtimeExtracts.delete(sessionId)
+    }
     return entries
   }
 
@@ -276,22 +422,43 @@ export function apply(ctx, config) {
       const agents = ctx.get('agents')
       const persistence = ctx.get('sessionPersistence')
       const records = await ctx.sessionQuery.listSessions()
+      const workspaceRecords = records
+        .filter((recordItem) => recordItem.header.cwd !== undefined && samePath(recordItem.header.cwd, cwd))
       // subagent 会话不在主列表(官方 sessionVisible 以 origin 排除):其输入是
       // 任务提示与注入文本而非人类输入,且会以更近的产物时间挤占扫描窗口,必须排除
-      const window = records
-        .filter((recordItem) => !isDerivedSessionHeader(recordItem.header)
-          && recordItem.header.cwd !== undefined && samePath(recordItem.header.cwd, cwd))
-        .slice(0, HISTORY_SESSION_SCAN_LIMIT)
-      // 该 cwd 无主会话(纯 subagent 派生或已清空):无可对齐内容,缓存读写一并跳过
-      if (window.length === 0) return
+      const mainRecords = workspaceRecords.filter((recordItem) => !isDerivedSessionHeader(recordItem.header))
+      const window = mainRecords.slice(0, HISTORY_SESSION_SCAN_LIMIT)
+      // 缓存只认宿主清单里仍存在的本工作区主会话:清单是全量逻辑语料(含已归档),
+      // 故归档会话仍在册、其输入保留;子会话与已删除会话的 sid 一律不在册,写回
+      // 前剔除。liveIds 取全部主会话而非截断后的窗口——窗口外的老会话条目仍有效,
+      // 只是不再重解压
+      const liveIds = new Set(mainRecords.map((recordItem) => String(recordItem.header.id)))
+      if (window.length === 0) {
+        // 本工作区已无主会话(会话全被删除,或只剩 subagent 派生):缓存里每个 sid
+        // 都失去来源。旧版在此提前 return 跳过读写,已删除会话的输入就永久留在
+        // 浮层里。删除整份缓存而不是写空:空文件仍在 global 轮询的缓存清单里,
+        // 会每轮再触发本工作区对齐
+        await removeWorkspaceCache(cacheDir, cwd)
+        return
+      }
       const cached = await readWorkspaceCache(cacheDir, cwd)
       const extracts = cached && cached.extracts ? { ...cached.extracts } : {}
+      // 一次 list() 取全量产物快照:旧代产物也能拿到真实历史文件路径,
+      // 不逐会话做代际扫描;list 不可用时逐会话 statArtifact 兜底
+      const artifactMap = await listArtifacts(persistence)
       const fresh = []
       let sliceStart = Date.now()
       for (const recordItem of window) {
         const isRunning = isSessionRunning({ agents, sessionId: recordItem.header.id })
-        const located = persistence ? persistence.locate(recordItem.header) : undefined
-        const fingerprint = located ? await safeStat(located.path) : null
+        let artifact = artifactFromRecord(recordItem)
+        if (artifact === undefined && artifactMap !== undefined) {
+          artifact = artifactMap.get(String(recordItem.header.id)) ?? null
+        }
+        if (artifact === undefined) {
+          const resolved = await statArtifact(persistence, recordItem.header)
+          artifact = resolved && resolved.status === 'ready' ? resolved : null
+        }
+        const fingerprint = artifact && artifact.path ? await safeStat(artifact.path) : null
         if (fingerprint !== null && fingerprint.size > maxArtifactBytes) continue
         try {
           const entries = await extractSession(recordItem, fingerprint, extracts, isRunning)
@@ -305,19 +472,24 @@ export function apply(ctx, config) {
           sliceStart = Date.now()
         }
       }
-      // extracts 裁剪:仅保留窗口内非运行会话(运行中走内存,窗口外已淘汰)
+      // extracts 裁剪:仅保留窗口内非运行会话(运行中走内存,窗口外已淘汰)。
+      // 同时清掉已停止会话的内存提取记录:停止后产物可能继续 flush 出尾部,
+      // 内存快照不再更新,留着只会让 session 范围缺尾(读取侧另有运行中门控)
       const windowIds = new Set(window.map((recordItem) => recordItem.header.id))
+      for (const sessionId of runtimeExtracts.keys()) {
+        if (!isSessionRunning({ agents, sessionId })) runtimeExtracts.delete(sessionId)
+      }
       const prunedExtracts = {}
       for (const [sessionId, record] of Object.entries(extracts)) {
         if (windowIds.has(sessionId) && !isSessionRunning({ agents, sessionId })) prunedExtracts[sessionId] = record
       }
-      // 既往污染自愈:旧版本窗口未排除 subagent,其条目已混入缓存 entries——
-      // 合并前按列表 origin 识别清除;会话已删除的条目无法识别,随时间被挤出
-      const subagentIds = new Set(records
-        .filter((recordItem) => isDerivedSessionHeader(recordItem.header))
-        .map((recordItem) => recordItem.header.id))
+      // 既往污染自愈:旧版本窗口未排除 subagent,其条目已混入缓存 entries;已删除
+      // 会话同理(首条保护让它们永不被时间挤出)——合并前按本工作区现存主会话
+      // 白名单剔除。无 sid 的早期条目无从判归属,保留(不触发首条保护)。
+      // 清理时机即批量对齐时机(启动对齐/global 范围轮询/缓存缺失与未落盘兜底):
+      // workspace 范围正常路径只读缓存,不为清理付全量清单扫描
       await updateWorkspaceCache(cacheDir, cwd, (latest) => {
-        const legacyEntries = (latest?.entries ?? []).filter((entry) => entry.sid === undefined || !subagentIds.has(entry.sid))
+        const legacyEntries = (latest?.entries ?? []).filter((entry) => entry.sid === undefined || liveIds.has(entry.sid))
         const nextExtracts = { ...latest?.extracts }
         // 提取期间已有新提交的会话保留新指纹,陈旧任务只能替换自己的基线。
         for (const sessionId of new Set([...Object.keys(cached?.extracts ?? {}), ...Object.keys(prunedExtracts)])) {
@@ -335,31 +507,36 @@ export function apply(ctx, config) {
 
   // 焦点对齐执行体:只解目标会话并写回(实时追加路径),走独立焦点车道,
   // 不被批量车道的分钟级解压堵死。不裁剪 extracts(裁剪由批量对齐负责),
-  // 只新增/更新目标会话指纹
+  // 只新增/更新目标会话指纹。无指纹(后端无 stat/list 能力/产物未落盘)仍解压取数:
+  // 观测能力缺失只影响指纹复用,不得让对齐静默停摆;失败落 warn(车道会吞掉
+  // 异常,不记日志则对齐失败在服务端完全不可见)
   function alignSessionFocus(cwd, header) {
     return enqueueFocusAlign(async () => {
-      // 与批量窗口同一不变式:缓存只收主会话输入(正常 UI 不可达,防直调路由)
-      if (isDerivedSessionHeader(header)) return
-      const sessionId = header.id
-      const persistence = ctx.get('sessionPersistence')
-      const located = persistence ? persistence.locate(header) : undefined
-      const fingerprint = located ? await safeStat(located.path) : null
-      if (fingerprint === null || fingerprint.size > maxArtifactBytes) return
-      const isRunning = isSessionRunning({ agents: ctx.get('agents'), sessionId })
-      const cached = await readWorkspaceCache(cacheDir, cwd)
-      const extracts = cached && cached.extracts ? { ...cached.extracts } : {}
-      const entries = await extractSession({ header }, fingerprint, extracts, isRunning)
-      await updateWorkspaceCache(cacheDir, cwd, (latest) => {
-        const nextExtracts = { ...latest?.extracts }
-        if (JSON.stringify(nextExtracts[sessionId]) === JSON.stringify(cached?.extracts?.[sessionId])) {
-          if (extracts[sessionId]) nextExtracts[sessionId] = extracts[sessionId]
-          else delete nextExtracts[sessionId]
-        }
-        return {
-          entries: aggregateInputs((latest?.entries ?? []).concat(entries.map((entry) => ({ ...entry, sid: sessionId }))), { limit: HISTORY_INPUT_LIMIT, maxChars: HISTORY_INPUT_MAX_CHARS }),
-          extracts: nextExtracts,
-        }
-      })
+      try {
+        // 与批量窗口同一不变式:缓存只收主会话输入(正常 UI 不可达,防直调路由)
+        if (isDerivedSessionHeader(header)) return
+        const sessionId = header.id
+        const resolved = await statArtifact(ctx.get('sessionPersistence'), header)
+        const fingerprint = resolved && resolved.status === 'ready' && resolved.path ? await safeStat(resolved.path) : null
+        if (fingerprint !== null && fingerprint.size > maxArtifactBytes) return
+        const isRunning = isSessionRunning({ agents: ctx.get('agents'), sessionId })
+        const cached = await readWorkspaceCache(cacheDir, cwd)
+        const extracts = cached && cached.extracts ? { ...cached.extracts } : {}
+        const entries = await extractSession({ header }, fingerprint, extracts, isRunning)
+        await updateWorkspaceCache(cacheDir, cwd, (latest) => {
+          const nextExtracts = { ...latest?.extracts }
+          if (JSON.stringify(nextExtracts[sessionId]) === JSON.stringify(cached?.extracts?.[sessionId])) {
+            if (extracts[sessionId]) nextExtracts[sessionId] = extracts[sessionId]
+            else delete nextExtracts[sessionId]
+          }
+          return {
+            entries: aggregateInputs((latest?.entries ?? []).concat(entries.map((entry) => ({ ...entry, sid: sessionId }))), { limit: HISTORY_INPUT_LIMIT, maxChars: HISTORY_INPUT_MAX_CHARS }),
+            extracts: nextExtracts,
+          }
+        })
+      } catch (error) {
+        if (ctx.logger) ctx.logger.warn('context-manager 历史输入聚焦对齐失败(' + header.id + '): ' + String(error && error.stack || error))
+      }
     })
   }
 
@@ -410,6 +587,19 @@ export function apply(ctx, config) {
   // 克隆单飞行守卫:git clone 重且不可并发,完成(含失败)即解锁
   let cloneInFlight = false
 
+  // 单会话提取条目:运行中会话走内存记录(不落盘),其余取 extracts 指纹记录;
+  // 旧缓存无 extracts 时回退全局 entries 过滤(仅历史数据,后续对齐自动补齐)。
+  // 内存记录只服务运行中会话:会话停止后产物可能继续 flush 出尾部,内存快照
+  // 停在停止前,继续优先内存会让 session 范围缺尾且 stale 判定看不到(磁盘已新)
+  function sessionEntriesOf(cached, sessionId, running) {
+    const withSid = (entries) => entries.map((entry) => ({ ...entry, sid: sessionId }))
+    const memory = running ? runtimeExtracts.get(sessionId) : undefined
+    if (memory && Array.isArray(memory.entries)) return withSid(memory.entries)
+    const extracted = cached && cached.extracts ? cached.extracts[sessionId] : undefined
+    if (extracted && Array.isArray(extracted.entries)) return withSid(extracted.entries)
+    return cached ? cached.entries.filter((entry) => entry.sid === sessionId) : []
+  }
+
   // 按范围读取历史:全部直接读持久缓存(毫秒级)立即返回,对齐由后台进行;
   // aligned=false 表示数据未就绪(首次无缓存,或请求会话产物已变而缓存未跟上),
   // client 据此提示等待并静默重拉
@@ -424,40 +614,50 @@ export function apply(ctx, config) {
     const cwd = header.cwd
     if (scope === 'session') {
       if (cwd === undefined) return { inputs: [], aligned: true }
+      // 会话范围取该会话提取全集:全局 entries 受工作区 200 条上限截断且每 sid
+      // 只保留最早一条,长期使用的工作区会让老会话只剩一条;完整数据本就存在
+      // extracts[sid].entries(运行中在内存 runtimeExtracts)。提取版本过期由
+      // check 判 stale 后聚焦对齐补齐。运行中判定在每次读缓存/检查指纹时现取:
+      // 停止瞬间仍可能读到内存快照,但下一次轮询按磁盘指纹判定 stale 并刷新
+      const agents = ctx.get('agents')
       const read = async () => {
         const cached = await readWorkspaceCache(cacheDir, cwd)
+        const isRunning = isSessionRunning({ agents, sessionId })
         return {
           cached,
-          mine: aggregateInputs(cached ? cached.entries.filter((entry) => entry.sid === sessionId) : [], aggregateOptions),
+          mine: aggregateInputs(sessionEntriesOf(cached, sessionId, isRunning), aggregateOptions),
         }
       }
       // 实时追加:产物 stat 与已知指纹不一致 = 会话有新输入未入缓存——聚焦对齐
       // 只解该会话并写回。提取器版本不符同判 stale(升级后旧格式条目在首请求
       // 内经聚焦对齐补齐,不等后台批量)。路由有界等待本次对齐(首条 <3s 预算):
       // 正常会话单次请求内直接拿到新数据;超时(巨产物等)返回既有数据 aligned=false,
-      // 后续轮询流式补齐。巨产物跳过聚焦(解压耗时与内存峰值失控),维持 aligned=true
+      // 后续轮询流式补齐。巨产物跳过聚焦(解压耗时与内存峰值失控),维持 aligned=true。
+      // 产物真源是公共 stat/list 快照(旧代产物也能拿到真实历史文件路径);后端
+      // 两者都没有时才按不可定位处理——每次请求都聚焦重读该会话(不落指纹),
+      // 不退回整工作区对齐(当前会话请求不为邻居付费)
       const check = async (cached) => {
-        const agents = ctx.get('agents')
-        const running = isSessionRunning({ agents, sessionId })
-        const known = running ? runtimeExtracts.get(sessionId) : cached && cached.extracts ? cached.extracts[sessionId] : undefined
-        const located = ctx.get('sessionPersistence') ? ctx.get('sessionPersistence').locate(header) : undefined
-        const fingerprint = located ? await safeStat(located.path) : null
+        const resolved = await statArtifact(ctx.get('sessionPersistence'), header)
+        const fingerprint = resolved && resolved.status === 'ready' && resolved.path ? await safeStat(resolved.path) : null
+        const isRunning = isSessionRunning({ agents, sessionId })
+        const known = isRunning ? runtimeExtracts.get(sessionId) : cached && cached.extracts ? cached.extracts[sessionId] : undefined
         return {
-          // 产物尚未落盘(新会话首轮未 flush):指纹缺失无从判断新鲜度,
+          unlocatable: resolved === undefined,
+          // 产物尚未落盘(新会话首轮未 flush)或后端报无产物:指纹缺失无从判断新鲜度,
           // 只能退回整工作区对齐取数
-          unmaterialized: fingerprint === null,
+          unmaterialized: resolved !== undefined && (resolved.status !== 'ready' || fingerprint === null),
           stale: fingerprint !== null && !(known && known.v === HISTORY_EXTRACT_VERSION && known.mtimeMs === fingerprint.mtimeMs && known.size === fingerprint.size),
           oversize: fingerprint !== null && fingerprint.size > maxArtifactBytes,
         }
       }
       let { cached, mine } = await read()
-      let { unmaterialized, stale, oversize } = await check(cached)
+      let state = await check(cached)
       // 整工作区对齐是重活(全量清单扫描 + 扫描窗口内全部会话解压):只在聚焦对齐
-      // 覆盖不到的两处分界兜底——产物未落盘(无指纹无从判断新鲜度)与工作区缓存
-      // 缺失(巨产物会话跳过聚焦,没有它首开将无人建缓存,浮层永久停在未对齐)。
-      // 常规路径绝不触发:当前会话请求不得为邻居会话付费
-      if (unmaterialized || cached === null) alignWorkspace(cwd)
-      if (stale && !oversize) {
+      // 覆盖不到的分界兜底——产物未落盘(无指纹无从判断新鲜度)与工作区缓存缺失
+      // (巨产物会话跳过聚焦,没有它首开将无人建缓存,浮层永久停在未对齐)。
+      // 不可定位后端由聚焦对齐自建缓存,不为邻居会话付费
+      if (!state.unlocatable && (state.unmaterialized || cached === null)) alignWorkspace(cwd)
+      if (state.unlocatable || (state.stale && !state.oversize)) {
         let focus = pendingFocus.get(sessionId)
         if (!focus) {
           focus = alignSessionFocus(cwd, header).finally(() => pendingFocus.delete(sessionId))
@@ -465,8 +665,11 @@ export function apply(ctx, config) {
         }
         const done = await Promise.race([focus.then(() => true), sleep(HISTORY_FOCUS_WAIT_MS).then(() => false)])
         ;({ cached, mine } = await read())
-        ;({ stale } = await check(cached))
-        if (!done || stale) return { inputs: mine, aligned: false }
+        if (!done) return { inputs: mine, aligned: false }
+        state = await check(cached)
+        // 不可定位后端无指纹可收敛:聚焦对齐落定即视为已对齐(后续请求仍会重读)
+        if (state.unlocatable) return { inputs: mine, aligned: cached !== null }
+        if (state.stale) return { inputs: mine, aligned: false }
         return { inputs: mine, aligned: true }
       }
       return { inputs: mine, aligned: cached !== null }
@@ -485,58 +688,56 @@ export function apply(ctx, config) {
   const routes = [
     {
       // 克隆仓库:resolveCloneRequest 校验(url 形态/父目录存在/目录名单段/目标
-      // 不存在)后 git clone;单飞行守卫在 handler 同步段置位,并发请求直接拒绝;
+      // 不存在)后 git clone。单飞行守卫在请求体读完、即将执行克隆前置位:
+      // 半开/超时请求不会占锁,冷启动排队请求也不会被读体窗口误判为并发。
       // 成功返回 target 路径,由 client 侧继续创建工作区并打开
       path: '/api/context/git-clone',
       handler: async (req, res) => {
         if (!rejectMethod(req, res, 'POST')) return
-        if (cloneInFlight) {
-          sendJson(res, 400, { error: CLONE_BUSY_MESSAGE })
-          return
-        }
-        cloneInFlight = true
         try {
-          let body
-          try {
-            body = JSON.parse(await readBody(req))
-          } catch {
-            throw new Error(MESSAGES.badJsonBody)
+          const body = await readJsonBody(req)
+          if (cloneInFlight) {
+            sendJson(res, 400, { error: CLONE_BUSY_MESSAGE })
+            return
           }
-          const request = await resolveCloneRequest(body, {
-            homedirPath: process.env.DSH_HOME || homedir(),
-            // stat + readdir 归一四态:git 允许克隆进空目录,其余占用形态拒绝
-            targetState: async (target) => {
-              let info
-              try {
-                info = await stat(target)
-              } catch {
-                return TARGET_MISSING
-              }
-              if (!info.isDirectory()) return TARGET_FILE
-              try {
-                return (await readdir(target)).length > 0 ? TARGET_NONEMPTY_DIR : TARGET_EMPTY_DIR
-              } catch {
-                return TARGET_NONEMPTY_DIR
-              }
-            },
-          })
-          // 父目录必须存在:spawn 的 cwd 不存在同样抛 ENOENT,与 git 缺失同码,
-          // 前置校验避免误报「git 不可用」
-          const parentDir = parentOf(request.target)
-          let parentInfo
+          cloneInFlight = true
           try {
-            parentInfo = await stat(parentDir)
-          } catch {
-            parentInfo = null
+            const request = await resolveCloneRequest(body, {
+              homedirPath: process.env.DSH_HOME || homedir(),
+              // stat + readdir 归一四态:git 允许克隆进空目录,其余占用形态拒绝
+              targetState: async (target) => {
+                let info
+                try {
+                  info = await stat(target)
+                } catch {
+                  return TARGET_MISSING
+                }
+                if (!info.isDirectory()) return TARGET_FILE
+                try {
+                  return (await readdir(target)).length > 0 ? TARGET_NONEMPTY_DIR : TARGET_EMPTY_DIR
+                } catch {
+                  return TARGET_NONEMPTY_DIR
+                }
+              },
+            })
+            // 父目录必须存在:spawn 的 cwd 不存在同样抛 ENOENT,与 git 缺失同码,
+            // 前置校验避免误报「git 不可用」
+            const parentDir = parentOf(request.target)
+            let parentInfo
+            try {
+              parentInfo = await stat(parentDir)
+            } catch {
+              parentInfo = null
+            }
+            if (!parentInfo || !parentInfo.isDirectory()) throw new Error('父目录不存在或不是目录:' + parentDir)
+            const result = await runClone({ ...request, parent: parentDir, spawn, treeKill: killTree })
+            if (ctx.logger) ctx.logger.info('context-manager 克隆完成: ' + result.path)
+            sendJson(res, 200, { path: result.path })
+          } finally {
+            cloneInFlight = false
           }
-          if (!parentInfo || !parentInfo.isDirectory()) throw new Error('父目录不存在或不是目录:' + parentDir)
-          const result = await runClone({ ...request, parent: parentDir, spawn, treeKill: killTree })
-          if (ctx.logger) ctx.logger.info('context-manager 克隆完成: ' + result.path)
-          sendJson(res, 200, { path: result.path })
         } catch (error) {
           respondError(ctx, res, error)
-        } finally {
-          cloneInFlight = false
         }
       },
     },
@@ -550,12 +751,7 @@ export function apply(ctx, config) {
             return
           }
           if (!rejectMethod(req, res, 'POST')) return
-          let body
-          try {
-            body = JSON.parse(await readBody(req))
-          } catch {
-            throw new Error(MESSAGES.badJsonBody)
-          }
+          const body = await readJsonBody(req)
           await persistToggle(ctx, { cloneEnabled: Boolean(body && body.enabled) })
           sendJson(res, 200, { enabled: readSettings(ctx, config).cloneEnabled })
         } catch (error) {
@@ -582,8 +778,9 @@ export function apply(ctx, config) {
             return
           }
           // 子 agent 会话的会话范围没有历史聚合语义(对齐入口按 origin 拒绝):
-          // 显式返回空且对齐,避免浮层永久停在未对齐并反复触发路由
-          if (header !== undefined && isDerivedSessionHeader(header)) {
+          // 显式返回空且对齐,避免浮层永久停在未对齐并反复触发路由。
+          // workspace/global 是工作区/全局聚合,与该会话是否为子会话无关,照常返回
+          if (scope === 'session' && header !== undefined && isDerivedSessionHeader(header)) {
             sendJson(res, 200, { inputs: [], aligned: true })
             return
           }
@@ -604,12 +801,7 @@ export function apply(ctx, config) {
       handler: async (req, res) => {
         if (!rejectMethod(req, res, 'POST')) return
         try {
-          let body
-          try {
-            body = JSON.parse(await readBody(req))
-          } catch {
-            throw new Error(MESSAGES.badJsonBody)
-          }
+          const body = await readJsonBody(req)
           const text = typeof body.text === 'string' ? body.text.trim().slice(0, HISTORY_INPUT_MAX_CHARS) : ''
           if (text === '') throw new Error('text 不能为空')
           let collected
@@ -637,12 +829,7 @@ export function apply(ctx, config) {
       handler: async (req, res) => {
         if (!rejectMethod(req, res, 'POST')) return
         try {
-          let body
-          try {
-            body = JSON.parse(await readBody(req))
-          } catch {
-            throw new Error(MESSAGES.badJsonBody)
-          }
+          const body = await readJsonBody(req)
           const from = typeof body.from === 'string' ? body.from.trim().slice(0, HISTORY_INPUT_MAX_CHARS) : ''
           const to = typeof body.to === 'string' ? body.to.trim().slice(0, HISTORY_INPUT_MAX_CHARS) : ''
           if (from === '') throw new Error('from 不能为空')
@@ -665,12 +852,7 @@ export function apply(ctx, config) {
       handler: async (req, res) => {
         if (!rejectMethod(req, res, 'POST')) return
         try {
-          let body
-          try {
-            body = JSON.parse(await readBody(req))
-          } catch {
-            throw new Error(MESSAGES.badJsonBody)
-          }
+          const body = await readJsonBody(req)
           const texts = body && Array.isArray(body.texts) ? body.texts : null
           if (texts === null || !texts.every((text) => typeof text === 'string')) throw new Error('texts 必须是字符串数组')
           const items = await updatePrompts(cacheDir, (current) => reorderPrompts(current, texts))
@@ -691,12 +873,7 @@ export function apply(ctx, config) {
             return
           }
           if (!rejectMethod(req, res, 'POST')) return
-          let body
-          try {
-            body = JSON.parse(await readBody(req))
-          } catch {
-            throw new Error(MESSAGES.badJsonBody)
-          }
+          const body = await readJsonBody(req)
           await persistToggle(ctx, { historyEnabled: Boolean(body && body.enabled) })
           sendJson(res, 200, { enabled: readSettings(ctx, config).historyEnabled })
         } catch (error) {
@@ -714,12 +891,7 @@ export function apply(ctx, config) {
             return
           }
           if (!rejectMethod(req, res, 'POST')) return
-          let body
-          try {
-            body = JSON.parse(await readBody(req))
-          } catch {
-            throw new Error(MESSAGES.badJsonBody)
-          }
+          const body = await readJsonBody(req)
           await persistToggle(ctx, { historyButtonEnabled: Boolean(body && body.enabled) })
           sendJson(res, 200, { enabled: readSettings(ctx, config).historyButtonEnabled })
         } catch (error) {
@@ -737,12 +909,7 @@ export function apply(ctx, config) {
             return
           }
           if (!rejectMethod(req, res, 'POST')) return
-          let body
-          try {
-            body = JSON.parse(await readBody(req))
-          } catch {
-            throw new Error(MESSAGES.badJsonBody)
-          }
+          const body = await readJsonBody(req)
           await persistToggle(ctx, { steerRecallEnabled: Boolean(body && body.enabled) })
           sendJson(res, 200, { enabled: readSettings(ctx, config).steerRecallEnabled })
         } catch (error) {
@@ -760,12 +927,7 @@ export function apply(ctx, config) {
             return
           }
           if (!rejectMethod(req, res, 'POST')) return
-          let body
-          try {
-            body = JSON.parse(await readBody(req))
-          } catch {
-            throw new Error(MESSAGES.badJsonBody)
-          }
+          const body = await readJsonBody(req)
           await persistToggle(ctx, { forkEnabled: Boolean(body && body.enabled) })
           sendJson(res, 200, { enabled: readSettings(ctx, config).forkEnabled })
         } catch (error) {
@@ -783,12 +945,7 @@ export function apply(ctx, config) {
             return
           }
           if (!rejectMethod(req, res, 'POST')) return
-          let body
-          try {
-            body = JSON.parse(await readBody(req))
-          } catch {
-            throw new Error(MESSAGES.badJsonBody)
-          }
+          const body = await readJsonBody(req)
           await persistToggle(ctx, { forkAutoResendEnabled: Boolean(body && body.enabled) })
           sendJson(res, 200, { enabled: readSettings(ctx, config).forkAutoResendEnabled })
         } catch (error) {
@@ -806,12 +963,7 @@ export function apply(ctx, config) {
             return
           }
           if (!rejectMethod(req, res, 'POST')) return
-          let body
-          try {
-            body = JSON.parse(await readBody(req))
-          } catch {
-            throw new Error(MESSAGES.badJsonBody)
-          }
+          const body = await readJsonBody(req)
           await persistToggle(ctx, { copySidEnabled: Boolean(body && body.enabled) })
           sendJson(res, 200, { enabled: readSettings(ctx, config).copySidEnabled })
         } catch (error) {
@@ -822,7 +974,7 @@ export function apply(ctx, config) {
   ]
 
   for (const route of routes) {
-    ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: route.path, handler: withHostGate(ctx, route.handler) }),
+    ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: route.path, handler: withRouteGate(ctx, route.handler) }),
       'dsh-context-manager ' + route.path)
   }
 

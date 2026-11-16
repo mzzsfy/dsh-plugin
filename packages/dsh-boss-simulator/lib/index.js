@@ -3,8 +3,8 @@
 // 公共总线 @mzzsfy/dsh-common-tools 为硬依赖(manifest dependencies 承载)。
 import z from '@deepseek-ai/schemastery'
 import { setupCommonTools, createChangeNotifier } from '@mzzsfy/dsh-common-tools/host'
-import { getControlRuntime, registerControl } from './control.mjs'
-import { registerToolRow } from './tools-row.mjs'
+import { registerControl } from './control.mjs'
+import { registerToolRow, controlRuntimeOf } from './tools-row.mjs'
 
 export const name = 'boss-simulator'
 // 公共总线需要 webServer 的 upgrade 注册面;控制室路由亦要求同一服务
@@ -16,16 +16,15 @@ export const Config = z.object({
 
 export function apply(ctx, config) {
   const cfg = Config(config || {})
-  // 受管角色组合行:在 agent realm 内注册业务工具行;控制室未启动(无运行时)即干净禁用
+  // 受管角色组合行:在 agent realm 内注册业务工具行;控制室未启动(无控制运行时)即干净禁用
   if (cfg.role === 'tools-row') {
-    const runtime = getControlRuntime()
-    if (!runtime) {
+    if (!controlRuntimeOf(ctx)) {
       console.warn('[boss-simulator] tools-row without control runtime, skipped')
       return
     }
     ctx.inject(['tools'], (scope) => {
       // 同 rs-workflow orchestrator 形态:effect 包 register 调用本体,行销毁即注销
-      scope.effect(() => registerToolRow(scope, runtime), 'boss-simulator tools-row')
+      scope.effect(() => registerToolRow(scope), 'boss-simulator tools-row')
     })
     return
   }

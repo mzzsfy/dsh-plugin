@@ -104,11 +104,16 @@ window.__ModuleLoader__.load({
       const [error, setError] = useState(undefined)
       const [expanded, setExpanded] = useState([])
 
-      const reload = () => api(API.state).then(setState).catch((cause) => setError(String(cause.message ?? cause)))
+      // 卸载后不得回写:初读是行 fiber 生命周期内唯一无人触发的异步链,
+      // 迟到响应 setState 会打在已卸载组件上(React 告警;旧代码 finally 里的
+      // disposed 判断是空的,拦不住任何东西)
+      const reload = (alive = () => true) => api(API.state)
+        .then((next) => { if (alive()) setState(next) })
+        .catch((cause) => { if (alive()) setError(String(cause.message ?? cause)) })
 
       useEffect(() => {
         let disposed = false
-        reload().finally(() => { if (disposed) return })
+        void reload(() => !disposed)
         return () => { disposed = true }
       }, [])
 

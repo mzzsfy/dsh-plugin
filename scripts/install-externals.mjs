@@ -5,7 +5,7 @@
 // 用法:node scripts/install-externals.mjs [包根目录相对路径](缺省 packages,枚举子目录)
 import {spawnSync} from 'node:child_process'
 import {readdirSync, existsSync, readFileSync, rmSync} from 'node:fs'
-import {join, basename} from 'node:path'
+import {join, basename, resolve} from 'node:path'
 import {fileURLToPath} from 'node:url'
 
 export const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
@@ -61,9 +61,17 @@ function runNpmInstall({pkgDir, specs, log, name}) {
 }
 
 function main() {
-  const packagesDir = process.argv[2] ?? 'packages'
+  const target = process.argv[2] ?? 'packages'
+  const absolute = resolve(REPO_ROOT, target)
+  // 单包目录(自身含 package.json)与"包含多个包目录的父目录"两种参数都支持
+  const dirs = existsSync(join(absolute, 'package.json')) ? [absolute] : packageDirs(REPO_ROOT, target)
+  if (dirs.length === 0) {
+    console.error(`未找到可安装的包目录: ${target}`)
+    process.exitCode = 1
+    return
+  }
   let failed = 0
-  for (const pkgDir of packageDirs(REPO_ROOT, packagesDir)) {
+  for (const pkgDir of dirs) {
     const outcome = installExternals({pkgDir, log: line => console.log(line)})
     if (!outcome.skipped && !outcome.ok) failed++
   }

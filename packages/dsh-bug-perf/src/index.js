@@ -1,13 +1,11 @@
 // dsh-bug-perf Host 半区:把行配置归一化后经配置路由交给浏览器半区,接收设置页保存,
-// 并接收浏览器定期上报的性能采样(只落本地临时文件,用于定位“越用越卡”)。
+// 并接收浏览器定期上报的性能采样(只落宿主数据目录,用于定位“越用越卡”)。
 // 会话列表瘦身在宿主执行(包装 sessionController.list),其余补丁在客户端执行;
-// 这里不做认证,缺 webServer 或路由注册失败都不影响宿主。
-import { withHostGate } from './route-gate.mjs'
-import { appendFileSync, existsSync, renameSync, statSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+// webServer 是硬注入依赖,缺它时本行不激活;这里不做认证,路由注册失败也不影响宿主。
+import { rejectCrossOrigin, withHostGate, withRouteGate } from './route-gate.mjs'
 import z from '@deepseek-ai/schemastery'
 import { DEFAULT_CONFIG, migrateConfig, normalizeConfig } from './config.mjs'
+import { createDiagStore, resolveDiagFile } from './diag-file.mjs'
 import { installListSlim } from './list-slim.mjs'
 import { installSessionWindow } from './session-window.mjs'
 import { installTerminalCoalesce } from './terminal-coalesce.mjs'
@@ -20,8 +18,11 @@ const CONFIG_PATH = '/api/dsh-bug-perf/config'
 const DIAG_PATH = '/api/dsh-bug-perf/diag'
 const NAMESPACE = 'bug-perf'
 const BODY_MAX_BYTES = 64 * 1024
-const DIAG_FILE = join(tmpdir(), 'dsh-bug-perf-diag.jsonl')
-const DIAG_MAX_BYTES = 2 * 1024 * 1024
+// 只有小超额排空后保留 keep-alive; 更大声明体走 413 + close
+const BODY_KEEPALIVE_MAX_BYTES = BODY_MAX_BYTES * 16
+// 超限后丢弃数据继续排空到 end; 累计排空上限与超时只用于兜底异常客户端
+const BODY_DRAIN_MAX_BYTES = BODY_MAX_BYTES * 1024
+const BODY_DRAIN_TIMEOUT_MS = 5 * 1000
 
 const SETTINGS_SCHEMA = z.object({
   // 无默认值:缺省即"旧版落盘",由读取时迁移并补写当前版本;给默认值会把旧配置误判为已迁移
@@ -37,8 +38,8 @@ const SETTINGS_SCHEMA = z.object({
     cooldownMs: z.number().default(DEFAULT_CONFIG.terminalWatchdog.cooldownMs).description('单个视图两次自愈的最小间隔(毫秒)'),
   }).description('终端输出看门狗'),
   terminalCoalesce: z.object({
-    enabled: z.boolean().default(DEFAULT_CONFIG.terminalCoalesce.enabled).description('终端输出合并:有订阅者时把连续小块按窗口合并成一次广播,降低逐帧渲染造成的吞吐上限'),
-    windowMs: z.number().default(DEFAULT_CONFIG.terminalCoalesce.windowMs).description('合并窗口(毫秒);窗口越大帧数越少,代价是输出延迟'),
+    enabled: z.boolean().default(DEFAULT_CONFIG.terminalCoalesce.enabled).description('终端输出合并:有订阅者时把连续小块按窗口合并成一次广播,降低逐帧渲染造成的吞吐上限;运行中关闭立即排空并直通,重新开启无需重装'),
+    windowMs: z.number().default(DEFAULT_CONFIG.terminalCoalesce.windowMs).description('合并窗口(毫秒);窗口越大帧数越少,代价是输出延迟;运行中修改对新批次生效'),
   }).description('终端输出合并'),
   socketKeepAlive: z.object({
     enabled: z.boolean().default(DEFAULT_CONFIG.socketKeepAlive.enabled).description('会话流保活:空闲时向会话流连接发送无害帧,避免宿主短心跳把公网连接误判为失联'),
@@ -67,7 +68,7 @@ const SETTINGS_SCHEMA = z.object({
     enabled: z.boolean().default(DEFAULT_CONFIG.listSlim.enabled).description('会话列表瘦身:按白名单裁剪 session/list 的投影并缓存,降低列表响应体积与重建耗时;响应形状不符时透传,新增列表字段需同步白名单'),
   }).description('会话列表瘦身'),
   diag: z.object({
-    enabled: z.boolean().default(DEFAULT_CONFIG.diag.enabled).description('性能采样上报:开启后按采样次数把页面性能摘要写入宿主临时文件,供事后排查;关闭时内存采样仍运行'),
+    enabled: z.boolean().default(DEFAULT_CONFIG.diag.enabled).description('性能采样上报:开启后按采样次数把页面性能摘要写入宿主数据目录(DSH_HOME),供事后排查;关闭时内存采样仍运行'),
     reportEvery: z.number().default(DEFAULT_CONFIG.diag.reportEvery).description('每多少次采样上报一次;采样周期固定,修改后刷新页面生效'),
   }).description('性能采样上报'),
 }).description('宿主缺陷兜底与性能补丁,每个功能独立开关')
@@ -78,12 +79,18 @@ export const Config = typeof SETTINGS_SCHEMA.volatile === 'function' ? SETTINGS_
 // 0.1.7 宿主以整节 volatile ref 传入,旧宿主为普通对象
 const unwrapVolatile = (value) => (typeof value?.get === 'function' ? value.get() : value)
 
-const sendJson = (res, status, body) => {
+const sendJson = (res, status, body, headers) => {
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
+    ...headers,
   })
   res.end(JSON.stringify(body))
+}
+
+// 413 请求体超限的收尾: 正常大体积已排空到 end, 超时/超限兜底也在此等响应刷出后销毁
+const closeAfterResponse = (req, res) => {
+  res.once?.('finish', () => setImmediate(() => req.socket?.destroy?.()))
 }
 
 // 设置页保存:legacy 命名空间以 register 在场为准(0.1.7 的 update 名义存在但按命名空间找条目必败);
@@ -113,21 +120,107 @@ const readConfig = (ctx, config) => {
   return migrateConfig(known ? stored : unwrapVolatile(config))
 }
 
+const requestAbortedError = () => {
+  const error = new Error('request aborted')
+  error.statusCode = 400
+  return error
+}
+
+// 请求体超限: 保留 413;是否还允许复用连接由调用方按 closeConnection 决定
+const payloadTooLargeError = (closeConnection) => {
+  const error = new Error('body too large')
+  error.statusCode = 413
+  error.closeConnection = closeConnection
+  return error
+}
+
+// 请求体读取:正常路径监听 data/end 与中断。超限后不提前回 413, 丢弃已读数据继续
+// resume 排空到 end: 提前响应会在请求体未读完时触发 TCP RST, 真实 fetch 收不到 413。
+// 排空累计超过上限或超时才兜底销毁; 小超额排空后保留 keep-alive, 其余带 close。
 const readBody = (req) => new Promise((resolve, reject) => {
+  let settled = false
   let size = 0
+  let drained = 0
+  let drainTimer
+  let overflowed = false
+  let closeConnection = false
   const chunks = []
-  req.on('data', (chunk) => {
-    size += chunk.length
-    if (size > BODY_MAX_BYTES) {
-      reject(new Error('body too large'))
-      req.destroy()
+  const declared = Number(req.headers?.['content-length'])
+  const declaredBytes = Number.isFinite(declared) && declared >= 0 ? declared : undefined
+  const clearDrainTimer = () => {
+    if (drainTimer === undefined) return
+    clearTimeout(drainTimer)
+    drainTimer = undefined
+  }
+  const finish = (settler, value) => {
+    if (settled) return
+    settled = true
+    clearDrainTimer()
+    req.off?.('data', onData)
+    req.off?.('end', onEnd)
+    req.off?.('error', onError)
+    req.off?.('aborted', onAborted)
+    req.off?.('close', onClose)
+    settler(value)
+  }
+  // 异常长/慢客户端兜底: 不再等待 end, 交给响应侧带 close 收尾
+  const failDrain = () => {
+    if (settled) return
+    finish(reject, payloadTooLargeError(true))
+  }
+  const onData = (chunk) => {
+    if (settled) return
+    if (overflowed) {
+      drained += chunk.length
+      if (drained > BODY_DRAIN_MAX_BYTES) failDrain()
       return
     }
-    chunks.push(chunk)
-  })
-  req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
-  req.on('error', reject)
+    size += chunk.length
+    if (size <= BODY_MAX_BYTES) {
+      chunks.push(chunk)
+      return
+    }
+    overflowed = true
+    chunks.length = 0
+    closeConnection = !(declaredBytes !== undefined && declaredBytes <= BODY_KEEPALIVE_MAX_BYTES)
+    req.resume?.()
+    drainTimer = setTimeout(failDrain, BODY_DRAIN_TIMEOUT_MS)
+    drainTimer.unref?.()
+  }
+  const onEnd = () => {
+    if (overflowed) {
+      finish(reject, payloadTooLargeError(closeConnection))
+      return
+    }
+    finish(resolve, Buffer.concat(chunks).toString('utf8'))
+  }
+  const onError = (error) => finish(reject, error)
+  const onAborted = () => finish(reject, requestAbortedError())
+  // close 在正常 end 后也会触发;只有请求体未读完才是客户端中途断开
+  const onClose = () => {
+    if (!req.complete) finish(reject, requestAbortedError())
+  }
+  req.on('data', onData)
+  req.on('end', onEnd)
+  req.on('error', onError)
+  req.on('aborted', onAborted)
+  req.on('close', onClose)
 })
+
+// 配置按节深合并: 只改一个字段不能把同节其它显式配置重置为默认值
+const mergeConfigPatch = (base, patch) => {
+  const merged = { ...base }
+  for (const [key, value] of Object.entries(patch)) {
+    // JSON 里名为 __proto__ 的键不能经赋值触发原型改写
+    if (key === '__proto__') continue
+    const current = base?.[key]
+    merged[key] = value !== null && typeof value === 'object' && !Array.isArray(value)
+      && current !== null && typeof current === 'object' && !Array.isArray(current)
+      ? { ...current, ...value }
+      : value
+  }
+  return merged
+}
 
 const configHandler = async (ctx, config, req, res) => {
   if (req.method !== 'POST') {
@@ -145,8 +238,11 @@ const configHandler = async (ctx, config, req, res) => {
   let body
   try {
     body = JSON.parse(await readBody(req))
-  } catch {
-    sendJson(res, 400, { error: 'bad-payload' })
+  } catch (error) {
+    const status = Number.isInteger(error?.statusCode) ? error.statusCode : 400
+    const closeConnection = error?.closeConnection === true
+    sendJson(res, status, { error: status === 413 ? 'payload-too-large' : 'bad-payload' }, closeConnection ? { connection: 'close' } : undefined)
+    if (closeConnection) closeAfterResponse(req, res)
     return
   }
   const patch = body?.config
@@ -156,7 +252,7 @@ const configHandler = async (ctx, config, req, res) => {
   }
   let next
   try {
-    next = normalizeConfig({ ...readConfig(ctx, config), ...patch })
+    next = normalizeConfig(mergeConfigPatch(readConfig(ctx, config), patch))
   } catch {
     sendJson(res, 500, { error: 'config-unavailable' })
     return
@@ -170,41 +266,33 @@ const configHandler = async (ctx, config, req, res) => {
   sendJson(res, 200, { config: next })
 }
 
-// 采样文件只保留最近一轮, 超过上限后轮转一次, 避免无限增长
-const recordDiag = (payload) => {
-  try {
-    if (existsSync(DIAG_FILE) && statSync(DIAG_FILE).size > DIAG_MAX_BYTES) renameSync(DIAG_FILE, `${DIAG_FILE}.1`)
-    appendFileSync(DIAG_FILE, `${JSON.stringify(payload)}\n`, 'utf8')
-  } catch {
-    // 磁盘不可写时丢弃采样, 不影响页面与宿主
-  }
-}
-
-const diagHandler = (req, res) => {
-  let value
-  try {
-    value = new URL(req.url ?? '/', 'http://localhost').searchParams.get('d')
-  } catch {
-    sendJson(res, 400, { error: 'bad-request' })
-    return
-  }
-  if (value === null) {
-    sendJson(res, 400, { error: 'missing-payload' })
+// 采样上报是写磁盘的副作用路由:只接受同源 JSON POST;其余方法先挡跨源,再回 405 且绝不落盘
+const diagHandler = async (diagStore, req, res) => {
+  if (req.method !== 'POST') {
+    if (rejectCrossOrigin(req, res)) return
+    sendJson(res, 405, { error: 'method-not-allowed' })
     return
   }
   let payload
   try {
-    payload = JSON.parse(value)
-  } catch {
+    payload = JSON.parse(await readBody(req))
+  } catch (error) {
+    const status = Number.isInteger(error?.statusCode) ? error.statusCode : 400
+    const closeConnection = error?.closeConnection === true
+    sendJson(res, status, { error: status === 413 ? 'payload-too-large' : 'bad-payload' }, closeConnection ? { connection: 'close' } : undefined)
+    if (closeConnection) closeAfterResponse(req, res)
+    return
+  }
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
     sendJson(res, 400, { error: 'bad-payload' })
     return
   }
-  recordDiag(payload)
+  diagStore.record(payload)
   sendJson(res, 200, { ok: true })
 }
 
 export function apply(ctx, config) {
-  // 列表瘦身与历史窗口收敛都不依赖 webServer/路由,开关从行配置实时读取;装载失败只关闭该能力
+  // 列表瘦身与历史窗口收敛本身不使用 webServer;但本行以 webServer 为注入前提,缺它时 apply 不会执行
   installListSlim(ctx, { isEnabled: () => normalizeConfig(unwrapVolatile(config)).listSlim.enabled })
   installSessionWindow(ctx, {
     isEnabled: () => normalizeConfig(unwrapVolatile(config)).sessionWindow.enabled,
@@ -216,8 +304,12 @@ export function apply(ctx, config) {
   // 终端输出合并只在宿主半区生效:包装 BrowserTerminal#output,无订阅者时直通
   const server = ctx.get('webServer')
   if (server === undefined || typeof server.register !== 'function') return
+  // 诊断文件按宿主实例隔离: 默认 home 下再用监听端口/pid 区分, 不落到全局共享路径
+  const diagStore = createDiagStore({ file: resolveDiagFile({ port: server.port }) })
+  // 每次输出都要读开关:原始布尔值只有“显式 false”与默认 true 两种语义,避免逐 chunk 归一化
+  const terminalCoalesce = () => unwrapVolatile(config)?.terminalCoalesce
   installTerminalCoalesce(ctx, {
-    isEnabled: () => normalizeConfig(unwrapVolatile(config)).terminalCoalesce.enabled,
+    isEnabled: () => terminalCoalesce()?.enabled !== false,
     readWindow: () => normalizeConfig(unwrapVolatile(config)).terminalCoalesce.windowMs,
   })
 
@@ -248,16 +340,22 @@ export function apply(ctx, config) {
       kind: 'exact',
       path: CONFIG_PATH,
       handler: (req, res) => configHandler(ctx, config, req, res),
+      write: true,
     },
     {
       kind: 'exact',
       path: DIAG_PATH,
-      handler: diagHandler,
+      // 有磁盘副作用: 与配置保存同走写闸门(宿主闸门 + 同源 + JSON POST)
+      write: true,
+      handler: (req, res) => diagHandler(diagStore, req, res),
     },
   ]
   try {
     ctx.effect(() => {
-      const disposers = routes.map((route) => server.register({ ...route, handler: withHostGate(ctx, route.handler) }))
+      const disposers = routes.map((route) => server.register({
+        ...route,
+        handler: (route.write ? withRouteGate : withHostGate)(ctx, route.handler),
+      }))
       return () => { for (const dispose of disposers) if (typeof dispose === 'function') dispose() }
     }, 'bug-perf routes')
   } catch (error) {

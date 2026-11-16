@@ -20,7 +20,6 @@ export const GATE_TARGETS = [
   ['dsh-stock-assistant', '/api/stock-assistant/snapshot'],
   ['dsh-tunnel', '/api/tunnel/status'],
   ['dsh-boss-simulator', '/api/boss-simulator/board'],
-  ['dsh-rs-workflow', '/api/rsww/config'],
 ]
 
 async function probe(url, headers, timeoutMs) {

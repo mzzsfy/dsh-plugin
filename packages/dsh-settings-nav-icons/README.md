@@ -15,7 +15,7 @@ DeepSeek Harness 纯前端插件:设置弹窗左侧导航与 dsh-market 插件�
 | 声明变更(注册新值/撤销) | 受影响分区 svg 内容就地重写,头像槽重新取图 |
 | 插件卸载 | 观察器随 `ctx.effect` 销毁,重载页面即恢复官方默认 |
 
-改写采用**内容制**:直接替换官方齿轮 svg 的内部内容,不新建节点、不动属性——节点、class、DOM 位置全部保持官方原样,其他插件针对官方图标的 CSS(如按 `> svg:first-child` 隐藏、伪元素 mask 叠加)照常作用于改写结果,不会出现双图标。
+改写采用**内容制**:直接替换官方齿轮 svg 的内部内容,不新建节点——节点、class、宽高等呈现属性与 DOM 位置全部保持官方原样(只就地增删 `data-navic` 记账、`data-navic-orig` 官方原样备份、`data-navic-yield` 让位记账三条 `data-*`,见「实现要点」),其他插件针对官方图标的 CSS(如按 `> svg:first-child` 隐藏、伪元素 mask 叠加)照常作用于改写结果,不会出现双图标。
 
 ## 取图优先级
 
@@ -30,7 +30,7 @@ DeepSeek Harness 纯前端插件:设置弹窗左侧导航与 dsh-market 插件�
 
 - **第三方供给 / 官方图标优先**:dshmarket 已用 `data-dsh-market-nav-icon` 等公开标记接管自己的行,本包直接让位;DSH 官方给官分区下发非齿轮图标时同样不碰。两者都不覆盖。
 - **外部声明**:其他插件运行时注册自己的 label/插件名 → 图标,优先级最高(见下节)。
-- **内置映射**:官方分区与未自供给的第三方分区(兜底接管;已声明供给权的分区让位,见实现要点「兜底边界」)。
+- **内置映射**:官方分区与未自供给的第三方分区(兜底接管;已声明供给权的分区让位,见实现要点「兜底边界」)。查表只认自有键:分区 label 恰为 `constructor`/`toString` 等原型链成员时落关键词/哈希,不取继承值。
 - **分类关键词**:插件名/分区名整词命中语义关键词得主题图(git→分支、im→机器人、search→放大镜、usage→图表、wallet→钱包、dash→表盘、扩展/插件→魔方、Agent/智能体→星芒等 23 组规则);整词边界匹配,`im` 不误伤 `important`。中文 `扩展`/`插件` 与 `Agent`/`智能体` 也参与分类,示例:`Agent 扩展` 取魔方,`Agent 管理` 取星芒。
 - **备用池**:星芒/层叠/标签/网格四个中性图形,按名称稳定哈希取一个——同一名称永远同一图形,重渲染不闪动。dsh-market 目录内全部插件(含下载量前 1000)至此都有图标。
 
@@ -47,12 +47,17 @@ window.__navicIcons.register({ '消息通知': 'bell' })
 ```
 
 - 键:分区显示文本(设置导航)或插件名(dsh-market 卡片)。两域共用一张表,同名时以先命中者生效,键请取不易与官方分区撞名的插件名。官方双语分区按等价组解析:任一语言 label 作键,两种语言下均命中(消除语言切换的声明键漂移)。
-- 值:内置 glyph 名(`tune/theme/bot/market/cube/mcp/shield/cards/plan/bell/wrench/archive/spark/layers/tag/grid/git/search/term/chart/code/doc/db/flow/globe/lock/image/zap/wallet/gauge`)或完整 16×16 `<svg>` 字符串。svg 字符串过安全门:完整开标签(大小写不敏感,拒绝 `<svgx` 残串)且单根闭合(首个 `</svg>` 后不得再有内容,堵尾缀活动 HTML);不带 `on*` 事件属性(`\b` 前界堵斜杠分隔绕过)、不带 `<script>`/`<style>`(内联样式全文档生效且 @import 可外联)/`<foreignObject>`/SMIL 动画(`<animate>`/`<set>` 等)载体;不带 `href`/`xlink:href` 及 `attributeName="href"` 注入(16×16 静态图标无合法引用/动画场景,外联请求一并封死);不带 `javascript:`(纵深);长度 ≤4096 字符;glyph 名查表经 `typeof` 收口,原型链成员不可能被注入。
-- 声明值经归一化后写入注册表;同值重复注册幂等短路;非法值(未知 glyph/被安全门拒绝/非字符串)撤销该键声明,该分区回到内置映射或关键词/哈希默认管线,已改写的 nav svg 内容就地重写。
+- 值:内置 glyph 名(`tune/theme/bot/market/cube/mcp/shield/cards/plan/bell/wrench/archive/spark/layers/tag/grid/git/search/term/chart/code/doc/db/flow/globe/lock/image/zap/wallet/gauge`)或完整 16×16 `<svg>` 字符串。svg 字符串过**四重白名单安全门**(标签门 + 属性门 + 颜色值门 + 文法门):
+  - 标签门:只认 `svg/path/circle/rect/line/polyline/polygon/ellipse/g/defs/linearGradient/radialGradient/stop/title/desc`;`script`/`style`(内联样式全文档生效且 @import 可外联)/`foreignObject`/`use`/`image`/`a`/`template` 与 SMIL 动画(`animate`/`animateTransform`/`set`/`discard`)等载体一律拒收。
+  - 属性门:表现层属性(`fill`/`stroke`/`stroke-width`/`stroke-linecap`/`stroke-linejoin`/`stroke-dasharray`/`opacity`/`transform`/`class`/`id`/`aria-hidden`/`aria-label` 等)按全局表,标签专有属性(`d`/`points`/`cx`/`viewBox`/`offset`/`gradientUnits`/`data-navic` 等)按标签表逐项放行;其余属性(含 `style`、`href`、`xlink:href`、`attributeName`/`attributeType`/`from`/`to`/`values`/`begin`/`dur` 等 SMIL 属性、`filter`/`clip-path`/`mask`/`marker-*` 等引用型属性、任何 `on*` 事件属性)不在任何白名单内即拒收。
+  - 颜色值门:`fill`/`stroke`/`color`/`stop-color` 只认颜色字面量(`none`/`currentColor`/字母命名色/`#hex`/`rgb()`/`hsl()` 系)与指向**本值内已定义 id** 的 `url(#id)`;外部 URL、协议相对地址、`data:`、`url(#id) red` 兜底色语法、`var()`、`expression()` 一律拒收(官方 sprite 与页面其他 id 不可达)。关键字/十六进制/函数名大小写不敏感,`url(#id)` 的片段是 DOM id,大小写敏感、按原样与 `id` 属性比对。
+  - 文法门:严格子集解析——唯一 `svg` 根且根外无内容、双引号属性、开闭标签严格配对、嵌套深度有上界;实体引用(`&`)、注释、CDATA、处理指令、DOCTYPE、命名空间前缀(`xmlns:xlink`/`xlink:href`)、未加引号属性值一律拒收(这些形态在浏览器解析下语义可变,不作兼容猜测)。长度 ≤4096 字符;glyph 名查表只认自有键(`Object.hasOwn`),原型链成员不可达。
+  - 图元门:必须含至少一个非退化图元——`path` 的 `d` 至少一条非零长度段(只有 moveto、原地指令、退化弧的 `d` 不画)、`polyline`/`polygon` 的 `points` 至少两对坐标,`circle` 的 `r`、`ellipse` 的 `rx`+`ry`、`rect` 的 `width`+`height` 为正,`line` 任一坐标非零;`defs`/`title`/`desc`/渐变容器内的图元不参与渲染,不计入。空壳 `<svg/>`、只有 `defs`/`title`/`desc` 或渐变、几何缺失、尺寸为 0、零长度段与单点折线的声明不是图标,一律拒收:零绘制内容写进官方 `innerHTML` 等于把齿轮清空(记账后还会因幂等比较而永久空白)。
+- 声明值经归一化后写入注册表;同值重复注册幂等短路;非法值(未知 glyph/被安全门或图元门拒绝/非字符串)撤销该键声明,该分区回到内置映射或关键词/哈希默认管线,已改写的 nav svg 内容就地重写。
 - 声明持久化在 `window.__navicIconDeclarations`:本插件 client 半区热重载会重跑工厂而生产者不重发注册,持久层让重装实例恢复声明,页面刷新随 window 释放。
 - 污染面收敛在 `window.__navicIcons` 单一命名空间,插件卸载时移除 API、取消已排定的重绘、队列恢复数组形态——卸载后生产者按上方「方式二」入队等待下一实例,不再驱动 DOM 改写;重载页面后全部还原为官方图标。
 
-本仓库全部插件包(含本包自画像与仅 host 半区的包)都走此机制显式声明,不依赖关键词/哈希推导;键为「分区 label + 市场短名」双形态:usage-panel(账号余额、dsh-usage-panel → wallet)、usage-dash(使用统计/Usage、dsh-usage-dash → gauge)、turn-notify(消息通知、dsh-turn-notify → bell)、maintain(版本与运维、dsh-maintain → wrench)、session-manager(会话归档、dsh-session-manager → archive)、rs-workflow(若水工作流、dsh-rs-workflow → flow)、cron-board(dsh-cron-board → plan)、think-expand(dsh-think-expand → spark)、auto-trust-all(dsh-auto-trust-all → shield)、llm-pi-gateway(dsh-llm-pi-gateway → globe)、settings-nav-icons(dsh-settings-nav-icons → tune)、boss-simulator(公司管理、dsh-boss-simulator → plan)、shell-select(Shell 管理 → term)、tool-gate(工具门 → layers)、tunnel(dsh-tunnel → globe)、context-manager(dsh-context-manager → git)、stock-assistant(股票 → 内联 SVG);仅 host 半区的 auto-trust-all 与 llm-pi-gateway 为声明专设最小 client 半区。注册样板由本包测试做契约锁定(清单自动发现,新增生产者即纳入)。
+本仓库全部插件包(含本包自画像与仅 host 半区的包)都走此机制显式声明,不依赖关键词/哈希推导;键为「分区 label + 市场短名」双形态:usage-panel(账号余额、dsh-usage-panel → wallet)、usage-dash(使用统计/Usage、dsh-usage-dash → gauge)、turn-notify(消息通知、dsh-turn-notify → bell)、maintain(版本与运维、dsh-maintain → wrench)、session-manager(会话归档、dsh-session-manager → archive)、cron-board(dsh-cron-board → plan)、think-expand(dsh-think-expand → spark)、auto-trust-all(dsh-auto-trust-all → shield)、llm-pi-gateway(dsh-llm-pi-gateway → globe)、settings-nav-icons(dsh-settings-nav-icons → tune)、boss-simulator(公司管理、dsh-boss-simulator → plan)、shell-select(Shell 管理 → term)、tool-gate(工具门 → layers)、tunnel(dsh-tunnel → globe)、context-manager(dsh-context-manager → git)、stock-assistant(股票 → 内联 SVG);仅 host 半区的 auto-trust-all 与 llm-pi-gateway 为声明专设最小 client 半区。注册样板由本包测试做契约锁定(清单自动发现,新增生产者即纳入)。
 
 ## 内置映射表
 
@@ -76,11 +81,11 @@ window.__navicIcons.register({ '消息通知': 'bell' })
 - 导航滚动补偿:官方 navList 高度随内容撑开,弹窗(overflow hidden)裁掉溢出且无滚动途径,分区一多底部不可达。插件启动时向 head 注入一条样式规则(navList `flex:1 1 0 + min-height:0 + overflow-y:auto + scrollbar-width:thin`),样式表形态对弹窗关闭重开等任意 React 重渲染持续生效;卸载即移除,零残留。类名锚定与图标改写同策略(`VOzbGW_` 哈希前缀字面量)。
 - 实现边界:`settings.*` 子槽位的声明权与渲染权均被原版 `dsh-client-ui-settings-general` 条目占用——`renderSlot` 只授予声明了 `children` 的条目(dsh-client-ui-renderer),而 Slot 声明全局唯一、重复声明即 `already declared`,因此任何插件都无法在保留设置页内容的前提下接管 Shell 重绘导航。DOM 观察是唯一不依赖官方契约变更的路径(dream-skin 与 dsh-better-sidebar 各自内置了同原理的一次性 hack)。
 - 匹配锚点:分区显示文本而非分区 id——id 不进 DOM,文本是唯一稳定可见锚点;CSS Modules 哈希类名(`VOzbGW_*`)取字面量。label 一律 trim 后匹配,空白 label 直接跳过。
-- 内容改写制:决策只对官方齿轮(三代齿轮识别:0.1.x 内联 `M14.0861` / 0.1.7 起 primitives IconSettingsOutlineMedium 齿体 `M13.0107 7.79377` / 0.2.2 起 sprite 引用 `use[href^="#dsw-icon-settings-outline"]`;官方分区语义图标非齿轮一律不动,插件注册分区走齿轮 fallback)生效,`applyDecision` 写官方 svg 的 `innerHTML` 并把记账(`data-navic` = label)与官方原样备份(`data-navic-orig`)落在官方 svg 自身;不新建节点、不改属性、不驱动 style。React 安全性依据:官方 nav 图标是静态子树,重渲染前后 element 引用相等即 bailout,改写内容稳定存活(0.1.x 的 NotFoundError 仅源于 remove 节点本身);升级残留的旧注入节点(`data-navic="1"`)在改写前清除。改写后的 svg 非齿轮且带记账,与"未处理的官方原生非齿轮 svg"靠记账区分——因此声明变更不删记账,由 `registerIcons` 对命中键的 nav svg 以 `resolveForLabel` 全链(声明 → 内置映射 → 关键词 → 哈希)就地重写内容,头像槽(非 svg 节点)仍走清账重贴。
-- 兜底边界(非默认 icon 一律不管):插件对**自己的**分区自行供图是合法形态(如 dshmarket 对自己行的 mask 插头),本包是兜底层,供给权已被声明的格子不碰——识别 cell 上的他包公开声明标记(`data-*-nav-icon`)即让位;若本包旧代已改写该格(残留),自动回退:恢复官方原样(`data-navic-orig` 备份优先,`data-icon` sprite 重建兜底)、清记账、落 `data-navic-yield` 让位记账永不重入。yield 格的图标呈现完全归外部供给方,其自身对官方 DOM 演进的适配自负(案例:dshmarket `> svg` 直子选择器在 0.2.2 navCell span 包裹下失效致双图,dsh-market/dsh-market#1104)。
-- 市场卡片头像槽记账为插件名,IMG/DIV 同构处理:原节点以行内 `display:none` 隐藏(hidden 属性是 UA 样式,会被市场卡自有类规则压过致双图标)、注入图标跟随(不触碰 React 受管子树),换名重贴按父容器范围清理旧注入、不误删外来兄弟。
+- 内容改写制:决策只对官方齿轮(三代齿轮识别:0.1.x 内联 `M14.0861` / 0.1.7 起 primitives IconSettingsOutlineMedium 齿体 `M13.0107 7.79377` / 0.2.2 起 sprite 引用 `use[href^="#dsw-icon-settings-outline"]`;官方分区语义图标非齿轮一律不动,插件注册分区走齿轮 fallback)生效,`applyDecision` 写官方 svg 的 `innerHTML` 并把记账(`data-navic` = label)与官方原样备份(`data-navic-orig`)落在官方 svg 自身;不新建节点、不改官方呈现属性(class/width/位置等原样)、不驱动 style,官方 svg 上只增删这三条 `data-*` 记账(让位格另落 `data-navic-yield`)。React 安全性依据:官方 nav 图标是静态子树,重渲染前后 element 引用相等即 bailout,改写内容稳定存活(0.1.x 的 NotFoundError 仅源于 remove 节点本身);升级残留的旧注入节点(`data-navic="1"`)在每个单元格裁决之前**无条件**清除(外部供给格/让位格虽不产生决策同样清,首个 svg 是官方节点本身故豁免;只清 primary 之外的直接兄弟,图标内容里的嵌套 svg 不动)。改写后的 svg 非齿轮且带记账,与"未处理的官方原生非齿轮 svg"靠记账区分——因此声明变更不删记账,由 `registerIcons` 对命中键的 nav svg 以 `resolveForLabel` 全链(声明 → 内置映射 → 关键词 → 哈希)就地重写内容,头像槽(非 svg 节点)仍走清账重贴。记账相等不直接等价于已完成改写:内容须仍含渲染树内的可绘制图元,旧版本把零绘制声明(空串、仅 `defs`、仅 `title`)写进过 `innerHTML`,这类格子按同一取图链重写而自愈。
+- 兜底边界(非默认 icon 一律不管):插件对**自己的**分区自行供图是合法形态(如 dshmarket 对自己行的 mask 插头),本包是兜底层,供给权已被声明的格子不碰——识别 cell 上的他包公开声明标记(`data-*-nav-icon`)即让位;若本包旧代已改写该格(残留),自动回退:恢复官方原样(`data-navic-orig` 备份优先,`data-icon` sprite 重建兜底)、清记账、落 `data-navic-yield` 让位记账永不重入;两条线索都不在场则零动作(不猜官方原样,留给下一轮重试)。yield 格的图标呈现完全归外部供给方,其自身对官方 DOM 演进的适配自负(案例:dshmarket `> svg` 直子选择器在 0.2.2 navCell span 包裹下失效致双图,dsh-market/dsh-market#1104)。
+- 市场卡片头像槽记账为插件名,IMG/DIV 同构处理:原节点以行内 `display:none` 隐藏(hidden 属性是 UA 样式,会被市场卡自有类规则压过致双图标)、注入图标跟随(不触碰 React 受管子树),换名重贴按父容器范围清理旧注入、不误删外来兄弟。幂等须三件齐备:记账相等、行内隐藏在场、紧随槽体之后的那个注入节点内容仍可绘制——React 重渲染摘掉注入节点或旧版本注入过零绘制空壳时同样重贴自愈;判据锚定槽的下一元素而非父容器任意节点,同一行里两个槽共用父容器时缺图的槽不会被另一槽的注入满足。
 - 生命周期:单个 `MutationObserver` 常驻 `document.body`(`childList` + `subtree` + `characterData` + `attributes`(仅 `style` 属性域);childList 通道仅元素级变更放行,characterData 通道按目标域精确放行——label 与市场卡片名所在行内的文本改写才唤醒,流式正文等域外文本变更不唤醒,attributes 通道仅头像槽的 style 变更放行——行内隐藏被外部清除(如 React 重渲染)后的自愈重贴入口,变更去抖到 `requestAnimationFrame` 扫描,单元格与头像槽合并为单次全文档遍历,扫描结束 `takeRecords` 消除自产写入回波;`ctx.effect` 持有,卸载即断开并取消已排定帧,已停止实例的注册入口短路、不驱动 DOM。观察器句柄、在途帧与滚动样式元素挂 window 代际槽(HMR 重评估先拆上一代三者,滚动样式对旧版槽缺字段宽松判空),帧句柄与槽同步(跨代取消真实可达)。常驻全文档观察是已知性能取舍:装饰性插件的目标域(设置弹窗/市场卡片)无稳定根锚点,两级观察的回归风险大于收益。
-- 纯逻辑层(映射表 + 改写决策)在 `src/logic.mjs`,`src/client.js` 内嵌同源实现,`node --test` 以同一套场景对两份实现做 parity 验证(全表 deepEqual + 决策函数逐函数源码对比),另有编排层契约测试(注册校验/队列三态与时序/生命周期/头像槽编排/异常隔离)与生产者样板契约测试(清单自动发现,见下)。
+- 纯逻辑层(映射表 + 改写决策)在 `src/logic.mjs`,`src/client.js` 内嵌同源实现,`node --test` 以同一套场景对两份实现做 parity 验证(全表 deepEqual + 安全门文法常量与正则逐项对表 + 决策函数逐函数源码对比),另有编排层契约测试(注册校验/队列三态与时序/生命周期/头像槽编排/异常隔离)与生产者样板契约测试(清单自动发现,见下)。
 
 ## 安装
 
@@ -115,7 +120,7 @@ pnpm --dir packages/dsh-settings-nav-icons test
 node --test packages/dsh-settings-nav-icons/test/*.test.mjs
 ```
 
-覆盖:上表全部行为场景(齿轮强补 / 非齿轮不动 / svg 记账幂等与 label 重写 / trim 与空 label / 无 svg 降级 / 内容改写与不建节点 / 0.1.x 残留清理 / 声明安全门 / 撤销回退取图链 / 关键词边界 / 头像槽 img+div / 导航滚动样式注入与卸载)、映射表契约、双实现全量同源 parity、client.js 注册 id 守卫、编排层契约(注册校验 / 就地重写 / 队列三态 / 生命周期 / 异常隔离 / 持久层恢复)、别名等价查询(lookupWithAlias / aliasKeysOf)、生产者样板契约(monorepo 布局下自动发现全部含声明样板的包,逐包校验入口探测/数组态入队/队列初始化三样板)。
+覆盖:上表全部行为场景(齿轮强补 / 非齿轮不动 / svg 记账幂等与 label 重写 / trim 与空 label / 无 svg 降级 / 内容改写与不建节点 / 裁决入口无条件清 0.1.x 残留(外部供给格与让位格同样清、官方首节点豁免、图标内嵌套 svg 保留)/ 外部供给格回退路径(`data-navic-orig` 优先、`data-icon` 重建兜底、两条线索皆无则零动作、回退后只留 yield)/ 声明安全门四重白名单矩阵:标签矩阵 + 属性矩阵 + 颜色值门(含 camelCase/大写 id 的 `url(#id)` 本地引用)+ 文法矩阵与合法边界(本地 `url(#id)` 渐变、`currentColor`)/ 撤销回退取图链 / 关键词边界 / 头像槽 img+div / 导航滚动样式注入与卸载 / 官方 sprite 重建的 `data-icon` 形态门)、映射表契约、双实现全量同源 parity(标签/属性白名单表逐表 deepEqual + 安全门文法常量与六条文法正则(四条颜色 + id/sprite 名)逐项对表,并含"只改 client 侧 SVG_MAX_DEPTH/正则必须变红"的突变负向验证)、README 契约(逐字解析 README 的 glyph 清单、规则组数与内置映射表并与实现逐项对表)、client.js 注册 id 守卫、编排层契约(注册校验 / 属性级载荷经真实注册入口拒收 / 就地重写 / 队列三态 / 生命周期 / 异常隔离 / 持久层恢复)、别名等价查询(lookupWithAlias / aliasKeysOf)、原型链键不取继承成员(内置映射 label 与 glyph 查表均只认自有键,含 Object.prototype 全键与原型字符串用例)、生产者样板契约(monorepo 布局下自动发现全部含声明样板的包,逐包校验入口探测/数组态入队/队列初始化三样板)。
 
 ## License
 

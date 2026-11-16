@@ -9,7 +9,7 @@ const text = node => typeof node === 'string' ? node : Array.isArray(node)
   ? node.map(text).join('') : node?.children?.map(text).join('') || ''
 const flush = () => new Promise(resolve => setImmediate(resolve))
 
-function fixture({ config: seed = {}, prefs = {}, permission = 'granted', saveFails = false, testWait, loadFails = false, testFails = false } = {}) {
+function fixture({ config: seed = {}, prefs = {}, permission = 'granted', saveFails = false, testWait, loadFails = false, testFails = false, document: doc = {} } = {}) {
   const values = new Map(Object.entries(prefs)), states = [], refs = [], requests = [], feedback = []
   let cursor = 0, refCursor = 0, firstRender = true, component, mod
   let saved = { enabled: Object.fromEntries(['completed', 'error', 'interrupted', 'approval', 'ask', 'max-tokens'].map(k => [k, true])), imTargets: [], ...seed }
@@ -25,7 +25,7 @@ function fixture({ config: seed = {}, prefs = {}, permission = 'granted', saveFa
     createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
   }
   const window = { __ModuleLoader__: { load: entry => { mod = entry.factory(name => name === 'react' ? react : tools) } },
-    localStorage: { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, String(value)) },
+    localStorage: { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, String(value)), removeItem: key => values.delete(key) },
     addEventListener: (key, fn) => { (listeners[key] ||= []).push(fn) }, removeEventListener() {} }
   const tools = { setupCommonTools: () => ({}), toast: { show: message => feedback.push(message) } }
   const fetch = async (path, options = {}) => {
@@ -42,7 +42,7 @@ function fixture({ config: seed = {}, prefs = {}, permission = 'granted', saveFa
     return { ok: true, json: async () => data }
   }
   const Notification = permission === 'unavailable' ? undefined : { permission }
-  new Function('window', 'document', 'fetch', 'Notification', source)(window, {}, fetch, Notification)
+  new Function('window', 'document', 'fetch', 'Notification', source)(window, doc, fetch, Notification)
   mod.apply({ get: () => ({}), inject() {}, effect() {}, slots: { inject: (_name, fn) => fn(), register: (_entry, render) => { component = render().type } } })
   const render = () => { cursor = 0; refCursor = 0; const tree = component(); firstRender = false; return tree }
   const find = predicate => nodes(render()).find(predicate)
@@ -50,7 +50,7 @@ function fixture({ config: seed = {}, prefs = {}, permission = 'granted', saveFa
   const button = name => find(n => n.type === 'button' && text(n) === name)
   const tab = name => { const b = button(name); assert.ok(b, name + '入口存在'); b.props.onClick() }
   render(); effects.splice(0).forEach(fn => fn())
-  return { render, find, control, button, tab, requests, values, feedback, listeners, ready: flush }
+  return { mod, render, find, control, button, tab, requests, values, feedback, listeners, ready: flush }
 }
 
 test('Given 旧补位开关开启 When 用户关闭桌面通知 Then 一次提交清除两个等效开关', async () => {
@@ -208,4 +208,19 @@ test('Given 通知权限例表 When 查看浏览器通知 Then 已授权无状�
     assert.equal(Boolean(alert), permission !== 'granted', permission)
     if (permission === 'unavailable') assert.match(text(alert), /不支持|不可用/)
   }
+})
+
+test('F6 Given 另一标签页关闭会话高亮 When storage 事件到达 Then 运行时开关与已挂行类立即清除', async () => {
+  const row = { className: 'tn-sess-hl tn-sess-hl--ask' }
+  const doc = { querySelectorAll: selector => selector === '.tn-sess-hl' ? [row] : [] }
+  const f = fixture({ prefs: { 'turn-notify:session-hl': '1' }, document: doc }); await f.ready()
+  assert.equal(f.mod.__test.sessionHighlightEnabled, true, '默认开启')
+  f.values.set('turn-notify:session-hl', '0')
+  f.listeners.storage.forEach(fn => fn({ key: 'turn-notify:session-hl', newValue: '0' }))
+  assert.equal(f.mod.__test.sessionHighlightEnabled, false, '跨标签页关闭必须立即作用到运行时开关,不等下一轮轮询')
+  assert.equal(row.className, '', '已挂行类必须立即清除')
+  // 另一标签页 localStorage.clear():key 为 null,读取回落默认开启
+  f.values.delete('turn-notify:session-hl')
+  f.listeners.storage.forEach(fn => fn({ key: null, newValue: null }))
+  assert.equal(f.mod.__test.sessionHighlightEnabled, true, '清空存储后按默认开启立即恢复')
 })
