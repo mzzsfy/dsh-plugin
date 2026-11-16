@@ -26,7 +26,7 @@ window.__ModuleLoader__.load({
     }
 
     // 与 package.json 同锁(仓库测试守):hello 首帧上报,也是消费方读取的版本面
-    const VERSION = '0.5.2'
+    const VERSION = '0.5.3'
     // 帧协议版本:改动帧集合即递增,host 回支持集,无交集即停用总线。
     // browser 单文件模块不能 import src/protocol.mjs,字面量与该文件同值由
     // test/protocol.test.mjs 锁;单边抬高会让本端协商无交集、静默停用总线
@@ -370,12 +370,30 @@ window.__ModuleLoader__.load({
       busState.revision = revision
     }
 
+    // 官方连接层是唯一合法的页面连接基址来源:DSH Desktop 的 dsh-app:// 源下自建
+    // URL 会继承自定义协议,WebSocket 构造即抛;connection.openWebSocket 取壳注入的
+    // 传输基址(__DSH_TRANSPORT__.streamBaseUrl),桌面端与远程访问同一条路径
+    function openBusSocket() {
+      const connection = busState.connection
+      if (typeof connection?.openWebSocket === 'function') return connection.openWebSocket(BUS_ROUTE)
+      const url = new URL(BUS_ROUTE, window.location.href)
+      url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+      return new WebSocket(url.href)
+    }
+
     function connectBus() {
       // 协议无交集是页级判决:任何 owner 后到挂载都不得重探连接
       if (busState.hello === 'unsupported') return
-      const url = new URL(BUS_ROUTE, window.location.href)
-      url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
-      const socket = new WebSocket(url.href)
+      let socket
+      try {
+        socket = openBusSocket()
+      } catch (error) {
+        // 构造即失败(自定义协议源无 WebSocket 代理等)不得抛出杀插件:
+        // 总线停用并留一次可观测告警,消费方据此启用自有兜底
+        busState.hello = 'unsupported'
+        console.warn('dsh-common-tools(bus): 页面连接不可用(' + String(error?.message ?? error) + '), 总线停用')
+        return
+      }
       busState.socket = socket
       busState.timeout = setTimeout(() => socket.close(), CONNECT_TIMEOUT_MS)
       socket.onopen = () => {
@@ -442,6 +460,9 @@ window.__ModuleLoader__.load({
     function setupCommonTools(ctx) {
       const plugin = requireName(ctx?.fiber?.entry?.options?.name, 'ctx.fiber.entry.options.name')
       const owner = { plugin, subscriptions: new Set() }
+      // 页面级共享连接只认一个基址:取首个可用 owner 的官方连接服务
+      const connection = typeof ctx?.get === 'function' ? ctx.get('connection') : undefined
+      if (connection !== undefined && busState.connection === undefined) busState.connection = connection
       const assertActive = () => {
         if (!busState.owners.has(owner)) throw new Error('common-tools: 插件已卸载')
       }

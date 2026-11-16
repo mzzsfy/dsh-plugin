@@ -2,6 +2,8 @@
 
 公共依赖库，提供插件独立消息通道与 toast。普通 npm 包，不是 DSH 插件。host 与 client 都通过当前插件的 `ctx` 建立通道，插件名自动来自 loader 的 `ctx.fiber.entry.options.name`，使用完整 npm 包名。共享模块的 require 不携带调用者身份，必须在 `apply(ctx)` 中初始化。
 
+client 侧的 WebSocket 连接基址取宿主官方连接层 `ctx.get('connection').openWebSocket(path)`:桌面版窗口页面源是 `dsh-app://app`,自建 `new URL(path, location.href)` 会继承自定义协议,`new WebSocket` 构造直接抛错;连接层缺席(旧宿主)时才回落到页面 URL。连接构造失败不抛出:总线停用并 console 告警一次,消费方据此走各自兜底。
+
 ## 双接口
 
 两端 API 相同，消息就是业务 payload：

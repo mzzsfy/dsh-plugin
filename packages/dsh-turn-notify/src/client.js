@@ -123,8 +123,8 @@ window.__ModuleLoader__.load({
 
     const storageState = { broken: false }
 
-    // 诚实降级:轮询与存储两类降级各自提示一次;轮询恢复后复位,存储不可用不自动复位
-    const degradeAnnounced = { poll: false, storage: false }
+    // 诚实降级:轮询/总线/存储三类降级各自提示一次;轮询恢复后复位,总线与存储不自动复位
+    const degradeAnnounced = { poll: false, bus: false, storage: false }
     function announceDegrade(kind, reason) {
       if (degradeAnnounced[kind]) return
       degradeAnnounced[kind] = true
@@ -821,10 +821,39 @@ window.__ModuleLoader__.load({
     }
 
     // 数据刷新唯一通道:订阅推送总线。首连 onReset 即首拉,消息到达重拉;
-    // 断线由公共 WS 总线重连,重连成功再触发 onReset 全量对账自愈
+    // 断线由公共 WS 总线重连,重连成功再触发 onReset 全量对账自愈。
+    // 就绪看门狗:窗口内拿不到首次 onReset(桌面 dsh-app:// 源无 WS 代理等)即启用
+    // 周期拉取兜底并一次性告警,总线就绪后停用——总线失败不得让自动通知整体失效
+    const BUS_READY_TIMEOUT_MS = 3 * 1000
+    const BUS_FALLBACK_INTERVAL_MS = 10 * 1000
     function startBusLoop(signal, clientBus, owner) {
       const refresh = () => { if (activeNotificationOwner === owner && !signal.aborted) refreshNotifications() }
-      return clientBus.subscribe(refresh, { onReset: refresh })
+      let ready = false
+      let timer = null
+      let disposed = false
+      const stopFallback = () => { if (timer !== null) { clearTimeout(timer); timer = null } }
+      const fallback = (delay) => {
+        if (disposed || ready || signal.aborted) return
+        timer = setTimeout(async () => {
+          timer = null
+          if (disposed || ready || signal.aborted) return
+          announceDegrade('bus', '推送总线未就绪,退化为周期拉取')
+          await refreshNotifications()
+          fallback(BUS_FALLBACK_INTERVAL_MS)
+        }, delay)
+        // 兜底定时器不持有页面/进程存活:总线永不就绪时也只被动等下一拍
+        if (typeof timer.unref === 'function') timer.unref()
+      }
+      fallback(BUS_READY_TIMEOUT_MS)
+      let stop = () => {}
+      try {
+        stop = clientBus.subscribe(refresh, {
+          onReset: () => { ready = true; stopFallback(); refresh() },
+        })
+      } catch (error) {
+        announceDegrade('bus', '推送总线不可用: ' + (error && error.message ? error.message : String(error)))
+      }
+      return () => { disposed = true; stopFallback(); stop() }
     }
 
     async function refreshSounds() {
