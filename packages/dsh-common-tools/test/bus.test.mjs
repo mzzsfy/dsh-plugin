@@ -3,12 +3,15 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 const source = readFileSync(new URL('../src/client.js', import.meta.url), 'utf8')
-function environment() {
+function environment({ throwOnConstruct = false } = {}) {
   const instances = [], timers = new Map(), warns = []
   let timerId = 0, parseCalls = 0, encoderConstructions = 0
   class Socket {
     static OPEN = 1
-    constructor(url) { this.url = url; this.readyState = 0; this.bufferedAmount = 0; this.sent = []; instances.push(this) }
+    constructor(url) {
+      if (throwOnConstruct) throw new SyntaxError("The URL's scheme must be either 'ws' or 'wss'.")
+      this.url = url; this.readyState = 0; this.bufferedAmount = 0; this.sent = []; instances.push(this)
+    }
     send(text) { this.sent.push(JSON.parse(text)) }
     close() { this.readyState = 3; this.closed = true; this.onclose?.() }
     open() { this.readyState = 1; this.onopen() }
@@ -29,14 +32,19 @@ function environment() {
     )
     return window.module.factory(() => ({}))
   }
-  function owner(name = 'a') {
+  function owner(name = 'a', connection) {
     const cleanups = []
-    const ctx = { fiber: { entry: { options: { name } } }, effect(fn) { cleanups.push(fn()) }, dispose() { while (cleanups.length) cleanups.pop()() } }
+    const ctx = {
+      fiber: { entry: { options: { name } } },
+      get: key => (key === 'connection' ? connection : undefined),
+      effect(fn) { cleanups.push(fn()) },
+      dispose() { while (cleanups.length) cleanups.pop()() },
+    }
     return { ctx, bus: load().setupCommonTools(ctx), dispose: ctx.dispose }
   }
   const fireTimer = () => { const [id, timer] = timers.entries().next().value; timers.delete(id); timer.fn(); return timer.ms }
   return {
-    load, owner, instances, warns, timers, fireTimer,
+    load, owner, instances, warns, timers, fireTimer, Socket,
     counters: { get parses() { return parseCalls }, get encoders() { return encoderConstructions } },
   }
 }
@@ -203,4 +211,24 @@ test('Given 连续发布 When 发送 Then 复用单一编码器且不回读整�
   for (let i = 0; i < 5; i++) bus.publish({ text: '甲'.repeat(512) })
   assert.equal(f.counters.parses, parses, '发送热路径不得 JSON.parse 整帧')
   assert.equal(f.counters.encoders, encoders, 'TextEncoder 实例单例复用,不逐帧新建')
+})
+
+test('Given 官方连接层可用 When 建连 Then 经 connection.openWebSocket 取基址', () => {
+  const f = environment(), opened = []
+  const connection = { openWebSocket(path) { opened.push(path); return new f.Socket('ws://127.0.0.1:9' + path) } }
+  const owner = f.owner('a', connection)
+  owner.bus.subscribe(() => {})
+  assert.deepEqual(opened, ['/api/bus/ws'], '连接路径交给宿主连接层解析,不自建页面 URL')
+  assert.equal(f.instances.length, 1)
+  assert.equal(f.instances[0].url, 'ws://127.0.0.1:9/api/bus/ws')
+  owner.dispose()
+})
+
+test('Given 页面连接构造抛错(自定义协议源) When 启用总线 Then 不抛出且一次性告警', () => {
+  const f = environment({ throwOnConstruct: true })
+  let bus
+  assert.doesNotThrow(() => { bus = f.owner().bus })
+  assert.doesNotThrow(() => bus.subscribe(() => {}))
+  assert.equal(f.warns.filter(message => message.indexOf('页面连接不可用') >= 0).length, 1, '降级告警只发一次')
+  assert.equal(f.timers.size, 0, '不得留下重连定时器')
 })

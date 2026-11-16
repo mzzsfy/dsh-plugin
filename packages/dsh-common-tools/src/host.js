@@ -15,7 +15,7 @@ try {
 const REGISTRY_KEY = '__dshCommonTools'
 const BUS_ROUTE = '/api/bus/ws'
 // 与 package.json 同锁(仓库测试守):注册表按此版本决定哪份 host 半区持有传输
-const PKG_VERSION = '0.5.2'
+const PKG_VERSION = '0.5.3'
 // 帧协议常量集中定义于 protocol.mjs,client 半区字面量由仓库测试与之互锁
 const MAX_BYTES = 1024 * 1024
 const HEARTBEAT_MS = 30 * 1000
