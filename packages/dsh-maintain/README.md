@@ -2,6 +2,12 @@
 
 DeepSeek Harness 设置页插件:版本监测、更新内容、升级前检查、安全模式与受管 A/B 升级、安全重启。
 
+## 预览
+
+![设置页](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-maintain/settings.png)
+![安装确认](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-maintain/install.png)
+![重启确认](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-maintain/restart.png)
+
 ## 功能
 
 - 版本监测:host 启动即检查一次,按轮询间隔重复检查(内存快照,不持久化);当前版本与追踪通道最新版对比,落后即提示。运行版本(宿主启动时缓存)与已装版本(受管链接 `dsh_link` 当前指向安装槽的清单版本)分开统计与展示,落后判定以运行版本为准,已装版本领先运行版本时提示"重启后生效"。定时轮询为软依赖:宿主 timer 服务不可用时仅停用自动轮询,面板显示降级提示,手动刷新仍可使用。通道最新版不是合法精确 semver 时安装入口禁用(宿主入口必以 400 拒绝)。

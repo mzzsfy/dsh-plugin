@@ -2,6 +2,10 @@
 
 穿透隧道:在 dsh 宿主进程内把本地端口反向代理出来。入口只有一个——**设置 > 穿透隧道**。同一张隧道表同时服务 GUI 与 ai,不引入 nginx/caddy 等外部反代。
 
+## 预览
+
+![主面板](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-tunnel/board.png)
+
 ## 0.2.0 变化
 
 - 移除主面板、`sidebar.panellist` 页签、设置 > 插件卡片、插件管理页配置卡与 `betterSidebar` 适配;低频功能收进设置分区,不再占主页与侧栏。
@@ -27,12 +31,12 @@
 
 - 全路径全协议透传: 无 strip、不改写 Location、WebSocket 任意路径可用
 - 应用按根路径正常启动, 无需 base 参数
-- 限制: 隧道名至少含一个字母(纯数字会与纯 IP 访问首段冲突), 且不得等于入口域名首标签(否则会劫持整个入口, 400);HTTPS 需泛域名证书
-- 分流按当前 `trustedHosts` 每次复核, 晚信任同样生效;冲突行保留并标 `route_error`, 信任面恢复后自动重试
+- 限制: 隧道名至少含一个字母(纯数字会与纯 IP 访问首段冲突);子域名隧道名等于**当前设置页地址**首标签时拒绝(保存后该地址会被隧道接管, 含 `/api/*`), 换名或改用其它地址打开设置页后再建;HTTPS 需泛域名证书
+- 分流只按 Host 首标签命中, 不读宿主 `trustedHosts`: 该集合由 `dsh-auto-trust-all` 按到达的 Host 动态累积, 泛解析部署下用它判入口会把每个试用过的子域当成入口
 
 ## 使用
 
-- GUI: 设置 > 穿透隧道。顶部「手动添加」;「本机服务」默认折叠, 展开后按端口/进程/地址过滤, 一键开放;行内「打开/复制/⋯」, `⋯` 里有复制局域网地址、编辑、停用/启用、删除(二次确认)。
+- GUI: 设置 > 穿透隧道。顶部「手动添加」;「本机服务」默认折叠, 展开后按端口/进程/地址过滤, 一键开放;行内「打开/复制/⋯」, `⋯` 里有复制局域网地址、编辑(可改名)、停用/启用、删除(二次确认)。菜单挂在 body 上, 不会被设置面板滚动区裁剪。
 - ai: `tunnel_open(targetPort, name?, entry?)` / `tunnel_list(probe?)` / `tunnel_ports(all?, refresh?, limit?)` / `tunnel_close(name)`。「允许 ai 使用」关闭即向 ai 注销工具, GUI/REST 不受影响。
 - 自动命名: 省略 `name` 时服务端生成 `app-<port>`, 冲突自动加 `-2`;显式重名返回 400。
 - 访问地址: path 为同源 `/p/<name>/`;subdomain 按当前域名派生 `<name>.<域名>`, IP/localhost 访问退回 `<name>.localhost` 并标注仅本机。
@@ -42,7 +46,7 @@
 ## REST
 
 - `GET /api/tunnel/tunnels?probe=1` → `{items}`(含 `status/health/stats/enabled`)
-- `POST /api/tunnel/tunnels` → 创建;`PATCH /api/tunnel/tunnels/:name` → `{targetPort?, entry?, enabled?}`;`DELETE /api/tunnel/tunnels/:name`
+- `POST /api/tunnel/tunnels` → 创建;`PATCH /api/tunnel/tunnels/:name` → `{name?, targetPort?, entry?, enabled?}`(改名会重建路由并回收旧地址连接);`DELETE /api/tunnel/tunnels/:name`
 - `GET /api/tunnel/ports?all=1&refresh=1`;`GET /api/tunnel/probe?port=8090`
 - `GET /api/tunnel/status` → `{ui,total,lanOrigin}`
 - `POST /api/tunnel/ui-settings` → `{aiTools}`
@@ -55,7 +59,7 @@
 
 ## 验证
 
-- `npm test`: 137 用例全绿, 覆盖双入口行为、故障边界、REST/CSRF/超限 413、统一路由闸门、ai 开关注销、端口发现、自动命名、enabled/PATCH、IPv6 目标、状态矩阵、设置分区注册与可见性门控、常量同源。
+- `npm test`: 138 用例全绿, 覆盖双入口行为、故障边界、REST/CSRF/超限 413、统一路由闸门、ai 开关注销、端口发现、自动命名、enabled/PATCH、IPv6 目标、状态矩阵、设置分区注册与可见性门控、常量同源。
 - 隔离宿主 + 真机浏览器: 设置分区可见、创建/打开/停用/启用/编辑/删除、path/subdomain 转发与统计更新。
 
 ## dsh 版本兼容

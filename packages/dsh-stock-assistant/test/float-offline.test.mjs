@@ -54,8 +54,11 @@ test('拍点线要走客户端的蜡烛校验, 补了开高低才画得出', asy
 test('详情页的离线前缀与浮窗同一句话', async () => {
   const { offlinePrefix } = await loadClient()
   assert.equal(offlinePrefix(null), '')
-  const prefix = offlinePrefix({ kind: 'cache', cachedAt: Date.parse('2026-11-16T06:20:00Z') })
-  assert.match(prefix, /^离线：当日缓存 14:20/, '时刻精确到分即可')
+  const cachedAt = Date.parse('2026-11-16T06:20:00Z')
+  const sameDay = Date.parse('2026-11-16T08:20:00Z')
+  const nextDay = Date.parse('2026-11-17T08:20:00Z')
+  assert.match(offlinePrefix({ kind: 'cache', cachedAt }, sameDay), /^离线：当日缓存 14:20/, '当日只给时分, 时刻精确到分即可')
+  assert.match(offlinePrefix({ kind: 'cache', cachedAt }, nextDay), /^离线：当日缓存 11-16 14:20/, '跨日补 MM-DD 前缀')
 })
 
 test('离线兜底也要说清数据可能不完整', async () => {

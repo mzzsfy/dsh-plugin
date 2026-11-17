@@ -4,7 +4,8 @@ export const RECOVERY_PROBE_MS = 5 * 60 * 1000
 // 探测退避上限: 一个实例连续探不通时, 间隔按倍数涨到这么久就不再涨
 export const PROBE_BACKOFF_MAX_MS = 60 * 60 * 1000
 // 触发降级的错误码: 别的错误码说明问题不在网络上, 换源也没用
-export const TRANSIENT_CODES = ['NETWORK', 'TIMEOUT']
+// 人机验证也是端起端落: 过验证码就好, 与网络故障一样按轮计次, 攒满三轮切到备源
+export const TRANSIENT_CODES = ['NETWORK', 'TIMEOUT', 'CHALLENGE']
 export function createRouter(getConfig, now = Date.now, changed = () => {}) {
   const states = new Map()
   // 主源与备用源构成一个环: 顺序即优先级, 降级沿环往下走一格, 走到头回到主源

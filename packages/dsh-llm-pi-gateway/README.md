@@ -2,6 +2,10 @@
 
 为 DSH LLM 请求补齐会话亲和键。gateway 不禁用或接管官方 `llm-pi-ai`，也不注册 adapter、directory 或 discovery；官方插件继续负责 provider、设置和模型发现。
 
+## 预览
+
+![插件图标](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/icons/png/dsh-llm-pi-gateway.png)
+
 ## 安装
 
 ```sh

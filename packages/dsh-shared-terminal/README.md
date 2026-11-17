@@ -2,6 +2,10 @@
 
 AI `terminal` 工具与用户通过 DSH 官方 Sidebar `terminal` tab 操作同一 Session-owned shell,并对同一终端的 Host xterm active viewport 做只读快照。写入通道随宿主代际:0.2.0 与 0.2.1-alpha.2 代 AI 借用官方 xterm UI 的输入 attachment 写入;0.2.1-rc.2 起插件自持输入附着(attach 泵,见下)。
 
+## 预览
+
+![插件图标](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/icons/png/dsh-shared-terminal.png)
+
 ## 功能
 
 只注册一个工具 `terminal`：

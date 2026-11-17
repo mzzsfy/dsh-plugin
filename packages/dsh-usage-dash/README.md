@@ -2,6 +2,17 @@
 
 用量统计面板(dsh 插件)。天/小时/分钟三粒度 token 与请求统计,设置页自绘面板:汇总卡、活动热力图、缓存命中率曲线、模型 donut 与列表、回扫状态行、会话底栏追加、回合费用芯片与官方用时弹窗最近请求详情,支持 en/zh 双语与可选费用估算;另含成本控制四模块:省钱沙盘、成本护栏(预算超限拦截/降级)、异常哨兵与用量摘要(设置页卡片 + 输入区常驻读数)。复刻自 [HaoyueQin/dsh-usage-statistics-panel](https://github.com/HaoyueQin/dsh-usage-statistics-panel),感谢原作者。
 
+## 预览
+
+![设置页](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-usage-dash/settings.png)
+![设置页（续）](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-usage-dash/settings-2.png)
+![设置页（续 2）](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-usage-dash/settings-3.png)
+![设置页（续 3）](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-usage-dash/settings-4.png)
+![最近输出速度](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-usage-dash/recent-speed.png)
+![用量明细](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-usage-dash/usage.png)
+![费用明细](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-usage-dash/cost.png)
+![成本护栏悬停](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-usage-dash/guard-hover.png)
+
 ## 功能(全阶段已交付)
 
 设置页「使用统计」区块:

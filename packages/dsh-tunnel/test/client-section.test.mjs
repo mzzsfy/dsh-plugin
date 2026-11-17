@@ -66,6 +66,13 @@ test('Given 分区卸载 When 再推送 Then 不再请求', async () => {
   assert.equal(harness.requests.length, before)
 })
 
+test('Given 操作菜单 When 源码检查 Then 菜单走 body portal 并固定定位(不被设置面板滚动区裁剪)', () => {
+  assert.match(clientSource, /tu-menu--floating/)
+  assert.match(clientSource, /createPortal\(menu, document\.body\)/)
+  assert.match(clientSource, /position:fixed;right:auto;top:auto;z-index:1200/)
+  assert.doesNotMatch(clientSource, /disabled: mode === 'edit'/, '隧道名在编辑弹窗里必须可改')
+})
+
 test('Given 源码 When 检查 Then 不再包含旧注册面与 sidebarTab 协议', () => {
   assert.doesNotMatch(clientSource, /slots\.register\(\s*\{\s*name:\s*'main'/)
   assert.doesNotMatch(clientSource, /sidebar\.panellist/)

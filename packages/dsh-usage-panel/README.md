@@ -2,6 +2,10 @@
 
 DeepSeek Harness 双端插件:在「设置 → 账号余额」手动配置多组(上限 20 个)LLM 平台账号(API 地址 + Key),定期自动查询并展示每个账号的余额、额度与历史趋势;刷新评估越过逻辑点(用量阈值穿越 / 余额阈值穿越 / 额度窗口重置)时,经 webhook、dsh-im、页内 toast 三通道推送通知。无自动发现;配置持久化在本机 `~/.dsh/dsh-usage-panel/accounts.json`,查询快照留存于同目录 `history.json`。
 
+## 预览
+
+![设置页](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-usage-panel/settings.png)
+
 ## 安装
 
 ```sh

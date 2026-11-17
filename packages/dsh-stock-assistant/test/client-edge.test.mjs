@@ -104,6 +104,18 @@ test('U03 未选中候选时确认添加不可用，不自动取首项', async (
   assert.match(html, /disabled/)
   assert.equal(adds, 0)
 })
+// 概览横幅: 来源被要求人机验证时直接念适配器的原因, 不是笼统的「最近请求失败」
+test('被要求人机验证时概览横幅给出可操作原因', async () => {
+  const { plugin } = await loadClientWithReact()
+  const reason = '东财要求人机验证：用浏览器打开 www.eastmoney.com 完成验证后自动恢复'
+  const base = { view: { view: 'list', query: '', selectedId: null, sort: 'manual' }, busy: {}, candidates: [], composing: false, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: {}, providers: [{ id: 'em-default', adapterId: 'eastmoney', enabled: true, budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }], routes: [] }, adapters: [], quotes: {}, catalogs: [], routeSelections: {} } }
+  const challenged = { ...base, data: { ...base.data, providerStatus: [{ id: 'em-default', credentialPresent: true, recentRequests: [{ at: 1, url: 'quotes eastmoney', status: 'CHALLENGE', ms: 5, message: reason }] }] } }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => challenged, subscribe: () => () => {}, updateView() {} }, layout: {} }))
+  assert.match(html, /www\.eastmoney\.com/, '横幅直接告诉用户去哪里完成验证')
+  const plain = { ...base, data: { ...base.data, providerStatus: [{ id: 'em-default', credentialPresent: true, recentRequests: [{ at: 1, url: 'quotes eastmoney', status: 'NETWORK', ms: 5 }] }] } }
+  const plainHtml = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => plain, subscribe: () => () => {}, updateView() {} }, layout: {} }))
+  assert.match(plainHtml, /最近请求失败/, '其他失败保持原有措辞')
+})
 // D2: Given已持久化空配置 When点一键默认源 Then草稿填充suggested;再走检查→保存回路提交
 test('设置页空配置一键默认源填充草稿', async () => {
   const { plugin } = await loadClientWithReact()
@@ -554,8 +566,11 @@ test('pruneDeniedTargets: 主源失败提升备源而非删整条路由', async 
   assert.equal(trimmed.length, 1)
   assert.equal(trimmed[0].primaryInstanceId, 'ts-1', '主源保留')
   assert.deepEqual(trimmed[0].fallbackInstanceIds, [])
-  // 全部目标不可用: 删除该路由
-  assert.equal(pruneDeniedTargets([route], new Set(['ts-1:kline:XNAS', 'em-default:kline:XNAS'])).length, 0)
+  // 全部目标不可用: 保留原路由。探针失败可能只是当次网络抖动或出口被拒, 删掉配置就再没有重试和自愈的机会
+  const kept = pruneDeniedTargets([route], new Set(['ts-1:kline:XNAS', 'em-default:kline:XNAS']))
+  assert.equal(kept.length, 1, '不因探针失败删掉用户的配置')
+  assert.equal(kept[0].primaryInstanceId, 'ts-1', '主源原样保留')
+  assert.deepEqual(kept[0].fallbackInstanceIds, ['em-default'], '备源也保留')
   // 无拒绝目标: 原样返回
   const untouched = pruneDeniedTargets([route], new Set())
   assert.equal(untouched[0].primaryInstanceId, 'ts-1')

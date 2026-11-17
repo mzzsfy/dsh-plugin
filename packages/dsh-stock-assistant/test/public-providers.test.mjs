@@ -324,6 +324,17 @@ test('三个公开适配器合同完整且网络错误归NETWORK', async () => {
 
 // ---- Step 4.1/4.3: 东财港美 quotes 解析与 search 放宽 ----
 
+const CHALLENGE_HTML = '<html><head><title>安全验证</title></head><body><div class="slide">请拖动滑块完成验证</div></body></html>'
+const htmlCtx = (ok = true) => ({ now: () => 100, signal: new AbortController().signal, fetch: async () => ({ ok, clone: () => ({ text: async () => CHALLENGE_HTML }), json: async () => { throw SyntaxError('Unexpected token <') } }) })
+
+test('东财被风控时给出人机验证提示, 而不是含混的响应格式错误', async () => {
+  await assert.rejects(eastmoney.quotes(req, htmlCtx()), e => e.code === 'CHALLENGE' && e.message.includes('www.eastmoney.com'), '200 的滑块验证页')
+  await assert.rejects(eastmoney.quotes(req, htmlCtx(false)), e => e.code === 'CHALLENGE', '403 的滑块验证页')
+  // 正常 JSON 响应不能被 HTML 嗅探误判
+  const ok = await eastmoney.quotes(req, jsonCtx({ data: { diff: [{ f2: 1369.51, f5: 1, f6: 1, f12: '600519', f13: 1, f15: 1376, f16: 1352.98, f17: 1363, f18: 1354, f124: 1793329204 }] } }))
+  assert.equal(ok.items[0].last, '1369.51')
+})
+
 test('东财 quotes 港美市场解析与币种派生', async () => {
   const hkCtx = { now: () => 100, signal: new AbortController().signal, usSymbols: new Map(), fetch: async () => ({ ok: true, json: async () => ({ data: { diff: [{ f2: 385.2, f12: '00700', f13: 116, f14: '腾讯控股', f15: 386, f16: 380, f17: 382.4, f18: 380, f5: 12345678, f6: 4712345678.9, f124: 1761816000 }] } }) }) }
   const hk = await eastmoney.quotes({ providerInstanceId: 'em', securities: [{ id: 'XHKG:equity:00700', exchange: 'XHKG', code: '00700' }] }, hkCtx)

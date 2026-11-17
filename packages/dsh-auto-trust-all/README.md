@@ -2,6 +2,10 @@
 
 DeepSeek Harness web 入口插件:动态信任所有实际到达的 Host——`dsh web` 启动后,任何实际到达的入口(泛域名、内网 IP、反代域名)等效已被 `--trusted-host=<实际到达的 host>` 静态放行。不干预监听绑定:web 监听地址由部署层决定(`--host` 旗标或宿主缺省 `127.0.0.1`)。
 
+## 预览
+
+![插件图标](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/icons/png/dsh-auto-trust-all.png)
+
 ## 功能
 
 - **动态信任**:包装 webServer 函数型路由处理器(exact / prefix / upgrade,以及 fallback 的 handler 形态;0.2.2 起 fallback 亦可为 `{ resource }` 资源对象,资源由宿主 `readResource`/HTTP 分发直接消费,非函数不参与包装,本条信任登记对其无意义),含激活前已注册与后续新注册,请求到达即提取 Host 头(与官方信任闸门同构的 WHATWG 解析:小写、去端口、IPv6 保留方括号),去重后写入 `connection` 服务实例的 `trustedHosts` 数组——各代宿主(0.2.0 线 / 0.2.1 线 / 0.2.2 线)的 `/api` 信任闸门都实时读它,无需重启;`webRuntime.trustedHosts` 在场时同步镜像(0.2.0 线同构自守卫插件读它,0.2.1 及以后线宿主已移除该服务,缺席即静默降级)。泛域名(`*.example.com`)等无法枚举的入口不再需要改启动命令。

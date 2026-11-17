@@ -4,6 +4,11 @@
 
 替代 `dsh-client-auto-continue` 的全部宿主侧恢复能力,并补上“任务没做完但回合正常结束”这一缺口。
 
+## 预览
+
+![设置页](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-keep-working/settings.png)
+![设置页（续）](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-keep-working/settings-2.png)
+
 ## 结案规则
 
 一句话:改过文件就 `present` 交付(之后不要再改文件、不再写 `TASK_DONE`),没改文件就最后一行单独写 `TASK_DONE`,做不下去最后一行写 `TASK_BLOCKED: 原因`。

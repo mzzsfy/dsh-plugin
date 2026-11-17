@@ -4,6 +4,10 @@
 
 client 侧的 WebSocket 连接基址取宿主官方连接层 `ctx.get('connection').openWebSocket(path)`:桌面版窗口页面源是 `dsh-app://app`,自建 `new URL(path, location.href)` 会继承自定义协议,`new WebSocket` 构造直接抛错;连接层缺席(旧宿主)时才回落到页面 URL。连接构造失败不抛出:总线停用并 console 告警一次,消费方据此走各自兜底。
 
+## 预览
+
+![插件图标](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/icons/png/dsh-common-tools.png)
+
 ## 双接口
 
 两端 API 相同，消息就是业务 payload：

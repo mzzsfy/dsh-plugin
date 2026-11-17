@@ -2,6 +2,11 @@
 
 对话增强插件:历史输入回溯(Alt+↑ 或输入框工具排按钮唤起)、插话撤回、对话分叉(进行中轮分叉/自动重发)、标题栏复制 sessionId、克隆仓库打开工作区(官方浏览目录弹窗注入)。dsh-session-manager 历史输入功能的独立延续包(原包已移除该功能)。
 
+## 预览
+
+![分叉按钮](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-context-manager/fork-button.png)
+![历史输入浮层](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-context-manager/history-overlay.png)
+
 ## 功能
 
 ### 历史输入浮层(Alt+↑ 或输入框按钮)

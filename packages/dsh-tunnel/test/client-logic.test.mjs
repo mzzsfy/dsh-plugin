@@ -105,12 +105,12 @@ test('弹窗名称建议: 进程名转 slug 并用端口做后缀, 无字母进�
   assert.match(long, new RegExp('^[a-z0-9-]+-' + 65535 + '$'))
 })
 
-test('提交体: 创建可带名称, 编辑绝不带 name(服务端名不可改)', () => {
+test('提交体: 创建与编辑都带名称(编辑可改名)', () => {
   const logic = loadLogic(undefined)
   const draft = { name: 'app', targetPort: '8090', entry: 'path' }
   assert.deepEqual(logic.tunnelBodyOf('create', draft, 'app'), { targetPort: 8090, entry: 'path', name: 'app' })
   assert.deepEqual(logic.tunnelBodyOf('create', draft, ''), { targetPort: 8090, entry: 'path' })
-  assert.deepEqual(logic.tunnelBodyOf('edit', draft, 'app'), { targetPort: 8090, entry: 'path' })
+  assert.deepEqual(logic.tunnelBodyOf('edit', draft, 'app'), { targetPort: 8090, entry: 'path', name: 'app' })
 })
 
 test('状态模型: 停用优先于路由错误, 路由错误优先于健康探测', () => {

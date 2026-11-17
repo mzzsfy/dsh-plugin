@@ -103,10 +103,7 @@ test('Given 在线/离线/停用/路由失败四类行 When list probe=1 Then �
     { name: 'disabled', targetPort: target.port, entry: 'path', enabled: false },
     { name: 'dsh', targetPort: target.port, entry: 'subdomain', enabled: true },
   ]))
-  const { plugin } = await scenario({
-    dataDir,
-    connection: { trustedHosts: ['dsh.example.com:3080'] },
-  })
+  const { plugin } = await scenario({ dataDir })
   const rows = (await list(plugin, { probe: true })).tunnels
   const byName = new Map(rows.map((row) => [row.name, row]))
   assert.equal(byName.get('online').status, 'online')
@@ -116,8 +113,8 @@ test('Given 在线/离线/停用/路由失败四类行 When list probe=1 Then �
   assert.equal(byName.get('offline').error, undefined)
   assert.equal(byName.get('disabled').status, 'disabled')
   assert.equal(byName.get('disabled').health, undefined)
-  assert.equal(byName.get('dsh').status, 'route_error')
-  assert.match(byName.get('dsh').error, /首标签冲突/)
+  assert.equal(byName.get('dsh').status, 'online', '子域名行与路径行按同一健康判据')
+  assert.equal(byName.get('dsh').error, undefined)
 })
 
 test('Given 在线行 When PATCH enabled=false Then 路由摘除且重启仍停用; PATCH true 恢复', async () => {

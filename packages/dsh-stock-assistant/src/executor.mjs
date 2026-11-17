@@ -6,9 +6,9 @@ export function createExecutor({ registry, budget, env = process.env, resolveCre
   const requestLogs = new Map(), proxies = new Map()
   let stopped = false, running = 0
   // probe 标记只给后台探测用: 界面上的"最近请求"只该反映用户请求
-  const record = (instanceId, url, status, startedAt, probe = false) => {
+  const record = (instanceId, url, status, startedAt, probe = false, message = null) => {
     const log = requestLogs.get(instanceId) || []
-    log.unshift({ at: now(), url: String(url), status, ms: Math.max(0, now() - startedAt), ...(probe ? { probe: true } : {}) })
+    log.unshift({ at: now(), url: String(url), status, ms: Math.max(0, now() - startedAt), ...(message ? { message } : {}), ...(probe ? { probe: true } : {}) })
     if (log.length > REQUEST_LOG_LIMIT) log.length = REQUEST_LOG_LIMIT
     requestLogs.set(instanceId, log)
   }
@@ -127,7 +127,8 @@ export function createExecutor({ registry, budget, env = process.env, resolveCre
           return result
         } catch (e) {
           const code = e instanceof StockError ? e.code : 'NETWORK'
-          record(instance.id, `${options.probe ? 'probe' : capability} ${instance.adapterId}`, code, startedAt, !!options.probe)
+          // 原因文案由适配器给出: 界面照着念, 不必猜是网络坏了还是被要求过人机验证
+          record(instance.id, `${options.probe ? 'probe' : capability} ${instance.adapterId}`, code, startedAt, !!options.probe, e?.message ?? null)
           if (controller.signal.aborted && controller.signal.reason?.code === 'TIMEOUT') throw controller.signal.reason
           if (e.code === 'RATE_LIMIT' && !options.probe) budget.block?.(instance, e.retryAfterMs || 60 * 1000)
           if (e instanceof StockError) throw e

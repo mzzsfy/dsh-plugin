@@ -39,15 +39,12 @@ const STORE_TMP_SUFFIX = '.tmp'
 // rename 的临时文件若被外部清理, 重建重试的写尝试总次数
 const STORE_WRITE_ATTEMPTS = 3
 const WARN_TAG = 'dsh-tunnel: '
-const ENTRY_LABEL_CONFLICT = '隧道名与入口域首标签冲突'
 
 const ENTRY_PATH = 'path'
 const ENTRY_SUBDOMAIN = 'subdomain'
 const VALID_ENTRIES = new Set([ENTRY_PATH, ENTRY_SUBDOMAIN])
 const SETTINGS_NS = 'tunnel'
 const SETTINGS_UNAVAILABLE = '设置服务不可用'
-// 已建立的 upgrade 连接不经过 matchHost, 按周期复核信任面并回收被晚信任覆盖的连接
-const TRUST_RECONCILE_MS = 1_000
 const HEALTH_CACHE_TTL_MS = 3_000
 
 // 监听层安装标记: 只装一次, 代际切换靠载体重定向, 旧包装退化为纯穿透
@@ -211,15 +208,17 @@ function firstLabelOf(hostHeader) {
   return at === -1 ? undefined : hostname.slice(0, at)
 }
 
-// 子域名隧道名与入口域首标签相同即整入口劫持: Host 分流先于宿主全部路由(含 /api/*), GUI 随之消失。
-// 比对面只取宿主 connection.trustedHosts(实际到达并被信任的 Host 授权), 不自建 Host 白名单。
-function conflictingEntryHost(trustedHosts, name) {
-  if (!Array.isArray(trustedHosts)) return undefined
-  for (const entry of trustedHosts) {
-    if (firstLabelOf(entry) === name) return entry
-  }
-  return undefined
+// 子域名隧道名等于「本次管理请求所在的 Host」首标签: 保存后这个地址会被隧道接管
+// (含 /api/*), 设置页在该地址消失, 因此只在这一刻拒绝。
+// 不扫描宿主 trustedHosts: 该集合由 auto-trust-all 按到达的 Host 动态累积,
+// 泛解析部署下每个试用过的 <name>.<域> 都会永久留在集合里, 用它判入口必然误报
+// (名字等于任一历史访问地址就被拒), 而真正会自劫持的只有当前这一个地址。
+function entryHostConflict(entryHost, name) {
+  return firstLabelOf(entryHost) === name
 }
+
+const entryConflictReason = (name, entryHost) =>
+  `隧道名与当前访问地址首标签冲突: ${name} 是 ${entryHost} 的首标签, 保存后该地址(含 /api/*)会进入隧道而不是设置页; 换名, 或改用其它地址打开设置页后再建`
 
 // strip 隧道前缀: 前缀本身映射 '/', 其余保留前导 '/' 携带查询串
 function targetPathOf(reqUrl, prefix) {
@@ -485,7 +484,6 @@ function installListener(webServer, server) {
       // 按当前代际的 socket 集合登记: 旧代 dispose 只回收自己接入的连接
       const generation = webServer[DISPATCH_PROP]
       trackUpgradedSocket(webServer, socket, generation, match.record)
-      generation?.watchTrust?.()
       forwardUpgrade(req, socket, head, { ...match, timeoutMs: readTimeout(webServer), proto: protocolOf(webServer) })
       return
     }
@@ -501,7 +499,7 @@ function trackUpgradedSocket(webServer, socket, generation, record) {
     own.add(socket)
     socket.once('close', () => own.delete(socket))
   }
-  // 子域名 upgrade 另记隧道名: 信任面晚到后按名字复核并关闭既有连接
+  // 子域名 upgrade 另记隧道名: close/停用/改名时按名字回收
   if (record?.entry === ENTRY_SUBDOMAIN && generation?.hostSockets instanceof Map) {
     generation.hostSockets.set(socket, record.name)
     socket.once('close', () => generation.hostSockets.delete(socket))
@@ -579,9 +577,9 @@ export function apply(ctx, config) {
   const healthEpoch = new Map()
   const emptyStats = () => ({ requests: 0, errors: 0, lastAccessAt: null, lastStatus: null, lastError: null })
   const statsOf = (row) => (row.stats ??= emptyStats())
-  // 已建立 upgrade 的隧道名台账: 信任面变化与 close 都按名字回收
+  // 已建立 upgrade 的隧道名台账: close/停用/改名都按名字回收
   const hostSockets = new Map()
-  // path 与 subdomain 分表: path socket 不受入口域信任面影响, 但 close 必须回收
+  // path 与 subdomain 分表: 两张表的 socket 都只在对应隧道结束生命周期时回收
   const pathSockets = new Map()
 
   function registerRoutes(record) {
@@ -627,29 +625,6 @@ export function apply(ctx, config) {
   }
 
   const persist = () => saveStore(dataDir, [...rows.values()].map(({ createdAt, enabled, entry, name, targetPort }) => ({ createdAt, enabled: enabled !== false, entry, name, targetPort })))
-
-  // 入口域首标签冲突: 服务缺失(非 web 传输/旧宿主)即无从判断, 放行原行为。
-  // 每次现读 trustedHosts: 信任面可能晚于插件装载才就绪, 静态快照会漏掉晚信任。
-  const readTrustedHosts = () => {
-    try {
-      return ctx.get('connection')?.trustedHosts
-    } catch {
-      return undefined
-    }
-  }
-  const entryHostInConflict = (tunnelName) => conflictingEntryHost(readTrustedHosts(), tunnelName)
-  const conflictReason = (name, clash) => `${ENTRY_LABEL_CONFLICT}: ${name} 是 ${clash} 的首标签, 该名字会把整个入口(含 /api/*)劫持到隧道目标`
-
-  // 运行期首次发现冲突即从活动表摘除并留 error; 信任面恢复后由周期核对重新激活
-  function suspendConflictedHost(row, clash) {
-    const reason = conflictReason(row.name, clash)
-    const changed = row.error !== reason || tunnels.has(row.name)
-    row.error = reason
-    if (tunnels.has(row.name)) deactivate(row.name)
-    // 已建立的子域名 upgrade 不走 matchHost, 同一次发现即断开
-    closeTunnelSockets(row.name)
-    if (changed) changes.refresh()
-  }
 
   function invalidateHealth(name) {
     healthEpoch.set(name, (healthEpoch.get(name) ?? 0) + 1)
@@ -712,12 +687,9 @@ export function apply(ctx, config) {
         return { ok: false, error: `targetPort 不得为宿主监听端口 ${hostPort}(自代理环)` }
       }
       const name = requestedName ?? uniqueTunnelName(rows, AUTO_NAME_PREFIX, args.targetPort)
-      // 仅子域名入口按 Host 分流, 名等于入口首标签即劫持整个 GUI; 路径入口只在 /p/<名> 下, 无此冲突
-      if (entry === ENTRY_SUBDOMAIN) {
-        const clash = entryHostInConflict(name)
-        if (clash !== undefined) {
-          return { ok: false, error: `${conflictReason(name, clash)}, 请换名` }
-        }
+      // 仅子域名入口按 Host 分流, 名等于当前管理地址首标签即接管该地址; 路径入口只在 /p/<名> 下, 无此冲突
+      if (entry === ENTRY_SUBDOMAIN && entryHostConflict(args.entryHost, name)) {
+        return { ok: false, error: entryConflictReason(name, args.entryHost) }
       }
       const existing = rows.get(name)
       // 活动行才占用名字; 未激活行允许原地重激活(占位释放后同名 open 不得被死条目永久拒绝)
@@ -772,27 +744,31 @@ export function apply(ctx, config) {
       return outcome
     },
     async list(args = {}) {
-      // 状态查询也按当前信任面校正, 避免未发生请求时把已失效的隧道报成 active
-      reconcileTrustedHosts()
+      // 状态查询先补激活失败的行, 避免占位释放后仍把可用的隧道报成不可用
+      retryInactiveRows()
       const list = [...rows.values()]
       const healths = args.probe === true ? await Promise.all(list.map((row) => probeRowHealth(row))) : []
       return { ok: true, tunnels: list.map((row, index) => rowView(row, healths[index])) }
     },
     async update(args) {
-      const name = args?.name
+      const currentName = args?.name
       const patch = args?.patch
-      if (typeof name !== 'string' || patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
+      if (typeof currentName !== 'string' || patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
         return { ok: false, error: '参数不合法: name 与 patch 必填' }
       }
-      if (Object.prototype.hasOwnProperty.call(patch, 'name')) return { ok: false, error: '隧道名不可修改' }
-      const allowed = new Set(['targetPort', 'entry', 'enabled'])
+      const allowed = new Set(['name', 'targetPort', 'entry', 'enabled'])
       for (const key of Object.keys(patch)) {
         if (!allowed.has(key)) return { ok: false, error: `不支持修改字段: ${key}` }
       }
       if (Object.keys(patch).length === 0) return { ok: false, error: 'patch 不能为空' }
-      const row = rows.get(name)
-      if (row === undefined) return { ok: false, error: `隧道不存在: ${name}` }
-      const next = { targetPort: row.targetPort, entry: row.entry, enabled: row.enabled !== false }
+      const row = rows.get(currentName)
+      if (row === undefined) return { ok: false, error: `隧道不存在: ${currentName}` }
+      const next = { name: currentName, targetPort: row.targetPort, entry: row.entry, enabled: row.enabled !== false }
+      if (patch.name !== undefined) {
+        const requestedName = typeof patch.name === 'string' ? patch.name.trim() : ''
+        if (!validateName(requestedName)) return { ok: false, error: 'name 须为小写字母/数字/连字符(≤32 位, 且至少含一个字母)' }
+        next.name = requestedName
+      }
       if (patch.targetPort !== undefined) {
         if (!validatePort(patch.targetPort)) return { ok: false, error: 'targetPort 须为 1..65535 整数' }
         if (patch.targetPort === Number(webServer.port)) return { ok: false, error: `targetPort 不得为宿主监听端口 ${webServer.port}(自代理环)` }
@@ -806,33 +782,48 @@ export function apply(ctx, config) {
         if (typeof patch.enabled !== 'boolean') return { ok: false, error: 'enabled 须为布尔' }
         next.enabled = patch.enabled
       }
-      if (next.entry === ENTRY_SUBDOMAIN) {
-        const clash = entryHostInConflict(name)
-        if (clash !== undefined) return { ok: false, error: `${conflictReason(name, clash)}, 请换名` }
+      if (next.name !== currentName && rows.has(next.name)) return { ok: false, error: `隧道名已占用: ${next.name}` }
+      if (next.entry === ENTRY_SUBDOMAIN && entryHostConflict(args.entryHost, next.name)) {
+        return { ok: false, error: entryConflictReason(next.name, args.entryHost) }
       }
-      const previous = { targetPort: row.targetPort, entry: row.entry, enabled: row.enabled !== false }
-      const wouldChangeRoute = previous.targetPort !== next.targetPort || previous.entry !== next.entry
-      const wasActive = tunnels.has(name)
-      if ((wouldChangeRoute || !next.enabled) && wasActive) deactivate(name)
+      const previous = { name: currentName, targetPort: row.targetPort, entry: row.entry, enabled: row.enabled !== false }
+      const routeChanged = previous.name !== next.name || previous.targetPort !== next.targetPort || previous.entry !== next.entry
+      const wasActive = tunnels.has(currentName)
+      if ((routeChanged || !next.enabled) && wasActive) deactivate(currentName)
+      const rollback = () => {
+        row.targetPort = previous.targetPort
+        row.entry = previous.entry
+        row.enabled = previous.enabled
+        if (next.name !== previous.name) {
+          rows.delete(next.name)
+          row.name = previous.name
+          rows.set(previous.name, row)
+        }
+      }
+      row.name = next.name
       row.targetPort = next.targetPort
       row.entry = next.entry
       row.enabled = next.enabled
-      if (next.enabled && (!wasActive || wouldChangeRoute)) {
+      if (next.name !== currentName) {
+        rows.delete(currentName)
+        rows.set(next.name, row)
+      }
+      if (next.enabled && (!wasActive || routeChanged)) {
         try {
           activate(row)
         } catch (error) {
-          row.targetPort = previous.targetPort
-          row.entry = previous.entry
-          row.enabled = previous.enabled
+          rollback()
           if (previous.enabled) {
             try { activate(row) } catch { row.error = String(error.message) }
           }
+          persist()
           changes.refresh()
           return { ok: false, error: `路由注册失败: ${error.message}` }
         }
       }
       if (next.enabled) delete row.error
-      invalidateHealth(name)
+      invalidateHealth(currentName)
+      if (next.name !== currentName) invalidateHealth(next.name)
       persist()
       changes.refresh()
       return { ok: true, ...rowView(row) }
@@ -877,12 +868,6 @@ export function apply(ctx, config) {
     if (label === undefined) return undefined
     const record = tunnels.get(label)
     if (record === undefined || record.entry !== ENTRY_SUBDOMAIN) return undefined
-    // 晚信任/动态信任变更: 每次按当前 trustedHosts 复核首标签冲突, 冲突即不劫持入口
-    const clash = entryHostInConflict(label)
-    if (clash !== undefined) {
-      suspendConflictedHost(record, clash)
-      return undefined
-    }
     return { record, url: req.url }
   }
   const matchPathUpgrade = (req) => {
@@ -898,52 +883,20 @@ export function apply(ctx, config) {
   dispatch.sockets = new Set()
   dispatch.hostSockets = hostSockets
   dispatch.pathSockets = pathSockets
-  let trustTimer
 
-  // 处理路径与定时器都会调用: 冲突行挂起, 恢复行重新激活, 已被覆盖的 upgrade 立即断开。
-  // path 与 subdomain 走同一条重试路径: 激活失败的行在占位释放/信任面恢复后自动恢复。
-  const reconcileTrustedHosts = () => {
+  // 激活失败的行(路由注册冲突等)在占位释放后重试: 每次列表都按当前隧道表补一遍
+  const retryInactiveRows = () => {
     for (const row of rows.values()) {
-      if (row.enabled === false) continue
-      if (row.entry === ENTRY_SUBDOMAIN) {
-        const clash = entryHostInConflict(row.name)
-        if (clash !== undefined) {
-          const reason = conflictReason(row.name, clash)
-          if (tunnels.has(row.name)) suspendConflictedHost(row, clash)
-          else if (row.error !== reason) {
-            row.error = reason
-            changes.refresh()
-          }
-          continue
-        }
-      }
-      if (!tunnels.has(row.name) && row.error !== undefined) {
-        delete row.error
-        try {
-          activate(row)
-          changes.refresh()
-        } catch (error) {
-          row.error = String(error.message)
-        }
+      if (row.enabled === false || tunnels.has(row.name)) continue
+      delete row.error
+      try {
+        activate(row)
+        changes.refresh()
+      } catch (error) {
+        row.error = String(error.message)
       }
     }
-    for (const [socket, name] of [...hostSockets]) {
-      if (entryHostInConflict(name) === undefined) continue
-      hostSockets.delete(socket)
-      socket.destroy()
-    }
-    if (hostSockets.size === 0 && trustTimer !== undefined) {
-      clearInterval(trustTimer)
-      trustTimer = undefined
-    }
   }
-  // 周期核对只在有子域名 upgrade 连接时运行, 空载不占定时器
-  const startTrustWatch = () => {
-    if (trustTimer !== undefined || hostSockets.size === 0) return
-    trustTimer = setInterval(reconcileTrustedHosts, TRUST_RECONCILE_MS)
-    trustTimer.unref?.()
-  }
-  dispatch.watchTrust = startTrustWatch
   const timeoutOf = () => connectTimeoutMs
   webServer[DISPATCH_PROP] = dispatch
   webServer[TIMEOUT_PROP] = timeoutOf
@@ -976,16 +929,6 @@ export function apply(ctx, config) {
     }
     rows.set(row.name, row)
     if (row.enabled === false) continue
-    // 恢复同样按当前信任面判冲突: 磁盘行可能先于 trustedHosts 就绪落盘(晚信任),
-    // 此时激活会永久劫持入口; 行留盘并标 error, 下次激活重试。
-    if (row.entry === ENTRY_SUBDOMAIN) {
-      const clash = entryHostInConflict(row.name)
-      if (clash !== undefined) {
-        row.error = conflictReason(row.name, clash)
-        console.warn(`${WARN_TAG}隧道 ${row.name} 激活失败, 保留待下次激活重试: ${row.error}`)
-        continue
-      }
-    }
     try {
       activate(row)
     } catch (error) {
@@ -1178,10 +1121,6 @@ export function apply(ctx, config) {
     if (webServer[DISPATCH_PROP] === dispatch) webServer[DISPATCH_PROP] = undefined
     if (webServer[TIMEOUT_PROP] === timeoutOf) webServer[TIMEOUT_PROP] = undefined
     // 只回收本代接入的 upgrade socket: 新代连接在它自己的集合里, 不得误杀
-    if (trustTimer !== undefined) {
-      clearInterval(trustTimer)
-      trustTimer = undefined
-    }
     for (const socket of dispatch.sockets) socket.destroy()
     dispatch.sockets.clear()
     hostSockets.clear()
