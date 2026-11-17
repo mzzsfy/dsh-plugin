@@ -5,7 +5,8 @@
   "scripts": {
     "test": "node scripts/aggregate-tests.mjs --rounds 1",
     "test:repo": "node --test \"tests/*.test.mjs\"",
-    "smoke": "node scripts/smoke-load.mjs"
+    "smoke": "node scripts/smoke-load.mjs",
+    "compat:prune": "node scripts/compat/prune.mjs"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.5",

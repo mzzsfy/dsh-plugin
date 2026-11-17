@@ -11,7 +11,7 @@ const STATUS_META = {
   running: { label: '运行中', tone: 'run' },
   success: { label: '成功', tone: 'ok' },
   fail: { label: '失败', tone: 'bad' },
-  timeout: { label: '超时', tone: 'warn' },
+  timeout: { label: '超时', tone: 'bad' },
   skipped: { label: '跳过', tone: 'mute' },
   interrupted: { label: '中断', tone: 'mute' },
   cancelled: { label: '已取消', tone: 'mute' },
@@ -19,7 +19,7 @@ const STATUS_META = {
 const TRIGGER_META = { cron: { label: '定时' }, manual: { label: '手动' } }
 const KIND_LABELS = { shell: '脚本', session: '会话' }
 const MODE_LABELS = { fresh: '每次新建', pinned: '固定会话' }
-const STATUS_TONE_COLOR = { ok: 'var(--cb-status-ok)', bad: 'var(--cb-status-bad)', warn: 'var(--cb-status-warn)', mute: 'var(--cb-status-mute)', run: 'var(--cb-status-run)' }
+const STATUS_TONE_COLOR = { ok: 'var(--cb-status-ok)', bad: 'var(--cb-status-bad)', mute: 'var(--cb-status-mute)', run: 'var(--cb-status-run)' }
 const SECOND_MS = 1000
 const MINUTE_MS = 60 * SECOND_MS
 const HOUR_MS = 60 * MINUTE_MS
@@ -66,7 +66,7 @@ function statusMeta(status) {
 // 宿主自动化任务只读摘要:目录字段见 dsh-schedule 的 ScheduleRecord / ScheduleCatalogEntry
 const AUTOMATION_STATUS_META = {
   active: { label: '启用', tone: 'ok' },
-  paused: { label: '暂停', tone: 'warn' },
+  paused: { label: '暂停', tone: 'mute' },
   inactive: { label: '停用', tone: 'mute' },
   ended: { label: '结束', tone: 'mute' },
 }
@@ -154,8 +154,8 @@ function automationRRuleText(task) {
   if (fields.FREQ === 'DAILY') return interval > 1 ? '每 ' + interval + ' 天' + time : '每天' + time
   if (fields.FREQ === 'WEEKLY') return (interval > 1 ? '每 ' + interval + ' 周' : '每周') + time
   if (fields.FREQ === 'MONTHLY') return (interval > 1 ? '每 ' + interval + ' 月' : '每月') + (fields.BYMONTHDAY ? ' ' + fields.BYMONTHDAY + ' 日' : '') + time
-  if (fields.FREQ === 'HOURLY') return '每 ' + interval + ' 小时'
-  if (fields.FREQ === 'MINUTELY') return '每 ' + interval + ' 分钟'
+  if (fields.FREQ === 'HOURLY') return interval > 1 ? '每 ' + interval + ' 小时' : '每小时'
+  if (fields.FREQ === 'MINUTELY') return interval > 1 ? '每 ' + interval + ' 分钟' : '每分钟'
   if (fields.FREQ === 'YEARLY') return (interval > 1 ? '每 ' + interval + ' 年' : '每年') + time
   return '自定义规则'
 }
@@ -444,8 +444,7 @@ body{
 --cb-accent-wash:color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent);
 --cb-danger:var(--dsw-alias-state-error-primary);
 --cb-ok:var(--dsw-alias-state-success-primary);
---cb-warn:var(--dsw-alias-state-warn-primary);
---cb-status-ok:var(--cb-ok);--cb-status-bad:var(--cb-danger);--cb-status-warn:var(--cb-warn);--cb-status-mute:var(--cb-text-dim);--cb-status-run:var(--cb-accent);
+--cb-status-ok:var(--cb-ok);--cb-status-bad:var(--cb-danger);--cb-status-mute:var(--cb-text-dim);--cb-status-run:var(--cb-status-ok);
 --cb-hover:var(--dsw-alias-interactive-bg-hover);
 --cb-hover-danger:var(--dsw-alias-interactive-bg-hover-danger);
 --cb-card:var(--dsw-alias-bg-layer-1);
@@ -463,11 +462,21 @@ body{
 .cb-page-title{font-size:20px;font-weight:500;line-height:28px;margin:0}
 .cb-page-desc{margin:4px 0 0;font-size:var(--cb-font-md);line-height:20px;color:var(--cb-text-sub)}
 .cb-toolbar{display:flex;align-items:center;gap:var(--cb-space-3);flex-wrap:wrap;padding-bottom:var(--cb-space-4);border-bottom:.5px solid var(--cb-border)}
-.cb-tabs{display:flex;gap:2px;background:var(--cb-bg-muted);border-radius:var(--cb-radius-md);padding:4px}
+/* 页面级工具条只承担 Tab 与状态计数,不再叠第二条分隔线 */
+.cb-toolbar--page{padding-bottom:0;border-bottom:0}
+.cb-tabs{display:flex;gap:2px;background:var(--cb-bg-muted);border-radius:var(--cb-radius-md);padding:2px}
 .cb-pill{border:none;border-radius:var(--cb-radius-sm);padding:0 14px;height:28px;font-size:var(--cb-font-md);background:transparent;color:var(--cb-text-sub);cursor:pointer;font-weight:500;transition:color .15s,background .15s}
 .cb-pill:hover{color:var(--cb-text)}
 .cb-pill--on{background:var(--cb-bg);color:var(--cb-text);font-weight:600}
 .cb-pill--on:hover{color:var(--cb-text)}
+/* 页面级 Tab 与列表筛选共用 pill 结构,靠容器形态分层:页面 Tab 无底胶囊,选中用下划线 */
+.cb-tabs--page{background:transparent;border-radius:0;padding:0;gap:24px}
+.cb-tabs--page .cb-pill{height:36px;border-radius:0;padding:0;border-bottom:2px solid transparent;color:var(--cb-text-sub)}
+.cb-tabs--page .cb-pill:hover{color:var(--cb-text);background:transparent}
+.cb-tabs--page .cb-pill--on{background:transparent;color:var(--cb-text);border-bottom-color:var(--cb-accent);font-weight:600}
+.cb-tabs--page .cb-pill--on:hover{background:transparent;color:var(--cb-text)}
+/* 工具条内的开关标签与同排按钮同字号 */
+.cb-toolbar .cb-switch .cb-meta{font-size:13px;color:var(--cb-text-sub)}
 .cb-spacer{flex:1}
 .cb-button{min-height:var(--cb-control-h);display:inline-flex;align-items:center;justify-content:center;gap:6px;border:1px solid var(--cb-border-strong);border-radius:var(--cb-radius-sm);padding:0 14px;font:inherit;font-size:var(--cb-font-md);font-weight:500;background:transparent;color:var(--cb-text);cursor:pointer;transition:border-color .15s,background .15s,color .15s;white-space:nowrap}
 .cb-button:hover:not(:disabled){background:var(--cb-hover)}
@@ -476,12 +485,19 @@ body{
 .cb-button--primary:hover:not(:disabled){background:var(--cb-accent-deep);border-color:var(--cb-accent-deep)}
 .cb-button--danger{color:var(--cb-danger);border-color:transparent}
 .cb-button--danger:hover:not(:disabled){border-color:transparent;background:var(--cb-hover-danger);color:var(--cb-danger)}
+/* 确认类弹窗的主操作:危险实底 + 反白,悬停不回退成浅底 */
+.cb-button--danger-solid{background:var(--cb-danger);border-color:var(--cb-danger);color:var(--dsw-alias-bg-base)}
+.cb-button--danger-solid:hover:not(:disabled){background:color-mix(in srgb, var(--cb-danger) 88%, var(--dsw-alias-label-primary));border-color:var(--cb-danger);color:var(--dsw-alias-bg-base)}
 .cb-button--sm{min-height:28px;padding:0 10px;font-size:var(--cb-font-sm)}
 .cb-button:focus-visible,.cb-icon:focus-visible,.cb-pill:focus-visible,.cb-select:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
-.cb-cards{display:flex;flex-direction:column;gap:var(--cb-space-2)}
-.cb-card{position:relative;display:flex;flex-direction:column;gap:var(--cb-space-2);border:.5px solid var(--cb-border);border-radius:var(--cb-radius-md);padding:var(--cb-space-4) var(--cb-space-5);cursor:pointer;overflow:hidden;background:var(--cb-card);transition:border-color .15s,background .15s}
+.cb-cards{display:flex;flex-direction:column;gap:6px}
+.cb-card{position:relative;display:flex;flex-direction:column;gap:var(--cb-space-1);border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--cb-radius-md);padding:10px var(--cb-space-5);cursor:pointer;overflow:hidden;background:var(--cb-card);box-shadow:inset 3px 0 0 var(--cb-status);transition:border-color .15s,background .15s}
 .cb-card:hover{border-color:var(--cb-border-strong);background:var(--cb-hover)}
-.cb-card::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--cb-status)}
+.cb-card:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
+/* 暗色下卡面与页面同为 layer-1 会糊成一片:卡升一层,描边取 border-l4 */
+body[data-ds-dark-theme] .cb-card{background:var(--dsw-alias-bg-layer-3)}
+body[data-ds-dark-theme] .cb-card--automation{background:var(--cb-bg-sub)}
+body[data-ds-dark-theme] .cb-card:hover{background:color-mix(in srgb,var(--dsw-alias-bg-layer-3) 88%,var(--dsw-alias-label-primary))}
 .cb-card--automation{background:var(--cb-bg-sub)}
 .cb-card--automation:hover{background:var(--cb-hover)}
 .cb-group{display:flex;flex-direction:column;gap:var(--cb-space-2);padding-top:var(--cb-space-4);border-top:.5px solid var(--cb-border)}
@@ -498,16 +514,28 @@ html[data-cb-hide-host-automation-nav] nav > div:has(> button[aria-label="Tarefa
 html[data-cb-hide-host-automation-nav] nav > div:has(> button > span > div[data-slot="sidebar.panellist"] svg[data-icon="dsw-icon-clock-outline-regular"]){display:none!important}
 .cb-card-row{display:flex;align-items:center;gap:var(--cb-space-3);flex-wrap:wrap}
 .cb-name{font-size:14px;font-weight:600;line-height:22px;color:var(--cb-text)}
-.cb-badge{min-height:20px;display:inline-flex;align-items:center;padding:0 8px;border-radius:999px;color:var(--cb-text-sub);background:var(--cb-bg-muted);font-size:var(--cb-font-xs);white-space:nowrap}
-.cb-dot{width:8px;height:8px;border-radius:50%;background:var(--cb-status);flex:none}
+.cb-badge{min-height:20px;display:inline-flex;align-items:center;padding:0 8px;border-radius:999px;color:var(--cb-text-sub);background:var(--cb-bg-muted);font-size:var(--cb-font-xs);font-weight:500;line-height:18px;white-space:nowrap}
+/* 模式标签是类型标签的附属说明,不占第二枚实底胶囊 */
+.cb-badge--mode{background:transparent;padding:0;color:var(--cb-text-dim);font-weight:400}
+.cb-dot{width:8px;height:8px;border-radius:50%;background:var(--cb-status);flex:none;box-shadow:0 0 0 1px color-mix(in srgb, var(--cb-text) 38%, transparent)}
 .cb-meta{font-size:var(--cb-font-sm);line-height:18px;color:var(--cb-text-sub)}
-.cb-actions{display:flex;align-items:center;gap:4px;margin-left:auto}
+/* 运行状态点:紧邻启停开关,专职表达上次运行成败;运行中用呼吸绿区分,不占第四种色相 */
+@keyframes cb-pulse{0%,100%{opacity:1}50%{opacity:.62}}
+.cb-dot--pulse{animation:cb-pulse 1.8s ease-in-out infinite}
+.cb-actions{display:flex;align-items:center;gap:var(--cb-space-2);margin-left:auto;height:28px}
+/* 卡内操作簇统一 28px 高度:32px 开关会把标题行整体撑高 */
+.cb-actions .cb-switch{min-height:28px}
 .cb-icon{min-height:28px;border:none;background:transparent;color:var(--cb-text-sub);cursor:pointer;font-size:var(--cb-font-sm);padding:0 8px;border-radius:var(--cb-radius-sm);transition:background .15s,color .15s}
 .cb-icon:hover{background:var(--cb-hover);color:var(--cb-text)}
+/* .cb-icon 的默认字色会盖掉 cb-button--danger,危险动作单独归位 */
+.cb-icon.cb-button--danger{color:var(--cb-danger)}
+.cb-icon.cb-button--danger:hover:not(:disabled){background:var(--cb-hover-danger);color:var(--cb-danger)}
 .cb-switch{position:relative;display:inline-flex;align-items:center;cursor:pointer;gap:var(--cb-space-3);min-height:32px}
 .cb-switch input[type="checkbox"] { position:absolute;opacity:0;width:1px;height:1px }
 .cb-switch__track{width:34px;height:19px;border-radius:999px;background:var(--cb-bg-muted);position:relative;transition:background .15s;flex:none}
 .cb-switch__thumb{position:absolute;top:3px;left:3px;width:13px;height:13px;border-radius:50%;background:var(--dsw-alias-bg-base);transition:left .15s}
+.cb-switch input[type="checkbox"]:not(:checked) + .cb-switch__track{box-shadow:inset 0 0 0 1px var(--cb-text-dim)}
+.cb-switch input[type="checkbox"]:not(:checked) + .cb-switch__track .cb-switch__thumb{box-shadow:0 0 0 1px color-mix(in srgb, var(--cb-text-dim) 55%, transparent)}
 .cb-switch input[type="checkbox"]:checked + .cb-switch__track{background:var(--cb-accent)}
 .cb-switch input[type="checkbox"]:checked + .cb-switch__track .cb-switch__thumb{left:18px}
 .cb-switch input[type="checkbox"]:focus-visible + .cb-switch__track{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
@@ -528,21 +556,26 @@ html[data-cb-hide-host-automation-nav] nav > div:has(> button > span > div[data-
 .cb-pc--open .cb-pc__chevron{transform:rotate(180deg)}
 .cb-pc__body{border-top:.5px solid var(--dsw-alias-border-l2);margin:0 16px;padding-bottom:8px}
 .cb-pc__row{gap:6px;padding:12px 0;display:grid}
-.cb-pc__rowLine{color:var(--dsw-alias-label-primary);justify-content:space-between;align-items:flex-start;gap:16px;font-size:13px;line-height:1.5;display:flex}
+.cb-pc__rowLine{color:var(--dsw-alias-label-primary);justify-content:space-between;align-items:center;gap:16px;font-size:13px;line-height:1.5;display:flex}
 .cb-pc__rowLabel{flex:1;min-width:0}
 .cb-pc__hint{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
-.cb-table{display:flex;flex-direction:column;gap:var(--cb-space-1);font-size:var(--cb-font-md)}
-.cb-row{display:flex;align-items:center;gap:var(--cb-space-3);border:1px solid var(--cb-border);border-radius:var(--cb-radius-md);padding:var(--cb-space-2) var(--cb-space-4);flex-wrap:wrap;transition:background .15s,border-color .15s}
+/* 列表表格化:整组一个外框,行间 0.5px 分隔,行高 40;不再逐行独立卡片 */
+.cb-table{display:flex;flex-direction:column;font-size:var(--cb-font-md);border:.5px solid var(--cb-border);border-radius:var(--cb-radius-md);overflow:hidden}
+.cb-row{display:flex;align-items:center;gap:var(--cb-space-3);padding:4px var(--cb-space-4);min-height:40px;box-sizing:border-box;flex-wrap:wrap;border-bottom:.5px solid var(--cb-border);transition:background .15s}
+.cb-row:last-child{border-bottom:0}
+.cb-row .cb-meta{font-variant-numeric:tabular-nums}
 .cb-row:hover{background:var(--cb-hover)}
-.cb-code{font-family:ui-monospace,SFMono-Regular,monospace;font-size:var(--cb-font-sm);color:var(--cb-text-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.cb-code{font-family:ui-monospace,SFMono-Regular,monospace;font-size:var(--cb-font-sm);line-height:18px;color:var(--cb-text-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .cb-mask{color:var(--cb-text-sub)}
 .cb-modal-mask{position:fixed;inset:0;background:var(--cb-mask);display:flex;align-items:center;justify-content:center;z-index:60;animation:cb-fade-in .16s ease-out}
 .cb-modal{background:var(--cb-bg);color:var(--cb-text);border-radius:var(--cb-radius-lg);padding:var(--cb-space-6);max-width:640px;width:min(640px,94vw);max-height:90vh;overflow:hidden;display:flex;flex-direction:column;gap:14px;box-shadow:var(--dsw-shadow-lv3);animation:cb-pop-in .2s ease-out}
 @keyframes cb-fade-in{from{opacity:0}to{opacity:1}}
 @keyframes cb-pop-in{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}
-@media (prefers-reduced-motion: reduce){.cb-modal-mask,.cb-modal{animation:none}.cb-card,.cb-row,.cb-button,.cb-pill,.cb-icon,.cb-switch__track,.cb-pc,.cb-pc__chevron{transition:none}}
-.cb-modal-head{display:flex;align-items:center;justify-content:space-between;gap:var(--cb-space-3);padding-bottom:var(--cb-space-2);border-bottom:1px solid var(--cb-border)}
-.cb-modal-title{font-size:16px;font-weight:600}
+@media (prefers-reduced-motion: reduce){.cb-modal-mask,.cb-modal{animation:none}.cb-dot--pulse{animation:none}.cb-card,.cb-row,.cb-button,.cb-pill,.cb-icon,.cb-switch__track,.cb-pc,.cb-pc__chevron{transition:none}}
+.cb-modal-head{display:flex;align-items:center;justify-content:space-between;gap:var(--cb-space-3);padding-bottom:var(--cb-space-4);border-bottom:.5px solid var(--cb-border)}
+.cb-modal-title{font-size:16px;line-height:24px;font-weight:600}
+/* 弹窗底部与头部分隔线对齐;sticky 仍由 .cb-modal .cb-toolbar 承担 */
+.cb-modal-footer{border-top:.5px solid var(--cb-border);padding-top:var(--cb-space-4)}
 .cb-modal-body{display:flex;flex-direction:column;gap:var(--cb-space-4);flex:1 1 auto;min-height:0;overflow:auto}
 .cb-modal .cb-toolbar{position:sticky;bottom:calc(-1 * var(--cb-space-6));z-index:1;background:var(--cb-bg);padding-top:var(--cb-space-3);border-bottom:0}
 .cb-section{display:flex;flex-direction:column;gap:var(--cb-space-2)}
@@ -591,8 +624,8 @@ html[data-cb-hide-host-automation-nav] nav > div:has(> button > span > div[data-
 .cb-if > .cb-field{flex-direction:row;align-items:center;gap:6px}
 .cb-if input[type="number"]{width:104px}
 .cb-log{font-family:ui-monospace,SFMono-Regular,monospace;font-size:var(--cb-font-sm);white-space:pre-wrap;word-break:break-all;background:var(--cb-bg-sub);border-radius:var(--cb-radius-md);padding:var(--cb-space-3);max-height:320px;overflow:auto}
-.cb-empty{font-size:var(--cb-font-md);color:var(--cb-text-dim);padding:var(--cb-space-6) 0;text-align:center;display:flex;flex-direction:column;align-items:center;gap:var(--cb-space-3)}
-.cb-select{min-height:30px;border:1px solid var(--cb-border-strong);border-radius:var(--cb-radius-md);padding:4px 8px;font:inherit;font-size:var(--cb-font-md);background:var(--cb-bg);color:var(--cb-text)}
+.cb-empty{font-size:14px;line-height:22px;color:var(--cb-text-sub);padding:var(--cb-space-6) 0;text-align:center;display:flex;flex-direction:column;align-items:center;gap:var(--cb-space-4)}
+.cb-select{min-height:var(--cb-control-h);border:1px solid var(--cb-border-strong);border-radius:var(--cb-radius-sm);padding:4px 8px;font:inherit;font-size:var(--cb-font-md);background:var(--cb-bg);color:var(--cb-text)}
 .cb-confirm-text{font-size:var(--cb-font-md);color:var(--cb-text);line-height:1.5}
 .cb-log::-webkit-scrollbar,.cb-modal::-webkit-scrollbar{width:8px;height:8px}
 .cb-log::-webkit-scrollbar-thumb,.cb-modal::-webkit-scrollbar-thumb{background:var(--cb-border-strong);border-radius:999px}
@@ -715,8 +748,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         props.label ? h('span', { className: 'cb-meta' }, props.label) : null)
     }
 
-    function PillGroup({ options, value, onChange }) {
-      return h('div', { className: 'cb-tabs' },
+    function PillGroup({ options, value, onChange, variant }) {
+      return h('div', { className: 'cb-tabs' + (variant === 'page' ? ' cb-tabs--page' : '') },
         options.map((option) => h('button', {
           key: option.value,
           className: 'cb-pill' + (option.value === value ? ' cb-pill--on' : ''),
@@ -1061,7 +1094,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             : null,
           form.kind === 'session' ? h('span', { className: 'cb-hint' }, '会话任务投递即完成,无超时与并发语义') : null),
         error ? h('div', { className: 'cb-error' }, error) : null,
-        h('div', { className: 'cb-toolbar' },
+        h('div', { className: 'cb-toolbar cb-modal-footer' },
           h('button', { className: 'cb-button', onClick: onDone }, '取消'),
           h('div', { className: 'cb-spacer' }),
           switchToggle({ checked: form.enabled, onChange: (e) => set({ enabled: e.target.checked }), label: '启用' }),
@@ -1070,16 +1103,19 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 
     function JobCard({ job, now, onToggle, onRun, onEdit, onDelete }) {
       const meta = statusMeta(job.lastStatus)
-      const style = { '--cb-status': STATUS_TONE_COLOR[meta.tone] }
+      const enabled = Boolean(job.enabled)
+      // 卡片色随启用态;上次运行成败另用状态点表达,两种语义不再抢同一个点
+      const tone = enabled ? (job.lastStatus ? meta.tone : 'ok') : 'mute'
+      const style = { '--cb-status': STATUS_TONE_COLOR[tone] }
       return h('div', { className: 'cb-card', style, role: 'button', tabIndex: 0, onClick: onEdit },
         h('div', { className: 'cb-card-row' },
-          h('span', { className: 'cb-dot' }),
           h('span', { className: 'cb-name' }, job.name),
           h('span', { className: 'cb-badge' }, KIND_LABELS[job.kind] || job.kind),
-          job.kind === 'session' && job.session ? h('span', { className: 'cb-badge' }, MODE_LABELS[job.session.mode]) : null,
+          job.kind === 'session' && job.session ? h('span', { className: 'cb-badge cb-badge--mode' }, MODE_LABELS[job.session.mode]) : null,
           h('div', { className: 'cb-actions', onClick: (event) => event.stopPropagation() },
+            h('span', { className: 'cb-dot cb-dot--state' + (meta.tone === 'run' ? ' cb-dot--pulse' : ''), style: { '--cb-status': STATUS_TONE_COLOR[meta.tone] }, title: job.lastStatus ? '上次运行:' + meta.label : '尚未运行' }),
             switchToggle({ checked: Boolean(job.enabled), onChange: onToggle }),
-            h('button', { className: 'cb-button cb-button--primary cb-button--sm', disabled: !job.enabled, title: job.enabled ? '立即运行' : '已停用', onClick: onRun }, '运行'),
+            h('button', { className: 'cb-button cb-button--sm', disabled: !job.enabled, title: job.enabled ? '立即运行' : '已停用', onClick: onRun }, '运行'),
             h('button', { className: 'cb-icon', title: '编辑', onClick: onEdit }, '编辑'),
             h('button', { className: 'cb-icon cb-button--danger', title: '删除', onClick: onDelete }, '删除'))),
         h('div', { className: 'cb-card-row' },
@@ -1101,11 +1137,12 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         onKeyDown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpen() } },
       },
         h('div', { className: 'cb-card-row' },
-          h('span', { className: 'cb-dot' }),
           h('span', { className: 'cb-name' }, task.title || '(未命名)'),
           h('span', { className: 'cb-badge' }, '自动化'),
           h('span', { className: 'cb-badge' }, status.label),
-          h('div', { className: 'cb-actions' }, h('span', { className: 'cb-hint' }, '点击打开宿主页面'))),
+          h('div', { className: 'cb-actions' },
+            h('span', { className: 'cb-dot cb-dot--state', style: { '--cb-status': STATUS_TONE_COLOR[status.tone] }, title: status.label }),
+            h('span', { className: 'cb-hint' }, '点击打开宿主页面'))),
         h('div', { className: 'cb-card-row' },
           meta.map((text, index) => h('span', { className: 'cb-meta', key: index }, text))),
         task.prompt ? h('div', { className: 'cb-code' }, task.prompt) : null)
@@ -1115,10 +1152,10 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     function ConfirmDialog({ message, onConfirm, onCancel }) {
       return h(Modal, { title: '删除确认', onClose: onCancel, width: 420 },
         h('div', { className: 'cb-confirm-text' }, message),
-        h('div', { className: 'cb-toolbar' },
+        h('div', { className: 'cb-toolbar cb-modal-footer' },
           h('div', { className: 'cb-spacer' }),
           h('button', { className: 'cb-button', onClick: onCancel }, '取消'),
-          h('button', { className: 'cb-button cb-button--danger', onClick: onConfirm }, '删除')))
+          h('button', { className: 'cb-button cb-button--danger-solid', onClick: onConfirm }, '删除')))
     }
 
     function JobsTab({ jobs, status, now, reload, applyJobPatch, wsModel, automationOn, automationAvailable, automationBusy, onToggleAutomation, automationTasks, automationError, onOpenAutomation }) {
@@ -1273,7 +1310,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           h('div', { className: 'cb-field' }, switchToggle({ checked: form.multi, onChange: (e) => set({ multi: e.target.checked }), label: '多值' })),
         ),
         error ? h('div', { className: 'cb-error' }, error) : null,
-        h('div', { className: 'cb-toolbar' },
+        h('div', { className: 'cb-toolbar cb-modal-footer' },
           h('button', { className: 'cb-button', onClick: onDone }, '取消'),
           h('div', { className: 'cb-spacer' }),
           switchToggle({ checked: form.enabled, onChange: (e) => set({ enabled: e.target.checked }), label: '启用' }),
@@ -1299,7 +1336,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         preview ? h('div', { className: 'cb-preview' },
           '解析 ' + preview.parsed.length + ' 条,非法 ' + preview.invalid + ' 条') : null,
         error ? h('div', { className: 'cb-error' }, error) : null,
-        h('div', { className: 'cb-toolbar' },
+        h('div', { className: 'cb-toolbar cb-modal-footer' },
           h('button', { className: 'cb-button', onClick: onDone }, '取消'),
           h('div', { className: 'cb-spacer' }),
           h('button', { className: 'cb-button', onClick: doPreview }, '预览'),
@@ -1347,7 +1384,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           h('button', { className: 'cb-button', onClick: () => setImporting(true) }, '导入'),
           h('button', { className: 'cb-button cb-button--primary', onClick: () => setFormRow({}) }, '新建变量')),
         notice ? h('div', { className: 'cb-hint' }, notice) : null,
-        envs.length === 0 ? h('div', { className: 'cb-empty' }, '暂无环境变量') :
+        envs.length === 0 ? h('div', { className: 'cb-empty' },
+          h('span', null, '暂无环境变量'),
+          h('button', { className: 'cb-button', onClick: () => setFormRow({}) }, '新建变量')) :
           h('div', { className: 'cb-table' },
             envs.map((row) => h('div', { key: row.id, className: 'cb-row' },
               switchToggle({ checked: Boolean(row.enabled), onChange: () => toggleEnv(row) }),
@@ -1362,7 +1401,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         importing ? h(ImportForm, { onDone: () => setImporting(false), reload }) : null,
         exportText !== null ? h(Modal, { title: '导出(仅启用行)', onClose: () => setExportText(null) },
           h('div', { className: 'cb-field cb-field--wide' }, h('textarea', { readOnly: true, value: exportText, style: { minHeight: '160px' } })),
-          h('div', { className: 'cb-toolbar' },
+          h('div', { className: 'cb-toolbar cb-modal-footer' },
             h('button', { className: 'cb-button', onClick: () => { setNotice(null); navigator.clipboard && navigator.clipboard.writeText(exportText).then(() => setNotice('已复制到剪贴板')) } }, '复制'),
             h('div', { className: 'cb-spacer' }),
             h('button', { className: 'cb-button', onClick: () => setExportText(null) }, '关闭'))) : null)
@@ -1432,7 +1471,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             runs.map((run) => {
               const meta = statusMeta(run.status)
               return h('div', { key: run.runId, className: 'cb-row' },
-                h('span', { className: 'cb-dot', style: { '--cb-status': STATUS_TONE_COLOR[meta.tone] } }),
+                h('span', { className: 'cb-dot' + (meta.tone === 'run' ? ' cb-dot--pulse' : ''), style: { '--cb-status': STATUS_TONE_COLOR[meta.tone] } }),
                 h('span', { className: 'cb-meta' }, meta.label),
                 h('span', { className: 'cb-badge' }, TRIGGER_META[run.trigger] ? TRIGGER_META[run.trigger].label : run.trigger),
                 h('span', { className: 'cb-meta' }, formatDateTime(run.createdAt, displayTzOffset)),
@@ -1448,7 +1487,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             ? h('div', { className: 'cb-hint' }, '日志较长,仅载入最后 ' + logView.tailLines + ' 行;点「导出」可取全文')
             : null,
           h('div', { className: 'cb-log' }, logView.text || '(空)'),
-          h('div', { className: 'cb-toolbar' },
+          h('div', { className: 'cb-toolbar cb-modal-footer' },
             h('div', { className: 'cb-spacer' }),
             h('button', { className: 'cb-button', onClick: () => exportLog(logView) }, '导出'),
             h('button', { className: 'cb-button', onClick: () => setLogView(null) }, '关闭'))) : null)
@@ -1581,8 +1620,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           h('div', null,
             h('h1', { className: 'cb-page-title' }, '定时任务'),
             h('p', { className: 'cb-page-desc' }, '按计划运行 shell 命令或会话任务;调度状态、任务配置与运行历史在此统一管理。'))),
-        h('div', { className: 'cb-toolbar' },
-          h(PillGroup, { options: TABS, value: tab, onChange: setTab }),
+        h('div', { className: 'cb-toolbar cb-toolbar--page' },
+          h(PillGroup, { options: TABS, value: tab, onChange: setTab, variant: 'page' }),
           h('div', { className: 'cb-spacer' }),
           status ? h('span', { className: 'cb-meta' },
             '运行中 ' + status.scheduler.active + ' · 队列 ' + status.scheduler.queued +

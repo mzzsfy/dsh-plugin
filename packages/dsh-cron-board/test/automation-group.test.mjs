@@ -440,3 +440,19 @@ test('Given 宿主无 remote.schedule When 打开看板 Then 开关禁用且看�
   assert.equal(switchOf(jobsTab.element)?.props.disabled, true, '无服务时开关应禁用')
   assert.ok(textOf(jobsTab.element).includes('新建任务'), '看板新建任务仍可用')
 })
+
+test('Given RRULE 省略 INTERVAL When 展示宿主任务频率 Then 间隔按 1 处理而不是 undefined', async () => {
+  const hourly = [{
+    id: 'automation-hourly', kind: 'rrule', title: '每小时巡检', prompt: '', status: 'active',
+    scheduledAt: '2099-01-02T01:00:00.000Z',
+    rrule: 'DTSTART;TZID=Asia/Shanghai:20990102T090000\nRRULE:FREQ=HOURLY',
+    target: { kind: 'new', create: {} }, involvedSessionIds: [],
+  }]
+  const { runtime } = createHarness({ showAutomation: true, tasks: hourly })
+  createdRuntimes.push(runtime)
+  runtime.render()
+  await runtime.flush()
+  const text = textOf(automationCards(runtime)[0].element)
+  assert.match(text, /每小时/)
+  assert.doesNotMatch(text, /undefined/)
+})
