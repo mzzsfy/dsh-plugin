@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-usage-dash",
   "description": "DSH 用量统计:三粒度面板、定价规则、省钱沙盘、成本护栏、异常哨兵与输入区常驻读数",
-  "version": "0.15.0",
+  "version": "0.15.1",
   "type": "module",
   "main": "src/index.js",
   "exports": {

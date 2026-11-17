@@ -476,24 +476,24 @@ test('formatDuration/formatTokensCompact 输出统一口径', () => {
   const enT = createTranslator(MESSAGES_EN)
   assert.equal(formatDuration(4500, enT), '4.5s')
   assert.equal(formatDuration(162000, enT), '2m42s')
-  assert.equal(formatTokensCompact(12200), '12.2K')
-  assert.equal(formatTokensCompact(5000), '5.0K')
+  assert.equal(formatTokensCompact(12200), '12.20K')
+  assert.equal(formatTokensCompact(5000), '5.00K')
 })
 
-test('带单位的 token 统一三位整数加一位小数,单位到 Q 为止', () => {
+test('带单位的 token 统一三位整数加两位小数,单位到 Q 为止', () => {
   assert.equal(formatTokens(1234567), '1,234,567')
   assert.equal(formatTokensCompact(999), '999')
-  assert.equal(formatTokensCompact(1234), '1.2K')
-  assert.equal(formatTokensCompact(123456), '123.5K')
-  assert.equal(formatTokensCompact(99999), '100.0K')
-  // 四舍五入到 1000.0 要进位,不能出现 1000.0K
-  assert.equal(formatTokensCompact(999999), '1.0M')
-  assert.equal(formatTokensCompact(425000000), '425.0M')
-  assert.equal(formatTokensCompact(20824000000), '20.8B')
-  assert.equal(formatTokensCompact(134100000000), '134.1B')
-  assert.equal(formatTokensCompact(12.3e12), '12.3T')
-  assert.equal(formatTokensCompact(1.5e15), '1.5Q')
-  assert.equal(formatTokensCompact(9.9e17), '990.0Q')
+  assert.equal(formatTokensCompact(1234), '1.23K')
+  assert.equal(formatTokensCompact(123456), '123.46K')
+  assert.equal(formatTokensCompact(99999), '100.00K')
+  // 四舍五入到 1000.00 要进位,不能出现 1000.00K
+  assert.equal(formatTokensCompact(999999), '1.00M')
+  assert.equal(formatTokensCompact(425000000), '425.00M')
+  assert.equal(formatTokensCompact(20824000000), '20.82B')
+  assert.equal(formatTokensCompact(134100000000), '134.10B')
+  assert.equal(formatTokensCompact(12.3e12), '12.30T')
+  assert.equal(formatTokensCompact(1.5e15), '1.50Q')
+  assert.equal(formatTokensCompact(9.9e17), '990.00Q')
 })
 
 test('命中率文案零数据为占位符', () => {
@@ -603,7 +603,7 @@ test('niceTicks 产生 1/2/5 序列且零上限为空', () => {
 
 test('trendLayout 单槽列距铺满且柱宽取上限', () => {
   const layout = trendLayout([{ day: '2026-03-15', total: 50, byModel: { a: 30, b: 20 } }], ['a', 'b'], 720, 46)
-  assert.equal(layout.step, 720 - 46 - 65)
+  assert.equal(layout.step, 720 - CHART_PAD.left - CHART_PAD.right)
   assert.equal(layout.barWidth, 30)
   assert.equal(layout.maxTotal, 50)
 })
@@ -1521,7 +1521,14 @@ test('hasAnomalyNews 折叠提醒判定:有异常日志或写入失败即提醒'
 })
 
 test('formatTokensCompact 超出 Q 档时钳在三位整数内', () => {
-  assert.equal(formatTokensCompact(1e18), '999.9Q')
-  assert.equal(formatTokensCompact(-1e21), '-999.9Q')
-  assert.equal(formatTokensCompact(9.99e17), '999.0Q')
+  assert.equal(formatTokensCompact(1e18), '999.99Q')
+  assert.equal(formatTokensCompact(-1e21), '-999.99Q')
+  assert.equal(formatTokensCompact(9.99e17), '999.00Q')
+})
+
+test('左轴留白容纳三位整数加两位小数的最长紧凑标签', () => {
+  // 11px 字号下七字符标签实测宽 41.91px,按 6px/字符预算并留 6px 轴间距
+  const longest = formatTokensCompact(999_990_000)
+  assert.equal(longest, '999.99M')
+  assert.ok(CHART_PAD.left >= longest.length * 6 + 6, `左留白 ${CHART_PAD.left} 不足以容纳 ${longest}`)
 })

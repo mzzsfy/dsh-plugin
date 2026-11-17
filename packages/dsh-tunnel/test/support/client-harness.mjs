@@ -6,7 +6,7 @@ const source = readFileSync(new URL('../../src/client.js', import.meta.url), 'ut
 export const PKG = '@mzzsfy/dsh-tunnel'
 export const tick = () => new Promise((resolve) => setImmediate(resolve))
 
-const SLOT_BUCKETS = ['main', 'sidebar.panellist', 'settings.plugin.item', 'plugins.bundle.config', 'settings.section']
+const SLOT_BUCKETS = ['main', 'sidebar.panellist', 'settings.plugin.item', 'plugins.bundle.config', 'settings.section', 'shell.bottom']
 
 function attachRefs(element) {
   if (element === null || typeof element !== 'object') return
@@ -92,7 +92,7 @@ export function createClientHarness(options = {}) {
     async (url, init = {}) => {
       state.requests.push({ url, method: init.method ?? 'GET' })
       let payload = { ok: true }
-      if (url.startsWith('/api/tunnel/tunnels?probe=1')) payload = { items: state.rows }
+      if (url.startsWith('/api/tunnel/tunnels')) payload = { items: state.rows }
       else if (url === '/api/tunnel/status') payload = { ui: { aiTools: true }, total: state.rows.length, lanOrigin: state.lanOrigin }
       else if (url.startsWith('/api/tunnel/ports')) payload = { supported: true, scannedAt: '2026-11-15T10:00:00.000Z', items: state.ports }
       else if (url.startsWith('/api/tunnel/probe')) payload = { ok: true, listening: true, health: { state: 'online' } }
@@ -121,7 +121,7 @@ export function createClientHarness(options = {}) {
     },
     slots: {
       inject(name, fn) {
-        if (name !== 'settings.section') return () => {}
+        if (name !== 'settings.section' && name !== 'shell.bottom') return () => {}
         const result = fn()
         return typeof result === 'function' ? result : () => result?.return?.()
       },
@@ -145,6 +145,19 @@ export function createClientHarness(options = {}) {
     return element
   }
 
+  function renderBucket(name, missing) {
+    const entry = [...state.buckets.get(name)][0]
+    if (entry === undefined) throw new Error(missing)
+    state.pendingEffects = []
+    const tree = renderTree(entry.component())
+    const effects = state.pendingEffects.splice(0)
+    for (const effect of effects) {
+      const cleanup = effect()
+      if (typeof cleanup === 'function') state.componentCleanups.push(cleanup)
+    }
+    return tree
+  }
+
   return {
     state,
     requests: state.requests,
@@ -157,6 +170,7 @@ export function createClientHarness(options = {}) {
       for (const disposer of state.effectDisposers.splice(0).reverse()) disposer()
     },
     sectionCount: () => state.buckets.get('settings.section').size,
+    bottomCount: () => state.buckets.get('shell.bottom').size,
     panelCount: () => state.buckets.get('main').size,
     panellistCount: () => state.buckets.get('sidebar.panellist').size,
     pluginCardCount: () => state.buckets.get('settings.plugin.item').size + state.buckets.get('plugins.bundle.config').size,
@@ -175,16 +189,10 @@ export function createClientHarness(options = {}) {
       for (const listener of state.docListeners.get('visibilitychange') ?? []) listener()
     },
     renderSection() {
-      const entry = [...state.buckets.get('settings.section')][0]
-      if (entry === undefined) throw new Error('设置分区未注册')
-      state.pendingEffects = []
-      const tree = renderTree(entry.component())
-      const effects = state.pendingEffects.splice(0)
-      for (const effect of effects) {
-        const cleanup = effect()
-        if (typeof cleanup === 'function') state.componentCleanups.push(cleanup)
-      }
-      return tree
+      return renderBucket('settings.section', '设置分区未注册')
+    },
+    renderBottom() {
+      return renderBucket('shell.bottom', '底部状态条未注册')
     },
   }
 }

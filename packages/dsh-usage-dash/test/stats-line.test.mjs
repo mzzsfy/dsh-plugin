@@ -118,11 +118,11 @@ test('cacheHitPercentPrecise 恒两位小数且 99.99 封顶', () => {
   assert.equal(cacheHitPercentPrecise({ uncachedInputTokens: 4, cacheReadTokens: 999996, cacheWriteTokens: 0, outputTokens: 1 }), '99.99')
 })
 
-test('formatTokensCompact 统一三位整数加一位小数', () => {
+test('formatTokensCompact 统一三位整数加两位小数', () => {
   assert.equal(formatTokensCompact(517, zhT), '517')
-  assert.equal(formatTokensCompact(12200, zhT), '12.2K')
-  assert.equal(formatTokensCompact(517000, zhT), '517.0K')
-  assert.equal(formatTokensCompact(1200000, zhT), '1.2M')
+  assert.equal(formatTokensCompact(12200, zhT), '12.20K')
+  assert.equal(formatTokensCompact(517000, zhT), '517.00K')
+  assert.equal(formatTokensCompact(1200000, zhT), '1.20M')
   assert.equal(formatTokensCompact(0, zhT), '0')
 })
 

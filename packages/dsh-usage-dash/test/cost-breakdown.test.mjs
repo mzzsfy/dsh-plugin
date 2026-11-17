@@ -191,7 +191,7 @@ test('Given 面板模型 When 生成视图 Then 两档金额、模型行与脚�
   assert.equal(row.amount, '¥0.0030')
   assert.equal(row.expression, '1,000×¥1.00 + 500×¥2.00 + 2,000×¥0.50 + 0×¥0.00')
   // 面板公式按缩写显示,悬浮项带完整 token、单价、金额与命中规则
-  assert.deepEqual(row.terms.map((term) => term.short), ['1.0K×¥1.00', '500×¥2.00', '2.0K×¥0.50', '0×¥0.00'])
+  assert.deepEqual(row.terms.map((term) => term.short), ['1.00K×¥1.00', '500×¥2.00', '2.00K×¥0.50', '0×¥0.00'])
   assert.equal(row.terms[0].label, '未缓存输入')
   assert.equal(row.terms[0].detail, '1,000 × ¥1.00/M = ¥0.0010')
   assert.equal(row.terms[0].rule, 'a/b')
@@ -232,14 +232,14 @@ test('Given 单价带三位以上小数 When 生成视图 Then 表达式按原�
   assert.equal(row.amount, '¥0.5818')
 })
 
-test('Given 亿级 token When 生成视图 Then 公式缩写一位小数且悬浮给完整值', () => {
+test('Given 亿级 token When 生成视图 Then 公式缩写两位小数且悬浮给完整值', () => {
   const view = costPanelViewOf(panelModel({
     rules: [rule('a/b', price(0.03, 0.03, 0.03, 0))],
     usage: null,
     modelUsage: { hours: [{ time: at(9), model: 'a/b', ...bucket({ uncachedInputTokens: 113_481_991, outputTokens: 330_455 }) }] },
   }), zhT, { subagentsAvailable: true })
   const row = view.sections[0].rows[0]
-  assert.deepEqual(row.terms.map((term) => term.short), ['113.5M×¥0.03', '330.5K×¥0.03', '0×¥0.03', '0×¥0.00'])
+  assert.deepEqual(row.terms.map((term) => term.short), ['113.48M×¥0.03', '330.46K×¥0.03', '0×¥0.03', '0×¥0.00'])
   assert.equal(row.terms[0].detail, '113,481,991 × ¥0.03/M = ¥3.4045')
 })
 

@@ -225,12 +225,79 @@ function createRefreshGate(readVisible, run) {
 function isPageVisible(document) {
   return document === undefined || document.visibilityState !== 'hidden'
 }
+
+// 底部状态条: 停用隧道不算开放; 开放时长按分钟/小时/天收敛, 超阈值标提醒。
+const STALE_OPEN_MS = 24 * 60 * 60 * 1000
+const STALE_OPEN_HOURS = STALE_OPEN_MS / (60 * 60 * 1000)
+const AGE_JUST_OPENED = '不到 1 分钟'
+
+function liveTunnels(rows) {
+  // enabled 是用户意图, active 是运行期路由是否真正注册; 恢复失败的行不算开放。
+  return (Array.isArray(rows) ? rows : []).filter((row) => row !== null && typeof row === 'object' && row.enabled !== false && row.active !== false)
+}
+
+function openAgeOf(now, iso) {
+  if (typeof iso !== 'string' || iso === '') return -1
+  const value = new Date(iso).getTime()
+  return Number.isFinite(value) ? Math.max(0, now - value) : -1
+}
+
+function openAgeText(now, iso) {
+  const age = openAgeOf(now, iso)
+  if (age < 0) return ''
+  if (age < 60 * 1000) return AGE_JUST_OPENED
+  const minutes = Math.floor(age / (60 * 1000))
+  if (minutes < 60) return minutes + ' 分钟'
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return hours + ' 小时'
+  return Math.floor(hours / 24) + ' 天'
+}
+
+function openAgePhrase(ageText) {
+  if (ageText === '') return ''
+  if (ageText === AGE_JUST_OPENED) return '已开放' + AGE_JUST_OPENED
+  return '已开放 ' + ageText
+}
+
+function statusBarSummary(rows, now) {
+  const list = liveTunnels(rows)
+  if (list.length === 0) return null
+  // 单条给细节, 多条只报数量: 单行不承载列表。
+  if (list.length === 1) {
+    const row = list[0]
+    const ageText = openAgeText(now, row.createdAt)
+    return {
+      count: 1,
+      headline: '隧道开放中',
+      detail: row.name + (ageText === '' ? '' : ' · ' + openAgePhrase(ageText)),
+      stale: openAgeOf(now, row.createdAt) >= STALE_OPEN_MS,
+    }
+  }
+  const stale = list.some((row) => openAgeOf(now, row.createdAt) >= STALE_OPEN_MS)
+  return {
+    count: list.length,
+    headline: '隧道 ' + list.length + ' 条运行中',
+    detail: stale ? '有隧道开放超过 ' + STALE_OPEN_HOURS + ' 小时' : '',
+    stale,
+  }
+}
+
+function statusBarRowVM(row, now, location) {
+  const ageText = openAgeText(now, row.createdAt)
+  return {
+    url: accessUrlOf(row, location),
+    openText: openAgePhrase(ageText),
+    stale: openAgeOf(now, row.createdAt) >= STALE_OPEN_MS,
+  }
+}
 /* LOGIC-END */
 
 /* SBUILD-BEGIN */
 const STYLE_ID = 'dsh-tunnel-style'
+const CLOCK_TICK_MS = 60 * 1000
 const CSS = `
-.tu-set{
+/* 菜单 portal 到 body, 脱离设置分区与状态条, 必须自带 token */
+.tu-set,.tu-bottom,.tu-menu{
   --tu-bg:var(--dsw-alias-bg-base);
   --tu-bg-sub:var(--dsw-alias-bg-layer-2);
   --tu-text:var(--dsw-alias-label-primary);
@@ -249,7 +316,9 @@ const CSS = `
   --tu-space-3:12px;
   --tu-space-4:16px;
   --tu-space-5:24px;
-  max-width:560px;display:flex;flex-direction:column;gap:var(--tu-space-4);font-size:14px;line-height:22px;color:var(--tu-text);container-type:inline-size;container-name:tu-set}
+}
+.tu-set{max-width:560px;display:flex;flex-direction:column;gap:var(--tu-space-4);font-size:14px;line-height:22px;color:var(--tu-text);container-type:inline-size;container-name:tu-set}
+.tu-set--embedded{max-width:none}
 
 .tu-set-head{display:flex;align-items:flex-start;justify-content:space-between;gap:var(--tu-space-3)}
 .tu-set-head__title{margin:0;font-size:18px;line-height:26px;font-weight:600}
@@ -336,8 +405,11 @@ const CSS = `
 .tu-pill-group{display:flex;gap:var(--tu-space-2);flex-wrap:wrap}
 .tu-pill{height:30px;padding:0 10px;border:.5px solid var(--tu-border-2);border-radius:6px;background:var(--tu-bg);color:var(--tu-text-sub);font:inherit;font-size:12px;cursor:pointer}
 .tu-pill--active{border-color:var(--tu-business);background:color-mix(in srgb, var(--tu-business) 10%, transparent);color:var(--tu-text)}
-.tu-modal{position:fixed;inset:0;z-index:100;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.28);padding:var(--tu-space-4)}
+/* 与宿主模态层同级(1100), 高于设置面板(1000); 同层按 DOM 顺序, 状态条弹窗需在宿主遮罩之上 */
+.tu-modal{position:fixed;inset:0;z-index:1100;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.28);padding:var(--tu-space-4)}
 .tu-modal__box{width:min(440px,100%);max-height:90vh;overflow:auto;background:var(--tu-bg);border:.5px solid var(--tu-border-2);border-radius:var(--tu-radius);box-shadow:0 16px 48px rgba(0,0,0,.2)}
+/* 宽于设置分区, 容纳列表行 */
+.tu-modal__box--wide{width:min(760px,100%)}
 .tu-modal__head{display:flex;align-items:center;justify-content:space-between;padding:var(--tu-space-3) var(--tu-space-4);border-bottom:.5px solid var(--tu-border)}
 .tu-modal__title{margin:0;font-size:15px;font-weight:600}
 .tu-modal__body{padding:var(--tu-space-4);display:flex;flex-direction:column;gap:var(--tu-space-3)}
@@ -356,6 +428,17 @@ const CSS = `
   .tu-card--ports .tu-card__head{flex-wrap:wrap;row-gap:6px}
   .tu-card--ports .tu-card__actions{margin-left:0;width:100%;justify-content:flex-end}
 }
+/* 底部状态条与设置分区共享 token; 无隧道时组件返回 null, 不占宿主高度 */
+.tu-bottom{background:var(--tu-bg);border-top:.5px solid var(--tu-border-2);color:var(--tu-text);font-size:12px;line-height:18px}
+.tu-bottom__open{display:flex;align-items:center;gap:var(--tu-space-2);width:100%;height:28px;padding:0 var(--tu-space-3);border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.tu-bottom__open:hover{background:var(--tu-hover)}
+.tu-bottom__open:focus-visible{outline:2px solid var(--tu-business);outline-offset:-2px}
+.tu-bottom__icon{width:16px;height:16px;flex:0 0 auto;color:var(--tu-text-sub)}
+.tu-bottom__head{font-weight:600;white-space:nowrap}
+.tu-bottom__detail{color:var(--tu-text-sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.tu-bottom__detail--stale{color:var(--tu-warn)}
+.tu-bottom__spacer{flex:1 1 auto}
+.tu-bottom__more{display:inline-flex;align-items:center;gap:var(--tu-space-1);color:var(--tu-text-sub);white-space:nowrap;flex:0 0 auto}
 `
 /* SBUILD-END */
 
@@ -433,21 +516,30 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         props.label ? h('span', null, props.label) : null)
     }
 
-    function Modal({ title, onClose, children }) {
+    function Modal({ title, onClose, children, wide = false }) {
       const boxRef = useRef(null)
+      const closeRef = useRef(onClose)
+      closeRef.current = onClose
       useEffect(() => {
         const previous = document.activeElement
         const box = boxRef.current
+        // 嵌套弹窗只让最上层响应 Esc/Tab: 后挂载的 box 在 DOM 末尾。
+        const topmost = () => {
+          if (box === null) return false
+          const boxes = document.querySelectorAll('.tu-modal__box')
+          return boxes.length <= 1 || boxes[boxes.length - 1] === box
+        }
         const focusable = () => Array.from(box?.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') ?? [])
         const preferred = box?.querySelector('input:not([disabled]), select:not([disabled]), textarea:not([disabled])')
         if (preferred) preferred.focus()
         else focusable()[0]?.focus()
         const onKey = (event) => {
+          if (!topmost()) return
           if (event.key === 'Escape') {
             event.preventDefault()
             event.stopImmediatePropagation()
             event.stopPropagation()
-            onClose()
+            closeRef.current()
             return
           }
           if (event.key !== 'Tab' || box === null) return
@@ -463,12 +555,12 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           document.removeEventListener('keydown', onKey, true)
           previous?.focus?.()
         }
-      }, [onClose])
-      return h('div', { className: 'tu-modal', onMouseDown: (event) => { if (event.target === event.currentTarget) onClose() } },
-        h('div', { ref: boxRef, className: 'tu-modal__box', role: 'dialog', 'aria-modal': 'true', 'aria-label': title, tabIndex: -1 },
+      }, [])
+      return h('div', { className: 'tu-modal', onMouseDown: (event) => { if (event.target === event.currentTarget) closeRef.current() } },
+        h('div', { ref: boxRef, className: 'tu-modal__box' + (wide ? ' tu-modal__box--wide' : ''), role: 'dialog', 'aria-modal': 'true', 'aria-label': title, tabIndex: -1 },
           h('div', { className: 'tu-modal__head' },
             h('h3', { className: 'tu-modal__title' }, title),
-            h('button', { type: 'button', className: 'tu-icon-btn', 'aria-label': '关闭', onClick: onClose }, '×')),
+            h('button', { type: 'button', className: 'tu-icon-btn', 'aria-label': '关闭', onClick: () => closeRef.current() }, '×')),
           children))
     }
 
@@ -530,11 +622,11 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       return { rows, lanOrigin, error, probing, reload }
     }
 
-    function SetHead({ onAdd }) {
+    function SetHead({ onAdd, embedded }) {
       return h('header', { className: 'tu-set-head' },
         h('div', null,
-          h('h2', { className: 'tu-set-head__title' }, SECTION_LABEL),
-          h('p', { className: 'tu-set-head__desc' }, '把本机正在跑的服务临时变成一条链接, 给浏览器、手机或其他设备用。')),
+          embedded ? null : h('h2', { className: 'tu-set-head__title' }, SECTION_LABEL),
+          h('p', { className: 'tu-set-head__desc' }, embedded ? '管理已开放隧道、本机端口与访问地址。' : '把本机正在跑的服务临时变成一条链接, 给浏览器、手机或其他设备用。')),
         h('div', { className: 'tu-set-head__actions' },
           h('button', { type: 'button', className: 'tu-button tu-button--primary', onClick: onAdd }, '手动添加')))
     }
@@ -832,7 +924,81 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           h('button', { type: 'button', className: 'tu-button tu-button--primary', disabled: busy || !nameOk || !portOk || entryConflict, onClick: submit }, busy ? '提交中…' : (mode === 'create' ? '创建' : '保存'))))
     }
 
-    function TunnelSettingsApp({ bus }) {
+    // 底部状态条数据: 与设置分区同一 REST, 只跟随总线与可见性刷新, 不周期轮询。
+    function useTunnelFeed(bus) {
+      const [rows, setRows] = useState(null)
+      const aliveRef = useRef(true)
+      const startedRef = useRef(false)
+      const load = useCallback(async () => {
+        const outcome = await request('GET', '/tunnels')
+        if (!aliveRef.current || !outcome.ok) return
+        setRows(outcome.data.items)
+      }, [])
+      useEffect(() => {
+        aliveRef.current = true
+        startedRef.current = false
+        const snapshot = tools.createSnapshotRefresh(load)
+        const gate = createRefreshGate(() => isPageVisible(document), snapshot.refresh)
+        const unsubscribe = bus.subscribe(() => gate.request(), {
+          onReset: () => { startedRef.current = true; gate.request() },
+        })
+        const onVisibility = () => gate.flush()
+        document.addEventListener('visibilitychange', onVisibility)
+        if (!startedRef.current) gate.request()
+        return () => {
+          aliveRef.current = false
+          unsubscribe()
+          document.removeEventListener('visibilitychange', onVisibility)
+          snapshot.dispose?.()
+        }
+      }, [bus, load])
+      return { rows }
+    }
+
+    function TunnelStatusBar({ bus }) {
+      const { rows } = useTunnelFeed(bus)
+      const [open, setOpen] = useState(false)
+      const [now, setNow] = useState(() => Date.now())
+      const summary = statusBarSummary(rows, now)
+      const hasSummary = summary !== null
+      // 只驱动本地时长重算, 不发请求; 页面恢复可见时立即校准。
+      useEffect(() => {
+        if (!hasSummary) return undefined
+        let timer = null
+        const tick = () => {
+          setNow(Date.now())
+          timer = setTimeout(tick, CLOCK_TICK_MS)
+        }
+        timer = setTimeout(tick, CLOCK_TICK_MS)
+        const onVisibility = () => { if (isPageVisible(document)) setNow(Date.now()) }
+        document.addEventListener('visibilitychange', onVisibility)
+        return () => {
+          clearTimeout(timer)
+          document.removeEventListener('visibilitychange', onVisibility)
+        }
+      }, [hasSummary])
+      const location = window.location
+      const icon = h('svg', { className: 'tu-bottom__icon', viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.2', 'aria-hidden': 'true' },
+        h('circle', { cx: 8, cy: 8, r: 6.3 }),
+        h('path', { d: 'M1.7 8h12.6M8 1.7c1.8 1.8 2.7 3.9 2.7 6.3S9.8 12.5 8 14.3C6.2 12.5 5.3 10.4 5.3 8S6.2 3.5 8 1.7z' }))
+      if (summary === null && !open) return null
+      // 单行展示: 悬停 title 给全部地址与时长, 点击打开内嵌管理弹窗。
+      const title = summary === null ? '' : liveTunnels(rows).map((row) => {
+        const vm = statusBarRowVM(row, now, location)
+        return row.name + '  ' + vm.url + (vm.openText === '' ? '' : '  ' + vm.openText)
+      }).join('\n')
+      return h('div', { className: 'tu-bottom' },
+        summary === null ? null : h('button', { type: 'button', className: 'tu-bottom__open', title: title === '' ? undefined : title, 'aria-haspopup': 'dialog', 'aria-expanded': open, onClick: () => setOpen(true) },
+          icon,
+          h('span', { className: 'tu-bottom__head' }, summary.headline),
+          summary.detail === '' ? null : h('span', { className: 'tu-bottom__detail' + (summary.stale ? ' tu-bottom__detail--stale' : '') }, summary.detail),
+          h('span', { className: 'tu-bottom__spacer' }),
+          h('span', { className: 'tu-bottom__more' }, '详情', h('span', { 'aria-hidden': 'true' }, '›'))),
+        open ? h(Modal, { title: SECTION_LABEL, wide: true, onClose: () => setOpen(false) },
+          h('div', { className: 'tu-modal__body' }, h(TunnelSettingsApp, { bus, embedded: true }))) : null)
+    }
+
+    function TunnelSettingsApp({ bus, embedded = false }) {
       const data = useTunnelData(bus)
       const [dialog, setDialog] = useState(null)
       const [portsVersion, setPortsVersion] = useState(0)
@@ -853,8 +1019,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         if (outcome.ok) afterChange()
         else setActionError(outcome.error)
       }
-      return h('section', { className: 'tu-set' },
-        h(SetHead, { onAdd: () => setDialog({ mode: 'create' }) }),
+      return h('section', { className: 'tu-set' + (embedded ? ' tu-set--embedded' : '') },
+        h(SetHead, { onAdd: () => setDialog({ mode: 'create' }), embedded }),
         h(TunnelCard, {
           rows: data.rows,
           now,
@@ -885,6 +1051,11 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         ctx.slots.inject('settings.section', () => ctx.slots.register(
           { name: 'settings.section', id: SECTION_ID, order: SECTION_ORDER, label: SECTION_LABEL },
           () => h(TunnelSettingsApp, { bus }),
+        ))
+        // 全局底部条: 有启用隧道才渲染, 空态不占高度; 旧宿主无此槽则不注册(干净禁用)
+        ctx.slots.inject('shell.bottom', () => ctx.slots.register(
+          { name: 'shell.bottom' },
+          () => h(TunnelStatusBar, { bus }),
         ))
       },
     }
