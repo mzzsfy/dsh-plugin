@@ -19,7 +19,7 @@ export const STATUS_META = {
   running: { label: '运行中', tone: 'run' },
   success: { label: '成功', tone: 'ok' },
   fail: { label: '失败', tone: 'bad' },
-  timeout: { label: '超时', tone: 'warn' },
+  timeout: { label: '超时', tone: 'bad' },
   skipped: { label: '跳过', tone: 'mute' },
   interrupted: { label: '中断', tone: 'mute' },
   cancelled: { label: '已取消', tone: 'mute' },

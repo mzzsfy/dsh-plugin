@@ -46,6 +46,7 @@
 - **每次自测新起实例,用完即杀**(终止 = 结束本会话拉起的实例进程):独立脚本无热重载,旧进程即旧代码——2026-09-24 cd0224b 之前的实例不支持流式(`stream:true` 恒回单块 JSON),复用长驻实例(默认端口 18123)是"测到旧行为"的唯一已知根因。随机端口按会话隔离,队列与请求历史互不串扰;隔离宿主与模拟器都不留常驻。
 - **LLM 上游一律指向 echo-upstream**:`node scripts/echo-upstream/cli.mjs --port 0` 新起独立实例(随机端口,stdout 打印实际端口),provider baseURL 指向该实例;三协议、SSE 流式、thinking、工具调用、错误注入与 HTTP 控制面见 [scripts/echo-upstream/README.md](scripts/echo-upstream/README.md)。禁止消耗真实 API 配额,禁止以"环境不可测"跳过可测断言(分层与夹具规则见 [scripts/echo-upstream/兼容性测试.md](scripts/echo-upstream/兼容性测试.md))。
 - **真实面零接触**:生产 profile、`~/.dsh`、3080 实例不读不写不重启;测试性 patch/bundles 改动只落 `.compat/<版本>/home/profiles/web`;留档不入版本库(默认临时目录;compat 工位按链接方法落 `llm-echo.jsonl`,gitignore 豁免)。
+- **工位磁盘回收**:`keep-stop` 只收尾进程、不回收磁盘,而每个工位自带一份约 700MB 宿主闭包,不回收会线性堆积。收尾后执行 `node scripts/compat/prune.mjs`:默认只删可重建的 `dsh-host`/`host-*`/`nm-backup`,保留 home、日志与截图等测试证据;`--all` 才删整工位;有存活 pid 的工位脚本自行跳过。跨会话遗留的历史工位同样按此回收,不得以"不是本会话创建"为由保留。
 
 各 `兼容性测试.md` 与模拟器 README 中固定端口 18123、真实 API、仓库内留档路径的写法属人工历史流程记录,AI 会话一律以本节为准。
 
