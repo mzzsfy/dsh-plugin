@@ -1429,7 +1429,8 @@ const usageModelsOf = (view, grouped, pointView) => (
 
 // 趋势图视口常量
 const CHART_HEIGHT = 220
-const CHART_PAD = { left: 46, right: 65, top: 10, bottom: 26 }
+// 左轴留白按最长刻度(三位整数 + 两位小数,七字符)预留,避免首位越出 SVG 视口被裁
+const CHART_PAD = { left: 54, right: 65, top: 10, bottom: 26 }
 const BAR_WIDTH_RATIO = 0.62
 const BAR_MIN_WIDTH = 3
 const BAR_MAX_WIDTH = 30
@@ -1926,8 +1927,8 @@ function cacheHitPercentPrecise(usage) {
   return percent.toFixed(2)
 }
 
-// 带单位的 token 一律三位整数 + 一位小数(123.1K / 812.5M / 134.1B / 12.0T / 1.5Q),
-// 单位最多到 B 上两级;四舍五入到 1000.0 时进位,不出现 1000.0K 这种形态
+// 带单位的 token 一律三位整数 + 两位小数(123.12K / 812.53M / 134.10B / 12.00T / 1.50Q),
+// 单位最多到 B 上两级;四舍五入到 1000.00 时进位,不出现 1000.00K 这种形态
 const COMPACT_UNITS = [
   { suffix: 'K', base: COMPACT_BASE },
   { suffix: 'M', base: COMPACT_BASE ** 2 },
@@ -1937,9 +1938,11 @@ const COMPACT_UNITS = [
 ]
 const COMPACT_HEAD_MIN = 100
 const COMPACT_HEAD_MAX = COMPACT_BASE
-// 最高档钳制值:三位整数 + 一位小数的展示上限
-const COMPACT_MAX_DISPLAY = COMPACT_HEAD_MAX - 0.1
-const roundOneDecimal = (count) => Math.round(count * NUMBER_ONE_DECIMAL) / NUMBER_ONE_DECIMAL
+const COMPACT_DECIMALS = 2
+const COMPACT_SCALE = 10 ** COMPACT_DECIMALS
+// 最高档钳制值:三位整数 + 两位小数的展示上限
+const COMPACT_MAX_DISPLAY = COMPACT_HEAD_MAX - 1 / COMPACT_SCALE
+const roundCompact = (count) => Math.round(count * COMPACT_SCALE) / COMPACT_SCALE
 
 function formatTokensCompact(value) {
   const count = Number.isFinite(value) ? value : 0
@@ -1953,14 +1956,14 @@ function formatTokensCompact(value) {
       break
     }
   }
-  let scaled = roundOneDecimal(abs / COMPACT_UNITS[index].base)
+  let scaled = roundCompact(abs / COMPACT_UNITS[index].base)
   if (scaled >= COMPACT_HEAD_MAX && index < COMPACT_UNITS.length - 1) {
     index += 1
-    scaled = roundOneDecimal(abs / COMPACT_UNITS[index].base)
+    scaled = roundCompact(abs / COMPACT_UNITS[index].base)
   }
   // Q 是最高档:再往上已经没有单位可进,钳在三位整数内免得撑破读数宽度
-  if (scaled >= COMPACT_HEAD_MAX) return `${sign}${COMPACT_MAX_DISPLAY.toFixed(1)}${COMPACT_UNITS[index].suffix}`
-  return `${sign}${scaled.toFixed(1)}${COMPACT_UNITS[index].suffix}`
+  if (scaled >= COMPACT_HEAD_MAX) return `${sign}${COMPACT_MAX_DISPLAY.toFixed(COMPACT_DECIMALS)}${COMPACT_UNITS[index].suffix}`
+  return `${sign}${scaled.toFixed(COMPACT_DECIMALS)}${COMPACT_UNITS[index].suffix}`
 }
 
 // 官方时长:60 秒内保留一位小数,以上整秒折分秒(官方同构签名)

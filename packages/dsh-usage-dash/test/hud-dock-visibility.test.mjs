@@ -167,10 +167,10 @@ test('tooltip 的费用行先给 tokens 再给金额', () => {
   const cost = (node?.props?.sections ?? []).find((section) => section.key === 'cost')
   assert.ok(cost, '缺少费用段')
   const today = cost.rows.find((row) => row.key === 'today')
-  assert.match(today.value, /^425\.0M · ¥24\.28$/)
+  assert.match(today.value, /^425\.00M · ¥24\.28$/)
   const month = cost.rows.find((row) => row.key === 'month')
-  assert.match(month.value, /^20\.8B · ¥711\.48$/)
+  assert.match(month.value, /^20\.82B · ¥711\.48$/)
   // 速率行同样要给用量,只有金额看不出量级
   const rate = cost.rows.find((row) => row.key === 'rate')
-  assert.match(rate.value, /^586\.0M\/h · ¥5\.74\/h$/)
+  assert.match(rate.value, /^586\.00M\/h · ¥5\.74\/h$/)
 })

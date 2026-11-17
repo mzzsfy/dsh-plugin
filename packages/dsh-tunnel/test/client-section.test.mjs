@@ -6,10 +6,11 @@ import { createClientHarness, tick } from './support/client-harness.mjs'
 
 const clientSource = readFileSync(new URL('../src/client.js', import.meta.url), 'utf8')
 
-test('Given 插件激活 When 注册 Then 只挂 settings.section, 旧四类入口为零', () => {
+test('Given 插件激活 When 注册 Then 设置分区与底部状态条各一条, 旧四类入口为零', () => {
   const harness = createClientHarness()
   harness.activate()
   assert.equal(harness.sectionCount(), 1)
+  assert.equal(harness.bottomCount(), 1)
   assert.equal(harness.panelCount(), 0)
   assert.equal(harness.panellistCount(), 0)
   assert.equal(harness.pluginCardCount(), 0)
@@ -70,6 +71,7 @@ test('Given 操作菜单 When 源码检查 Then 菜单走 body portal 并固定�
   assert.match(clientSource, /tu-menu--floating/)
   assert.match(clientSource, /createPortal\(menu, document\.body\)/)
   assert.match(clientSource, /position:fixed;right:auto;top:auto;z-index:1200/)
+  assert.match(clientSource, /\.tu-set,\.tu-bottom,\.tu-menu\{/, '菜单 portal 到 body 后必须自带颜色 token, 否则背景透明')
   assert.doesNotMatch(clientSource, /disabled: mode === 'edit'/, '隧道名在编辑弹窗里必须可改')
 })
 

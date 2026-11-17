@@ -15,7 +15,7 @@ function loadLogic(navigator) {
   const end = clientSource.indexOf('/* LOGIC-END */')
   assert.ok(start >= 0 && end > start, '缺少 LOGIC 标记')
   const code = clientSource.slice(start, end)
-  return new Function('navigator', code + '\nreturn { accessUrlOf, accessLocalOnly, copyText, createRefreshGate, isPageVisible, entryLabelOf, isEntryLabelConflict, defaultEntryFor, entryHintOf, relativeTime, statusOf, statusTextOf, statusToneOf, statsTextOf, tunnelRowVM, portView, suggestName, tunnelBodyOf, PATH_PREFIX, NAME_RE, NAME_HAS_LETTER_RE, ENTRY_PATH, ENTRY_SUBDOMAIN, PORT_MIN, PORT_MAX }')(navigator)
+  return new Function('navigator', code + '\nreturn { accessUrlOf, accessLocalOnly, copyText, createRefreshGate, isPageVisible, entryLabelOf, isEntryLabelConflict, defaultEntryFor, entryHintOf, relativeTime, statusOf, statusTextOf, statusToneOf, statsTextOf, tunnelRowVM, portView, suggestName, tunnelBodyOf, liveTunnels, openAgeText, statusBarSummary, statusBarRowVM, PATH_PREFIX, NAME_RE, NAME_HAS_LETTER_RE, ENTRY_PATH, ENTRY_SUBDOMAIN, PORT_MIN, PORT_MAX, STALE_OPEN_MS }')(navigator)
 }
 
 function constantOf(source, name) {
@@ -210,6 +210,70 @@ test('刷新闸门: 可见时立即执行, 隐藏时只记脏并在恢复后补�
   assert.equal(gate.pending, false)
   assert.equal(gate.flush(), false, '无脏标记时 flush 幂等')
   assert.equal(runs, 2)
+})
+
+// 底部状态条: 停用隧道不算开放; 摘要取最久的一条, 超过阈值标提醒。
+test('状态条: 只统计已启用且运行期激活的隧道', () => {
+  const logic = loadLogic(undefined)
+  const rows = [
+    { name: 'app', enabled: true },
+    { name: 'off', enabled: false },
+    { name: 'legacy' },
+    { name: 'api', enabled: true, status: 'route_error', active: false },
+  ]
+  assert.deepEqual(logic.liveTunnels(rows).map((row) => row.name), ['app', 'legacy'])
+  assert.deepEqual(logic.liveTunnels(undefined), [])
+})
+
+test('状态条: 开放时长文案按 秒/分钟/小时/天 收敛, 非法时间返回空', () => {
+  const logic = loadLogic(undefined)
+  const now = Date.parse('2026-11-17T12:00:00.000Z')
+  const ago = (ms) => new Date(now - ms).toISOString()
+  assert.equal(logic.openAgeText(now, ago(30 * 1000)), '不到 1 分钟')
+  assert.equal(logic.openAgeText(now, ago(12 * 60 * 1000)), '12 分钟')
+  assert.equal(logic.openAgeText(now, ago(3 * 60 * 60 * 1000)), '3 小时')
+  assert.equal(logic.openAgeText(now, ago(25 * 60 * 60 * 1000)), '1 天')
+  assert.equal(logic.openAgeText(now, ''), '')
+  assert.equal(logic.openAgeText(now, 'not-a-date'), '')
+})
+
+test('状态条: 单条给名称与时长, 多条只报数量; 超过 24 小时标记 stale', () => {
+  const logic = loadLogic(undefined)
+  const now = Date.parse('2026-11-17T12:00:00.000Z')
+  const at = (ms) => new Date(now - ms).toISOString()
+  const single = logic.statusBarSummary([{ name: 'app', enabled: true, createdAt: at(12 * 60 * 1000) }], now)
+  assert.equal(single.count, 1)
+  assert.equal(single.headline, '隧道开放中')
+  assert.equal(single.detail, 'app · 已开放 12 分钟')
+  assert.equal(single.stale, false)
+  const fresh = logic.statusBarSummary([{ name: 'app', enabled: true, createdAt: at(30 * 1000) }], now)
+  assert.equal(fresh.detail, 'app · 已开放不到 1 分钟', '短时长不出现「已开放 不到」的空格断句')
+  const many = [
+    { name: 'app', enabled: true, createdAt: at(12 * 60 * 1000) },
+    { name: 'api', enabled: true, createdAt: at(25 * 60 * 60 * 1000) },
+  ]
+  const summary = logic.statusBarSummary(many, now)
+  assert.equal(summary.count, 2)
+  assert.equal(summary.headline, '隧道 2 条运行中')
+  assert.equal(summary.detail, '有隧道开放超过 24 小时', '多条只报数量, 但超时仍需提醒')
+  assert.equal(summary.stale, true)
+  assert.equal(logic.statusBarSummary([{ name: 'off', enabled: false }], now), null)
+  assert.equal(logic.statusBarSummary([], now), null)
+})
+
+test('状态条: 行视图给出地址与超时标记', () => {
+  const logic = loadLogic(undefined)
+  const now = Date.parse('2026-11-17T12:00:00.000Z')
+  const location = { protocol: 'http:', hostname: '127.0.0.1', port: '3080', origin: 'http://127.0.0.1:3080' }
+  const fresh = logic.statusBarRowVM({ name: 'app', entry: 'path', createdAt: new Date(now - 60 * 1000).toISOString() }, now, location)
+  assert.equal(fresh.url, 'http://127.0.0.1:3080/p/app/')
+  assert.equal(fresh.openText, '已开放 1 分钟')
+  assert.equal(fresh.stale, false)
+  const justNow = logic.statusBarRowVM({ name: 'app', entry: 'path', createdAt: new Date(now - 30 * 1000).toISOString() }, now, location)
+  assert.equal(justNow.openText, '已开放不到 1 分钟')
+  const stale = logic.statusBarRowVM({ name: 'api', entry: 'path', createdAt: new Date(now - 25 * 60 * 60 * 1000).toISOString() }, now, location)
+  assert.equal(stale.stale, true)
+  assert.equal(stale.openText, '已开放 1 天')
 })
 
 test('页面可见性判定: 仅 hidden 视为不可见', () => {
