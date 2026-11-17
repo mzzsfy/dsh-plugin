@@ -2,6 +2,11 @@
 
 轻量级定时任务看板 dsh 插件:环境变量集中管理 + 定时任务(cron)调度,执行体支持两类——本地脚本(dsh 宿主进程内 spawn)与 dsh 会话任务(定时向 dsh 会话投递任务,投递即终态,支持「每次新建会话」或「固定同一会话」)。
 
+## 预览
+
+![主面板](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-cron-board/board.png)
+![环境变量](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-cron-board/envs.png)
+
 ## 功能
 
 - **看板**:任务卡片列表(状态色/下次触发相对时间/启停开关/立即运行/编辑/删除),新建编辑模态为调度构建器布局:类型/会话模式/调度频率统一分段组件,结构化频率(每天/每周/工作日/固定间隔)自动生成表达式(反解不出即自定义手输),即将执行时刻 chips 为服务端实时预览;编辑保存只提交改动字段并带回打开时的 `updatedAt` 作乐观锁,期间任务被别处改动(自动禁用/开关/会话绑定)则以 409 拒绝重保存而非静默回滚

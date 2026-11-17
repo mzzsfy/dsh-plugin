@@ -121,14 +121,15 @@ window.__ModuleLoader__.load({
       }
       return out
     }
-    // 探针失败按目标粒度剔除: 主源不可用提升首个可用备源, 备源不可用仅移除该备源, 全部目标不可用才删路由。
-    // 适配器声明的能力矩阵是粗粒度笛卡尔积(如腾讯声明 kline 含美股但实际不支持), 整条剔除会连带丢掉可用备源。
+    // 探针失败按目标粒度剔除: 主源不可用提升首个可用备源, 备源不可用仅移除该备源。
+    // 全部目标都探不通时原样保留: 探针失败可能只是当次网络抖动或出口被拒(整站拒绝时每个市场都会失败),
+    // 删掉配置等于替用户永久放弃这个市场, 运行时还会因此报 NO_ROUTE 且无处重试。
     const pruneDeniedTargets = (routes, deniedKeys) => routes.map(route => {
       const target = id => `${id}:${route.capability}:${route.market}`
       const alive = [route.primaryInstanceId, ...route.fallbackInstanceIds].filter(id => !deniedKeys.has(target(id)))
-      if (!alive.length) return null
+      if (!alive.length) return route
       return { ...route, primaryInstanceId: alive[0], fallbackInstanceIds: alive.slice(1), failoverMode: alive.length > 1 ? route.failoverMode : 'off' }
-    }).filter(Boolean)
+    })
     const BROWSE_MARKETS = { XSHG: '沪 A', XSHE: '深 A', XHKG: '港股', XNAS: '纳斯达克', XNYS: '纽交所', XJPX: '日本', XKRX: '韩国', XLON: '英国' }
     // 客户端请求的三种时限: 普通读写、探针、目录同步; 超时统一折算成用户可读且可退避的中文错误
     const REQUEST_TIMEOUT_MESSAGE = '请求超时，请重试'
@@ -875,9 +876,12 @@ window.__ModuleLoader__.load({
       function open(id) { runtime.updateView({ detailId: id, selectedId: id, overlay: 'detail', focusId: id, keyboardNavigating: false, menuId: null }) }
       // 概览横幅: 仅异常态显示(健康态运维摘要收进「更多」菜单), Leek-Fund 模式=主页纯列表
       // 概览横幅直指用户请求: 后台探测的失败不是用户动作, 不在横幅上报
-      const unhealthy = (state.data.providerStatus || []).filter(s => { const log = (s.recentRequests || []).filter(r => !r.probe); return log.length && log[0].status !== 'ok' })
+      const lastFailure = s => (s.recentRequests || []).find(r => !r.probe)
+      const unhealthy = (state.data.providerStatus || []).filter(s => { const log = lastFailure(s); return log && log.status !== 'ok' })
+      // 原因照抄适配器的话: 「需要人机验证，打开某站完成验证」比「最近请求失败」更能告诉用户下一步做什么
+      const reason = unhealthy.map(s => ({ id: s.id, why: lastFailure(s)?.status === 'CHALLENGE' ? lastFailure(s)?.message || '需要人机验证' : null })).find(r => r.why)
       const providers = state.data.control.providers || []
-      const sourcesBanner = unhealthy.length || providers.some(p => !p.enabled) ? h('div', { className: 'ssb-banner' }, `${providers.filter(p => p.enabled).length}/${providers.length} 个数据源启用${unhealthy.length ? `，${unhealthy.map(s => s.id).join('、')} 最近请求失败` : ''}`, h(Button, { onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) }, '查看')) : null
+      const sourcesBanner = unhealthy.length || providers.some(p => !p.enabled) ? h('div', { className: 'ssb-banner' }, reason ? `${reason.id} ${reason.why}` : `${providers.filter(p => p.enabled).length}/${providers.length} 个数据源启用${unhealthy.length ? `，${unhealthy.map(s => s.id).join('、')} 最近请求失败` : ''}`, h(Button, { onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) }, '查看')) : null
       // 分组 tab: 全部 → 各标签(首现序) → 未分组; 一只票可同时属于多个标签, 于是在多个 tab 可见
       const tabs = tagTabs(w.order, w.items)
       const active = resolveTab(tabs, view.activeTab)
@@ -1891,12 +1895,12 @@ window.__ModuleLoader__.load({
         }) : [h('p', { className: 'ssb-muted' }, '未选择标的，点 ☰ 勾选')]))
     }
     // 离线兜底提示: 当日缓存说出是哪一次成功的, 追加过报价点也要说清补了几个——都不能让用户以为这是实时分时
-    function offlineText(offline) {
+    function offlineText(offline, now = Date.now()) {
       if (!offline) return ''
-      return `离线：当日缓存 ${clockText(offline.cachedAt)}${offline.appended ? `，补 ${offline.appended} 个报价点` : ''}`
+      return `离线：当日缓存 ${clockText(offline.cachedAt, now)}${offline.appended ? `，补 ${offline.appended} 个报价点` : ''}`
     }
     // 离线提示的前缀: 浮窗图下与详情页元信息共用同一句话, 免得两处说法不一致
-    const offlinePrefix = offline => offline ? `${offlineText(offline)} · ` : ''
+    const offlinePrefix = (offline, now = Date.now()) => offline ? `${offlineText(offline, now)} · ` : ''
     // 数值一律先过 finiteOr: Number(null) 是 0, 会把缺失的昨收当成真实的 0 交给下游
     function floatReadout({ candles, trendData, quote }) {
       return { last: finiteOr(candles?.at(-1)?.close ?? quote?.last), base: finiteOr(trendData?.preClose ?? quote?.previousClose) }

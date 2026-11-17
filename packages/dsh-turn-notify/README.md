@@ -2,6 +2,13 @@
 
 DeepSeek Harness 消息通知插件:AI 回合产生六类事件(任务完成/任务出错/异常中断/等待审批/AI 提问/回复被截断),按配置通过声音、系统通知、页内通知、webhook、IM 与后台桌面通知提醒。同源多窗口共享一次呈现,不同浏览器或不同地址独立接收。
 
+## 预览
+
+![设置页](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-turn-notify/settings.png)
+![规则配置](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-turn-notify/rules.png)
+![声音设置](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-turn-notify/sounds.png)
+![推送设置](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-turn-notify/push.png)
+
 ## 快速上手
 
 ```sh

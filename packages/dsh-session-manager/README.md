@@ -4,6 +4,10 @@ DeepSeek Harness 会话生命周期管理插件:自动归档 + 归档面板 + �
 
 历史输入浮层、插话撤回与对话分叉已迁至独立插件 `dsh-context-manager`(会话上下文管理);工作区文件夹运行标记见 `dsh-turn-notify`;会话列表瘦身(列表投影裁剪与缓存)已迁至 `dsh-bug-perf`。旧设置项 `listSlimEnabled` 不再读取,开关改由 `dsh-bug-perf` 的 `listSlim.enabled` 管理(默认开启)。本包 0.10.0 及更早版本仍带丢失调用方上下文的旧列表包装,必须升级到 0.11.0 或更高(当前 0.13.1);旧包装与新 `dsh-bug-perf` 同装时仍会绕过宿主鉴权,不能只升级对端包。
 
+## 预览
+
+![设置页](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-session-manager/settings.png)
+
 ## 功能
 
 - 自动归档:host 半区对超期会话走官方 `workspace.archiveSession` 通道,三个触发源共用同一评估与门闩:新会话创建(`session/created`,按该会话所属工作区限定)、settings 就绪后的启动补扫(全量,清掉停机期间积压)、每日周期轮(全量,经宿主 timer 服务固定短 tick + 到期判断)。幂等:已归档会话不参与评估。阈值 `autoArchiveDays` 默认 7,`0` 关闭;周期间隔 `autoArchiveIntervalHours` 默认 24,`0` 关闭周期轮,变更经周期 tick 对账(关闭即时暂停、重启用最迟下个 tick 生效、缩短经锚定钳制前移,最长等新间隔而非等满旧周期)。评估筛选:createdAt 纯内存预筛 + 已归档跳过 + stat 后活跃度判定;同轮评估带代际令牌,卸载/超时后每个 await 返回都自检,旧代不得继续 `archiveSession`;宿主永不落定时硬上界作废旧代并释放门闩;超时只中止后续归档,门闩等 work 收尾后释放,不提前重入。产物路径以公共 `sessionPersistence.stat()/list()` 快照的 `location` 为真源(旧代 `migration-required` 产物也指向真实历史文件),无 stat/list/locate 观测能力的旧宿主与产物不可读的会话一律跳过,宁可漏归档不可误归档;单会话探测异常逐条隔离并计数告警,不拖垮同轮其余会话。经 settings 命名空间 `session-manager` 注册(schema 拒绝负数与非整数)。timer 为软依赖:宿主定时服务不可用时仅周期轮停用,面板顶部提示,插件其余能力不受影响。

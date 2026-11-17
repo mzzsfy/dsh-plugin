@@ -2,6 +2,10 @@
 
 DeepSeek Harness 纯前端插件:设置弹窗左侧导航与 dsh-market 插件市场卡片的图标适配——原版 Shell 只为 `models` / `agent-presets` / `plugins` 三个分区 id 提供专属图标,其余分区(含通用设置)一律回退齿轮;本插件按分区显示文本把齿轮换成专属图形,并为市场卡片头像槽提供插件语义图标。
 
+## 预览
+
+![设置导航图标](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-settings-nav-icons/settings-nav.png)
+
 ## 行为
 
 | 场景 | 行为 |

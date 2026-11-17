@@ -56,6 +56,8 @@ export function createClientHarness(options = {}) {
     useRef: (value) => ({ current: value }),
     useCallback: (fn) => fn,
     useEffect: (fn) => { state.pendingEffects.push(fn) },
+    // 布局副作用在替身里按普通副作用处理: 只验证效果, 不模拟帧时序
+    useLayoutEffect: (fn) => { state.pendingEffects.push(fn) },
   }
 
   const tools = {
@@ -103,6 +105,7 @@ export function createClientHarness(options = {}) {
 
   const plugin = state.definition.factory((name) => {
     if (name === 'react') return react
+    if (name === 'react-dom') return { createPortal: (node) => ({ type: 'portal', props: { children: [node] } }) }
     if (name === '@mzzsfy/dsh-common-tools/client') return tools
     throw new Error('unexpected module: ' + name)
   })

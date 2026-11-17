@@ -2,6 +2,10 @@
 
 公司管理模拟器:以老板身份安排任务,授权后派发给部门自治执行,只接受汇报。任务可由面板直接创建(不依赖 AI 可用性),也可交给管理员预设会话澄清方案;实际实施与独立验收由标准会话执行,报告经 durable 会话事件归并。GUI 以任务列表为主视图,管理员对话作为可选助手。
 
+## 预览
+
+![主面板](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-boss-simulator/board.png)
+
 ## 行角色
 
 行配置 `role` 必填,三值分发(`lib/index.js`):

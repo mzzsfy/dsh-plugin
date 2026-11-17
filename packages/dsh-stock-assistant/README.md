@@ -4,6 +4,16 @@ DSH 全局股票工具。左侧“股票”入口打开独立主页面，无会�
 
 支持八个市场（沪/深 A 股、港股、美股 NYSE/NASDAQ、日经、韩证、伦敦）：自选（多标签分组；市场自动分组：解散某市场分组后新增同市场票不再自动归组，该市场自选清空后仍按默认归组，手动加回市场标签即恢复；分组 tab 与 tab 内涨跌/持仓统计、置顶、拖拽排序、别名、删除撤销）、名称/代码/拼音首字母搜索（多市场候选带币种徽标）、行情与 K 线图表（分时/日K/周K/月K，MA/EMA/BOLL/BBI 可分别开关、成交量副图、昨收/价格标记/区间高低参考线，lightweight-charts 渲染）、价格标记（成本/卖价，单只最多 12 条，多笔成本取最低价计浮盈、卖价按成本计潜在收益）、悬浮盯盘（列表与图形双模式、只盯勾选的标的、图形模式报价行给设了成本的标的补持仓盈亏、刷新间隔五档 3/5/10/15/30 秒、默认 10 秒、可拖动、常驻在所有面板之上）、基础详情、涨跌排序、手动刷新、暂停采集，以及数据源与能力路由设置（含"应用推荐配置"与按市场配置 K 线/分时）。不做交易、持仓管理或资讯；价格提醒仅限自选标记价穿越，经页内/系统通知或已安装的通知插件呈现。
 
+## 预览
+
+![主面板](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-stock-assistant/board.png)
+![K 线](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-stock-assistant/kline.png)
+![悬浮盯盘](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-stock-assistant/floating.png)
+![市场页](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-stock-assistant/market.png)
+![搜索候选](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-stock-assistant/search.png)
+![设置页](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-stock-assistant/settings.png)
+![市场与能力路由](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-stock-assistant/settings-routes.png)
+
 ## 数据结构与持久化
 
 **不使用 DSH 默认设置系统。** 本插件不声明 `Config`，不调用 `settings` 或 `configEditor`。配置界面位于股票工具自己的“设置”视图中。

@@ -34,6 +34,14 @@ const TREND_FIELDS = 'f51,f52,f53,f54,f55,f56,f57,f58'
 // 分时时间戳的来源时区: 东财统一用北京时间, 与证券所属市场无关
 const SOURCE_ZONE = 'Asia/Shanghai'
 const num = value => value == null || typeof value === 'number' && !Number.isFinite(value) ? null : value === '-' ? null : String(value)
+// 风控页是 HTML: 不嗅探就会被当成「响应不是JSON」, 用户看不到「去浏览器过滑块」这条唯一出路
+const CHALLENGE_HINT = /验证码|人机验证|安全验证|滑块|拖动|geetest|tcaptcha|captcha/i
+const challenged = async response => {
+  try {
+    const text = await response.clone().text()
+    return /^\s*</.test(text) || CHALLENGE_HINT.test(text)
+  } catch { return false }
+}
 async function getJson(ctx, url) {
   let response
   try {
@@ -43,6 +51,7 @@ async function getJson(ctx, url) {
     if (e instanceof StockError) throw e
     throw new StockError('NETWORK', '无法连接行情来源', 502, { retryable: true })
   }
+  if (await challenged(response)) throw new StockError('CHALLENGE', '东财要求人机验证：用浏览器打开 www.eastmoney.com 完成验证后自动恢复', 502)
   if (!response.ok) throw new StockError('NETWORK', '来源服务暂不可用', 502, { retryable: true })
   return response.json().catch(() => { throw new StockError('BAD_PAYLOAD', '来源响应不是JSON', 502) })
 }

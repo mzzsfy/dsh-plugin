@@ -4,6 +4,10 @@
 `deferLoading` 标,交给宿主 deferred tool loading 原生链路(API `defer_loading`,
 服务端按需搜索激活),解决插件注入大量工具污染上下文的问题。
 
+## 预览
+
+![设置页](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-tool-gate/settings.png)
+
 ## 机制
 
 - **声明式收敛**:白名单是全系统工具 defer 态的唯一事实源——白名单内清标

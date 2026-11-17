@@ -4,6 +4,12 @@
 
 定位:官方修复落地前的运行期兜底,不是宿主行为的替代实现。升级 dsh 后应复核宿主版本是否已修复,再决定是否保留。
 
+## 预览
+
+![设置页](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-bug-perf/settings.png)
+![设置页（续）](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-bug-perf/settings-2.png)
+![设置页（续 2）](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-bug-perf/settings-3.png)
+
 ## 功能
 
 | 功能 | 配置节 | 兜底对象 | 行为 |

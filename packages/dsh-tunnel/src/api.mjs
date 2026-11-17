@@ -95,13 +95,14 @@ export function createApi({ tunnelsApi, readUi, updateUi, lanOrigin, logSystem }
       const result = await tunnelsApi.list({ probe: url.searchParams.get('probe') === '1' })
       return { items: result.tunnels }
     } },
-    { method: 'POST', segments: ['tunnels'], handler: ({ body }) => {
-      const outcome = tunnelsApi.open(body)
+    { method: 'POST', segments: ['tunnels'], handler: ({ req, body }) => {
+      // entryHost: 本次管理请求所在的 Host, 唯一会因同名子域名隧道自劫持的地址
+      const outcome = tunnelsApi.open({ ...body, entryHost: req.headers.host })
       if (!outcome.ok) throw new Error(outcome.error)
       return outcome
     } },
-    { method: 'PATCH', segments: ['tunnels', ':name'], handler: async ({ params, body }) => {
-      const outcome = await tunnelsApi.update({ name: params.name, patch: body })
+    { method: 'PATCH', segments: ['tunnels', ':name'], handler: async ({ req, params, body }) => {
+      const outcome = await tunnelsApi.update({ name: params.name, patch: body, entryHost: req.headers.host })
       if (!outcome.ok) throw new Error(outcome.error)
       return outcome
     } },

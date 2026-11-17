@@ -4,6 +4,10 @@ Windows 宿主 shell 链接管:接管根组合中的官方 `pwsh` 工具与执�
 
 **宿主要求 ≥ 0.1.7-rc.1**:保留现有 settings/行配置契约的最低版本要求。已移除会话预设声明和 `@deepseek-ai/dsh-agent-preset` 依赖，不扩大旧宿主兼容范围。
 
+## 预览
+
+![设置页](https://raw.githubusercontent.com/mzzsfy/dsh-plugin/main/assets/screenshots/dsh-shell-select/settings.png)
+
 ## 工作方式
 
 - **运行时接管**:bundle 补丁不静态禁用官方 `tool-pwsh`、`pwsh-sandbox` 两行——boot 期官方 pwsh 链先服务,主行(`ctx.shell` 执行器 + `shell` 工具 + systemPrompt 段)apply 落定后经 `entry.update` 运行时禁用官方两行(dsh-market 同款,内存态不持久),再挂载执行器接管。本包任意死法(import 崩/apply 崩/被禁/卸载)下官方行保持启用,官方 pwsh 链自服务,系统不出现 shell 全灭窗口;运行时接管/挂载失败回滚官方双行并落 `inactive`,回滚失败时由 guard 死态代挂兜底;重启后由行树声明态收敛。web 行(`/api/shell-select/*` 数据通道,`inject: ['webServer', 'settings']` 声明式门控——服务就绪才激活)与 guard 哨兵行同 patch 插入;全部路由走共享 `withRouteGate`(宿主闸门 + 写方法 Origin↔Host 同源(大小写不敏感)+ `application/json` 精确 content-type),超限请求体回 413 且不先销毁 socket。

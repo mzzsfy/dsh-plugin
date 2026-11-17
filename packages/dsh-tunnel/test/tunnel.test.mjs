@@ -719,55 +719,77 @@ test('场景24 代际令牌: 新代已接管分发载体时, 旧代 dispose 不�
   assert.equal(host.dshTunnelDispatch, nextGeneration, '旧代回收必须认令牌')
 })
 
-// ── P2-44 入口域首标签 ───────────────────────────────────────────────────────
-// 子域名隧道按 Host 首标签分流, 且分流先于宿主全部路由(含 /api/*): 名等于入口域首标签
-// 即把整个 GUI 劫持到隧道目标, 且按盘恢复后不自愈——open 必须拒收。
+// ── 当前访问地址首标签 ───────────────────────────────────────────────────────
+// 子域名隧道按 Host 首标签分流, 且分流先于宿主全部路由(含 /api/*): 名等于「本次管理
+// 请求所在 Host」首标签, 保存后这个地址就交给隧道, 设置页在该地址消失——只在这一刻拒绝。
+// 宿主 trustedHosts 是 auto-trust-all 按到达 Host 累积的集合, 不是入口域, 不参与判定。
 
-test('场景25 入口域首标签冲突: Given GUI 经 dsh.example.com 访问 Then 子域名名 dsh 被拒且入口不被劫持', async () => {
-  const { host, plugin } = await scenario({ plugin: { connection: { trustedHosts: ['dsh.example.com:3080'] } } })
+test('场景25 当前访问地址首标签冲突: Given 设置页经 dsh.example.com 访问 Then 同名子域名隧道被拒, 其它地址创建放行', async () => {
+  const { host, plugin } = await scenario()
   cleanup.push(() => plugin.dispose(), () => host.dispose())
-  const refused = await open(plugin, { name: 'dsh', targetPort: PORT_MAX - 1, entry: 'subdomain' })
-  assert.equal(refused.ok, false)
-  assert.match(refused.error, /入口域首标签冲突/)
-  assert.match(refused.error, /dsh\.example\.com/)
-  assert.equal(tunnelPrefixCount(host), 0)
-  assert.equal(storeRows(plugin.dataDir).length, 0, '冲突名不得落盘(否则重启按盘恢复继续劫持)')
-
-  // 管理 REST 同一判据, 走 400 而不是静默成功
+  const payload = JSON.stringify({ name: 'dsh', targetPort: PORT_MAX - 1, entry: 'subdomain' })
+  // 管理 REST 判据即本次请求的 Host
   const rest = await request(host, '/api/tunnel/tunnels', {
     method: 'POST',
+    host: 'dsh.example.com',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ name: 'dsh', targetPort: PORT_MAX - 1, entry: 'subdomain' }),
+    body: payload,
   })
   assert.equal(rest.status, 400)
-  assert.match(JSON.parse(rest.body).error, /入口域首标签冲突/)
+  assert.match(JSON.parse(rest.body).error, /首标签冲突/)
+  assert.match(JSON.parse(rest.body).error, /dsh\.example\.com/)
+  assert.equal(tunnelPrefixCount(host), 0)
+  assert.equal(storeRows(plugin.dataDir).length, 0, '冲突名不得落盘')
 
-  // 入口 Host 仍由宿主应答: GUI 与 /api/* 不被隧道吞掉
-  assert.equal((await request(host, '/api/x', { host: 'dsh.example.com' })).body, 'host-api')
-  assert.equal((await request(host, '/', { host: 'dsh.example.com' })).body, 'host-fallback')
+  // 同一名字经其它地址打开设置页即可创建: 只有当前地址会被接管
+  const other = await request(host, '/api/tunnel/tunnels', {
+    method: 'POST',
+    host: 'entry.example.com',
+    headers: { 'content-type': 'application/json' },
+    body: payload,
+  })
+  assert.equal(other.status, 200)
+  assert.equal(JSON.parse(other.body).name, 'dsh')
+  assert.equal(storeRows(plugin.dataDir).length, 1)
 
   // 路径入口只在 /p/<名> 下, 不按 Host 分流: 无此冲突
-  const pathEntry = await open(plugin, { name: 'dsh', targetPort: PORT_MAX - 1 })
+  const pathEntry = await open(plugin, { name: 'dsh-path', targetPort: PORT_MAX - 2, entry: 'path' })
   assert.equal(pathEntry.ok, true)
   assert.equal(tunnelPrefixCount(host), 1)
 })
 
-test('场景26 入口域取值: Given trustedHosts 含 localhost/IP 与多级域名 Then 只拦真正撞首标签的名字', async () => {
+test('场景26 信任集合不参与判定: Given trustedHosts 累积了历史访问域名 Then 其首标签同名隧道照常创建与分发', async () => {
+  const target = await startTarget((req, res) => { res.writeHead(200); res.end('target') })
+  cleanup.push(() => target.stop())
   const { host, plugin } = await scenario({
-    plugin: { connection: { trustedHosts: ['localhost:3080', '127.0.0.1:3080', '[::1]:3080', 'gui.a.example.com'] } },
+    plugin: { connection: { trustedHosts: ['dshyh-t1.it.example.com:3080', 't1-dshyh.it.example.com:3080'] } },
   })
   cleanup.push(() => plugin.dispose(), () => host.dispose())
-  assert.equal((await open(plugin, { name: 'app', targetPort: PORT_MAX - 1, entry: 'subdomain' })).ok, true,
-    '无点主机/IP 不产生首标签, 未撞即放行')
-  const refused = await open(plugin, { name: 'gui', targetPort: PORT_MAX - 2, entry: 'subdomain' })
-  assert.equal(refused.ok, false)
-  assert.match(refused.error, /gui\.a\.example\.com/, '多级域名取首标签, 与 client 侧 entryLabelOf 同构')
+  const created = await request(host, '/api/tunnel/tunnels', {
+    method: 'POST',
+    host: 'entry.example.com',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 't1-dshyh', targetPort: target.port, entry: 'subdomain' }),
+  })
+  assert.equal(created.status, 200, '历史信任域名不得让名字永久报废')
+  assert.equal((await request(host, '/', { host: 't1-dshyh.it.example.com' })).body, 'target')
 })
 
-test('场景27 入口域比对服务缺失: Given 无 connection 服务 Then 与原行为一致(放行)', async () => {
-  const { host, plugin } = await scenario()
+test('场景27 分发不受信任集合影响: Given 子域名隧道被访问并被登记进 trustedHosts Then 隧道继续转发而不自毁', async () => {
+  const target = await startTarget((req, res) => { res.writeHead(200); res.end('target') })
+  cleanup.push(() => target.stop())
+  const connection = { trustedHosts: [] }
+  const { host, plugin } = await scenario({ plugin: { connection } })
   cleanup.push(() => plugin.dispose(), () => host.dispose())
-  assert.equal((await open(plugin, { name: 'dsh', targetPort: PORT_MAX - 1, entry: 'subdomain' })).ok, true)
+  assert.equal((await open(plugin, { name: 'app', targetPort: target.port, entry: 'subdomain' })).ok, true)
+  assert.equal((await request(host, '/', { host: 'app.example.com' })).body, 'target')
+  // auto-trust-all 会把这个到达的 Host 推入 trustedHosts: 不得因此把隧道摘掉
+  connection.trustedHosts = ['app.example.com:3080']
+  assert.equal((await request(host, '/', { host: 'app.example.com' })).body, 'target')
+  const row = (await list(plugin)).tunnels.find((item) => item.name === 'app')
+  assert.equal(row.active, true)
+  assert.equal(row.error, undefined)
+  assert.equal((await request(host, '/api/x', { host: 'app.example.com' })).body, 'target', '/api/* 同属该子域名: 整入口透传')
 })
 
 // ── P3 Location 前缀边界 ────────────────────────────────────────────────────
@@ -813,46 +835,48 @@ test('场景29 Location 带查询串/锚点: Given 已带前缀 Then 按 pathnam
   assert.equal((await request(host, '/p/app/root-query')).headers.location, '/p/app/?q=1#h')
 })
 
-test('场景30 恢复首标签冲突: Given 盘上子域名行撞晚就绪信任面 Then active:false+error 且入口不被劫持', async () => {
-  const dataDir = tempDataDir()
-  writeFileSync(join(dataDir, 'tunnels.json'), JSON.stringify([
-    { name: 'dsh', entry: 'subdomain', targetPort: PORT_MAX - 1, createdAt: 't1' },
-    { name: 'safe', entry: 'subdomain', targetPort: PORT_MAX - 2, createdAt: 't2' },
-  ]))
-  const host = await startedHost()
-  host.register({ kind: 'prefix', path: '/api', handler: (req, res) => { res.writeHead(200); res.end('host-api') } })
-  host.installFallback('host-fallback')
-  const plugin = await applyPlugin(host, { dataDir, connection: { trustedHosts: ['dsh.example.com:3080'] } })
-  cleanup.push(() => plugin.dispose(), () => host.dispose())
-
-  const listed = (await list(plugin)).tunnels
-  const conflict = listed.find((row) => row.name === 'dsh')
-  assert.equal(conflict.active, false, '冲突行不得激活')
-  assert.match(conflict.error, /入口域首标签冲突/)
-  assert.match(conflict.error, /dsh\.example\.com/)
-  assert.equal(listed.find((row) => row.name === 'safe').active, true, '其它行照常恢复')
-  assert.equal((await request(host, '/', { host: 'dsh.example.com' })).body, 'host-fallback', '入口必须仍归宿主')
-  assert.equal((await request(host, '/api/x', { host: 'dsh.example.com' })).body, 'host-api')
-  assert.ok(plugin.warnings.some((line) => line.includes('dsh')), '冲突行须留告警')
-
-  // 失败行留在磁盘: 一次无关 open 不得把它抹掉
-  await open(plugin, { name: 'other', targetPort: PORT_MAX - 3 })
-  assert.deepEqual(storeRows(dataDir).map((row) => row.name).sort(), ['dsh', 'other', 'safe'])
-})
-
-test('场景31 晚信任: Given 信任面后补入口域 Then 既有子域名隧道立即停止劫持入口', async () => {
+test('场景30 盘上子域名行恢复: Given 盘上行首标签与 trustedHosts 某条相同 Then 照常激活并分发', async () => {
   const target = await startTarget((req, res) => { res.writeHead(200); res.end('target') })
   cleanup.push(() => target.stop())
-  const connection = { trustedHosts: [] }
-  const { host, plugin } = await scenario({ plugin: { connection } })
+  const dataDir = tempDataDir()
+  writeFileSync(join(dataDir, 'tunnels.json'), JSON.stringify([
+    { name: 'dsh', entry: 'subdomain', targetPort: target.port, createdAt: 't1' },
+    { name: 'safe', entry: 'subdomain', targetPort: target.port, createdAt: 't2' },
+  ]))
+  const { host, plugin } = await scenario({
+    plugin: { dataDir, connection: { trustedHosts: ['dsh.example.com:3080'] } },
+  })
   cleanup.push(() => plugin.dispose(), () => host.dispose())
-  assert.equal((await open(plugin, { name: 'dsh', targetPort: target.port, entry: 'subdomain' })).ok, true,
-    '信任面未就绪时不得凭猜测拒绝')
+  const listed = (await list(plugin)).tunnels
+  const restored = listed.find((row) => row.name === 'dsh')
+  assert.equal(restored.active, true, '历史信任域名不得阻止激活')
+  assert.equal(restored.error, undefined)
+  assert.equal(listed.find((row) => row.name === 'safe').active, true)
   assert.equal((await request(host, '/', { host: 'dsh.example.com' })).body, 'target')
-  // 宿主异步加载完成/用户新增信任域: 分流必须每次现读,不得沿用装载时快照
-  connection.trustedHosts = ['dsh.example.com:3080']
-  assert.equal((await request(host, '/', { host: 'dsh.example.com' })).body, 'host-fallback')
-  assert.equal((await request(host, '/api/x', { host: 'dsh.example.com' })).body, 'host-api')
+})
+
+test('场景31 改名: Given 已激活 path 隧道 When PATCH name Then 旧前缀摘除、新地址生效、盘上换名', async () => {
+  const target = await startTarget((req, res) => { res.writeHead(200); res.end('ok') })
+  cleanup.push(() => target.stop())
+  const { host, plugin } = await scenario()
+  cleanup.push(() => plugin.dispose(), () => host.dispose())
+  assert.equal((await open(plugin, { name: 'old', targetPort: target.port, entry: 'path' })).ok, true)
+  assert.equal((await request(host, '/p/old/')).body, 'ok')
+  const renamed = await request(host, '/api/tunnel/tunnels/old', {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'fresh' }),
+  })
+  assert.equal(renamed.status, 200)
+  assert.equal(JSON.parse(renamed.body).name, 'fresh')
+  assert.equal((await request(host, '/p/old/')).body, 'host-fallback', '旧前缀必须一并摘除')
+  assert.equal((await request(host, '/p/fresh/')).body, 'ok')
+  assert.deepEqual(storeRows(plugin.dataDir).map((row) => row.name), ['fresh'])
+
+  plugin.dispose()
+  const reloaded = await applyPlugin(host, { dataDir: plugin.dataDir })
+  cleanup.push(() => reloaded.dispose())
+  assert.deepEqual((await list(reloaded)).tunnels.map((row) => row.name), ['fresh'])
 })
 
 test('场景32 socket 代际: Given 新代已接入 upgrade Then 旧代 dispose 不得回收新代连接', async () => {
@@ -895,47 +919,61 @@ test('场景32 socket 代际: Given 新代已接入 upgrade Then 旧代 dispose 
   newSocket.destroy()
 })
 
-test('场景34 晚信任回收: Given 子域名 upgrade 已建立 Then 信任面补入口域后连接关闭且状态转 active:false+error', async () => {
+test('场景34 改名回收 upgrade: Given 子域名 upgrade 已建立 When 改名 Then 旧名 socket 关闭且新名字命中', async () => {
   const wsTarget = await startWsTarget([])
   cleanup.push(() => wsTarget.stop())
-  const connection = { trustedHosts: [] }
-  const { host, plugin } = await scenario({ plugin: { connection } })
+  const { host, plugin } = await scenario()
   cleanup.push(() => plugin.dispose(), () => host.dispose())
-  assert.equal((await open(plugin, { name: 'dsh', targetPort: wsTarget.port, entry: 'subdomain' })).ok, true)
-
-  const socket = await openPersistentUpgrade(host, 'dsh.example.com')
-  assert.equal(await probeSocket(socket, 'before-trust'), 'before-trust', '信任面变化前连接应可正常转发')
+  assert.equal((await open(plugin, { name: 'old', targetPort: wsTarget.port, entry: 'subdomain' })).ok, true)
+  const socket = await openPersistentUpgrade(host, 'old.example.com')
+  assert.equal(await probeSocket(socket, 'before-rename'), 'before-rename')
   const closed = new Promise((resolve) => socket.once('close', () => resolve(true)))
 
-  connection.trustedHosts = ['dsh.example.com:3080']
-  assert.equal((await request(host, '/', { host: 'dsh.example.com' })).body, 'host-fallback', '冲突后入口立即归宿主')
-  const row = (await list(plugin)).tunnels.find((item) => item.name === 'dsh')
-  assert.equal(row.active, false, '冲突后状态不得再报 active')
-  assert.match(row.error, /入口域首标签冲突/)
-  await Promise.race([closed, new Promise((resolve) => setTimeout(() => resolve(false), 2000))])
-  assert.equal(socket.destroyed, true, '已建立的子域名 upgrade 连接必须被回收')
-})
-
-test('场景35 晚信任周期回收: Given 信任面变化但无新请求 Then 既有 upgrade 由周期核对关闭', async () => {
-  const wsTarget = await startWsTarget([])
-  cleanup.push(() => wsTarget.stop())
-  const connection = { trustedHosts: [] }
-  const { host, plugin } = await scenario({ plugin: { connection } })
-  cleanup.push(() => plugin.dispose(), () => host.dispose())
-  assert.equal((await open(plugin, { name: 'dsh', targetPort: wsTarget.port, entry: 'subdomain' })).ok, true)
-  const socket = await openPersistentUpgrade(host, 'dsh.example.com')
-  assert.equal(await probeSocket(socket, 'before-trust'), 'before-trust')
-  const closed = new Promise((resolve) => socket.once('close', () => resolve(true)))
-
-  connection.trustedHosts = ['dsh.example.com:3080']
+  const renamed = await request(host, '/api/tunnel/tunnels/old', {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'fresh' }),
+  })
+  assert.equal(renamed.status, 200)
   const closedInTime = await Promise.race([
     closed,
-    new Promise((resolve) => setTimeout(() => resolve(false), 2_500)),
+    new Promise((resolve) => setTimeout(() => resolve(false), 1_500)),
   ])
-  assert.equal(closedInTime, true, '无新请求时周期核对必须回收既有 upgrade')
-  const row = (await list(plugin)).tunnels.find((item) => item.name === 'dsh')
-  assert.equal(row.active, false)
-  assert.match(row.error, /入口域首标签冲突/)
+  assert.equal(closedInTime, true, '改名必须回收旧名的 upgrade 连接')
+  assert.equal(socket.destroyed, true)
+  // 旧首标签不再命中, 新首标签命中
+  assert.equal((await request(host, '/', { host: 'old.example.com' })).body, 'host-fallback')
+  assert.equal((await upgrade(host, '/ws', { host: 'fresh.example.com' })).upgraded, true)
+})
+
+test('场景35 改名拒绝: Given 目标名已占用或撞当前地址首标签 Then 400 且原行不变', async () => {
+  const target = await startTarget((req, res) => { res.writeHead(200); res.end('ok') })
+  cleanup.push(() => target.stop())
+  const { host, plugin } = await scenario()
+  cleanup.push(() => plugin.dispose(), () => host.dispose())
+  assert.equal((await open(plugin, { name: 'keep', targetPort: target.port, entry: 'path' })).ok, true)
+  assert.equal((await open(plugin, { name: 'taken', targetPort: PORT_MAX - 10, entry: 'path' })).ok, true)
+
+  const occupied = await request(host, '/api/tunnel/tunnels/keep', {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'taken' }),
+  })
+  assert.equal(occupied.status, 400)
+  assert.match(JSON.parse(occupied.body).error, /已占用/)
+
+  const selfConflict = await request(host, '/api/tunnel/tunnels/keep', {
+    method: 'PATCH',
+    host: 'fresh.example.com',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'fresh', entry: 'subdomain' }),
+  })
+  assert.equal(selfConflict.status, 400)
+  assert.match(JSON.parse(selfConflict.body).error, /首标签冲突/)
+
+  const rows = (await list(plugin)).tunnels
+  assert.deepEqual(rows.map((row) => row.name).sort(), ['keep', 'taken'], '被拒改名不得改动行表')
+  assert.equal((await request(host, '/p/keep/')).body, 'ok', '被拒改名不得摘掉旧路由')
 })
 
 test('场景36 close 回收: Given 子域名 upgrade 已建立 When close Then 该隧道 socket 全部关闭', async () => {

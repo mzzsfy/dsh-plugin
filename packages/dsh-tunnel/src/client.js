@@ -8,6 +8,8 @@ const SECTION_ID = 'tunnel'
 const SECTION_LABEL = '穿透隧道'
 const SECTION_ORDER = 47
 const COPY_FLASH_MS = 1200
+const MENU_GAP = 6
+const MENU_MARGIN = 8
 const REQUEST_TIMEOUT_MS = 15 * 1000
 const PROBE_DEBOUNCE_MS = 350
 const PORT_MIN = 1
@@ -147,7 +149,7 @@ function portView(items, options = {}) {
 
 function tunnelBodyOf(mode, draft, name) {
   const body = { targetPort: Number(draft.targetPort), entry: draft.entry }
-  if (mode === 'create' && name !== '') body.name = name
+  if (name !== '') body.name = name
   return body
 }
 
@@ -294,6 +296,7 @@ const CSS = `
 .tu-icon-btn{width:28px;height:28px;border:0;border-radius:6px;background:transparent;color:var(--tu-text-sub);font:inherit;font-size:18px;line-height:1;cursor:pointer;display:inline-flex;align-items:center;justify-content:center}
 .tu-icon-btn:hover{background:var(--tu-hover);color:var(--tu-text)}
 .tu-menu{position:absolute;right:var(--tu-space-4);top:40px;z-index:5;min-width:150px;padding:var(--tu-space-1);background:var(--tu-bg);border:.5px solid var(--tu-border-2);border-radius:6px;box-shadow:var(--dsw-shadow-lv3,0 8px 24px rgba(0,0,0,.12))}
+.tu-menu--floating{position:fixed;right:auto;top:auto;z-index:1200}
 .tu-menu__item{display:block;width:100%;padding:7px 10px;border:0;border-radius:4px;background:transparent;color:var(--tu-text);font:inherit;font-size:13px;text-align:left;cursor:pointer;white-space:nowrap}
 .tu-menu__item:hover{background:var(--tu-hover)}
 .tu-menu__item--danger{color:var(--tu-danger)}
@@ -378,8 +381,15 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       return noopFactory()
     }
     const tools = require('@mzzsfy/dsh-common-tools/client')
-    const { useState, useEffect, useRef, useCallback } = React
+    const { useState, useEffect, useLayoutEffect, useRef, useCallback } = React
     const h = (type, props, ...children) => React.createElement(type, props || null, ...children)
+    // 宿主模块表不保证提供 react-dom 主入口: 缺失时菜单退回原地渲染(仍可用, 但可能被滚动容器裁剪)
+    let createPortal = null
+    try {
+      createPortal = require('react-dom').createPortal
+    } catch {
+      createPortal = null
+    }
 
     function ensureStyle(document) {
       let style = document.getElementById(STYLE_ID)
@@ -541,24 +551,36 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 
     function TunnelRow({ row, now, lanOrigin, onEdit, onToggle, onRemove }) {
       const [menuOpen, setMenuOpen] = useState(false)
+      const [menuAnchor, setMenuAnchor] = useState(null)
+      const [menuPos, setMenuPos] = useState(null)
       const [armed, setArmed] = useState(false)
       const [flash, setFlash] = useState('')
       const rootRef = useRef(null)
+      const menuRef = useRef(null)
       useEffect(() => {
         if (!menuOpen) return undefined
         const close = (event) => {
-          if (rootRef.current !== null && rootRef.current.contains?.(event.target)) return
+          const target = event.target
+          if (rootRef.current !== null && rootRef.current.contains?.(target)) return
+          if (menuRef.current !== null && menuRef.current.contains?.(target)) return
           setMenuOpen(false)
           setArmed(false)
         }
         const onKey = (event) => { if (event.key === 'Escape') { setMenuOpen(false); setArmed(false) } }
+        // 菜单是浮层快照: 滚动/缩放后锚点失效, 直接收起而不是跟随
+        const onViewport = () => { setMenuOpen(false); setArmed(false) }
         document.addEventListener('mousedown', close)
         document.addEventListener('keydown', onKey)
+        window.addEventListener('scroll', onViewport, true)
+        window.addEventListener('resize', onViewport)
         return () => {
           document.removeEventListener('mousedown', close)
           document.removeEventListener('keydown', onKey)
+          window.removeEventListener('scroll', onViewport, true)
+          window.removeEventListener('resize', onViewport)
         }
       }, [menuOpen])
+      // 菜单按触发按钮实测高度摆位: 下方放不下就翻到上方, 两侧都放不下取下方并夹进视口
       const vm = tunnelRowVM(row, window.location, now)
       const url = vm.url
       const urlDisabled = row.enabled === false || vm.status === 'route_error'
@@ -571,6 +593,46 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         setTimeout(() => setFlash(''), COPY_FLASH_MS)
       })
       const closeMenu = () => { setMenuOpen(false); setArmed(false) }
+      const floating = createPortal !== null
+      // 菜单项数随局域网地址存在与否变化, 高度须在每次打开/项数变化后重测
+      useLayoutEffect(() => {
+        if (!floating || !menuOpen || menuAnchor === null || menuRef.current === null) return
+        const height = menuRef.current.offsetHeight
+        const below = menuAnchor.bottom + MENU_GAP
+        const above = menuAnchor.top - MENU_GAP - height
+        const fitsBelow = below + height + MENU_MARGIN <= window.innerHeight
+        const top = fitsBelow || above < MENU_MARGIN ? below : above
+        setMenuPos({ right: menuAnchor.right, top: Math.max(MENU_MARGIN, top) })
+      }, [floating, menuOpen, menuAnchor, armed, lanUrl])
+      const toggleMenu = (event) => {
+        if (menuOpen) { closeMenu(); return }
+        const rect = event.currentTarget.getBoundingClientRect()
+        setMenuAnchor({
+          right: Math.max(MENU_MARGIN, window.innerWidth - rect.right),
+          top: rect.top,
+          bottom: rect.bottom,
+        })
+        setMenuPos(null)
+        setMenuOpen(true)
+      }
+      const menu = menuOpen ? h('div', {
+        ref: menuRef,
+        className: 'tu-menu' + (floating ? ' tu-menu--floating' : ''),
+        role: 'menu',
+        style: floating
+          ? (menuPos === null ? { visibility: 'hidden' } : { right: menuPos.right, top: menuPos.top })
+          : undefined,
+      },
+        h('button', { type: 'button', className: 'tu-menu__item', role: 'menuitem', onClick: () => { copy(url); closeMenu() } }, '复制地址'),
+        lanUrl !== '' ? h('button', { type: 'button', className: 'tu-menu__item', role: 'menuitem', onClick: () => { copy(lanUrl); closeMenu() } }, '复制局域网地址') : null,
+        h('button', { type: 'button', className: 'tu-menu__item', role: 'menuitem', onClick: () => { onEdit(row); closeMenu() } }, '编辑'),
+        h('button', { type: 'button', className: 'tu-menu__item', role: 'menuitem', onClick: () => { onToggle(row); closeMenu() } }, row.enabled === false ? '启用' : '停用'),
+        h('button', {
+          type: 'button',
+          className: 'tu-menu__item tu-menu__item--danger' + (armed ? ' tu-menu__item--armed' : ''),
+          role: 'menuitem',
+          onClick: () => { if (!armed) { setArmed(true); return } onRemove(row); closeMenu() },
+        }, armed ? '确认删除' : '删除')) : null
       return h('div', { className: 'tu-row', ref: rootRef },
         h('div', { className: 'tu-row__head' },
           h('span', { className: 'tu-dot tu-dot--' + tone, 'aria-hidden': 'true' }),
@@ -582,18 +644,11 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
               ? h('button', { type: 'button', className: 'tu-button tu-button--sm', disabled: true, title: vm.statusText }, '打开')
               : h('a', { className: 'tu-button tu-button--sm tu-button--primary', href: url, target: '_blank', rel: 'noreferrer' }, '打开'),
             h('button', { type: 'button', className: 'tu-button tu-button--sm tu-button--ghost', onClick: () => copy(url) }, flash || '复制'),
-            h('button', { type: 'button', className: 'tu-icon-btn', 'aria-haspopup': 'menu', 'aria-expanded': menuOpen, 'aria-label': '更多操作', onClick: () => setMenuOpen(!menuOpen) }, '⋯'),
-            menuOpen ? h('div', { className: 'tu-menu', role: 'menu' },
-              h('button', { type: 'button', className: 'tu-menu__item', role: 'menuitem', onClick: () => { copy(url); closeMenu() } }, '复制地址'),
-              lanUrl !== '' ? h('button', { type: 'button', className: 'tu-menu__item', role: 'menuitem', onClick: () => { copy(lanUrl); closeMenu() } }, '复制局域网地址') : null,
-              h('button', { type: 'button', className: 'tu-menu__item', role: 'menuitem', onClick: () => { onEdit(row); closeMenu() } }, '编辑'),
-              h('button', { type: 'button', className: 'tu-menu__item', role: 'menuitem', onClick: () => { onToggle(row); closeMenu() } }, row.enabled === false ? '启用' : '停用'),
-              h('button', {
-                type: 'button',
-                className: 'tu-menu__item tu-menu__item--danger' + (armed ? ' tu-menu__item--armed' : ''),
-                role: 'menuitem',
-                onClick: () => { if (!armed) { setArmed(true); return } onRemove(row); closeMenu() },
-              }, armed ? '确认删除' : '删除')) : null)),
+            h('button', { type: 'button', className: 'tu-icon-btn', 'aria-haspopup': 'menu', 'aria-expanded': menuOpen, 'aria-label': '更多操作', onClick: toggleMenu }, '⋯'),
+            // 浮层菜单必须挂在 body: 设置面板内容区是 overflow:auto, 原地绝对定位会被裁剪/遮挡
+            menu !== null && createPortal !== null && typeof document !== 'undefined' && document.body
+              ? createPortal(menu, document.body)
+              : menu)),
         urlDisabled
           ? h('span', { className: 'tu-row__url tu-row__url--disabled', title: url }, url)
           : h('a', { className: 'tu-row__url', href: url, target: '_blank', rel: 'noreferrer', title: url }, url),
@@ -734,7 +789,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         return () => { alive = false; clearTimeout(timer) }
       }, [draft.targetPort])
       const trimmedName = draft.name.trim()
-      const nameOk = trimmedName === '' || (NAME_RE.test(trimmedName) && NAME_HAS_LETTER_RE.test(trimmedName))
+      const nameValid = NAME_RE.test(trimmedName) && NAME_HAS_LETTER_RE.test(trimmedName)
+      // 创建允许留空(自动命名), 改名必须给出合法名
+      const nameOk = mode === 'edit' ? nameValid : trimmedName === '' || nameValid
       const portValue = Number(draft.targetPort)
       const portOk = Number.isInteger(portValue) && portValue >= PORT_MIN && portValue <= PORT_MAX
       const entryConflict = draft.entry === ENTRY_SUBDOMAIN && trimmedName !== '' && isEntryLabelConflict(trimmedName, window.location.hostname)
@@ -757,8 +814,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             probe === null ? h('span', { className: 'tu-hint' }, '本机应用监听端口') : h('span', { className: probe.listening ? 'tu-ok' : 'tu-hint' }, probe.listening ? '端口在监听' : '端口未在监听, 可稍后启动')),
           h('div', { className: 'tu-field' },
             h('label', { className: 'tu-field__label', htmlFor: 'tu-tunnel-name' }, '隧道名'),
-            h('input', { id: 'tu-tunnel-name', type: 'text', className: 'tu-input', value: draft.name, placeholder: '留空自动生成 app-<端口>', disabled: mode === 'edit', onChange: (event) => { setNameTouched(true); patch({ name: event.target.value }) } }),
-            h('span', { className: 'tu-hint' }, mode === 'edit' ? '名称即地址, 创建后不可修改' : '小写字母/数字/连字符, 留空自动生成')),
+            h('input', { id: 'tu-tunnel-name', type: 'text', className: 'tu-input', value: draft.name, placeholder: '留空自动生成 app-<端口>', onChange: (event) => { setNameTouched(true); patch({ name: event.target.value }) } }),
+            h('span', { className: 'tu-hint' }, mode === 'edit' ? '名称即访问地址, 改动后旧地址失效' : '小写字母/数字/连字符, 留空自动生成')),
           h('div', { className: 'tu-field tu-field--wide' },
             h('span', { className: 'tu-field__label' }, '入口形态'),
             h(PillGroup, {
@@ -769,7 +826,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             h('span', { className: 'tu-hint' }, entryHintOf(draft.entry, window.location))),
           mode === 'edit' ? h('span', { className: 'tu-hint' }, '修改目标端口或入口会短暂断开当前连接; 入口变化会改变访问地址。') : null,
           error !== '' ? h('div', { className: 'tu-error', role: 'alert' }, error) : null,
-          entryConflict ? h('div', { className: 'tu-error' }, '隧道名与入口域首标签冲突(' + entryLabelOf(window.location.hostname) + '): 该名字会劫持整个入口, 请换名') : null),
+          entryConflict ? h('div', { className: 'tu-error' }, '隧道名与当前访问地址首标签冲突(' + entryLabelOf(window.location.hostname) + '): 保存后该地址会进入隧道而不是设置页; 换名, 或改用其它地址打开设置页后再建') : null),
         h('div', { className: 'tu-modal__foot' },
           h('button', { type: 'button', className: 'tu-button', onClick: onClose }, '取消'),
           h('button', { type: 'button', className: 'tu-button tu-button--primary', disabled: busy || !nameOk || !portOk || entryConflict, onClick: submit }, busy ? '提交中…' : (mode === 'create' ? '创建' : '保存'))))
