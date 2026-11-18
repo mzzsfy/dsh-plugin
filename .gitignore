@@ -14,3 +14,22 @@ node_modules/
 !/docs/dsh-stock-assistant/
 !/docs/兼容性测试/
 /docs/兼容性测试/*
+/docs/dsh-stock-assistant/*
+!/docs/dsh-stock-assistant/design.md
+
+# 凭据与本地证据永不入库
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+id_rsa*
+*_rsa
+*_ed25519
+known_hosts
+cookies.txt
+**/test/evidence/
+*.jsonl
+*.tmp
+/assets/screenshots/_wip/

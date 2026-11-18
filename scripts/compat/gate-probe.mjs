@@ -33,18 +33,24 @@ async function probe(url, headers, timeoutMs) {
 
 /**
  * 探针只覆盖"该包已装载"的路由,未装载的包直接跳过。
+ * livePackages 是 activation 里 state=live 的包(短名):live 包的路由 404 说明
+ * 装载成功但路由未注册(静默禁用),必须判失败;缺省视为未知并按未装载跳过。
  * @returns {{ok:boolean, rows:Array<{name:string,path:string,anon:number,auth:number,ok:boolean}>}}
  */
-export async function probeHostGate({ base, cookie, packages, timeoutMs = 10_000 }) {
+export async function probeHostGate({ base, cookie, packages, livePackages, timeoutMs = 10_000 }) {
   const filtered = Array.isArray(packages) && packages.length > 0
   const rows = []
   for (const [name, path] of GATE_TARGETS) {
     if (filtered && !packages.includes(name)) continue
     const anon = await probe(base + path, {}, timeoutMs)
-    // 路径不存在:全量模式下说明目标表写错,判失败;--only 子集模式允许该包未装载
     if (anon === 404) {
-      rows.push({ name, path, anon, auth: null, ok: filtered })
-      if (!filtered) log(`[gate-probe] 失败 ${name} ${path} 路由不存在(目标表需更新)`)
+      // 全量模式下路由不存在即缺陷;--only 模式只有 live 包才算缺陷
+      const live = livePackages?.has(name) === true
+      const ok = filtered ? !live : false
+      rows.push({ name, path, anon, auth: null, ok })
+      if (live) log(`[gate-probe] 失败 ${name} ${path} 包已 live 但路由不存在(静默禁用)`)
+      else if (!filtered) log(`[gate-probe] 失败 ${name} ${path} 路由不存在(目标表需更新)`)
+      else log(`[gate-probe] 跳过 ${name} ${path} 包未 live`)
       continue
     }
     const auth = await probe(base + path, { cookie }, timeoutMs)

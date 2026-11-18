@@ -165,7 +165,7 @@ test('场景5c 智谱 Max:TOKENS_LIMIT 加 TIME_LIMIT 提示数窗口', () => {
   assert.equal(reading.level, 'max')
 })
 
-test('场景5d 智谱真实响应:demo-account 账号 CREDIT_LIMIT 原样结构', () => {
+test('场景5d 智谱真实响应:CREDIT_LIMIT 原样结构', () => {
   const reading = parseZhipu({
     code: 200,
     msg: '操作成功',

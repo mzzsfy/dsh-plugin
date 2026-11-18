@@ -91,3 +91,42 @@ test('未装载的包(404)不参与判定', async () => {
     server.close()
   }
 })
+
+test('live 包路由 404 判失败(装载成功但路由未注册)', async () => {
+  const { server, base } = await serve((req, res) => {
+    res.writeHead(404)
+    res.end()
+  })
+  try {
+    const result = await probeHostGate({
+      base,
+      cookie: 'session=good',
+      packages: ['dsh-shared-terminal'],
+      livePackages: new Set(['dsh-shared-terminal']),
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.rows[0].anon, 404)
+    assert.equal(result.rows[0].ok, false)
+  } finally {
+    server.close()
+  }
+})
+
+test('非 live 包路由 404 跳过(--only 子集)', async () => {
+  const { server, base } = await serve((req, res) => {
+    res.writeHead(404)
+    res.end()
+  })
+  try {
+    const result = await probeHostGate({
+      base,
+      cookie: 'session=good',
+      packages: ['dsh-shared-terminal'],
+      livePackages: new Set(),
+    })
+    assert.equal(result.ok, true)
+    assert.equal(result.rows[0].ok, true)
+  } finally {
+    server.close()
+  }
+})
