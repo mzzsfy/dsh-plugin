@@ -26,7 +26,7 @@ Windows 原语、DSH 候选启动和故障恢复已经实测通过。发布必�
 | 用户生产循环是 PowerShell | `while ($true) { dsh web --no-open }`，没有启动屏障和失败限次 |
 | 本机 PowerShell 优先解析 dsh.ps1 | 本轮 `Get-Command dsh -All`：依次 dsh.ps1、dsh.cmd、dsh；不能只以 Bash shim 推断用户启动链 |
 | shim 绑定全局树 | 已读本机 dsh.ps1：从 basedir 的 node.exe 启动 basedir/node_modules/@deepseek-ai/dsh/lib/bin.js |
-| 本机 Node 与 npm prefix 使用 nvm 别名 | 本轮只读命令：execPath 为 <node install dir>\node.exe，npm config get prefix 为 <node install dir>；realpath显示该 SymbolicLink 别名与版本实体一致；不能误称本机此链接必为junction |
+| 本机 Node 与 npm prefix 使用 nvm 别名 | 本轮只读命令：execPath 为 `<node install dir>\node.exe`，npm config get prefix 为 `<node install dir>`；realpath显示该 SymbolicLink 别名与版本实体一致；不能误称本机此链接必为junction |
 | npm 合法提升依赖 | 前轮从 web-app 的 createRequire 成功解析同层 connection，直接子目录却不存在；验证器不能只查引用方直接子目录 |
 | 前轮两个新进程分别读到版本 A、B | 仅证明 junction 换向后新进程可读新入口；未测 DSH 实例、并发 reader、掉电或失败路径 |
 | 前轮活进程再次 import 仍读 A | 仅证明那条 import 路径的缓存行为，不证明全部晚加载或任意 path 访问免疫 |

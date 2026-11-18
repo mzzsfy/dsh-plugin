@@ -213,10 +213,12 @@ async function checkActivation(base, token, bundleNames, workDir) {
       const activation = data.activation
       if (activation) {
         const findings = data.diagnostics?.findings ?? []
+        const live = bundleNames.filter((name) => activation[name]?.state === 'live')
         const notLive = bundleNames.filter((name) => activation[name]?.state !== 'live')
         lastSeen = {
           liveAll: notLive.length === 0,
           notLive,
+          live,
           findingsCount: findings.length,
           findingsSample: findings.slice(0, 5),
           apiShape: Object.keys(data),
@@ -230,7 +232,7 @@ async function checkActivation(base, token, bundleNames, workDir) {
     await sleep(ACTIVATION_POLL_MS)
   }
   writeFileSync(join(workDir, 'installed.json'), lastRaw || '(空响应)', 'utf8')
-  return lastSeen ?? { liveAll: false, notLive: bundleNames, findingsCount: -1, findingsSample: [], apiShape: [] }
+  return lastSeen ?? { liveAll: false, notLive: bundleNames, live: [], findingsCount: -1, findingsSample: [], apiShape: [] }
 }
 
 function runBrowserProbe(probeScript, url, pngPath) {
@@ -796,7 +798,9 @@ async function main() {
     // /api prefix 上,插件 exact/更长 prefix 先命中,漏接线在这里必然变红。
     if (!args.crashOnly) {
       const cookie = await mintSessionCookie(base, token)
-      checks.gate = await probeHostGate({ base, cookie, packages: args.only })
+      // activation 的 live 名单(短名)给闸门探针:live 包路由 404 即静默禁用
+      const livePackages = new Set((checks.activation?.live ?? []).map((name) => name.replace(/^@[^/]+\//, '')))
+      checks.gate = await probeHostGate({ base, cookie, packages: args.only, livePackages })
       log(`[${args.version}] gate ${checks.gate.ok ? 'ok' : 'FAIL'} (${checks.gate.rows.length} 条路由)`)
       for (const row of checks.gate.rows) log(`[${args.version}]   ${row.ok ? 'OK ' : 'BAD'} ${row.name} ${row.path} 无cookie=${row.anon} 带cookie=${row.auth}`)
     }

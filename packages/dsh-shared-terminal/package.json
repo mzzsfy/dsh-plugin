@@ -32,7 +32,8 @@
         "0.2.2-alpha.3": "compatible",
         "0.2.2-rc.1": "compatible",
         "0.2.2-rc.2": "compatible",
-        "0.2.2-rc.3": "compatible"
+        "0.2.2-rc.3": "compatible",
+        "0.2.2-rc.4": "compatible"
       }
     },
     "hostMin": "0.2.0-rc.2"

@@ -73,6 +73,17 @@ async function openPreferences() {
   await page.getByRole('tab', { name: '显示偏好' }).click()
 }
 
+// 菜单开关的确定性条件: aria-expanded 与 listbox hidden 在同一次 React 提交落地。
+// click 返回只代表事件已派发, 不代表 React 已提交——下一步动作若落在提交窗口里,
+// trigger 的 onClick 会按旧 open 状态走错分支(该关的开、该开的关)。先等双信号到位再继续
+async function waitMenuState(label, open) {
+  await page.waitForFunction(([labelText, expectedOpen]) => {
+    const trigger = document.querySelector(`[aria-label="${labelText}"]`)
+    const menu = trigger?.closest('.ssb-select')?.querySelector('[role="listbox"]')
+    return trigger?.getAttribute('aria-expanded') === String(expectedOpen) && menu?.hidden === !expectedOpen
+  }, [label, open])
+}
+
 // preferences 写盘响应缓冲: 挤兑/CPU 饥饿下"注册等待窗口"与"click 完成"会互相吃掉
 // 30s 时窗, page 级监听从用例开始就缓存全部响应, 断言侧按谓词取事件, 事件永不丢
 const preferenceResponses = []
@@ -97,6 +108,7 @@ test('鼠标点开下拉并选择: 菜单进 DOM, 选择后写盘且菜单关闭
   const trigger = page.getByRole('combobox', { name: '悬浮盯盘刷新' })
   await trigger.click()
   const listbox = page.getByRole('listbox', { name: '悬浮盯盘刷新' })
+  await waitMenuState('悬浮盯盘刷新', true)
   await listbox.waitFor({ state: 'visible' })
   const pending = takePreferenceResponse()
   await listbox.getByRole('option', { name: '30秒' }).click()
@@ -107,6 +119,7 @@ test('鼠标点开下拉并选择: 菜单进 DOM, 选择后写盘且菜单关闭
   assert.equal(body.data.unchanged, false)
   assert.equal(await trigger.getAttribute('aria-expanded'), 'false')
   assert.match(await trigger.innerText(), /30秒/)
+  await waitMenuState('悬浮盯盘刷新', false)
   await listbox.waitFor({ state: 'hidden', timeout: 1000 })
   assert.equal(errors.length, 0)
 })
@@ -138,11 +151,14 @@ test('键盘打开与选择, Escape 只关菜单不关设置弹窗', async () =>
   assert.match(await trigger.innerText(), /30秒/)
   // 再打开一次, Escape 只收菜单
   await trigger.click()
+  await waitMenuState('刷新间隔', true)
   await listbox.waitFor({ state: 'visible' })
   await page.keyboard.press('Escape')
+  await waitMenuState('刷新间隔', false)
   await listbox.waitFor({ state: 'hidden', timeout: 1000 })
   await page.getByRole('dialog', { name: '设置' }).waitFor({ state: 'visible' })
   await trigger.click()
+  await waitMenuState('刷新间隔', true)
   await page.getByRole('option', { name: '15秒' }).click()
   await page.getByRole('button', { name: '关闭' }).click()
   // 显式等弹窗退场: 遮罩退场动画中点「更多操作」会命中持续不稳定态
@@ -155,12 +171,16 @@ test('点击菜单外关闭下拉, 设置弹窗保持打开', async () => {
   const trigger = page.getByRole('combobox', { name: '涨跌颜色' })
   const listbox = page.getByRole('listbox', { name: '涨跌颜色' })
   await trigger.click()
+  await waitMenuState('涨跌颜色', true)
   await listbox.waitFor({ state: 'visible' })
   await trigger.click()
+  await waitMenuState('涨跌颜色', false)
   await listbox.waitFor({ state: 'hidden', timeout: 1000 })
   await trigger.click()
+  await waitMenuState('涨跌颜色', true)
   await listbox.waitFor({ state: 'visible' })
   await page.locator('.ssb-settings h3').first().click()
+  await waitMenuState('涨跌颜色', false)
   await listbox.waitFor({ state: 'hidden', timeout: 1000 })
   await page.getByRole('dialog', { name: '设置' }).waitFor({ state: 'visible' })
 })
