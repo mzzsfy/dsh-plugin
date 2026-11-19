@@ -8,11 +8,11 @@ import { join } from 'node:path'
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'keep-working-test-'))
 
 import { DEFAULTS, resolveConfig } from '../src/config.mjs'
+import { pendingInbox } from '../src/inbox.mjs'
 import {
   createTraceThrottle,
   listFreshByDirectory,
   nextScanRetryMs,
-  pendingInbox,
   SCAN_RETRY_MAX_MS,
   SCAN_RETRY_MIN_MS,
   scanSettled,

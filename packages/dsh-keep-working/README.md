@@ -36,8 +36,11 @@
 | `aborted` | 用户取消不恢复;`disposed` / `legacy` 按中断恢复,不看结案标记 |
 | `blocked` | 宿主 pre-step 被拒的回合终态(维护闸门、目标预约竞争等),按中断恢复;归档会话与子会话除外。目标因此落成 `blocked`(`prompt-rejected`)时重新武装交回 driver |
 | `forked` 等 | 不处理 |
+| 队列有输入(`agent/inbox/spliced` 未消费) | 上面除 `completed` 与用户取消以外的失败类终态(`error` / `max-tokens` / `interrupted` / `blocked` / `disposed`·`legacy` 取消)只补一条「继续」,走 `steer` 插队,不看结案标记、不受 `maxConsecutive` 与「区分永久错误」拦截 |
 
-以下回合一律不发送:子会话(`origin === 'subagent'`,旧记录按 `parentSession` + `delegationDepth >= 1`)、用户中途插话的回合、非用户发起的回合的结案提醒、已达连续上限的会话。
+以下回合一律不发送:子会话(`origin === 'subagent'`,旧记录按 `parentSession` + `delegationDepth >= 1`)、用户中途插话的回合、非用户发起的回合的结案提醒、已达连续上限的会话(队列里仍有人的输入时除外,见下一段)。
+
+宿主的失败回合不消费 durable inbox:回合在 `turn()` 里抛出后不会再进下一回合,`next-turn` / `next-step` 里排队的输入没人 claim,agent 停在 idle。实时判定因此自己重放 `agent/inbox/spliced` 投影,发现队列非空就改发「继续」并插队唤醒——文案只写「继续」是因为此刻唯一缺的是一次唤醒,上一轮的状态已由人的指令接管。`next-turn` 全部计数,`next-step` 只算真人插话(运行时上下文注入不算)。`completed` 不走这条路:宿主自己会在队列非空时开下一回合,再补一条就是重复回合。用户主动取消(`abort cause = user`)同样不拉起,被拒的是人的决定,不能由队列改写。连续上限与错误分类也不拦排队唤醒,但仍计入连续次数:每次唤醒消费队列里的一条输入,所以不会无限重试。
 
 `enforceClosure=false` 时表中所有“未结案”分支不成立:正常结束的回合直接结案,写文件不要求 present、末行不要求标记;只有空回合(`resumeSilentTurns`)、中断、报错、重启扫描仍按各自规则恢复。系统提示词不变。
 
@@ -47,7 +50,7 @@
 
 ## 节奏
 
-`graceMs` 到点才发送;两次发送之间至少间隔 `cooldownMs`,连续失败按 `backoffFactor` 退避,封顶 `backoffMaxMs`;单会话连续 `maxConsecutive` 次后放弃,等待人工介入;真人发起的回合一到就清零,额度恢复。`cooldownMs` 同时是目标接回的最小间隔:冷却中降级为补消息,到点由定时器再尝试接回一次,频率受同一窗口约束,失败与补发都计入连续上限。判定看回合前导段:宿主注入的上下文(指令文件、工作目录、任务事件等,来源不是 `user`)不算发起,本插件补发的消息也不算。
+`graceMs` 到点才发送;两次发送之间至少间隔 `cooldownMs`,连续失败按 `backoffFactor` 退避,封顶 `backoffMaxMs`;单会话连续 `maxConsecutive` 次后放弃,等待人工介入;真人发起的回合一到就清零,额度恢复。排队唤醒是唯一不受 `maxConsecutive` 约束的恢复:人的指令排在 durable inbox 里,放过它就等于丢掉用户输入。`cooldownMs` 同时是目标接回的最小间隔:冷却中降级为补消息,到点由定时器再尝试接回一次,频率受同一窗口约束,失败与补发都计入连续上限。判定看回合前导段:宿主注入的上下文(指令文件、工作目录、任务事件等,来源不是 `user`)不算发起,本插件补发的消息也不算。
 
 断网时挂起,`offlineCheckMs` 后复查;探测失败按在线处理,不会永久卡住。
 
@@ -71,7 +74,7 @@
 - `enforceClosure`:默认开启;关闭后正常结束的回合不再要求 `TASK_DONE` / `TASK_BLOCKED` 或 `present`,也不补结案提醒,系统提示词不变
 - `resumeGoals`:默认开启,与宿主“重启后 disarm”的默认相反,这是本插件有意的行为差异;同时覆盖被宿主预检拒绝打成 `blocked` 的目标
 - `resumePausedGoals`:默认关闭,暂停是人的决定
-- `classify`:默认关闭,所有 `error` 都会重试(受 `maxConsecutive` 封顶);开启后只跳过请求结构类永久错误(上下文超限、`INVALID_ARGS`、`NO_ADAPTER`、`MISSING_CREDENTIAL`、prompt 变量缺失)。鉴权、余额、模型不存在、401/403 等上游级错误始终重试:中转服务后面可能还有别的上游,换一条通道就可能成功
+- `classify`:默认关闭,所有 `error` 都会重试(受 `maxConsecutive` 封顶);开启后只跳过请求结构类永久错误(上下文超限、`INVALID_ARGS`、`NO_ADAPTER`、`MISSING_CREDENTIAL`、prompt 变量缺失)。鉴权、余额、模型不存在、401/403 等上游级错误始终重试:中转服务后面可能还有别的上游,换一条通道就可能成功;队列里有人的输入时该开关同样不生效
 
 ## 设置面板
 
