@@ -9,6 +9,7 @@ import { closureVerdict, hasVisibleOutput, lastAssistantText, matchMarker, turnS
 import { fillTemplate } from './config.mjs'
 import { isTransientFailure, parseFailureFacts } from './failure.mjs'
 import { rearmGoal } from './goal.mjs'
+import { pendingInbox, QUEUED_RESUME_TEXT } from './inbox.mjs'
 import { isDerivedSessionHeader } from './session-kind.mjs'
 import { appendFileSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -46,36 +47,6 @@ export function trace(message) {
 
 /** 宿主重启产生的取消原因,值得在重启后补一次。 */
 const RESTART_CANCEL_CAUSES = new Set(['disposed', 'legacy'])
-
-/**
- * 重放会话日志里的 durable inbox 投影,得到仍在排队的输入。
- *
- * 宿主把排队消息持久化为 `agent/inbox/spliced`;重启只重建投影,不会自动唤醒
- * agent,所以扫描必须自己发现这些消息。next-turn 全部算待处理输入;next-step
- * 只算真人插话——其余是运行时上下文注入,重启后不该凭它拉起整轮。
- * 返回条数与最后一次入队时间。
- */
-export function pendingInbox(events) {
-  const queues = { 'next-turn': [], 'next-step': [] }
-  let lastAt = 0
-  for (const event of events) {
-    if (event?.type !== 'agent/inbox/spliced') continue
-    const data = event.data ?? {}
-    const queue = queues[data.target]
-    if (queue === undefined) continue
-    const declared = Number.isSafeInteger(data.start) ? data.start : 0
-    const start = declared < 0 ? Math.max(queue.length + declared, 0) : Math.min(declared, queue.length)
-    const removed = Math.min(
-      Math.max(Number.isSafeInteger(data.removedCount) ? data.removedCount : 0, 0),
-      queue.length - start,
-    )
-    const inserted = Array.isArray(data.inserted) ? data.inserted : []
-    queues[data.target] = [...queue.slice(0, start), ...inserted, ...queue.slice(start + removed)]
-    if (inserted.length > 0 && typeof event.time === 'number') lastAt = Math.max(lastAt, event.time)
-  }
-  const steering = queues['next-step'].filter((message) => message?.source?.kind === 'user').length
-  return { count: queues['next-turn'].length + steering, lastAt }
-}
 
 /** 计入“最近 N 条消息”的事件类型;present 以交付事件为准。 */
 const RECENT_MESSAGE_TYPES = new Set(['assistant/message', 'user/message', 'tool/result', 'deliverables/presented'])
@@ -155,9 +126,6 @@ function tailVerdict(events, nowTime, config, inbox = pendingInbox(events)) {
       return 'skip:无需恢复'
   }
 }
-
-/** 排队消息只缺一次唤醒,不需要解释上一轮状态。 */
-const QUEUED_RESUME_TEXT = '继续'
 
 /**
  * 恢复文案:按尾部原因取对应说法。
