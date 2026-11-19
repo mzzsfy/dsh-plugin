@@ -31,6 +31,23 @@ const presented = (seq, turn) =>
 const userMessage = (seq, kind = 'user', id = `m-${seq}`) =>
   event(seq, 'user/message', { id, source: { kind }, content: [{ type: 'text', text: 'go' }] })
 
+// 宿主把排队输入写成 agent/inbox/spliced;空队列上 start=0 等价于追加
+const queueAppend = (seq, target, text = '然后就修复 直到整个逻辑没有问题为止') =>
+  event(seq, 'agent/inbox/spliced', {
+    target,
+    start: 0,
+    inserted: [{ id: `q-${seq}`, source: { kind: 'user' }, content: [{ type: 'text', text }] }],
+  })
+
+const contextAppend = (seq) =>
+  event(seq, 'agent/inbox/spliced', {
+    target: 'next-step',
+    start: 0,
+    inserted: [
+      { id: `c-${seq}`, source: { kind: 'runtime-context' }, content: [{ type: 'text', text: '上下文' }] },
+    ],
+  })
+
 function createFakeTimers(clock) {
   let next = 0
   const pending = new Map()
@@ -59,6 +76,7 @@ function createHarness({ origin, header, config: overrides, probe, observe, onOb
   let time = START_TIME
   const events = []
   const sent = []
+  const steered = []
   const handlers = new Map()
   const timers = createFakeTimers(() => time)
   // 故意不提供 deprecated 的 snapshotEvents:实时判定必须走 sessionQuery 观察面
@@ -68,6 +86,7 @@ function createHarness({ origin, header, config: overrides, probe, observe, onOb
     session,
     inbox: { nextTurn: [] },
     followup: (message) => sent.push(message),
+    steer: (message) => steered.push(message),
   }
   const query = {
     observeSession: async (id, options) => {
@@ -98,7 +117,7 @@ function createHarness({ origin, header, config: overrides, probe, observe, onOb
     config: resolveConfig(overrides),
     timers,
     now: () => time,
-    createUserMessage: (options) => ({ id: `auto-${sent.length + 1}`, ...options }),
+    createUserMessage: (options) => ({ id: `auto-${sent.length + steered.length + 1}`, ...options }),
     probe,
   })
   engine.attach()
@@ -120,6 +139,7 @@ function createHarness({ origin, header, config: overrides, probe, observe, onOb
     engine,
     emit,
     sent,
+    steered,
     timers,
     runTurn,
     session,
@@ -881,4 +901,85 @@ test('S19 空回合开关关闭但有有效写入:仍要求 present', async () =
   h.timers.flush()
   assert.equal(h.sent.length, 1, '文件已改就不能被空回合开关跳过')
   assert.match(textOf(h.sent[0]), /TASK_DONE/)
+})
+
+// 排队输入面:失败类终态不唤醒 durable inbox,队列里排着的是人的指令,必须插队跑掉
+
+test('E-Q1 报错回合有排队输入:插队唤醒「继续」,不发错误文案', async () => {
+  const h = createHarness()
+  h.emit(turnStart(0, TURN))
+  h.emit(userMessage(1))
+  h.emit(queueAppend(2, 'next-turn'))
+  await h.emit(turnEnd(3, TURN, { kind: 'error', error: { code: 'UNKNOWN', message: 'socket hang up' } }))
+  h.timers.flush()
+  assert.equal(h.sent.length, 0, '有排队输入时不得先发错误文案')
+  assert.equal(h.steered.length, 1, '排队输入必须插队唤醒,不能追加到队尾')
+  assert.equal(textOf(h.steered[0]), '继续')
+})
+
+test('E-Q2 连续上限用尽后排队输入仍插队唤醒', async () => {
+  const h = createHarness({ config: { maxConsecutive: 1 } })
+  const failure = { kind: 'error', error: { code: 'UNKNOWN', message: 'socket hang up' } }
+  h.emit(turnStart(0, 1))
+  h.emit(userMessage(1))
+  await h.emit(turnEnd(2, 1, failure))
+  h.timers.flush()
+  assert.equal(h.sent.length, 1, '首次报错按上限内恢复')
+  h.advanceTo(h.now() + 60 * 60_000)
+
+  h.emit(turnStart(10, 2))
+  h.emit(userMessage(11))
+  h.emit(queueAppend(12, 'next-turn'))
+  await h.emit(turnEnd(13, 2, failure))
+  h.timers.flush()
+  assert.equal(h.sent.length, 1, '封顶只封自动恢复')
+  assert.equal(h.steered.length, 1, '人的排队指令不能被连续上限锁死在队列里')
+  assert.equal(textOf(h.steered[0]), '继续')
+})
+
+test('E-Q3 next-step 只有运行时上下文:不算排队,仍发错误文案', async () => {
+  const h = createHarness()
+  h.emit(turnStart(0, TURN))
+  h.emit(userMessage(1))
+  h.emit(contextAppend(2))
+  await h.emit(turnEnd(3, TURN, { kind: 'error', error: { code: 'UNKNOWN', message: 'socket hang up' } }))
+  h.timers.flush()
+  assert.equal(h.steered.length, 0)
+  assert.equal(h.sent.length, 1)
+  assert.match(textOf(h.sent[0]), /^继续。/)
+})
+
+test('E-Q4 中断回合有排队输入:插队「继续」而不是中断文案', async () => {
+  const h = createHarness()
+  h.emit(turnStart(0, TURN))
+  h.emit(userMessage(1))
+  h.emit(queueAppend(2, 'next-step'))
+  await h.emit(turnEnd(3, TURN, { kind: 'interrupted' }))
+  h.timers.flush()
+  assert.equal(h.sent.length, 0)
+  assert.equal(h.steered.length, 1)
+  assert.equal(textOf(h.steered[0]), '继续')
+})
+
+test('E-Q5 用户主动取消 + 排队输入:不拉起', async () => {
+  const h = createHarness()
+  h.emit(turnStart(0, TURN))
+  h.emit(userMessage(1))
+  h.emit(queueAppend(2, 'next-turn'))
+  await h.emit(turnEnd(3, TURN, { kind: 'aborted', reason: { kind: 'user' } }))
+  h.timers.flush()
+  assert.equal(h.sent.length, 0, '用户取消是人的决定,不能被队列改写')
+  assert.equal(h.steered.length, 0)
+})
+
+test('E-Q6 正常结案 + 排队输入:宿主自己会续跑,不重复唤醒', async () => {
+  const h = createHarness()
+  h.emit(turnStart(0, TURN))
+  h.emit(userMessage(1))
+  h.emit(queueAppend(2, 'next-turn'))
+  h.emit(assistant(3, TURN, '已交付\nTASK_DONE'))
+  await h.emit(turnEnd(4, TURN, { kind: 'completed' }))
+  h.timers.flush()
+  assert.equal(h.sent.length, 0)
+  assert.equal(h.steered.length, 0)
 })

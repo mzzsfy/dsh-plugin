@@ -16,10 +16,19 @@ import {
 import { cooldownFor, fillTemplate } from './config.mjs'
 import { isTransientFailure, parseFailureFacts } from './failure.mjs'
 import { REJECTED_BLOCK_CODE, rearmGoal } from './goal.mjs'
+import { pendingInbox, QUEUED_RESUME_TEXT } from './inbox.mjs'
 import { isDerivedSessionHeader } from './session-kind.mjs'
 
 /** 宿主重启产生的取消原因;只有这些值得在重启后补一次。 */
 const RESTART_CANCEL_CAUSES = new Set(['disposed', 'legacy'])
+
+/**
+ * 会停住 agent 的回合终态。
+ *
+ * 宿主的错误回合在 `turn()` 里抛出,不会再进下一回合,durable inbox 里排队的输入
+ * 因此没人消费;这些终态的实时判定必须自己插队唤醒。
+ */
+const QUEUE_RECOVERY_KINDS = new Set(['error', 'max-tokens', 'interrupted', 'blocked'])
 
 /** 自己发出的消息 id 只保留近期,避免长期驻留。 */
 const SENT_ID_MEMORY = 50
@@ -114,7 +123,7 @@ export function createEngine({
   }
 
   /** 按 turn/end 的原因给出动作;undefined 表示不恢复,{ closed } 表示正常结案。 */
-  function decide(event, state, events) {
+  function decideByReason(event, state, events) {
     const turn = event.data?.turn
     const reason = event.data?.reason ?? {}
 
@@ -177,6 +186,30 @@ export function createEngine({
     }
   }
 
+  /**
+   * 排队输入优先于一切恢复护栏。
+   *
+   * 失败类终态(报错、截断、中断、宿主拒绝)不唤醒 durable inbox,里面排着的是
+   * 人的指令:被连续上限、错误分类或结案标记挡住就永远躺在队列里。这类回合改成
+   * 插队唤醒,文案只写「继续」;正常结案与用户主动取消仍按原判定。
+   */
+  function decide(event, state, events) {
+    const reason = event.data?.reason ?? {}
+    const decision = decideByReason(event, state, events)
+    if (decision?.closed === true || reason.kind === 'completed') return decision
+    const recoverable =
+      QUEUE_RECOVERY_KINDS.has(reason.kind) ||
+      (reason.kind === 'aborted' && RESTART_CANCEL_CAUSES.has(reason.reason?.kind))
+    if (!recoverable) return decision
+    if (pendingInbox(events).count === 0) return decision
+    return {
+      reason: 'queued',
+      text: QUEUED_RESUME_TEXT,
+      queued: true,
+      ...(decision?.goalDriven === true ? { goalDriven: true } : {}),
+    }
+  }
+
   function fire(session, state, decision) {
     if (disposed || config.paused) return
     const agent = ctx.agents.get(session.id)
@@ -189,7 +222,9 @@ export function createEngine({
       source: { kind: 'user' },
     })
     try {
-      agent.followup(message)
+      // 排队输入必须插队:followup 会追加到 next-turn 队尾,排在人的指令之后
+      if (decision.queued === true) agent.steer(message)
+      else agent.followup(message)
     } catch (error) {
       log(`${session.id}: 投递失败 ${error instanceof Error ? error.message : String(error)}`)
       return
@@ -238,7 +273,8 @@ export function createEngine({
     if (disposed || config.paused) return
     if (isSubagent(session)) return
     if (state.pendingTimer !== undefined || state.pending !== undefined) return
-    if (state.consecutive >= config.maxConsecutive) {
+    // 排队的是人的指令:连续上限只封自动恢复,不能把队列锁死在 durable inbox 里
+    if (decision.queued !== true && state.consecutive >= config.maxConsecutive) {
       log(`${session.id}: 已达连续上限 ${config.maxConsecutive},等待用户介入`)
       return
     }
