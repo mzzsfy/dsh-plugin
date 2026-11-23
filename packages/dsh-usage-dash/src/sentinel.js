@@ -467,6 +467,8 @@ export function installSentinel(ctx, deps = {}) {
 
   const runDetection = async () => {
     const nowMs = now()
+    // 定价域在 apply 后才打开完成:挂载首刷先等就绪,免首轮误判未配置定价
+    await deps.pricing?.ready?.()
     const config = resolveConfig(deps)
     state.config = config
     if (!config.enabled) {

@@ -17,7 +17,8 @@ import {
 } from './cycle.js'
 import { normalizeFeatures, featureOn } from './features.js'
 import { installGuard } from './guard.js'
-import { CURRENCIES, CONDITION_KINDS, normalizePricingRules, UNIT_PER_MILLION } from './pricing.js'
+import { normalizePricingRules } from './pricing.js'
+import { sharedPricingStore } from './pricing-store.js'
 import { DEFAULT_SENTINEL_CONFIG, installSentinel, normalizeSentinelConfig } from './sentinel.js'
 import { modelUsageProjectionDefinition } from './session-models.js'
 import { recentRequestsProjectionDefinition } from './recent-requests.js'
@@ -82,43 +83,11 @@ const STATS_LINE_SCHEMA = schemastery.object({
   requestDetails: schemastery.boolean().default(STATS_LINE_DEFAULTS.requestDetails),
 }).default(STATS_LINE_DEFAULTS)
 
-// 定价形状与 pricing.js 契约同源:kind 判别 required 恒成立,
-// 防 nullable 直通误入首个 union 成员
-const WEEKDAY_MIN = 0
-const WEEKDAY_MAX = 6
-
-const CONDITION_FIELD_SCHEMAS = {
-  dailyWindow: { from: schemastery.string(), to: schemastery.string() },
-  weekdays: { days: schemastery.array(schemastery.number().min(WEEKDAY_MIN).max(WEEKDAY_MAX).step(1)) },
-  monthDays: { from: schemastery.number().step(1), to: schemastery.number().step(1) },
-  dateRange: { from: schemastery.string(), to: schemastery.string() },
-}
-
-const CONDITION_SCHEMA = schemastery.union(
-  CONDITION_KINDS.map((kind) => schemastery.object({
-    kind: schemastery.const(kind).required(),
-    ...CONDITION_FIELD_SCHEMAS[kind],
-  })),
-)
-
-const PRICING_RULE_SCHEMA = schemastery.object({
-  model: schemastery.string(),
-  unit: schemastery.const(UNIT_PER_MILLION),
-  currency: schemastery.union(CURRENCIES.map((currency) => schemastery.const(currency))),
-  price: schemastery.object({
-    input: schemastery.number().min(0),
-    output: schemastery.number().min(0),
-    cacheRead: schemastery.number().min(0),
-    cacheWrite: schemastery.number().min(0),
-  }),
-  conditions: schemastery.array(CONDITION_SCHEMA),
-})
-
+// 定价规则表不进配置槽位:逐条规则的嵌套结构会把 profile 配置节撑成长表,
+// 持久化改由 pricing-store 的 usage_pricing 域承担,配置节只留零碎设置
 const SETTINGS_SCHEMA = schemastery.object({
   minuteRetentionDays: schemastery.number().min(0).step(1).default(DEFAULT_MINUTE_RETENTION_DAYS)
     .description(`分钟桶保留天数(上限 ${MINUTE_RETENTION_MAX_DAYS} 天),0 表示禁用分钟桶`),
-  pricing: schemastery.object({ rules: schemastery.array(PRICING_RULE_SCHEMA) })
-    .description('定价规则(wire 由 /api/usage-dash/pricing 读写)'),
   statsLine: STATS_LINE_SCHEMA.description('底部信息栏增强开关'),
   budget: BUDGET_SCHEMA.description('成本护栏预算:日 / 周期限额与超限动作'),
   cycle: CYCLE_SCHEMA.description('计费周期:决定「本周期已花」的统计窗口'),
@@ -146,18 +115,58 @@ function unwrapVolatile(value) {
   return typeof value?.get === 'function' ? value.get() : value
 }
 
+// 存量 profile 配置节里的定价规则一次性迁入 usage_pricing 域,随后从补丁删键。
+// 先写域再删键:域写失败保留 profile 原文下次重试;删键失败时域已有记录,
+// 下轮跳过导入只重试删键,不会用旧配置覆盖用户后来在新编辑器里改的价格
+async function migrateProfilePricing({ ctx, editor, entry, pricingStore }) {
+  const rules = normalizePricingRules(entry?.options?.config?.pricing?.rules)
+  if (rules.length > 0) await pricingStore.importLegacy(rules)
+  if (!editor || typeof editor.edit !== 'function') {
+    ctx.logger?.warn('usage-dash: configEditor 缺席,profile 旧定价节未清理')
+    return false
+  }
+  await editor.edit(entry, (current) => {
+    const next = { ...current }
+    delete next.pricing
+    return next
+  })
+  return true
+}
+
 export function apply(ctx, config) {
   const store = sharedStore(ctx.storageDomain)
   const collector = new UsageCollector(ctx, store)
-  // pricing 能力门面:settings 激活前置 active=false(routes 侧 GET 空值、
-  // POST 拒 503),激活后实时读 settings——改价下次查询即时生效
+  // 定价能力门面:规则表落 usage_pricing 域,读同步取域内快照,写串行自增
+  // revision;域打开失败即降级(routes 侧 GET 空值、POST 拒 503)
+  const pricingStore = sharedPricingStore(ctx.storageDomain)
   const pricing = {
-    active: false,
-    rules: () => [],
-    revision: () => 0,
-    replace: async () => {
-      throw new Error('usage-dash: pricing settings inactive')
+    // 派生自域状态:ready 之前与降级态均为 false,不依赖微任务注册顺序
+    get active() {
+      return pricingStore.opened
     },
+    ready: () => pricingStore.readyPromise(),
+    rules: () => pricingStore.rules(),
+    revision: () => pricingStore.revision(),
+    replace: async (rules) => pricingStore.replace(normalizePricingRules(rules)),
+  }
+  void pricingStore.readyPromise().then(() => {
+    if (pricingStore.degradation === undefined) return
+    const detail = pricingStore.degradation instanceof Error
+      ? pricingStore.degradation.message
+      : String(pricingStore.degradation)
+    ctx.logger?.warn(`usage-dash: 定价规则存储不可用 ${detail}`)
+  })
+  // 存量 profile 配置节里的定价规则一次性迁移:只依赖条目原文与 profile 编辑能力,
+  // 与 settings 注入解耦(settings 缺席时价格不能凭空失效)
+  if (Object.hasOwn(ctx.fiber?.entry?.options?.config ?? {}, 'pricing')) {
+    void migrateProfilePricing({
+      ctx,
+      editor: ctx.get('configEditor'),
+      entry: ctx.fiber?.entry,
+      pricingStore,
+    }).catch((error) => {
+      ctx.logger?.warn(`usage-dash: 定价规则迁移失败 ${error instanceof Error ? error.message : String(error)}`)
+    })
   }
   // 预算能力门面:与 pricing 同形态,settings 激活前 active=false(路由拒写、只读空值)
   const budget = {
@@ -214,16 +223,6 @@ export function apply(ctx, config) {
       // 每日本地日首次写入时按保留值清理分钟/小时桶;启动回扫前的触发在下方回扫入口
       store.retentionDays = () =>
         settings.get(SETTINGS_NAMESPACE)?.minuteRetentionDays ?? DEFAULT_MINUTE_RETENTION_DAYS
-      pricing.active = true
-      pricing.rules = () => normalizePricingRules(settings.get(SETTINGS_NAMESPACE)?.pricing?.rules)
-      // revision 取 describe 中本 ns 描述符,settings 任何写入都会自增
-      pricing.revision = () =>
-        settings.describe().find((descriptor) => descriptor.ns === SETTINGS_NAMESPACE)?.revision ?? 0
-      pricing.replace = async (rules) => {
-        // update 深合并下数组整体替换,不动 minuteRetentionDays 用户层
-        await settings.update(SETTINGS_NAMESPACE, { pricing: { rules: normalizePricingRules(rules) } })
-        return normalizePricingRules(settings.get(SETTINGS_NAMESPACE)?.pricing?.rules)
-      }
       budget.active = true
       budget.config = () => ({
         ...normalizeBudgetConfig(settings.get(SETTINGS_NAMESPACE)?.budget),
@@ -250,26 +249,11 @@ export function apply(ctx, config) {
     }
     // 0.1.7+ 形态:静态 Config 导出生成节表单。关闭原生自动页(maintain 同构),
     // 读经 apply 入参 config 整节解包,写经 configEditor.edit(fiber.entry 与命名空间
-    // 解耦),revision 读 describe 按条目 id 定位(0.1.7 描述符以 entry.options.id 为 ns)
+    // 解耦);定价规则不在本形态内,读写走 usage_pricing 域
     if (typeof settings.configure === 'function') {
       settingsCtx.effect(() => settings.configure({ auto: false }, ctx.fiber))
     }
     store.retentionDays = () => unwrapVolatile(config)?.minuteRetentionDays ?? DEFAULT_MINUTE_RETENTION_DAYS
-    pricing.active = true
-    pricing.rules = () => normalizePricingRules(unwrapVolatile(config)?.pricing?.rules)
-    pricing.revision = () =>
-      settings.describe?.().find((descriptor) => descriptor.ns === ctx.fiber?.entry?.options?.id)?.revision ?? 0
-    pricing.replace = async (rules) => {
-      const editor = ctx.get('configEditor')
-      const entry = ctx.fiber?.entry
-      if (!editor || typeof editor.edit !== 'function' || !entry) {
-        throw new Error('usage-dash: configEditor inactive')
-      }
-      // change 回调整体替换 pricing 节,不动 minuteRetentionDays 用户层
-      const normalized = normalizePricingRules(rules)
-      await editor.edit(entry, (current) => ({ ...current, pricing: { rules: normalized } }))
-      return normalizePricingRules(unwrapVolatile(config)?.pricing?.rules)
-    }
     budget.active = true
     budget.config = () => ({
       ...normalizeBudgetConfig(unwrapVolatile(config)?.budget),

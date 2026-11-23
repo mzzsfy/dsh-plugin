@@ -22,10 +22,40 @@ const RULE = {
   conditions: [],
 }
 
-// sharedStore 单例按 storageDomain 缓存:每例独立 domain 防串扰;域 open 缺席时
-// store 走内存降级,单测无落盘
-function makeDomain() {
-  return { open: async () => ({}) }
+// sharedStore/sharedPricingStore 单例按 storageDomain 缓存:每例独立 facility
+// 防串扰;表为内存 Map,断言直接读行,不落盘
+const tableHandle = (rows) => ({
+  get: (key) => rows.get(key),
+  entries: () => rows.entries(),
+  keys: () => rows.keys(),
+  get size() { return rows.size },
+  put: async (key, value) => { rows.set(key, value) },
+  delete: async (key) => rows.delete(key),
+  update: async (key, fn) => {
+    if (!rows.has(key)) throw new Error(`no record ${key} to update`)
+    const next = fn(rows.get(key))
+    rows.set(key, next)
+    return next
+  },
+})
+
+// 单 facility 多域:域表按 `<domain>.<table>` 分行,opened 记录打开过的域名
+function makeFacility() {
+  const tables = new Map()
+  const opened = []
+  const rowsOf = (domain, table) => {
+    const key = `${domain}.${table}`
+    if (!tables.has(key)) tables.set(key, new Map())
+    return tables.get(key)
+  }
+  return {
+    opened,
+    rows: rowsOf,
+    async open(spec) {
+      opened.push(spec.name)
+      return { name: spec.name, table: (table) => tableHandle(rowsOf(spec.name, table)) }
+    },
+  }
 }
 
 function makeRes() {
@@ -62,15 +92,14 @@ const invokeJson = (routes, path, { headers, payload, ...rest } = {}) =>
     ...rest,
   })
 
-// legacy 方法面桩(≤0.1.6 SettingsProvider):register/get/update/describe 命名空间语义
+// legacy 方法面桩(≤0.1.6 SettingsProvider):register/get/update/describe 命名空间语义。
+// 定价规则已移出配置节,这里只承载其余节
 function makeLegacySettings(store = {}) {
   let revision = 0
   return {
     register() {},
     get: () => store,
     update: async (_ns, patch) => {
-      const pricing = patch.pricing
-      if (pricing) store.pricing = { ...(store.pricing ?? {}), ...pricing }
       if (patch.cycle) store.cycle = { ...(store.cycle ?? {}), ...patch.cycle }
       if (patch.minuteRetentionDays !== undefined) store.minuteRetentionDays = patch.minuteRetentionDays
       revision += 1
@@ -80,32 +109,43 @@ function makeLegacySettings(store = {}) {
 }
 
 // 0.1.7 形态桩:settings 无 register/get(configure/describe 在),configRef 为整节
-// 单 ref 桩,configEditor 桩合并写回 configStore
-function makeRc17({ configStore = {}, configEditorAvailable = true, withRoutes = true } = {}) {
+// 单 ref 桩,configEditor 桩按 entry.options.config 的当前原文整节替换写回
+function makeRc17({ configStore = {}, configEditorAvailable = true } = {}) {
   const routes = new Map()
   const editCalls = []
+  const facility = makeFacility()
+  let revision = 0
   const configRef = { get: () => ({ ...configStore }) }
   const settingsService = {
-    configure: (presentation, owner) => { return () => {} },
-    describe: () => [{ ns: 'usage-dash', revision: configStore.__revision ?? 0 }],
+    configure: () => () => {},
+    describe: () => [{ ns: 'usage-dash', revision }],
+  }
+  const entry = {
+    options: {
+      id: 'usage-dash',
+      name: '@mzzsfy/dsh-usage-dash',
+      // getter 反映桩存储:迁移读原始 config,删除键后重读即为新值
+      get config() { return configStore },
+    },
   }
   const configEditor = {
-    async edit(entry, change) {
-      editCalls.push(entry)
-      const next = change({ ...configStore }, {})
-      for (const key of Object.keys(next)) configStore[key] = next[key]
-      configStore.__revision = (configStore.__revision ?? 0) + 1
+    async edit(target, change) {
+      editCalls.push(target)
+      const next = change(structuredClone(target.options.config ?? {}), {})
+      for (const key of Object.keys(configStore)) if (!(key in next)) delete configStore[key]
+      Object.assign(configStore, next)
+      revision += 1
     },
   }
   const pendingInjects = []
   const ctx = {
     on() {},
     logger: { warn() {} },
-    fiber: { entry: { options: { id: 'usage-dash', name: '@mzzsfy/dsh-usage-dash' } } },
+    fiber: { entry },
+    storageDomain: facility,
     get(name) {
       if (name === 'settings') return settingsService
       if (name === 'configEditor') return configEditorAvailable ? configEditor : undefined
-      if (name === 'storageDomain') return makeDomain()
       return undefined
     },
     effect(fn) { fn() },
@@ -123,6 +163,7 @@ function makeRc17({ configStore = {}, configEditorAvailable = true, withRoutes =
     configRef,
     configStore,
     editCalls,
+    facility,
     activateSettings: () => {
       for (const fn of pendingInjects.splice(0)) {
         fn({
@@ -143,8 +184,8 @@ test('Config 导出契约:根级 volatile 包装,validate 产整节单 ref,默�
   assert.equal(resolved.issues, undefined)
   const section = resolved.value.get()
   assert.equal(section.minuteRetentionDays, DEFAULT_MINUTE_RETENTION_DAYS)
-  // pricing 缺省对象校验补全:rules 数组缺省为空
-  assert.deepEqual(section.pricing?.rules ?? [], [])
+  // 定价规则不进配置节:profile 只留零碎设置,规则表由 usage_pricing 域承载
+  assert.equal(Object.hasOwn(section, 'pricing'), false, '配置节不得再出现 pricing')
   // 底栏偏好默认值与 client DEFAULT_PREFS 同源:展示增强开、替换与请求详情关
   assert.deepEqual(section.statsLine, {
     cachePrecision: true,
@@ -158,41 +199,48 @@ test('Config 导出契约:根级 volatile 包装,validate 产整节单 ref,默�
   assert.deepEqual(STATS_LINE_DEFAULT_PREFS, section.statsLine, 'client/宿主出厂默认值不一致')
 })
 
-test('0.1.7 形态:settings 激活即门面生效,GET 读 configRef,POST 经 configEditor.edit 整节替换', async () => {
-  // Given configRef 携带用户值 + 路由捕获
-  const rc = makeRc17({ configStore: { minuteRetentionDays: 7, pricing: { rules: [] } } })
+test('0.1.7 形态:定价规则读写落在 usage_pricing 域,profile 配置节不被写入', async () => {
+  // Given 配置节只有零碎设置
+  const rc = makeRc17({ configStore: { minuteRetentionDays: 7 } })
   apply(rc.ctx, rc.configRef)
   // When 激活 settings 注入
   rc.activateSettings()
-  // Then GET pricing 回读 configRef 节值
+  // Then GET pricing 空表
   const read = await invoke(rc.routes, PATH_PRICING, { method: 'GET' })
   const readParsed = JSON.parse(read.body)
   assert.equal(read.statusCode, 200)
   assert.deepEqual(readParsed.value.rules, [])
+  assert.equal(rc.facility.opened.includes('usage_pricing'), true, '定价域必须打开')
   // When POST 合法规则
   const saved = await invokeJson(rc.routes, PATH_PRICING, { payload: { rules: [RULE] } })
-  // Then edit 定位本条目,pricing 整节替换,回读新值,revision 自增
+  // Then 写进定价域,revision 自增,配置节与 configEditor 都不参与
   const savedParsed = JSON.parse(saved.body)
   assert.equal(saved.statusCode, 200)
   assert.equal(savedParsed.ok, true)
-  assert.equal(rc.editCalls.length, 1)
-  assert.equal(rc.editCalls[0].options.id, 'usage-dash')
-  assert.deepEqual(rc.configStore.pricing.rules, [RULE])
-  assert.equal(rc.configStore.minuteRetentionDays, 7, 'minuteRetentionDays 用户层不动')
+  assert.equal(rc.editCalls.length, 0, '定价写入不再经 configEditor')
+  const row = rc.facility.rows('usage_pricing', 'rules').get('current')
+  assert.deepEqual(row.rules, [RULE])
+  assert.equal(row.revision, 1)
   assert.deepEqual(savedParsed.value.rules, [RULE])
   assert.equal(savedParsed.value.revision, 1)
+  assert.equal(rc.configStore.minuteRetentionDays, 7, '其它设置不动')
+  assert.equal(Object.hasOwn(rc.configStore, 'pricing'), false, '配置节不得写入定价')
 })
 
 test('0.1.7 形态:GET/POST 归一重复 */* 与同模型多条无条件', async () => {
-  // Given 存量规则含两条 */* 与一个精确模型,全局组排在前面
-  // When GET 回读、再 POST 一组新的重复规则
-  // Then GET/POST 都把精确模型放前,*/* 只保留首条并放最后
+  // Given 定价域存量规则含两条 */* 与一个精确模型,全局组排在前面
   const globalOne = { ...RULE, model: '*/*', price: { ...RULE.price, input: 1 } }
   const globalTwo = { ...RULE, model: '*/*', price: { ...RULE.price, input: 9 } }
   const exact = { ...RULE, model: 'p/m', price: { ...RULE.price, input: 3 } }
-  const rc = makeRc17({ configStore: { pricing: { rules: [globalOne, exact, globalTwo] } } })
+  const rc = makeRc17()
+  rc.facility.rows('usage_pricing', 'rules').set('current', {
+    rules: [globalOne, exact, globalTwo],
+    revision: 1,
+    updatedAt: 0,
+  })
   apply(rc.ctx, rc.configRef)
   rc.activateSettings()
+  // Then GET 把精确模型放前,*/* 只保留首条并放最后
   const read = JSON.parse((await invoke(rc.routes, PATH_PRICING, { method: 'GET' })).body)
   assert.deepEqual(read.value.rules.map((item) => [item.model, item.price.input]), [['p/m', 3], ['*/*', 1]])
   // When 再写一组重复规则:提交序首条 9 胜出,POST 回读同口径
@@ -202,20 +250,19 @@ test('0.1.7 形态:GET/POST 归一重复 */* 与同模型多条无条件', async
   assert.deepEqual(saved.value.rules.map((item) => [item.model, item.price.input]), [['p/m', 3], ['*/*', 9]])
 })
 
-test('0.1.7 形态:configEditor 缺失即 POST 拒绝,GET 回读不受影响', async () => {
+test('0.1.7 形态:configEditor 缺席不影响定价写入(规则表已脱离配置槽位)', async () => {
   // Given configEditor 服务缺席
   const rc = makeRc17({ configEditorAvailable: false })
   apply(rc.ctx, rc.configRef)
   rc.activateSettings()
   // When POST 写规则
   const saved = await invokeJson(rc.routes, PATH_PRICING, { payload: { rules: [RULE] } })
-  // Then ok:false 错误响应,进程存活(测试走完即证)
+  // Then 仍写进定价域,不再依赖 profile 编辑能力
   const savedParsed = JSON.parse(saved.body)
-  assert.equal(savedParsed.ok, false)
-  // When GET 回读
-  const read = await invoke(rc.routes, PATH_PRICING, { method: 'GET' })
-  // Then 仍回 configRef 当前值
-  assert.equal(read.statusCode, 200)
+  assert.equal(saved.statusCode, 200)
+  assert.equal(savedParsed.ok, true)
+  assert.deepEqual(rc.facility.rows('usage_pricing', 'rules').get('current').rules, [RULE])
+  assert.equal(rc.editCalls.length, 0)
 })
 
 test('0.1.7 形态:configure 在场即关闭原生自动页,register 缺失不抛错', () => {
@@ -231,18 +278,19 @@ test('0.1.7 形态:configure 在场即关闭原生自动页,register 缺失不�
   assert.deepEqual(configureCalls[0].presentation, { auto: false })
 })
 
-// 独立 legacy 用例:register/get/update 命名空间面行为与现状全同
-test('legacy 形态:settings 激活即门面生效,replace 经命名空间 update,revision 经 describe', async () => {
+// 独立 legacy 用例:settings 方法面照常启用其余配置,定价规则同样落独立域
+test('legacy 形态:settings 激活即门面生效,定价读写走 usage_pricing 域', async () => {
   const routes = new Map()
   const store = {}
+  const facility = makeFacility()
   const settingsService = makeLegacySettings(store)
   const pendingInjects = []
   const ctx = {
     on() {},
     logger: { warn() {} },
+    storageDomain: facility,
     get(name) {
       if (name === 'settings') return settingsService
-      if (name === 'storageDomain') return makeDomain()
       return undefined
     },
     effect(fn) { fn() },
@@ -258,16 +306,85 @@ test('legacy 形态:settings 激活即门面生效,replace 经命名空间 updat
   for (const fn of pendingInjects.splice(0)) {
     fn({ settings: settingsService, interval: () => {}, effect(f) { f() } })
   }
-  // GET 回读命名空间存储值
+  // GET 空表
   const read = await invoke(routes, PATH_PRICING, { method: 'GET' })
   assert.equal(read.statusCode, 200)
-  // POST 合法规则经 update 落命名空间
+  assert.deepEqual(JSON.parse(read.body).value.rules, [])
+  // POST 合法规则落定价域,命名空间不再承载 pricing
   const saved = await invokeJson(routes, PATH_PRICING, { payload: { rules: [RULE] } })
   const savedParsed = JSON.parse(saved.body)
   assert.equal(savedParsed.ok, true)
-  assert.deepEqual(store.pricing.rules, [RULE])
+  assert.deepEqual(facility.rows('usage_pricing', 'rules').get('current').rules, [RULE])
+  assert.equal(store.pricing, undefined)
   assert.deepEqual(savedParsed.value.rules, [RULE])
   assert.equal(savedParsed.value.revision, 1)
+})
+
+// —— 存量配置迁移:profile 的 pricing 节搬进定价域后从补丁删键 ——
+test('迁移:profile 存量 pricing 规则搬进定价域并从配置节删除', async () => {
+  const rc = makeRc17({ configStore: { minuteRetentionDays: 7, pricing: { rules: [RULE] } } })
+  apply(rc.ctx, rc.configRef)
+  rc.activateSettings()
+  // 迁移在 apply 里异步进行:等域打开与 configEditor.edit 完成
+  for (let attempt = 0; attempt < 50 && Object.hasOwn(rc.configStore, 'pricing'); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2))
+  }
+  assert.equal(Object.hasOwn(rc.configStore, 'pricing'), false, '配置节应删除 pricing')
+  assert.equal(rc.configStore.minuteRetentionDays, 7, '其它设置不受影响')
+  assert.equal(rc.editCalls.length, 1, '迁移只经一次 profile 编辑')
+  assert.deepEqual(rc.facility.rows('usage_pricing', 'rules').get('current').rules, [RULE])
+  const read = JSON.parse((await invoke(rc.routes, PATH_PRICING, { method: 'GET' })).body)
+  assert.deepEqual(read.value.rules, [RULE])
+})
+
+test('迁移:定价域打开失败时不删配置节(规则不丢)', async () => {
+  const rc = makeRc17({ configStore: { pricing: { rules: [RULE] } } })
+  rc.ctx.storageDomain = {
+    async open(spec) {
+      if (spec.name === 'usage_pricing') throw new Error('backend-not-found')
+      return { name: spec.name, table: () => tableHandle(new Map()) }
+    },
+  }
+  apply(rc.ctx, rc.configRef)
+  rc.activateSettings()
+  // 迁移因导入失败而中止:等降级告警落地后断言配置节原样保留
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(rc.editCalls.length, 0, '导入失败不得删配置节')
+  assert.deepEqual(rc.configStore.pricing?.rules, [RULE])
+})
+
+test('迁移:定价域已有规则时不用旧配置覆盖(只重试删键)', async () => {
+  const newer = { ...RULE, price: { ...RULE.price, input: 9 } }
+  const rc = makeRc17({ configStore: { pricing: { rules: [RULE] } } })
+  rc.facility.rows('usage_pricing', 'rules').set('current', { rules: [newer], revision: 3, updatedAt: 0 })
+  apply(rc.ctx, rc.configRef)
+  rc.activateSettings()
+  for (let attempt = 0; attempt < 50 && Object.hasOwn(rc.configStore, 'pricing'); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2))
+  }
+  assert.equal(Object.hasOwn(rc.configStore, 'pricing'), false)
+  assert.deepEqual(rc.facility.rows('usage_pricing', 'rules').get('current').rules, [newer])
+  assert.equal(rc.facility.rows('usage_pricing', 'rules').get('current').revision, 3)
+})
+
+test('降级:定价域打开失败时 GET 空表、POST 503,采集与面板照常', async () => {
+  const rc = makeRc17({ configStore: {} })
+  rc.ctx.storageDomain = {
+    async open(spec) {
+      if (spec.name === 'usage_pricing') throw new Error('backend-not-found')
+      return { name: spec.name, table: () => tableHandle(new Map()) }
+    },
+  }
+  apply(rc.ctx, rc.configRef)
+  rc.activateSettings()
+  const read = await invoke(rc.routes, PATH_PRICING, { method: 'GET' })
+  assert.equal(read.statusCode, 200)
+  assert.deepEqual(JSON.parse(read.body).value, { revision: 0, rules: [] })
+  const saved = await invokeJson(rc.routes, PATH_PRICING, { payload: { rules: [RULE] } })
+  const savedParsed = JSON.parse(saved.body)
+  assert.equal(saved.statusCode, 503)
+  assert.equal(savedParsed.ok, false)
+  assert.match(savedParsed.error.message, /pricing unavailable/)
 })
 
 
@@ -327,9 +444,9 @@ test('legacy 形态:计费周期写入经命名空间 update,GET 回读生效', 
   const ctx = {
     on() {},
     logger: { warn() {} },
+    storageDomain: makeFacility(),
     get(name) {
       if (name === 'settings') return settingsService
-      if (name === 'storageDomain') return makeDomain()
       return undefined
     },
     effect(fn) { fn() },

@@ -548,6 +548,8 @@ export function registerUsageRoutes(
   // exact 注册下宿主只会命中自有路径,此处仍按路径精确等值分派,未匹配即 404
   const dispatch = async (req, res) => {
     try {
+      // 定价域在 apply 之后才打开完成:首请求先等就绪,免把已配规则当未定价
+      await pricing?.ready?.()
       const path = routePathOf(req)
       const matched = handlers.get(path)
       if (!matched) throw usageError(HTTP_STATUS_NOT_FOUND, `unknown endpoint ${path}`, CODE_NOT_FOUND)

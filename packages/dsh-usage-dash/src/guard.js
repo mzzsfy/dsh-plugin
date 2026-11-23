@@ -110,6 +110,8 @@ export function installGuard(ctx, deps) {
 
   // 燃烧率取最近 30 分钟分钟桶:窗口内价格按当前规则命中
   const rateAt = async (at) => {
+    // 定价域在 apply 后才打开完成:首请求前等就绪,免把已配价格当未定价
+    await deps.pricing?.ready?.()
     const rules = deps.pricing?.rules?.() ?? []
     if (!Array.isArray(rules) || rules.length === 0) return 0
     const window = recentMinuteBuckets(at, deps.timeZone, RATE_WINDOW_MINUTES)
@@ -163,6 +165,8 @@ export function installGuard(ctx, deps) {
     const at = clock()
     cache.flight = (async () => {
       try {
+        // 花费读数与速率同源读定价:域未就绪时先等,免把已配价格当未定价缓存 30 秒
+        await deps.pricing?.ready?.()
         const spent = await deps.spent()
         const ratePerHour = await rateAt(at)
         const evaluation = evaluateBudget({ config, spent, ratePerHour, now: at })
