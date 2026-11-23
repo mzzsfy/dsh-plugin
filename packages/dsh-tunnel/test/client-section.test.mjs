@@ -26,6 +26,7 @@ test('Given 分区已注册 When 挂载 Then 并行拉取隧道(带探活)与状
   assert.ok(harness.requests.some((request) => request.url === '/api/tunnel/tunnels?probe=1'))
   assert.ok(harness.requests.some((request) => request.url === '/api/tunnel/status'))
   assert.equal(harness.requests.some((request) => request.url.startsWith('/api/tunnel/ports')), false, '端口列表默认折叠, 不应自动扫描')
+  assert.equal(harness.requests.some((request) => request.url.startsWith('/api/tunnel/logs')), false, '请求日志默认折叠, 不应自动拉取')
 })
 
 test('Given 页面隐藏 When 总线推送 Then 不请求; 恢复可见后只补一次', async () => {

@@ -105,6 +105,44 @@ const STATUS_TONE = { online: 'ok', offline: 'warn', disabled: 'dim', route_erro
 const statusTextOf = (status) => STATUS_TEXT[status] ?? STATUS_TEXT.unknown
 const statusToneOf = (status) => STATUS_TONE[status] ?? STATUS_TONE.unknown
 
+// 请求日志展示: 状态只分 ok/warn/danger 三档, 0 是客户端中断
+const HTTP_OK_MIN = 100
+const HTTP_CLIENT_ERROR_MIN = 400
+const HTTP_SERVER_ERROR_MIN = 500
+const MS_PER_SECOND = 1000
+
+function filterRequestLogs(items, query) {
+  const needle = String(query ?? '').trim().toLowerCase()
+  const list = Array.isArray(items) ? items : []
+  if (needle === '') return list
+  return list.filter((item) => [item?.tunnel, item?.method, item?.kind, item?.kind === 'ws' ? 'WS' : '', item?.path, item?.status, requestLogStatusText(item?.status), item?.error]
+    .some((value) => String(value ?? '').toLowerCase().includes(needle)))
+}
+
+function requestLogToneOf(status) {
+  if (status === 0 || status >= HTTP_SERVER_ERROR_MIN) return 'danger'
+  if (status >= HTTP_CLIENT_ERROR_MIN) return 'warn'
+  if (status >= HTTP_OK_MIN && status < HTTP_CLIENT_ERROR_MIN) return 'ok'
+  return ''
+}
+
+function requestLogStatusText(status) {
+  return status === 0 ? '中断' : String(status)
+}
+
+function requestLogMsText(ms) {
+  const value = Number(ms)
+  if (!Number.isFinite(value) || value < 0) return '—'
+  if (value < MS_PER_SECOND) return Math.round(value) + 'ms'
+  return (value / MS_PER_SECOND).toFixed(1) + 's'
+}
+
+function requestLogTimeText(iso) {
+  if (typeof iso !== 'string' || iso === '') return '—'
+  const value = new Date(iso)
+  return Number.isNaN(value.getTime()) ? '—' : value.toLocaleTimeString()
+}
+
 function statsTextOf(stats, now) {
   if (stats === undefined || stats === null) return '本次运行暂无访问'
   const count = Number.isInteger(stats.requests) ? stats.requests : 0
@@ -295,6 +333,10 @@ function statusBarRowVM(row, now, location) {
 /* SBUILD-BEGIN */
 const STYLE_ID = 'dsh-tunnel-style'
 const CLOCK_TICK_MS = 60 * 1000
+const LOG_PAGE_LIMIT = 50
+const LOG_QUERY_LIMIT = 2000
+const LOG_LIMIT_MIN = 0
+const LOG_LIMIT_MAX = 2000
 const CSS = `
 /* 菜单 portal 到 body, 脱离设置分区与状态条, 必须自带 token */
 .tu-set,.tu-bottom,.tu-menu{
@@ -382,10 +424,22 @@ const CSS = `
 .tu-port__proc{color:var(--tu-text-sub);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px}
 .tu-port__bind{color:var(--tu-text-dim);font-size:12px;white-space:nowrap}
 .tu-port__actions{margin-left:auto;display:flex;align-items:center;gap:var(--tu-space-1)}
-.tu-card__filter{display:flex;align-items:center;gap:var(--tu-space-2);padding:var(--tu-space-2) var(--tu-space-4);border-bottom:.5px solid var(--tu-border)}
+.tu-log{padding:8px var(--tu-space-4);border-bottom:.5px solid var(--tu-border)}
+.tu-log:last-child{border-bottom:0}
+.tu-log__main{display:flex;align-items:center;gap:var(--tu-space-2);min-width:0;font-size:12px;line-height:18px}
+.tu-log__time{color:var(--tu-text-dim);font-variant-numeric:tabular-nums;white-space:nowrap;flex:0 0 auto}
+.tu-log__req{display:flex;align-items:center;gap:6px;min-width:0;flex:1 1 auto}
+.tu-log__method{font-weight:600;white-space:nowrap;flex:0 0 auto}
+.tu-log__path{font-family:var(--ds-font-family-code);color:var(--tu-text-sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.tu-log__ms{color:var(--tu-text-dim);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right;flex:0 0 auto;min-width:44px}
+.tu-log__error{margin-top:2px;color:var(--tu-text-sub);font-size:12px;line-height:18px;overflow-wrap:anywhere}
+.tu-log__capacity{display:flex;align-items:center;gap:4px;margin-left:auto;color:var(--tu-text-sub);font-size:12px;white-space:nowrap}
+.tu-input--num{width:68px;padding:0 6px;font-variant-numeric:tabular-nums}
+.tu-card__filter{display:flex;align-items:center;flex-wrap:wrap;gap:var(--tu-space-2);padding:var(--tu-space-2) var(--tu-space-4);border-bottom:.5px solid var(--tu-border)}
 .tu-input{height:30px;min-width:0;padding:0 8px;border:.5px solid var(--tu-border-2);border-radius:6px;background:var(--tu-bg);color:var(--tu-text);font:inherit;font-size:13px;box-sizing:border-box}
 .tu-input:focus{outline:2px solid var(--tu-business);outline-offset:1px}
 .tu-input--search{flex:1}
+@media (max-width:520px){.tu-card__filter .tu-input--search{flex:1 1 100%}.tu-log__capacity{margin-left:0}}
 .tu-card__more{padding:var(--tu-space-2) var(--tu-space-4);border-top:.5px solid var(--tu-border);text-align:center}
 .tu-switch{display:inline-flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap;color:var(--tu-text-sub);font-size:12px}
 .tu-switch input[type="checkbox"]{position:absolute;opacity:0;width:1px;height:1px;margin:0}
@@ -854,6 +908,128 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           : null)
     }
 
+    function LogRow({ item }) {
+      const tone = requestLogToneOf(item.status)
+      const statusBadge = 'tu-badge' + (tone === '' ? '' : ' tu-badge--' + tone)
+      const kind = item.kind === 'ws' ? 'WS' : item.method
+      return h('div', { className: 'tu-log' },
+        h('div', { className: 'tu-log__main' },
+          h('span', { className: 'tu-log__time', title: item.at }, requestLogTimeText(item.at)),
+          h('span', { className: 'tu-badge', title: item.tunnel }, item.tunnel),
+          h('span', { className: 'tu-log__req' },
+            h('span', { className: 'tu-log__method' }, kind),
+            h('span', { className: 'tu-log__path', title: item.path }, item.path)),
+          h('span', { className: statusBadge, title: item.error ?? requestLogStatusText(item.status) }, requestLogStatusText(item.status)),
+          h('span', { className: 'tu-log__ms' }, requestLogMsText(item.ms))),
+        item.error === undefined ? null : h('div', { className: 'tu-log__error', title: item.error }, item.error))
+    }
+
+    function LogsCard() {
+      const [expanded, setExpanded] = useState(false)
+      const [items, setItems] = useState(null)
+      const [capacity, setCapacity] = useState(null)
+      const [query, setQuery] = useState('')
+      const [limit, setLimit] = useState(LOG_PAGE_LIMIT)
+      const [draftCapacity, setDraftCapacity] = useState('')
+      const [error, setError] = useState('')
+      const [busy, setBusy] = useState(false)
+      const [saving, setSaving] = useState(false)
+      const aliveRef = useRef(true)
+      const seqRef = useRef(0)
+      useEffect(() => () => { aliveRef.current = false }, [])
+      const load = useCallback(async () => {
+        const seq = ++seqRef.current
+        setBusy(true)
+        const outcome = await request('GET', '/logs?limit=' + LOG_QUERY_LIMIT)
+        if (!aliveRef.current || seq !== seqRef.current) return
+        setBusy(false)
+        if (!outcome.ok) { setError(outcome.error); return }
+        setError('')
+        const nextCapacity = Number.isInteger(outcome.data.limit) ? outcome.data.limit : 0
+        setItems(Array.isArray(outcome.data.items) ? outcome.data.items : [])
+        setCapacity(nextCapacity)
+        setDraftCapacity(String(nextCapacity))
+      }, [])
+      useEffect(() => { if (expanded) load() }, [expanded, load])
+      const filtered = filterRequestLogs(items ?? [], query)
+      const visible = filtered.slice(0, limit)
+      const rest = filtered.slice(limit)
+      const capacityDraft = Number(draftCapacity)
+      const capacityValid = draftCapacity !== '' && Number.isInteger(capacityDraft) && capacityDraft >= LOG_LIMIT_MIN && capacityDraft <= LOG_LIMIT_MAX
+      const saveCapacity = async () => {
+        if (!capacityValid) {
+          setError('保留条数须为 ' + LOG_LIMIT_MIN + '..' + LOG_LIMIT_MAX + ' 整数')
+          return
+        }
+        setSaving(true)
+        const outcome = await request('POST', '/ui-settings', { requestLogLimit: capacityDraft })
+        if (!aliveRef.current) return
+        setSaving(false)
+        if (!outcome.ok || outcome.data?.ok === false) {
+          setError(outcome.data?.error ?? outcome.error ?? '保存失败')
+          return
+        }
+        setError('')
+        await load()
+      }
+      const meta = capacity === null ? '展开后加载' : capacity === 0 ? '已关闭' : items === null ? '展开后加载' : filtered.length + ' 条 / 上限 ' + capacity
+      const emptyText = capacity === 0
+        ? '请求日志已关闭(requestLogLimit=0)。'
+        : '还没有请求经过隧道。日志最多保留 ' + capacity + ' 条。'
+      return h('section', { className: 'tu-card tu-card--logs', 'aria-label': '请求日志' },
+        h('div', { className: 'tu-card__head' },
+          h('button', {
+            type: 'button',
+            className: 'tu-button tu-button--ghost tu-button--sm',
+            'aria-expanded': expanded,
+            'aria-label': expanded ? '收起请求日志' : '展开请求日志',
+            onClick: () => setExpanded(!expanded),
+          }, expanded ? '▾' : '▸'),
+          h('h3', { className: 'tu-card__title' }, '请求日志'),
+          h('span', { className: 'tu-card__meta' }, meta),
+          h('div', { className: 'tu-card__actions' },
+            h('button', { type: 'button', className: 'tu-button tu-button--sm tu-button--ghost', disabled: busy, onClick: load }, busy ? '加载中…' : '刷新'))),
+        error !== '' ? h('div', { style: { padding: '8px 16px' } }, h(Notice, { tone: 'danger' }, error)) : null,
+        expanded ? h('div', null,
+          h('div', { className: 'tu-card__filter' },
+            h('input', {
+              type: 'search',
+              className: 'tu-input tu-input--search',
+              placeholder: '过滤隧道 / 路径 / 状态',
+              'aria-label': '过滤请求日志',
+              value: query,
+              onChange: (event) => { setQuery(event.target.value); setLimit(LOG_PAGE_LIMIT) },
+            }),
+            h('span', { className: 'tu-card__meta' }, capacity === 0 ? '日志已关闭' : '仅保留本次运行记录'),
+            h('label', { className: 'tu-log__capacity' },
+              h('span', null, '保留'),
+              h('input', {
+                type: 'number',
+                min: LOG_LIMIT_MIN,
+                max: LOG_LIMIT_MAX,
+                step: 1,
+                className: 'tu-input tu-input--num',
+                'aria-label': '请求日志保留条数',
+                value: draftCapacity,
+                onChange: (event) => setDraftCapacity(event.target.value),
+              }),
+              h('span', null, '条'),
+              h('button', {
+                type: 'button',
+                className: 'tu-button tu-button--sm',
+                disabled: saving || !capacityValid,
+                onClick: saveCapacity,
+              }, saving ? '保存中…' : '保存'))),
+          items === null
+            ? h('div', { className: 'tu-skeleton' }, h('div', { className: 'tu-skeleton__line' }), h('div', { className: 'tu-skeleton__line' }), h('div', { className: 'tu-skeleton__line' }))
+            : visible.length === 0
+              ? h('div', { className: 'tu-empty' }, query.trim() === '' ? emptyText : '没有匹配的日志。')
+              : h('div', { className: 'tu-list' }, visible.map((item, index) => h(LogRow, { key: item.seq ?? index, item }))),
+          rest.length > 0 ? h('div', { className: 'tu-card__more' },
+            h('button', { type: 'button', className: 'tu-button tu-button--sm tu-button--ghost', onClick: () => setLimit(LOG_QUERY_LIMIT) }, '展开其余 ' + rest.length + ' 条')) : null)
+          : null)
+    }
+
     function TunnelDialog({ mode, row, portItem, onClose, onSaved }) {
       const initial = row ?? { name: '', targetPort: portItem?.port ?? '', entry: defaultEntryFor(window.location) }
       const [draft, setDraft] = useState(initial)
@@ -1034,6 +1210,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           onRemove: remove,
         }),
         h(PortsCard, { onOpen: (item) => setDialog({ mode: 'create', portItem: item }), refreshKey: portsVersion }),
+        h(LogsCard, null),
         dialog === null ? null : h(TunnelDialog, {
           mode: dialog.mode,
           row: dialog.row,

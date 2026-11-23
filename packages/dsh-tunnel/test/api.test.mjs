@@ -38,6 +38,15 @@ function makeTunnelsApi() {
       const removed = rows.delete(name)
       return { ok: true, removed }
     },
+    logs(args = {}) {
+      const items = [
+        { at: '2026-11-23T10:00:00.000Z', tunnel: 'app', kind: 'http', method: 'GET', path: '/p/app/a', status: 200, ms: 2 },
+        { at: '2026-11-23T10:00:01.000Z', tunnel: 'web', kind: 'http', method: 'GET', path: '/p/web/b', status: 404, ms: 3 },
+        { at: '2026-11-23T10:00:02.000Z', tunnel: 'web', kind: 'http', method: 'GET', path: '/p/web/c', status: 500, ms: 4 },
+      ].filter((item) => args.name === undefined || item.tunnel === args.name)
+      const limit = Number.isInteger(args.limit) && args.limit > 0 ? args.limit : undefined
+      return { ok: true, items: limit === undefined ? items : items.slice(0, limit), limit: 100 }
+    },
   }
 }
 
@@ -60,8 +69,8 @@ function makeReq(method, pathAndQuery, body, extraHeaders = {}) {
 }
 
 async function call(api, method, pathAndQuery, body, extraHeaders) {
-  const res = { status: null, payload: null, finished: [] }
-  res.writeHead = (status) => { res.status = status }
+  const res = { status: null, payload: null, headers: {}, finished: [] }
+  res.writeHead = (status, headers) => { res.status = status; res.headers = headers ?? {} }
   res.on = (event, listener) => { if (event === 'finish') res.finished.push(listener) }
   res.end = (text) => {
     res.raw = text
@@ -136,6 +145,20 @@ test('GET ports 与 probe 透传业务面', async () => {
   const bad = await call(api, 'GET', '/api/tunnel/probe?port=70000')
   assert.equal(bad.status, 400)
   assert.match(bad.payload.error, /1..65535/)
+})
+
+test('GET logs 透传过滤与 limit, 非法数值不抛错', async () => {
+  const { api } = makeApi()
+  const all = await call(api, 'GET', '/api/tunnel/logs')
+  assert.equal(all.status, 200)
+  assert.equal(all.headers['cache-control'], 'no-store')
+  assert.equal(all.payload.items.length, 3)
+  assert.equal(all.payload.limit, 100)
+  const filtered = await call(api, 'GET', '/api/tunnel/logs?name=web&limit=1')
+  assert.deepEqual(filtered.payload.items.map((item) => item.path), ['/p/web/b'])
+  const badLimit = await call(api, 'GET', '/api/tunnel/logs?limit=abc')
+  assert.equal(badLimit.status, 200)
+  assert.equal(badLimit.payload.items.length, 3)
 })
 
 test('GET status 携带 ui 与 total', async () => {

@@ -72,8 +72,10 @@ export async function applyPlugin(webServer, options = {}) {
   const originalWarn = console.warn
   console.warn = (...args) => warnings.push(args.join(' '))
   let dispose
+  const config = { connectTimeoutMs: options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT, dataDir }
+  if (options.requestLogLimit !== undefined) config.requestLogLimit = options.requestLogLimit
   try {
-    dispose = apply(ctx, { connectTimeoutMs: options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT, dataDir })
+    dispose = apply(ctx, config)
   } finally {
     console.warn = originalWarn
   }
