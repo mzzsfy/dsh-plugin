@@ -1,4 +1,4 @@
-// 宿主升级时同步升级插件:版本选择、registry/Git/maintain 跳过与单插件失败隔离。
+// 宿主升级前的插件升级:版本选择、registry/Git/内置跳过、逐插件进度事件与单插件失败隔离。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
@@ -45,7 +45,7 @@ test('choosePluginVersion:只接受严格高于已装版本,不降级', () => {
   assert.equal(choosePluginVersion([{ version: '1.1.0', bundle: true }], 'not-semver'), null)
 })
 
-test('upgradeProfilePlugins:升级 registry 插件,跳过 maintain/Git/无更新插件', async () => {
+test('upgradeProfilePlugins:升级 registry 插件,清单不含 maintain/Git/内置', async () => {
   const calls = []
   const manager = {
     listBundles: async () => [
@@ -73,15 +73,44 @@ test('upgradeProfilePlugins:升级 registry 插件,跳过 maintain/Git/无更新
   const result = await upgradeProfilePlugins({
     pluginManager: manager,
     registryBase: 'https://mirror.example/',
+    newRequestId: () => 'req-1',
     onOutput: (text) => output.push(text),
   })
-  assert.deepEqual(result.updated.map((row) => row.name), ['@scope/a'])
-  assert.deepEqual(result.skipped.map((row) => row.name), [MAINTAIN_BUNDLE, '@scope/git'])
+  assert.deepEqual(result.items.map((row) => [row.name, row.state, row.from, row.to]), [
+    ['@scope/a', 'updated', '1.0.0', '1.1.0'],
+  ])
   assert.deepEqual(calls, [
     ['listVersions', '@scope/a', { registry: 'https://mirror.example/' }],
-    ['updateBundle', '@scope/a', '1.1.0', { registry: 'https://registry.example/' }],
+    ['updateBundle', '@scope/a', '1.1.0', { registry: 'https://registry.example/', requestId: 'req-1' }],
   ])
   assert.match(output.join(''), /升级插件 @scope\/a: 1\.0\.0 -> 1\.1\.0/)
+})
+
+test('upgradeProfilePlugins:逐插件快照与宿主步骤 requestId 事件', async () => {
+  const events = []
+  const manager = {
+    listBundles: async () => [{ name: '@scope/a', installed: true, update: 'registry', version: '1.0.0' }],
+    listVersions: async () => ({
+      status: 'listed',
+      installed: '1.0.0',
+      registry: null,
+      versions: [{ version: '1.1.0', bundle: true, prerelease: false }],
+    }),
+    updateBundle: async (name, version) => ({ from: '1.0.0', to: version, step: 'install', result: { application: 'applied', changed: true } }),
+  }
+  await upgradeProfilePlugins({
+    pluginManager: manager,
+    newRequestId: () => 'req-a',
+    onItem: (event) => events.push(event),
+  })
+  const snapshots = events.filter((event) => event.kind === 'snapshot').map((event) => event.items.map((item) => item.state))
+  assert.deepEqual(snapshots[0], ['pending'])
+  assert.ok(snapshots.some((states) => states[0] === 'checking'))
+  assert.ok(snapshots.some((states) => states[0] === 'upgrading'))
+  assert.deepEqual(snapshots[snapshots.length - 1], ['updated'])
+  assert.deepEqual(events.filter((event) => event.kind === 'step'), [
+    { kind: 'step', name: '@scope/a', index: 1, total: 1, requestId: 'req-a' },
+  ])
 })
 
 test('upgradeProfilePlugins:候选不高于已装版本时跳过,不调用 updateBundle', async () => {
@@ -97,10 +126,8 @@ test('upgradeProfilePlugins:候选不高于已装版本时跳过,不调用 updat
     updateBundle: async (...args) => { calls.push(args) },
   }
   const result = await upgradeProfilePlugins({ pluginManager: manager })
-  assert.deepEqual(result.updated, [])
-  assert.deepEqual(result.failed, [])
-  assert.equal(result.skipped[0].name, '@scope/old')
-  assert.match(result.skipped[0].reason, /严格高于/)
+  assert.equal(result.items[0].state, 'skipped')
+  assert.match(result.items[0].reason, /严格高于/)
   assert.deepEqual(calls, [])
 })
 
@@ -117,9 +144,9 @@ test('upgradeProfilePlugins:已装版本来源不一致时取较高者,仍不降
     updateBundle: async (...args) => { calls.push(args) },
   }
   const result = await upgradeProfilePlugins({ pluginManager: manager })
-  assert.deepEqual(result.updated, [])
+  assert.equal(result.items[0].state, 'skipped')
   assert.deepEqual(calls, [])
-  assert.match(result.skipped[0].reason, /严格高于/)
+  assert.match(result.items[0].reason, /严格高于/)
 })
 
 test('upgradeProfilePlugins:单插件失败/异常继续处理后续插件', async () => {
@@ -129,7 +156,7 @@ test('upgradeProfilePlugins:单插件失败/异常继续处理后续插件', asy
       { name: '@scope/throw', installed: true, update: 'registry', version: '1.0.0' },
       { name: '@scope/ok', installed: true, update: 'registry', version: '1.0.0' },
     ],
-    listVersions: async (name) => ({
+    listVersions: async () => ({
       status: 'listed',
       installed: '1.0.0',
       registry: null,
@@ -150,10 +177,23 @@ test('upgradeProfilePlugins:单插件失败/异常继续处理后续插件', asy
     },
   }
   const result = await upgradeProfilePlugins({ pluginManager: manager })
-  assert.deepEqual(result.updated.map((row) => row.name), ['@scope/ok'])
-  assert.deepEqual(result.failed.map((row) => row.name), ['@scope/fail', '@scope/throw'])
-  assert.equal(result.failed[0].restoreFailed, true)
-  assert.match(result.failed[1].error, /network down/)
+  const byName = new Map(result.items.map((row) => [row.name, row]))
+  assert.equal(byName.get('@scope/ok').state, 'updated')
+  assert.equal(byName.get('@scope/fail').state, 'failed')
+  assert.equal(byName.get('@scope/fail').restoreFailed, true)
+  assert.equal(byName.get('@scope/throw').state, 'failed')
+  assert.match(byName.get('@scope/throw').error, /network down/)
+})
+
+test('upgradeProfilePlugins:版本列表不可用时失败,不能把未检查伪装成已是最新版', async () => {
+  const manager = {
+    listBundles: async () => [{ name: '@scope/a', installed: true, update: 'registry', version: '1.0.0' }],
+    listVersions: async () => ({ status: 'unavailable', reason: 'registry unavailable' }),
+    updateBundle: async () => { throw new Error('不得安装未知版本') },
+  }
+  const result = await upgradeProfilePlugins({ pluginManager: manager })
+  assert.equal(result.items[0].state, 'failed')
+  assert.match(result.items[0].error, /registry unavailable/)
 })
 
 test('upgradeProfilePlugins:服务方法缺失时直接报错,不伪造成功', async () => {

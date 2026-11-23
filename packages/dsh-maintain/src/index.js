@@ -33,9 +33,16 @@ import {
   summarizePluginHealth,
   writeSafeModeRecord,
 } from './managed-state.mjs'
-import { isSafeModeProtectedPlugin, normalizeSafeModeWhitelist, SAFE_MODE_WHITELIST_MAX, scanProfilePlugins } from './plugin-compat.mjs'
+import { isSafeModeProtectedPlugin, normalizeSafeModeWhitelist, SAFE_MODE_WHITELIST_MAX, scanCandidatePlugins, scanProfilePlugins } from './plugin-compat.mjs'
 import { upgradeProfilePlugins, supportsPluginUpgrade, PLUGIN_UPGRADE_MODE } from './plugin-upgrade.mjs'
-import { appendProgressOutput, createProgress, progressSnapshot, updateProgressPhase } from './progress.mjs'
+import {
+  appendProgressOutput,
+  createProgress,
+  progressSnapshot,
+  updateProgressItems,
+  updateProgressPhase,
+  updateProgressPlugin,
+} from './progress.mjs'
 import { runPreflight } from './preflight.mjs'
 import { withRouteGate } from './route-gate.mjs'
 
@@ -573,56 +580,8 @@ export function apply(ctx, config, dependencies = {}) {
   }
 
   let landingHealth = null
-  // 新宿主上的插件同步升级进度:仅进程内,完成后结果落 state.json。
-  let postUpgradePluginProgress = null
-  let postUpgradePluginRun = null
   // 已落地/已降级的状态也允许在新进程启动时复核一次,避免旧版本把平台不支持插件误判后永久卡 degraded
   const LANDING_RECHECK_PHASES = new Set(['awaiting-restart', 'healthy', 'degraded', 'landed'])
-
-  // 宿主已切到目标版本后,按新宿主兼容性执行待处理的插件升级。
-  // 单插件失败只记录,不阻断新宿主;完成后 pending=false,健康检查看到更新后的插件。
-  async function runPostUpgradePlugins({ layout, pluginManager, operationId }) {
-    if (postUpgradePluginRun !== null) return postUpgradePluginRun
-    postUpgradePluginRun = (async () => {
-      const startedAt = Date.now()
-      let progress = updateProgressPhase(createProgress(startedAt), 'plugins', startedAt)
-      postUpgradePluginProgress = { progress }
-      try {
-        const result = await upgradeProfilePlugins({
-          pluginManager,
-          registryBase: readSettings(ctx, config).registryBase,
-          onOutput: (chunk) => {
-            progress = appendProgressOutput(progress, chunk, Date.now())
-            postUpgradePluginProgress = { progress }
-          },
-        })
-        const completed = { ...result, pending: false, completedAt: Date.now() }
-        try { await mergeManagedState(layout, { plugins: completed }) } catch (error) {
-          console.warn('[dsh-maintain] 插件同步升级结果写入失败: ' + singleLine(error?.message ?? error))
-        }
-        audit('upgrade', 'plugins', 'operationId=' + (operationId ?? 'unknown')
-          + ' updated=' + completed.updated.length + ' failed=' + completed.failed.length
-          + ' skipped=' + completed.skipped.length)
-      } catch (error) {
-        const failed = {
-          requested: true,
-          pending: false,
-          updated: [],
-          failed: [],
-          skipped: [],
-          error: error?.message ?? String(error),
-          completedAt: Date.now(),
-        }
-        try { await mergeManagedState(layout, { plugins: failed }) } catch (writeError) {
-          console.warn('[dsh-maintain] 插件同步升级失败状态写入失败: ' + singleLine(writeError?.message ?? writeError))
-        }
-        audit('upgrade', 'plugins-failed', 'operationId=' + (operationId ?? 'unknown') + ' error=' + singleLine(failed.error))
-      } finally {
-        postUpgradePluginProgress = null
-      }
-    })()
-    return postUpgradePluginRun
-  }
 
   function formatLastUpgrade(reconciled) {
     if (!reconciled) return null
@@ -677,9 +636,6 @@ export function apply(ctx, config, dependencies = {}) {
     const upgradeView = upgrade.running
       ? { running: true, last: visibleLast, progress, historical: false }
       : { running: false, last: visibleLast, historical: visibleLast?.historical === true }
-    const pluginUpgrade = postUpgradePluginProgress
-      ? { running: true, ...progressSnapshot(postUpgradePluginProgress.progress, Date.now()) }
-      : null
     return {
       packageName: TARGET_PACKAGE,
       pid: process.pid,
@@ -708,7 +664,6 @@ export function apply(ctx, config, dependencies = {}) {
       checkedAt: snapshot.checkedAt,
       checkError: snapshot.error,
       upgrade: upgradeView,
-      pluginUpgrade,
       lastUpgrade: visibleLast,
       health: upgrade.last?.health ?? persistedLast?.health ?? landingHealth,
       safeMode: safeModeRecord ? { ...safeModeRecord, active: true } : { active: false },
@@ -773,10 +728,19 @@ export function apply(ctx, config, dependencies = {}) {
     }
   }
 
-  // 受管升级全流程:布局发现→编排(安装/验证/切换,锁与阶段持久化在编排器内)
+  // 插件升级失败明细:一行内列出名称/目标版本/原因,作为中止切槽的错误正文
+  function failedPluginText(items) {
+    return (Array.isArray(items) ? items : [])
+      .filter((item) => item.state === 'failed')
+      .map((item) => item.name + (item.to ? '@' + item.to : '') + '(' + (item.error || '未知错误') + ')')
+      .join('; ')
+  }
+
+  // 受管升级全流程:布局发现→编排(安装/验证/提交前插件升级/切换,锁与阶段持久化在编排器内)
   // →成功后按单次 autoRestart 意图收尾。任何阶段失败保留原版本服务,
   // 锁与阶段状态由编排器落盘;切换状态未知时无视意图强制退出。
   // 安全模式在切换前禁用未验证插件,失败且未切换时恢复启用,成功则由新宿主接管。
+  // 插件升级前置到切槽前:新宿主启动时加载的必须是已升级插件,失败即不切槽。
   async function performManagedUpgradeFlow({ targetVersion, registryBase, autoRestart, safeMode = false, upgradePlugins = false }) {
     const startedAt = Date.now()
     const last = {
@@ -792,9 +756,7 @@ export function apply(ctx, config, dependencies = {}) {
       error: null,
       exitScheduled: false,
       safeMode: { requested: safeMode, disabled: [] },
-      // 插件升级必须等宿主切到目标版本后执行:新宿主启动时按目标版本重新筛选兼容版本,
-      // 这里只落待执行意图,避免用旧宿主的兼容结论误装/降级插件。
-      plugins: upgradePlugins ? { requested: true, pending: true, updated: [], failed: [], skipped: [], error: null } : null,
+      plugins: upgradePlugins ? { requested: true, items: [], total: 0, error: null } : null,
     }
     let progress = createProgress(startedAt)
     upgrade = { running: true, last, progress }
@@ -802,6 +764,31 @@ export function apply(ctx, config, dependencies = {}) {
     let safeModeRecord = null
     let disabledPlugins = []
     let pluginManager = null
+    // 宿主 update-state 事件按 requestId 归属到当前插件,用于「禁用/启用 xxx 插件」文案
+    let offPluginState = null
+    const pluginRequests = new Map()
+    const setPluginProgress = (plugin) => {
+      progress = updateProgressPlugin(progress, plugin)
+      upgrade.progress = progress
+    }
+    const setPluginItems = (items) => {
+      progress = updateProgressItems(progress, items)
+      upgrade.progress = progress
+    }
+    const subscribePluginSteps = () => {
+      if (offPluginState !== null || typeof ctx.on !== 'function') return
+      try {
+        const off = ctx.on('plugin-manager/update-state', (event) => {
+          const request = event && pluginRequests.get(event.requestId)
+          if (!request) return
+          setPluginProgress({ ...request, step: event.step })
+        }, { global: true })
+        if (typeof off === 'function') offPluginState = off
+      } catch (error) {
+        // 事件面缺失只影响步骤文案,插件级进度仍由 upgradeProfilePlugins 推进
+        console.warn('[dsh-maintain] 插件升级步骤事件不可用: ' + singleLine(error?.message ?? error))
+      }
+    }
     const restoreSafeMode = async () => {
       const failures = []
       for (const plugin of disabledPlugins) {
@@ -815,6 +802,82 @@ export function apply(ctx, config, dependencies = {}) {
         }
       }
       return failures
+    }
+    // 切槽前插件阶段:升级 profile 内全部可更新插件,再按目标宿主复检。
+    // 任一插件升级失败或复检仍有不兼容插件即抛出,编排器不切换链接。
+    const upgradePluginsBeforeSwitch = async ({ candidatePackage } = {}) => {
+      if (!upgradePlugins) return
+      if (!candidatePackage) throw new Error('缺少候选宿主路径,无法复检插件,已中止切换槽位')
+      pluginManager = ctx.get('pluginManager')
+      if (!supportsPluginUpgrade(pluginManager)) {
+        throw new Error('先升级插件再切槽不可用:pluginManager 缺少 listBundles/listVersions/updateBundle')
+      }
+      subscribePluginSteps()
+      try {
+        const result = await upgradeProfilePlugins({
+          pluginManager,
+          registryBase,
+          onOutput: (chunk) => {
+            progress = appendProgressOutput(progress, chunk, Date.now())
+            upgrade.progress = progress
+          },
+          onItem: (event) => {
+            if (event.kind === 'snapshot') {
+              setPluginItems(event.items)
+              // 上一个插件已到终态时清空当前插件,避免间隙里仍显示它的禁用/启用文案
+              const current = progress.plugin
+              if (current) {
+                const row = event.items.find((item) => item.name === current.name)
+                if (row && row.state !== 'pending' && row.state !== 'checking' && row.state !== 'upgrading') {
+                  setPluginProgress(null)
+                }
+              }
+            }
+            if (event.kind === 'step') {
+              // 先落到通用「正在升级插件」;宿主 update-state 事件到达再细化为禁用/启用/恢复
+              const request = { name: event.name, index: event.index, total: event.total, step: 'upgrading' }
+              pluginRequests.set(event.requestId, request)
+              setPluginProgress(request)
+            }
+          },
+        })
+        last.plugins = { requested: true, items: result.items, total: result.total, error: null }
+        const failed = failedPluginText(result.items)
+        if (failed.length > 0) throw new Error('插件升级未完成,已中止切换槽位: ' + failed)
+        // 用候选槽的 app-boot 检查升级后实际落盘的插件。
+        const scanCandidate = dependencies.scanPlugins ?? scanCandidatePlugins
+        const scan = await scanCandidate({
+          profileDir,
+          candidateSlot: resolve(candidatePackage, '../../..'),
+          installAnchor: join(candidatePackage, 'package.json'),
+          targetVersion,
+          pluginManager,
+          safeModeWhitelist: readSettings(ctx, config).safeModeWhitelist,
+          strict: true,
+        })
+        if (scan?.available !== true || !Array.isArray(scan.plugins)) {
+          throw new Error('目标版本插件复检不可用,已中止切换槽位: ' + (scan?.reason || '无法确认插件兼容性'))
+        }
+        const blocked = scan.plugins.filter((plugin) => plugin.status === 'block')
+        if (blocked.length > 0) {
+          const protectedBlocked = blocked.filter((plugin) => plugin.safeModeProtected === true)
+          throw new Error('升级后仍有插件与目标版本不兼容,已中止切换槽位: '
+            + blocked.map((plugin) => plugin.name + (plugin.version ? ' ' + plugin.version : '')).join(', ')
+            + (protectedBlocked.length > 0
+              ? ';其中保护/白名单插件需先发布兼容版本'
+              : ';可关闭「先升级插件再切换槽位」改用安全模式升级,或先让这些插件发布兼容版本'))
+        }
+      } finally {
+        pluginRequests.clear()
+        setPluginProgress(null)
+      }
+    }
+    const beforeSwitch = async (info) => {
+      await defaultBeforeSwitch()
+      if (upgradePlugins) {
+        await upgradePluginsBeforeSwitch(info)
+        await defaultBeforeSwitch()
+      }
     }
     audit('upgrade', 'triggered', 'targetVersion=' + targetVersion + (safeMode ? ' safeMode=true' : '') + (upgradePlugins ? ' plugins=true' : ''))
     try {
@@ -880,7 +943,7 @@ export function apply(ctx, config, dependencies = {}) {
         operationId: last.operationId,
         previousVersion: runningVersion,
         validate: validateCandidate,
-        beforeSwitch: defaultBeforeSwitch,
+        beforeSwitch,
         onPhase: (state) => {
           last.phase = state.phase
           last.slot = state.slot ?? null
@@ -902,12 +965,7 @@ export function apply(ctx, config, dependencies = {}) {
         finishedAt: Date.now(),
       })
       last.elapsedMs = last.finishedAt - last.startedAt
-      // 插件升级意图必须在调度退出前落盘:新宿主只认 state.json 的 pending 标记。
-      if (last.plugins) {
-        try { await mergeManagedState(layout, { plugins: last.plugins }) } catch (error) {
-          console.warn('[dsh-maintain] 插件升级待执行状态写入失败: ' + singleLine(error?.message ?? error))
-        }
-      }
+      // 插件前置升级已在切槽前落定,结果只随本次升级记录回显
       audit('upgrade', 'ok', 'operationId=' + last.operationId + ' slot=' + last.slot + ' phase=' + last.phase)
       // 切换已发生:异步重读链接槽版本,状态面板的「已装/待重启」不依赖下一次定时检查;
       // 不阻塞落定/退出调度(读盘失败保持旧快照)
@@ -932,10 +990,13 @@ export function apply(ctx, config, dependencies = {}) {
       last.switched = error.switched === true
       last.phase = 'failed'
       if (last.plugins) {
+        const touched = Array.isArray(last.plugins.items)
+          && last.plugins.items.some((item) => item.state !== 'pending')
         last.plugins = {
           ...last.plugins,
-          pending: false,
-          error: last.plugins.error || '宿主升级未完成,插件未升级',
+          error: last.plugins.error || (error.switched === true
+            ? '插件已升级,但切槽后状态不确定'
+            : touched ? '插件阶段已中止,宿主未切换槽位' : '插件阶段未执行'),
         }
       }
       const shouldRestore = safeModeRecord !== null && error.switched !== true && error.indeterminate !== true
@@ -971,6 +1032,10 @@ export function apply(ctx, config, dependencies = {}) {
           console.warn('[dsh-maintain] 插件升级结果写入状态失败: ' + singleLine(error?.message ?? error))
         }
       }
+      if (typeof offPluginState === 'function') {
+        try { offPluginState() } catch {}
+        offPluginState = null
+      }
       upgrade = { running: false, last }
     }
   }
@@ -990,9 +1055,6 @@ export function apply(ctx, config, dependencies = {}) {
     })
     if (!reconciled || !reconciled.landed || !LANDING_RECHECK_PHASES.has(state.phase)) return
     const pluginManager = ctx.get('pluginManager')
-    if (state.plugins?.requested === true && state.plugins.pending === true) {
-      await runPostUpgradePlugins({ layout, pluginManager, operationId: reconciled.operationId })
-    }
     const inventoryService = ctx.get('pluginInventory') ?? ctx.pluginInventory
     let inventory = []
     let inventoryAvailable = false
@@ -1258,14 +1320,10 @@ export function apply(ctx, config, dependencies = {}) {
           sendJson(res, 400, { error: 'upgradePlugins 必须是布尔值或缺省' })
           return
         }
-        if (upgradePlugins && autoRestart === false) {
-          sendJson(res, 400, { error: '同时升级插件必须自动重启:插件升级需要新宿主加载' })
-          return
-        }
         const pluginManager = ctx.get('pluginManager')
         if (upgradePlugins && !supportsPluginUpgrade(pluginManager)) {
           audit('upgrade', 'rejected', 'reason=plugin-upgrade-unavailable')
-          sendJson(res, 409, { error: '同时升级插件不可用:pluginManager 缺少 listBundles/listVersions/updateBundle' })
+          sendJson(res, 409, { error: '先升级插件再切槽不可用:pluginManager 缺少 listBundles/listVersions/updateBundle' })
           return
         }
         // 与重启调度双向互斥:restartScheduled 置位到进程终止的窗口内触发升级,
@@ -1333,8 +1391,8 @@ export function apply(ctx, config, dependencies = {}) {
           })
           return
         }
-        // 插件兼容硬门:与目标 DSH 版本不兼容的插件在普通升级下直接拒绝;
-        // 安全模式只允许覆盖可禁用的用户插件,宿主自带的 maintain/只读管理插件不可禁用。
+        // 普通升级先拦已知不兼容插件;前置插件升级允许尝试修复,由候选槽复检决定能否切换。
+        // 安全模式仍只禁用自身候选集合,不覆盖白名单。
         let pluginScan
         try {
           pluginScan = await scanPluginsImpl({
@@ -1353,7 +1411,7 @@ export function apply(ctx, config, dependencies = {}) {
           return
         }
         const incompatible = pluginScan.available ? pluginScan.plugins.filter((plugin) => plugin.status === 'block') : []
-        if (incompatible.length > 0) {
+        if (!upgradePlugins && incompatible.length > 0) {
           const candidateNames = new Set((pluginScan.safeModeCandidates ?? []).map((plugin) => plugin.name))
           const uncovered = incompatible.filter((plugin) => !candidateNames.has(plugin.name))
           if (!safeMode || uncovered.length > 0) {

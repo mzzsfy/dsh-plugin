@@ -66,7 +66,7 @@ function makeCtx({ settingsStore, settingsAvailable = true, legacySettings = fal
   // legacy 形态下 settingsStore 别名 settings 命名空间存储,config 为空对象
   const config = legacySettings ? {} : (settingsStore ?? {})
   const legacyStore = legacySettings ? (settingsStore ?? {}) : {}
-  const calls = { exits: [], registered: [], disposers: [], editCalls: [], configureCalls: [], registerCalls: [] }
+  const calls = { exits: [], registered: [], disposers: [], editCalls: [], configureCalls: [], registerCalls: [], hooks: [] }
   const settingsService = {
     configure(presentation, owner) {
       calls.configureCalls.push({ presentation, owner })
@@ -96,10 +96,16 @@ function makeCtx({ settingsStore, settingsAvailable = true, legacySettings = fal
     // fiber 桩:0.1.7 写路径经 fiber.entry 定位 profile 条目
     fiber: { entry: { options: { id: 'maintain', name: '@mzzsfy/dsh-maintain' } } },
     profileContext: installAnchor === null ? {} : { installAnchor, name: 'web', dir: 'test-profile', home: 'test-home' },
-    // 事件面桩:pre-step 经 ctx.on 挂接,核算与计时类经 inject 上下文
+    // 事件面桩:按事件名收集监听,pre-step hook 另存 agentHook 供既有用例读取
     on(event, listener) {
-      calls.agentHook = { event, listener }
-      return () => { if (calls.agentHook?.listener === listener) calls.agentHook = undefined }
+      const entry = { event, listener }
+      calls.hooks.push(entry)
+      if (event === 'agent/pre-step') calls.agentHook = entry
+      return () => {
+        const index = calls.hooks.indexOf(entry)
+        if (index >= 0) calls.hooks.splice(index, 1)
+        if (calls.agentHook === entry) calls.agentHook = undefined
+      }
     },
     get(name) {
       if (name === 'hostVersionProbe') return hostVersionProbeAvailable ? services.hostVersionProbe || (() => '1.0.0') : undefined
@@ -486,7 +492,7 @@ test('plugins:只返回已安装 profile 插件并标记可加入白名单的插
   assert.equal(byName['@scope/not-installed'], undefined)
   const status = await get(routes, '/api/maintain/status')
   assert.equal(status.payload.upgradePluginsAvailable, true)
-  assert.equal(status.payload.pluginUpgradeMode, 'post-restart')
+  assert.equal(status.payload.pluginUpgradeMode, 'pre-switch')
 })
 
 test('plugins:pluginManager 缺失或读取失败时返回可解释的不可用状态', async () => {
@@ -857,18 +863,26 @@ test('upgrade:upgradePlugins 非布尔 400,runner 不得启动', async () => {
   assert.equal(runner.calls.length, 0)
 })
 
-test('upgrade:同时升级插件必须自动重启', async () => {
+test('upgrade:关闭自动重启也允许先升级插件', async () => {
   const runner = makeRunnerStub()
-  const { routes } = makeCtx({ services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
-  const denied = await post(routes, '/api/maintain/upgrade', {
+  const pluginManager = {
+    listBundles: async () => [],
+    listVersions: async () => ({ status: 'listed', versions: [] }),
+    updateBundle: async () => ({ result: { application: 'applied' } }),
+  }
+  const { routes } = makeCtx({
+    services: { ...IDLE_SERVICES, pluginManager },
+    dependencies: DEPS({ runManagedUpgrade: runner }),
+  })
+  const accepted = await post(routes, '/api/maintain/upgrade', {
     targetVersion: '9.9.9',
     autoRestart: false,
     upgradePlugins: true,
   })
-  assert.equal(denied.status, 400)
-  assert.match(denied.payload.error, /必须自动重启/)
+  // 插件升级前置到切槽前,不再要求自动重启才允许勾选
+  assert.equal(accepted.status, 200)
   await drainMicrotasks()
-  assert.equal(runner.calls.length, 0)
+  assert.equal(runner.calls.length, 1)
 })
 
 test('upgrade:pluginManager 缺少更新方法时 409,不进入编排', async () => {
@@ -884,7 +898,7 @@ test('upgrade:pluginManager 缺少更新方法时 409,不进入编排', async ()
   assert.equal(runner.calls.length, 0)
 })
 
-test('upgrade:同时升级插件只登记待执行,宿主切换前不按旧宿主装插件', async (t) => {
+test('upgrade:插件升级前置到切槽前,完成后才切换槽位', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const calls = []
   const pluginManager = {
@@ -905,13 +919,18 @@ test('upgrade:同时升级插件只登记待执行,宿主切换前不按旧宿�
       return { from: '1.0.0', to: version, step: 'install', result: { application: 'applied', changed: true } }
     },
   }
-  const runner = makeRunnerStub({ result: async () => {
+  const runner = makeRunnerStub({ result: async (input) => {
     calls.push(['host'])
+    await assert.doesNotReject(() => input.beforeSwitch({ candidatePackage: '/fake/slot/node_modules/@deepseek-ai/dsh' }))
+    calls.push(['switch'])
     return { operationId: 'op-plugins', switched: true, phase: 'awaiting-restart', slot: 'a', targetVersion: '9.9.9' }
   } })
   const { routes } = makeCtx({
     services: { ...IDLE_SERVICES, pluginManager },
-    dependencies: DEPS({ runManagedUpgrade: runner }),
+    dependencies: DEPS({
+      runManagedUpgrade: runner,
+      scanPlugins: async () => ({ available: true, plugins: [], safeModeCandidates: [] }),
+    }),
   })
   const accepted = await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9', upgradePlugins: true })
   assert.equal(accepted.status, 200)
@@ -923,10 +942,257 @@ test('upgrade:同时升级插件只登记待执行,宿主切换前不按旧宿�
   }
   assert.ok(settled)
   assert.equal(settled.upgrade.last.ok, true)
-  assert.equal(settled.upgrade.last.plugins.pending, true)
-  assert.deepEqual(settled.upgrade.last.plugins.updated, [])
-  assert.deepEqual(calls, [['host']])
+  assert.deepEqual(settled.upgrade.last.plugins.items.map((row) => [row.name, row.state, row.to]), [
+    ['@scope/a', 'updated', '1.1.0'],
+  ])
+  assert.deepEqual(calls, [
+    ['host'],
+    ['listVersions', '@scope/a'],
+    ['updateBundle', '@scope/a', '1.1.0'],
+    ['switch'],
+  ])
 })
+
+test('upgrade:插件升级失败即中止切槽,不进入切换', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const calls = []
+  const pluginManager = {
+    listBundles: async () => [
+      { name: '@scope/good', installed: true, update: 'registry', version: '1.0.0' },
+      { name: '@scope/bad', installed: true, update: 'registry', version: '2.0.0' },
+    ],
+    listVersions: async (name) => ({
+      status: 'listed',
+      installed: name === '@scope/bad' ? '2.0.0' : '1.0.0',
+      registry: null,
+      versions: [{
+        version: name === '@scope/bad' ? '2.1.0' : '1.1.0',
+        bundle: true,
+        prerelease: false,
+      }],
+    }),
+    updateBundle: async (name, version) => {
+      calls.push(['updateBundle', name, version])
+      if (name === '@scope/bad') {
+        return { from: '2.0.0', to: version, step: 'install', result: { application: 'failed', changed: false, error: { code: 'operation-error', diagnostic: 'network down' } } }
+      }
+      return { from: '1.0.0', to: version, step: 'install', result: { application: 'applied', changed: true } }
+    },
+  }
+  const runner = makeRunnerStub({ result: async (input) => {
+    calls.push(['host'])
+    await input.beforeSwitch({ candidatePackage: '/fake/slot/node_modules/@deepseek-ai/dsh' })
+    calls.push(['switch'])
+    return { operationId: 'op-fail', switched: true, phase: 'awaiting-restart', slot: 'a' }
+  } })
+  const { routes } = makeCtx({
+    services: { ...IDLE_SERVICES, pluginManager },
+    dependencies: DEPS({
+      runManagedUpgrade: runner,
+      scanPlugins: async () => ({ available: true, plugins: [], safeModeCandidates: [] }),
+    }),
+  })
+  const accepted = await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9', upgradePlugins: true })
+  assert.equal(accepted.status, 200)
+  let settled = null
+  for (let i = 0; i < 50 && settled === null; i += 1) {
+    await realSleep(20)
+    const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
+    if (status?.upgrade?.running === false && status?.upgrade?.last) settled = status
+  }
+  assert.ok(settled)
+  assert.equal(settled.upgrade.last.ok, false, '插件失败必须让升级落定失败')
+  assert.match(settled.upgrade.last.error, /@scope\/bad/)
+  assert.equal(calls.some((call) => call[0] === 'switch'), false, '插件失败后不得切换槽位')
+  const items = Object.fromEntries(settled.upgrade.last.plugins.items.map((row) => [row.name, row.state]))
+  assert.deepEqual(items, { '@scope/good': 'updated', '@scope/bad': 'failed' })
+})
+
+test('upgrade:升级后复检仍有不兼容插件时中止切槽', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const calls = []
+  const pluginManager = {
+    listBundles: async () => [],
+    listVersions: async () => ({ status: 'listed', versions: [] }),
+    updateBundle: async () => ({ result: { application: 'applied' } }),
+  }
+  // 入口插件门扫描为空;切槽前的目标宿主复检返回不兼容插件
+  const scanArgs = []
+  const runner = makeRunnerStub({ result: async (input) => {
+    calls.push(['host'])
+    await input.beforeSwitch({ candidatePackage: '/fake/slot/node_modules/@deepseek-ai/dsh' })
+    calls.push(['switch'])
+    return { operationId: 'op-scan', switched: true, phase: 'awaiting-restart', slot: 'a' }
+  } })
+  const { routes } = makeCtx({
+    services: { ...IDLE_SERVICES, pluginManager },
+    dependencies: DEPS({
+      runManagedUpgrade: runner,
+      scanPlugins: async (args) => {
+        scanArgs.push(args)
+        if (scanArgs.length === 1) return { available: true, plugins: [], safeModeCandidates: [] }
+        return {
+          available: true,
+          plugins: [{ name: '@scope/stale', version: '1.0.0', status: 'block', reasons: ['宿主版本要求不满足'], safeModeProtected: true }],
+          safeModeCandidates: [],
+        }
+      },
+    }),
+  })
+  const accepted = await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9', upgradePlugins: true })
+  assert.equal(accepted.status, 200)
+  let settled = null
+  for (let i = 0; i < 50 && settled === null; i += 1) {
+    await realSleep(20)
+    const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
+    if (status?.upgrade?.running === false && status?.upgrade?.last) settled = status
+  }
+  assert.ok(settled)
+  assert.equal(settled.upgrade.last.ok, false)
+  assert.match(settled.upgrade.last.error, /@scope\/stale/)
+  assert.equal(calls.some((call) => call[0] === 'switch'), false)
+  // 复检必须锚在候选槽 dsh 包的 package.json,按本次目标版本判定
+  assert.equal(scanArgs[1].installAnchor, join('/fake/slot/node_modules/@deepseek-ai/dsh', 'package.json'))
+  assert.equal(scanArgs[1].targetVersion, '9.9.9')
+})
+
+for (const scenario of [
+  { name: 'beforeSwitch 缺失 candidatePackage', beforeSwitchInfo: {}, recheckAvailable: true, error: /candidatePackage|候选/ },
+  { name: '候选复检 unavailable', beforeSwitchInfo: { candidatePackage: '/fake/slot/node_modules/@deepseek-ai/dsh' }, recheckAvailable: false, error: /evaluator unavailable/ },
+]) {
+  test('upgrade:先升级插件时' + scenario.name + '必须失败不切槽', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    // Given 入口扫描通过,但候选锚点缺失或候选评估器不可用
+    const calls = []
+    const scanArgs = []
+    const exits = []
+    const pluginManager = {
+      listBundles: async () => [],
+      listVersions: async () => ({ status: 'listed', versions: [] }),
+      updateBundle: async () => ({ result: { application: 'applied' } }),
+    }
+    const runner = makeRunnerStub({ result: async (input) => {
+      calls.push(['host'])
+      await input.beforeSwitch(scenario.beforeSwitchInfo)
+      calls.push(['switch'])
+      return { operationId: 'op-recheck-unavailable', switched: true, phase: 'awaiting-restart', slot: 'a' }
+    } })
+    const { routes } = makeCtx({
+      exits,
+      services: { ...IDLE_SERVICES, pluginManager },
+      dependencies: DEPS({
+        runManagedUpgrade: runner,
+        scanPlugins: async (args) => {
+          scanArgs.push(args)
+          return {
+            available: scanArgs.length === 1 || scenario.recheckAvailable,
+            reason: scanArgs.length === 1 ? null : 'evaluator unavailable',
+            plugins: [],
+            safeModeCandidates: [],
+          }
+        },
+      }),
+    })
+    // When 显式要求升级插件并由 runner 调用切槽前门控
+    const accepted = await post(routes, '/api/maintain/upgrade', {
+      targetVersion: '9.9.9', upgradePlugins: true, autoRestart: false,
+    })
+    assert.equal(accepted.status, 200)
+    let settled = null
+    for (let i = 0; i < 50 && settled === null; i += 1) {
+      await realSleep(20)
+      const status = (await get(routes, '/api/maintain/status')).payload
+      if (status?.upgrade?.running === false && status?.upgrade?.last) settled = status
+    }
+    // Then 无法证明候选兼容时必须失败,不得切槽或调度重启
+    assert.ok(settled, '候选复检失败必须落定')
+    assert.deepEqual({
+      ok: settled.upgrade.last.ok,
+      switched: settled.upgrade.last.switched,
+      switchCalled: calls.some((call) => call[0] === 'switch'),
+    }, { ok: false, switched: false, switchCalled: false })
+    assert.match(settled.upgrade.last.error, scenario.error)
+    assert.equal(scanArgs.length, scenario.beforeSwitchInfo.candidatePackage ? 2 : 1)
+    if (scenario.beforeSwitchInfo.candidatePackage) {
+      assert.equal(scanArgs[1].installAnchor, join(scenario.beforeSwitchInfo.candidatePackage, 'package.json'))
+      assert.equal(scanArgs[1].targetVersion, '9.9.9')
+    }
+    t.mock.timers.tick(RESTART_DELAY_MS + 1)
+    assert.deepEqual(exits, [])
+  })
+}
+
+for (const whitelisted of [false, true]) {
+  test('upgrade:入口插件 block 且先升级插件时接受' + (whitelisted ? '白名单' : '非白名单') + ' registry 插件,更新并通过候选复检后才切槽', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    // Given 环境通过,可更新插件当前阻断;白名单不改变先更新再复检的规则
+    const calls = []
+    const scanArgs = []
+    const candidatePackage = '/fake/slot/node_modules/@deepseek-ai/dsh'
+    const plugin = {
+      name: '@scope/a', version: '1.0.0', status: 'block', reasons: ['宿主版本要求不满足'],
+      safeModeProtected: whitelisted, safeModeWhitelisted: whitelisted, safeModeCandidate: !whitelisted,
+    }
+    const pluginManager = {
+      listBundles: async () => [{ name: '@scope/a', installed: true, update: 'registry', version: '1.0.0' }],
+      listVersions: async (name) => {
+        calls.push(['listVersions', name])
+        return { status: 'listed', installed: '1.0.0', registry: null, versions: [{ version: '1.1.0', bundle: true, prerelease: false }] }
+      },
+      updateBundle: async (name, version) => {
+        calls.push(['updateBundle', name, version])
+        return { from: '1.0.0', to: version, step: 'install', result: { application: 'applied', changed: true } }
+      },
+    }
+    const runner = makeRunnerStub({ result: async (input) => {
+      calls.push(['host'])
+      await input.beforeSwitch({ candidatePackage })
+      calls.push(['switch'])
+      return { operationId: 'op-repair-block', switched: true, phase: 'awaiting-restart', slot: 'a' }
+    } })
+    const { routes } = makeCtx({
+      settingsStore: { safeModeWhitelist: whitelisted ? ['@scope/a'] : [] },
+      services: { ...IDLE_SERVICES, pluginManager },
+      dependencies: DEPS({
+        runManagedUpgrade: runner,
+        scanPlugins: async (args) => {
+          scanArgs.push(args)
+          calls.push(['scan', scanArgs.length])
+          return {
+            available: true,
+            plugins: scanArgs.length === 1 ? [plugin] : [],
+            safeModeAvailable: !whitelisted,
+            safeModeCandidates: whitelisted ? [] : [plugin],
+          }
+        },
+      }),
+    })
+    // When 不开安全模式,显式先升级插件
+    const accepted = await post(routes, '/api/maintain/upgrade', {
+      targetVersion: '9.9.9', upgradePlugins: true, safeMode: false, autoRestart: false,
+    })
+    // Then 入口不得抢先拒绝,更新完成且候选扫描无阻断后才能切换
+    assert.equal(accepted.status, 200, '插件阻断应交由切槽前更新与候选复检处理')
+    let settled = null
+    for (let i = 0; i < 50 && settled === null; i += 1) {
+      await realSleep(20)
+      const status = (await get(routes, '/api/maintain/status')).payload
+      if (status?.upgrade?.running === false && status?.upgrade?.last) settled = status
+    }
+    assert.ok(settled)
+    assert.equal(settled.upgrade.last.ok, true)
+    assert.equal(settled.upgrade.last.switched, true)
+    assert.deepEqual(settled.upgrade.last.plugins.items.map((row) => [row.name, row.state, row.to]), [
+      ['@scope/a', 'updated', '1.1.0'],
+    ])
+    assert.deepEqual(calls, [
+      ['scan', 1], ['host'], ['listVersions', '@scope/a'], ['updateBundle', '@scope/a', '1.1.0'], ['scan', 2], ['switch'],
+    ])
+    assert.equal(scanArgs[1].installAnchor, join(candidatePackage, 'package.json'))
+    assert.equal(scanArgs[1].targetVersion, '9.9.9')
+    assert.deepEqual(scanArgs.map((args) => args.safeModeWhitelist), whitelisted ? [['@scope/a'], ['@scope/a']] : [[], []])
+  })
+}
 
 test('upgrade:runner 失败不调度退出,状态落定失败,可再次发起', async () => {
   const exits = []
@@ -2249,7 +2515,7 @@ test('健康检查:appReady 后核对插件失败并把 state 标 degraded', asy
   assert.equal(payload.lastUpgrade.health.failed[0].moduleName, '@scope/a')
 })
 
-test('健康检查:新宿主启动后按目标版本升级待处理插件并写回结果', async (t) => {
+test('健康检查:新宿主落地不再自动升级插件,state.json 的插件记录原样展示', async (t) => {
   const { mkdtemp, writeFile, readFile, rm } = await import('node:fs/promises')
   const { tmpdir } = await import('node:os')
   const { join } = await import('node:path')
@@ -2261,24 +2527,19 @@ test('健康检查:新宿主启动后按目标版本升级待处理插件并写�
     targetPackage: RUNNING_INSTALL.originalPackage,
     phase: 'awaiting-restart',
     startedAt: 100,
-    plugins: { requested: true, pending: true, updated: [], failed: [], skipped: [], error: null },
+    plugins: { requested: true, total: 1, items: [{ name: '@scope/a', state: 'updated', from: '1.0.0', to: '1.1.0' }], error: null },
   }))
   const calls = []
   let ready = null
   const pluginManager = {
-    listBundles: async () => [{ name: '@scope/a', installed: true, update: 'registry', version: '1.0.0' }],
-    listVersions: async (name, options) => {
-      calls.push(['listVersions', name, options])
-      return {
-        status: 'listed',
-        installed: '1.0.0',
-        registry: null,
-        versions: [{ version: '1.1.0', bundle: true, prerelease: false }],
-      }
+    listBundles: async () => [{ name: '@scope/a', installed: true, update: 'registry', version: '1.1.0' }],
+    listVersions: async (name) => {
+      calls.push(['listVersions', name])
+      return { status: 'listed', installed: '1.1.0', registry: null, versions: [] }
     },
     updateBundle: async (name, version) => {
       calls.push(['updateBundle', name, version])
-      return { from: '1.0.0', to: version, step: 'install', result: { application: 'applied', changed: true } }
+      return { result: { application: 'applied' } }
     },
   }
   const { routes } = makeCtx({
@@ -2294,31 +2555,14 @@ test('健康检查:新宿主启动后按目标版本升级待处理插件并写�
   await ready()
   const state = JSON.parse(await readFile(join(root, 'state.json'), 'utf8'))
   assert.equal(state.phase, 'healthy')
-  assert.equal(state.plugins.pending, false)
-  assert.deepEqual(state.plugins.updated.map((row) => row.name), ['@scope/a'])
-  assert.deepEqual(calls, [
-    ['listVersions', '@scope/a', { registry: 'https://registry.npmjs.org' }],
-    ['updateBundle', '@scope/a', '1.1.0'],
-  ])
+  assert.deepEqual(state.plugins.items.map((row) => row.state), ['updated'])
+  assert.deepEqual(calls, [], '新宿主落地不得再触发插件升级')
   const payload = (await get(routes, '/api/maintain/status')).payload
-  assert.equal(payload.lastUpgrade.plugins.updated[0].name, '@scope/a')
+  assert.equal(payload.lastUpgrade.plugins.items[0].name, '@scope/a')
 })
 
-test('健康检查:插件升级进行中通过 status.pluginUpgrade 暴露进度', async (t) => {
-  const { mkdtemp, writeFile, rm } = await import('node:fs/promises')
-  const { tmpdir } = await import('node:os')
-  const { join } = await import('node:path')
-  const root = await mkdtemp(join(tmpdir(), 'maintain-post-progress-'))
-  t.after(() => rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }))
-  await writeFile(join(root, 'state.json'), JSON.stringify({
-    operationId: 'op-post-progress',
-    targetVersion: '0.1.1',
-    targetPackage: RUNNING_INSTALL.originalPackage,
-    phase: 'awaiting-restart',
-    startedAt: 100,
-    plugins: { requested: true, pending: true, updated: [], failed: [], skipped: [], error: null },
-  }))
-  let ready = null
+test('升级进度:切槽前插件升级过程通过 status.upgrade.progress 暴露插件与步骤', async (t) => {
+  const calls = []
   let releaseUpdate
   let startedUpdate
   const updateStarted = new Promise((resolve) => { startedUpdate = resolve })
@@ -2331,32 +2575,101 @@ test('健康检查:插件升级进行中通过 status.pluginUpgrade 暴露进度
       versions: [{ version: '1.1.0', bundle: true, prerelease: false }],
     }),
     updateBundle: async (name, version) => {
+      calls.push(['updateBundle', name, version])
       startedUpdate()
       await new Promise((resolve) => { releaseUpdate = resolve })
       return { from: '1.0.0', to: version, step: 'install', result: { application: 'applied', changed: true } }
     },
   }
+  const runner = makeRunnerStub({ result: async (input) => {
+    input.onPhase?.({ phase: 'pre-switch', operationId: 'op-progress', slot: 'a' })
+    await input.beforeSwitch({ candidatePackage: '/fake/slot/node_modules/@deepseek-ai/dsh' })
+    return { operationId: 'op-progress', switched: true, phase: 'awaiting-restart', slot: 'a' }
+  } })
   const { routes } = makeCtx({
-    services: {
-      ...IDLE_SERVICES,
-      hostVersionProbe: () => '0.1.1',
-      appReady: { onReady: (listener) => { ready = listener } },
-      pluginInventory: { list: async () => ({ entries: [] }) },
-      pluginManager,
-    },
-    dependencies: DEPS({ createLayout: async () => ({ ...LAYOUT_STUB, root }) }),
+    services: { ...IDLE_SERVICES, pluginManager },
+    dependencies: DEPS({
+      runManagedUpgrade: runner,
+      scanPlugins: async () => ({ available: true, plugins: [], safeModeCandidates: [] }),
+    }),
   })
-  const readyPromise = ready()
+  const accepted = await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9', upgradePlugins: true })
+  assert.equal(accepted.status, 200)
   await updateStarted
   const running = (await get(routes, '/api/maintain/status')).payload
-  assert.equal(running.pluginUpgrade.running, true)
-  assert.equal(running.pluginUpgrade.phase, 'plugins')
-  assert.match(running.pluginUpgrade.phaseLabel, /插件/)
+  assert.equal(running.upgrade.running, true)
+  assert.equal(running.upgrade.progress.phase, 'pre-switch')
+  assert.match(running.upgrade.progress.phaseLabel, /@scope\/a\(1\/1\)/)
+  assert.deepEqual(running.upgrade.progress.items.map((item) => item.state), ['upgrading'])
+  assert.equal(running.upgrade.progress.plugin.name, '@scope/a')
+  assert.equal(running.upgrade.progress.plugin.step, 'upgrading')
   releaseUpdate()
-  await readyPromise
-  const settled = (await get(routes, '/api/maintain/status')).payload
-  assert.equal(settled.pluginUpgrade, null)
-  assert.equal(settled.lastUpgrade.plugins.updated[0].name, '@scope/a')
+  let settled = null
+  for (let i = 0; i < 50 && settled === null; i += 1) {
+    await realSleep(20)
+    const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
+    if (status?.upgrade?.running === false && status?.upgrade?.last) settled = status
+  }
+  assert.ok(settled)
+  assert.equal(settled.upgrade.last.plugins.items[0].state, 'updated')
+})
+
+test('升级进度:宿主 update-state 事件把插件阶段细化为禁用/启用文案,结束后释放订阅', async (t) => {
+  let routesRef = null
+  let ctxRef = null
+  let release
+  let startedUpdate
+  const updateStarted = new Promise((resolve) => { startedUpdate = resolve })
+  const labels = []
+  const pluginManager = {
+    listBundles: async () => [{ name: '@scope/a', installed: true, update: 'registry', version: '1.0.0' }],
+    listVersions: async () => ({
+      status: 'listed',
+      installed: '1.0.0',
+      registry: null,
+      versions: [{ version: '1.1.0', bundle: true, prerelease: false }],
+    }),
+    updateBundle: async (name, version, options) => {
+      const listener = ctxRef && (ctxRef.calls.hooks.find((hook) => hook.event === 'plugin-manager/update-state') || {}).listener
+      assert.ok(listener, '插件升级前必须已订阅宿主 update-state')
+      for (const step of ['removing', 'installing']) {
+        listener({ requestId: options.requestId, step })
+        const running = (await get(routesRef, '/api/maintain/status')).payload
+        labels.push(running.upgrade.progress.phaseLabel)
+      }
+      startedUpdate()
+      await new Promise((resolve) => { release = resolve })
+      return { from: '1.0.0', to: version, step: 'install', result: { application: 'applied' } }
+    },
+  }
+  const runner = makeRunnerStub({ result: async (input) => {
+    input.onPhase?.({ phase: 'pre-switch', operationId: 'op-steps', slot: 'a' })
+    await input.beforeSwitch({ candidatePackage: '/fake/slot/node_modules/@deepseek-ai/dsh' })
+    return { operationId: 'op-steps', switched: true, phase: 'awaiting-restart', slot: 'a' }
+  } })
+  const { ctx, routes } = makeCtx({
+    services: { ...IDLE_SERVICES, pluginManager },
+    dependencies: DEPS({
+      runManagedUpgrade: runner,
+      scanPlugins: async () => ({ available: true, plugins: [], safeModeCandidates: [] }),
+    }),
+  })
+  routesRef = routes
+  ctxRef = ctx
+  const accepted = await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9', upgradePlugins: true })
+  assert.equal(accepted.status, 200)
+  await updateStarted
+  assert.deepEqual(labels, ['正在禁用插件 @scope/a(1/1)', '正在启用插件 @scope/a(1/1)'])
+  release()
+  let settled = null
+  for (let i = 0; i < 50 && settled === null; i += 1) {
+    await realSleep(20)
+    const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
+    if (status?.upgrade?.running === false && status?.upgrade?.last) settled = status
+  }
+  assert.ok(settled)
+  assert.equal(settled.upgrade.last.plugins.items[0].state, 'updated')
+  assert.equal(ctx.calls.hooks.some((hook) => hook.event === 'plugin-manager/update-state'), false)
 })
 
 test('健康检查:服务缺失时不得误写 healthy', async (t) => {

@@ -3,6 +3,9 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 
 import {
   MAINTAIN_BUNDLE,
@@ -13,6 +16,7 @@ import {
   isSafeModeProtectedPlugin,
   normalizeSafeModeWhitelist,
   scanProfilePlugins,
+  scanCandidatePlugins,
 } from '../src/plugin-compat.mjs'
 
 const TARGET = '0.2.2-rc.3'
@@ -174,6 +178,184 @@ test('scanProfilePlugins:白名单插件不进入安全模式候选并带原因'
   assert.equal(plugin.safeModeCandidate, false)
   assert.match(plugin.reasons.join(' '), /白名单/)
   assert.deepEqual(report.safeModeCandidates, [])
+})
+
+function scanFixture(overrides = {}) {
+  return scanProfilePlugins({
+    profileDir: 'C:/fake-profile',
+    targetVersion: TARGET,
+    pluginManager: {
+      listBundles: async () => [{ name: '@scope/plugin', enabled: true, installed: true, availability: 'profile' }],
+      setBundleEnabled: async () => {},
+    },
+    loadEvaluator: () => ({ evaluate: () => undefined, readExemptions: () => ({}) }),
+    readFileImpl: async () => JSON.stringify(manifest()),
+    ...overrides,
+  })
+}
+
+// Given 宿主兼容 API 缺失或损坏 When 严格扫描 Then 不可用且说明故障。
+for (const [label, api, reason] of [
+  ['整个 API 缺失', null, /宿主.*兼容/],
+  ['evaluator 缺失', { readExemptions: () => ({}) }, /evaluate/],
+  ['evaluator 不可调用', { evaluate: true, readExemptions: () => ({}) }, /evaluate/],
+  ['readExemptions 缺失', { evaluate: () => undefined }, /readExemptions/],
+  ['readExemptions 不可调用', { evaluate: () => undefined, readExemptions: true }, /readExemptions/],
+]) {
+  test('scanProfilePlugins:strict ' + label + ' 时不可放行', async () => {
+    const report = await scanFixture({ strict: true, loadEvaluator: () => api })
+    assert.equal(report.available, false)
+    assert.equal(report.safeModeAvailable, false)
+    assert.match(report.reason, reason)
+  })
+}
+
+for (const strict of [false, true]) {
+  test('scanProfilePlugins:' + (strict ? 'strict' : '默认') + ' 宿主 API 加载异常', async () => {
+    const options = { loadEvaluator: () => { throw new Error('host-load-broken') } }
+    if (!strict) {
+      await assert.rejects(scanFixture(options), /host-load-broken/)
+      return
+    }
+    const report = await scanFixture({ ...options, strict })
+    assert.equal(report.available, false)
+    assert.match(report.reason, /宿主.*兼容.*host-load-broken/)
+  })
+}
+
+// Given 扫描依赖失败 When 分别默认和严格扫描 Then 仅严格模式关闭放行。
+for (const [label, overrides, strictReason, defaultReason] of [
+  ['豁免读取异常', {
+    loadEvaluator: () => ({ evaluate: () => undefined, readExemptions: async () => { throw new Error('exemptions-broken') } }),
+  }, /豁免.*exemptions-broken/, /未声明/],
+  ['manifest 读取失败', {
+    readFileImpl: async () => { throw new Error('manifest-ENOENT') },
+  }, /@scope\/plugin.*manifest.*manifest-ENOENT/, /读取插件清单失败.*manifest-ENOENT/],
+  ['manifest 解析失败', {
+    readFileImpl: async () => '{broken-json',
+  }, /@scope\/plugin.*manifest/, /读取插件清单失败/],
+  ['evaluator 抛错', {
+    loadEvaluator: () => ({ evaluate: () => { throw new Error('evaluator-broken') }, readExemptions: () => ({}) }),
+  }, /@scope\/plugin.*兼容判定失败.*evaluator-broken/, /兼容判定失败.*evaluator-broken/],
+]) {
+  for (const strict of [false, true]) {
+    test('scanProfilePlugins:' + (strict ? 'strict' : '默认') + ' ' + label, async () => {
+      const report = await scanFixture({ ...overrides, ...(strict ? { strict } : {}) })
+      assert.equal(report.available, !strict)
+      if (strict) {
+        assert.equal(report.safeModeAvailable, false)
+        assert.match(report.reason, strictReason)
+      } else {
+        assert.equal(report.plugins[0].status, PLUGIN_WARN)
+        assert.match(report.plugins[0].reasons.join(' '), defaultReason)
+      }
+    })
+  }
+}
+
+test('scanProfilePlugins:默认宿主 API 缺失时继续矩阵预检', async () => {
+  const report = await scanFixture({ loadEvaluator: () => null })
+  assert.equal(report.available, true)
+  assert.equal(report.plugins[0].status, PLUGIN_WARN)
+})
+
+// Given 可用宿主 API When 严格扫描 Then 正常分类与启用插件筛选不变。
+for (const [label, evaluate, status] of [
+  ['无声明仍警告', () => undefined, PLUGIN_WARN],
+  ['不兼容仍阻断', () => ({ requirements: { 'engines.dsh': '>=0.3.0' }, exempted: false }), PLUGIN_BLOCK],
+]) {
+  test('scanProfilePlugins:strict ' + label, async () => {
+    const report = await scanFixture({
+      strict: true,
+      loadEvaluator: () => ({ evaluate, readExemptions: () => ({}) }),
+    })
+    assert.equal(report.available, true)
+    assert.equal(report.plugins[0].status, status)
+  })
+}
+
+test('scanProfilePlugins:strict 正常时向 evaluator 传递豁免与目标版本', async () => {
+  const exemptions = { '@scope/plugin': true }
+  const report = await scanFixture({
+    strict: true,
+    loadEvaluator: () => ({
+      evaluate: (value, receivedExemptions, targetVersion) => {
+        assert.equal(value.name, '@scope/plugin')
+        assert.deepEqual(receivedExemptions, exemptions)
+        assert.equal(targetVersion, TARGET)
+      },
+      readExemptions: () => exemptions,
+    }),
+    readFileImpl: async () => JSON.stringify(manifest({ dsh: { compatibility: { dshReleases: { [TARGET]: 'compatible' } } } })),
+  })
+  assert.equal(report.available, true)
+  assert.equal(report.plugins[0].status, PLUGIN_OK)
+})
+
+test('scanProfilePlugins:strict 不读取已禁用、未安装、官方及非 bundle 插件的 manifest', async () => {
+  const report = await scanFixture({
+    strict: true,
+    pluginManager: { listBundles: async () => [
+      { name: '@scope/disabled', enabled: false, installed: true },
+      { name: '@scope/uninstalled', enabled: true, installed: false },
+      { name: '@scope/official', enabled: true, installed: true, official: true },
+      { name: '@scope/installation', enabled: true, installed: true, availability: 'installation' },
+      { name: '@scope/not-bundle', enabled: true, installed: true, error: { code: 'not-bundle' } },
+    ] },
+    readFileImpl: async () => { throw new Error('不应读取被筛除插件') },
+  })
+  assert.equal(report.available, true)
+  assert.deepEqual(report.plugins, [])
+})
+
+test('scanProfilePlugins:strict 任一保护插件读取失败不可被先前成功插件掩盖', async () => {
+  const report = await scanFixture({
+    strict: true,
+    pluginManager: { listBundles: async () => [
+      { name: '@scope/plugin', enabled: true, installed: true },
+      { name: MAINTAIN_BUNDLE, enabled: true, installed: true },
+    ] },
+    readFileImpl: async (path) => {
+      if (path.includes('dsh-maintain')) throw new Error('protected-manifest-broken')
+      return JSON.stringify(manifest())
+    },
+  })
+  assert.equal(report.available, false)
+  assert.match(report.reason, /@mzzsfy\/dsh-maintain.*protected-manifest-broken/)
+})
+
+test('候选复检:拒绝解析到槽外的评估器,同槽重装后读取新评估器', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'maintain-candidate-scan-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const slot = join(root, 'slot')
+  const anchor = join(slot, 'node_modules', '@deepseek-ai', 'dsh', 'package.json')
+  const profileDir = join(root, 'profile')
+  const pluginFile = join(profileDir, 'node_modules', '@scope', 'plugin', 'package.json')
+  for (const file of [anchor, pluginFile]) {
+    await mkdir(dirname(file), { recursive: true })
+    await writeFile(file, JSON.stringify(manifest()))
+  }
+  async function installEvaluator(parent, verdict) {
+    const file = join(parent, 'node_modules', '@deepseek-ai', 'dsh-app-boot', 'index.cjs')
+    await mkdir(dirname(file), { recursive: true })
+    await writeFile(join(dirname(file), 'package.json'), JSON.stringify({ main: 'index.cjs' }))
+    await writeFile(file, `module.exports = { readProfileVersionExemptions: () => ({}), evaluatePluginCompatibility: () => ${verdict} }`)
+  }
+  await installEvaluator(root, 'undefined')
+  const options = {
+    profileDir, installAnchor: anchor, targetVersion: TARGET, strict: true, candidateSlot: slot,
+    pluginManager: { listBundles: async () => [{ name: '@scope/plugin', enabled: true, installed: true }] },
+  }
+  const missing = await scanCandidatePlugins(options)
+  assert.equal(missing.available, false)
+  await installEvaluator(slot, 'undefined')
+  const first = await scanCandidatePlugins(options)
+  assert.equal(first.available, true)
+  assert.equal(first.plugins[0].status, PLUGIN_WARN)
+  await installEvaluator(slot, '({ requirements: { dsh: ">99" } })')
+  const second = await scanCandidatePlugins(options)
+  assert.equal(second.available, true)
+  assert.equal(second.plugins[0].status, PLUGIN_BLOCK)
 })
 
 test('scanProfilePlugins:pluginManager 缺失时返回 unavailable,不抛错', async () => {

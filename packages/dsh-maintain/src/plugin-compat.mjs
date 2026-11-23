@@ -1,7 +1,12 @@
 // 插件兼容判定与安全模式候选:纯判定与 profile 读取分层,宿主能力经注入,便于单测。
+import { realpathSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
-import { join } from 'node:path'
+import { isAbsolute, join, relative, sep } from 'node:path'
+import { Worker } from 'node:worker_threads'
+
+const HOST_COMPAT_PACKAGE = '@deepseek-ai/dsh-app-boot'
+const CANDIDATE_SCAN_TIMEOUT_MS = 60 * 1000
 
 export const MAINTAIN_BUNDLE = '@mzzsfy/dsh-maintain'
 
@@ -71,11 +76,16 @@ export function classifyPluginCompatibility({ manifest, targetVersion, evaluator
 }
 
 // 宿主安装树内的兼容判定 API:profile 的 node_modules 不含 app-boot,必须从 installAnchor 解析。
-export function loadHostCompatibilityApi(installAnchor) {
+export function loadHostCompatibilityApi(installAnchor, candidateSlot) {
   try {
     if (!installAnchor) return null
     const requireFromHost = createRequire(installAnchor)
-    const api = requireFromHost('@deepseek-ai/dsh-app-boot')
+    const entry = requireFromHost.resolve(HOST_COMPAT_PACKAGE)
+    if (candidateSlot) {
+      const pathInSlot = relative(realpathSync(candidateSlot), realpathSync(entry))
+      if (isAbsolute(pathInSlot) || pathInSlot === '..' || pathInSlot.startsWith('..' + sep)) return null
+    }
+    const api = requireFromHost(entry)
     if (typeof api.evaluatePluginCompatibility !== 'function' || typeof api.readProfileVersionExemptions !== 'function') return null
     return {
       evaluate: api.evaluatePluginCompatibility,
@@ -95,6 +105,47 @@ async function readManifest(profileDir, name, readFileImpl) {
   return JSON.parse(await readFileImpl(path, 'utf8'))
 }
 
+// 新 Worker 不复用上一次候选的模块缓存;只传复检需要的清单字段。
+export async function scanCandidatePlugins({ profileDir, installAnchor, targetVersion, pluginManager, safeModeWhitelist, candidateSlot }) {
+  if (!candidateSlot) return unavailable('缺少候选安装槽')
+  let rows
+  try {
+    rows = await pluginManager.listBundles()
+  } catch (error) {
+    return unavailable('读取插件清单失败: ' + (error?.message ?? error))
+  }
+  if (!Array.isArray(rows)) return unavailable('插件清单不是数组')
+  const plugins = rows.filter((row) => row && typeof row.name === 'string').map((row) => ({
+    name: row.name,
+    version: row.version,
+    enabled: row.enabled,
+    installed: row.installed,
+    official: row.official,
+    availability: row.availability,
+    error: row.error?.code ?? String(row.error ?? ''),
+    readOnlyReason: row.readOnlyReason,
+  }))
+  return new Promise((resolve) => {
+    const worker = new Worker(new URL('./candidate-plugin-scan.mjs', import.meta.url), {
+      workerData: { profileDir, installAnchor, targetVersion, safeModeWhitelist, candidateSlot, plugins },
+      execArgv: [],
+      env: {},
+    })
+    let settled = false
+    const finish = (result) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(result)
+      void worker.terminate()
+    }
+    const timer = setTimeout(() => finish(unavailable('目标宿主插件复检超时')), CANDIDATE_SCAN_TIMEOUT_MS)
+    worker.once('message', finish)
+    worker.once('error', (error) => finish(unavailable('目标宿主插件复检失败: ' + error.message)))
+    worker.once('exit', (code) => finish(unavailable('目标宿主插件复检未返回结果: ' + code)))
+  })
+}
+
 // profile 插件扫描:pluginManager 提供启用/安装/只读状态与禁用能力;缺失即降级不可用。
 export async function scanProfilePlugins({
   profileDir,
@@ -102,6 +153,7 @@ export async function scanProfilePlugins({
   targetVersion,
   pluginManager,
   safeModeWhitelist = [],
+  strict = false,
   loadEvaluator = loadHostCompatibilityApi,
   readFileImpl = readFile,
 } = {}) {
@@ -114,9 +166,20 @@ export async function scanProfilePlugins({
     return unavailable('读取插件清单失败: ' + (error && error.message ? error.message : String(error)))
   }
   if (!Array.isArray(rows)) return unavailable('插件清单不是数组')
-  const api = loadEvaluator(installAnchor)
+  let api
+  try {
+    api = loadEvaluator(installAnchor)
+  } catch (error) {
+    if (strict) return unavailable('加载宿主兼容判定 API 失败: ' + (error?.message ?? error))
+    throw error
+  }
+  if (strict && (!api || typeof api.evaluate !== 'function' || typeof api.readExemptions !== 'function')) {
+    return unavailable('宿主兼容判定 API 不可用: evaluate/readExemptions 缺失或不可调用')
+  }
   let exemptions = {}
-  try { if (api) exemptions = await api.readExemptions(profileDir) } catch {}
+  try { if (api) exemptions = await api.readExemptions(profileDir) } catch (error) {
+    if (strict) return unavailable('读取插件版本豁免失败: ' + (error?.message ?? error))
+  }
   const plugins = []
   for (const row of rows) {
     if (!row || typeof row.name !== 'string') continue
@@ -132,6 +195,7 @@ export async function scanProfilePlugins({
     try {
       manifest = await readManifest(profileDir, row.name, readFileImpl)
     } catch (error) {
+      if (strict) return unavailable('插件 ' + row.name + ' manifest 读取失败: ' + (error?.message ?? error))
       plugins.push({
         name: row.name,
         version: row.version ?? null,
@@ -155,6 +219,7 @@ export async function scanProfilePlugins({
         exemptions,
       })
     } catch (error) {
+      if (strict) return unavailable('插件 ' + row.name + ' 兼容判定失败: ' + (error?.message ?? error))
       classified = { status: PLUGIN_WARN, reasons: ['兼容判定失败: ' + (error?.message ?? error)] }
     }
     plugins.push({

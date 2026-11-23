@@ -164,21 +164,26 @@ test('finalizeManagedState:读取旧 state 并写入 healthy 与 health,保留�
   assert.equal(disk.health.ok, true)
 })
 
-test('normalizePluginUpgrade:保留待执行标记与结果行', () => {
+test('normalizePluginUpgrade:逐插件状态与错误保留', () => {
   const normalized = normalizePluginUpgrade({
     requested: true,
-    pending: true,
-    updated: [{ name: '@scope/a', from: '1.0.0', to: '1.1.0' }],
-    failed: [],
-    skipped: [],
+    items: [
+      { name: '@scope/a', state: 'updated', from: '1.0.0', to: '1.1.0', application: 'applied' },
+      { name: '@scope/b', state: 'failed', error: 'network down', restoreFailed: true },
+      { name: '@scope/c', state: 'skipped', reason: '没有严格高于已装版本的兼容版本' },
+    ],
     error: null,
   })
-  assert.equal(normalized.pending, true)
-  assert.equal(normalized.updated[0].name, '@scope/a')
-  assert.equal(normalizePluginUpgrade({ requested: true, pending: false }).pending, false)
+  assert.equal(normalized.total, 3)
+  assert.equal(normalized.items[0].state, 'updated')
+  assert.equal(normalized.items[1].error, 'network down')
+  assert.equal(normalized.items[1].restoreFailed, true)
+  assert.match(normalized.items[2].reason, /严格高于/)
+  assert.equal(normalizePluginUpgrade({ requested: true }).items.length, 0)
+  assert.equal(normalizePluginUpgrade({ requested: false }), null)
 })
 
-test('mergeManagedState:插件同步升级结果与健康收尾并存', async (t) => {
+test('mergeManagedState:插件前置升级结果与健康收尾并存', async (t) => {
   const root = await makeRoot(t)
   await writeFile(join(root, 'state.json'), JSON.stringify({
     operationId: 'op-plugins',
@@ -189,15 +194,16 @@ test('mergeManagedState:插件同步升级结果与健康收尾并存', async (t
   }))
   const plugins = {
     requested: true,
-    updated: [{ name: '@scope/a', from: '1.0.0', to: '1.1.0', application: 'applied' }],
-    failed: [],
-    skipped: [{ name: '@scope/git', reason: 'Git 插件没有版本列表,跳过' }],
+    items: [
+      { name: '@scope/a', state: 'updated', from: '1.0.0', to: '1.1.0', application: 'applied' },
+      { name: '@scope/git', state: 'skipped', reason: 'Git 插件没有版本列表,跳过' },
+    ],
     error: null,
   }
   await mergeManagedState({ root }, { plugins })
   await finalizeManagedState({ root }, { phase: 'healthy', health: { ok: true }, finishedAt: 200 })
   const state = await readManagedState({ root })
-  assert.deepEqual(state.plugins, plugins)
+  assert.deepEqual(state.plugins.items.map((row) => row.name), ['@scope/a', '@scope/git'])
   assert.equal(state.health.ok, true)
   assert.equal(state.phase, 'healthy')
   const reconciled = reconcileManagedState({
@@ -206,8 +212,9 @@ test('mergeManagedState:插件同步升级结果与健康收尾并存', async (t
     runningPackage: 'C:/new/dsh',
     platform: 'win32',
   })
-  assert.equal(reconciled.plugins.updated[0].name, '@scope/a')
-  assert.equal(reconciled.plugins.skipped[0].name, '@scope/git')
+  assert.equal(reconciled.plugins.items[0].name, '@scope/a')
+  assert.equal(reconciled.plugins.items[0].state, 'updated')
+  assert.equal(reconciled.plugins.items[1].state, 'skipped')
 })
 
 test('markUpgradeReceiptSeen:与健康收尾并发时保留已读标记', async (t) => {
