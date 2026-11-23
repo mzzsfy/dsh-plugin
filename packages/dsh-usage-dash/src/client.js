@@ -3664,6 +3664,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     const SWITCH_EDGE_INSET = 3
     const SWITCH_THUMB_TRAVEL = SWITCH_TRACK_WIDTH - SWITCH_THUMB_SIZE - SWITCH_EDGE_INSET * 2
     const SWITCH_TRANSITION_MS = 120
+    // 最近请求详情表格列宽:首列同时容纳展开箭头与两位序号,表宽下限取列宽总和,窄屏横向滚动而不是压扁列宽
+    const REQUEST_TABLE_COLUMNS = ['64px', '72px', '72px', '132px', '64px', '84px', '72px', '88px', '88px']
+    const REQUEST_TABLE_MIN_WIDTH = REQUEST_TABLE_COLUMNS.reduce((total, width) => total + Number.parseFloat(width), 0)
     // 遮蔽语义:同 id 同 priority 属注册冲突(注册表抛错),需取更低值压过
     // 同格竞争者;usp 同款接管注册用 -1,本插件取次低值,官方无显式 priority(默认 0)
     const STATS_SLOT_PRIORITY = -2
@@ -4012,10 +4015,10 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-request-metric-label{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
 .ud-request-metric-value{font-size:14px;line-height:20px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
 .ud-request-table-wrap{overflow:auto;min-height:0}
-.ud-request-table{width:100%;min-width:660px;border-collapse:collapse;table-layout:fixed}
+.ud-request-table{width:100%;min-width:${REQUEST_TABLE_MIN_WIDTH}px;border-collapse:collapse;table-layout:fixed}
 .ud-request-table th{position:sticky;top:0;z-index:1;background:var(--dsw-alias-bg-layer-1);font-size:11px;line-height:16px;font-weight:500;color:var(--dsw-alias-label-tertiary);text-align:left;padding:8px 8px;border-bottom:.5px solid var(--dsw-alias-border-l2);white-space:nowrap}
 .ud-request-table td{padding:8px;border-bottom:.5px solid var(--dsw-alias-border-l1);vertical-align:middle;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ud-request-table th:first-child,.ud-request-table td:first-child{padding-left:20px;width:40px}
+.ud-request-table th:first-child,.ud-request-table td:first-child{padding-left:20px}
 .ud-request-table th:last-child,.ud-request-table td:last-child{padding-right:20px}
 .ud-request-row{cursor:pointer}
 .ud-request-row:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px}
@@ -4959,7 +4962,7 @@ ${HUD_CSS}
         h('div', { className: 'ud-request-table-wrap' },
           h('table', { className: 'ud-request-table' },
             h('colgroup', null,
-              ['40px', '72px', '72px', '132px', '64px', '84px', '72px', '88px', '88px'].map((width, index) => h('col', { key: index, style: { width } }))),
+              REQUEST_TABLE_COLUMNS.map((width, index) => h('col', { key: index, style: { width } }))),
             h('thead', null, h('tr', null,
               ['#', t('requestTime'), t('requestStatus'), t('requestModel'), t('requestFirstToken'), t('requestSpeed'), t('requestOutput'), t('requestTotalTokens'), t('requestEstimate')]
                 .map((label, index) => h('th', { key: index, scope: 'col' }, label)))),
