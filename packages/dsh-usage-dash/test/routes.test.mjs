@@ -634,7 +634,7 @@ test('pricing 非 GET/POST 方法拒绝 405', async () => {
   assert.equal(parsed.error.code, 'usage_api_error')
 })
 
-test('settings 缺席时 pricing POST 拒绝 503', async () => {
+test('定价能力缺席时 pricing POST 拒绝 503', async () => {
   const { routes } = mount()
   const res = await invokeJson(routes, PATH_PRICING, { payload: { rules: [] } })
   const parsed = JSON.parse(res.body)
@@ -713,7 +713,7 @@ test('minutes 端点按父 H 价格计价', async () => {
   assert.equal(parsed.value.unpriced, 0)
 })
 
-test('settings 缺席时 range 响应与现状形状一致(无 cost/unpriced)', async () => {
+test('定价能力缺席时 range 响应与现状形状一致(无 cost/unpriced)', async () => {
   const store = makeStore({ rows: [makeRow({ bucket: '2026-02-01', inputTokens: 10, requests: 1 })] })
   const { routes } = mount({ store })
   const res = await invokeJson(routes, PATH_RANGE, { payload: { from: '2026-02-01', to: '2026-02-01' } })
