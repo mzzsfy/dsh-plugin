@@ -220,7 +220,7 @@ test('详情抽屉化: 浮层结构+底层保留+无返回按钮', async () => {
   assert.match(html, /ssb-overlay/, '浮层容器渲染')
   assert.match(html, /ssb-drawer/, '抽屉形态')
   assert.match(html, /贵州茅台/, '抽屉内详情')
-  assert.match(html, /自选 · /, '底层自选列表仍渲染')
+  assert.match(html, /贵州茅台/, '底层自选列表仍渲染')
   assert.doesNotMatch(html, /返回自选/, '抽屉无返回自选按钮')
   assert.doesNotMatch(html, /返回市场/, '抽屉无返回市场按钮')
   assert.match(html, /ssb-overlay-close|关闭/, '统一关闭入口')
@@ -231,7 +231,7 @@ test('设置模态化: 遮罩居中+关闭回主区', async () => {
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {} }, layout: { providerCheck: () => {} } }))
   assert.match(html, /ssb-modal/, '模态形态')
   assert.match(html, /ssb-overlay/, '遮罩层')
-  assert.match(html, /自选 · /, '底层主区仍渲染')
+  assert.match(html, /ssb-list-pane/, '底层主区仍渲染')
   assert.doesNotMatch(html, /返回自选/, '模态无返回自选按钮')
 })
 test('K线周期Tab语义', async () => {
@@ -279,7 +279,7 @@ test('自选列表列权重与组合概览', async () => {
   const q = (last, pct, change) => ({ quote: { last, previousClose: '1', change, changePct: pct, providerInstanceId: 'a', delayKind: 'realtime', quoteAt: null, receivedAt: 1, sessionState: 'trading' }, health: 'ok', lastError: null })
   const state = { view: { view: 'list', sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [a.id, b.id], items: { [a.id]: a, [b.id]: b } }, preferences: {} }, quotes: { [a.id]: q('397.20', '1.27', '5.00'), [b.id]: q('1480.00', '2.84', '40.85') }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
-  assert.match(html, /2 只 · 2 涨 0 跌/, '组合概览条')
+  assert.match(html, /2 涨 0 跌/, '组合概览条')
   assert.match(html, /\+5\.00/, '涨跌额随现价单元格展示')
   assert.match(html, /\+1\.27%/, '涨跌幅胶囊')
   assert.match(html, /ssb-row-sub/, '副行展示开/高/低/成交额/振幅')
@@ -387,13 +387,13 @@ test('标签 tab 渲染与切换', async () => {
   assert.ok(allAt > 0 && allOpen >= 0, '存在「全部 · 4」按钮')
   assert.match(manual.slice(allOpen, allAt + 1), /aria-selected="true"/, '默认选中全部')
   for (const name of ['甲股', '乙股', '丙股', '丁股']) assert.ok(manual.includes(name), `全部 tab 应含 ${name}`)
-  // 统计行按当前 tab 成员算: 全部四只, 三只上涨
-  assert.match(manual, /4 只 · 3 涨 1 跌/)
+  // 统计行按当前 tab 成员算: 全部四只, 三只上涨; 只数由 tab 自带, 概览不再重复
+  assert.match(manual, /3 涨 1 跌/)
 
   const bai = render(withActive(mkState(), '白酒'))
   assert.ok(bai.includes('甲股') && bai.includes('丙股'))
   assert.ok(!bai.includes('乙股') && !bai.includes('丁股'), '非激活 tab 的成员不渲染')
-  assert.match(bai, /2 只 · 2 涨 0 跌/, '统计只算本 tab 成员')
+  assert.match(bai, /2 涨 0 跌/, '统计只算本 tab 成员')
   // 标签 tab 才有关联管理动作; 全部与未分组不是可管理的标签
   assert.ok(bai.includes('重命名') && bai.includes('解散'), '标签 tab 给重命名与解散')
   assert.ok(!manual.includes('重命名'), '全部 tab 不出现标签管理')
@@ -752,16 +752,27 @@ test('D02 拖拽落位计算: 段内前插/后插与非本 tab 成员回填', as
   assert.deepEqual([...dragOrder(['a', 'b'], full, 'b', 'a', false)], ['b', 'x', 'a', 'y'], '非本 tab 成员保持原槽位')
 })
 
-test('D03 副标题按自选实际市场面生成', async () => {
+// 视野优先: 顶部没有标题带, 分组 tab 之上也没有节头; 概览与更新时间是 tab 条右端的淡小字
+test('D03 顶栏与列表条各占一行, 标题与概览不单独占行', async () => {
   const { plugin } = await loadClientWithReact()
   const mk = (id, name, code, ex) => ({ id, officialName: name, code, exchange: ex, instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false })
   const a = mk('XHKG:equity:00700', '腾讯控股', '00700', 'XHKG'), b = mk('XNAS:equity:NVDA', '英伟达', 'NVDA', 'XNAS'), c = mk('XSHE:equity:000001', '平安银行', '000001', 'XSHE')
-  const build = ids => ({ view: { view: 'list', sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: ids, items: Object.fromEntries([a, b, c].map(s => [s.id, s]).filter(([id]) => ids.includes(id))) }, preferences: {} }, quotes: {}, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } })
-  const render = state => renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
-  assert.match(render(build([a.id, b.id, c.id])), /自选行情 · 沪深A股、港股、美股/, '三市场按固定优先级列出')
-  assert.match(render(build([b.id, a.id])), /自选行情 · 港股、美股/, '只列实际持有市场')
-  assert.match(render(build([c.id])), /自选行情 · 沪深A股/, '深市归入沪深A股')
-  assert.match(render(build([])), /自选行情 · 沪深A股、港股、美股、日股、韩股、英股/, '空自选给出覆盖范围')
+  const quote = pct => ({ quote: { last: '1', previousClose: '1', change: '0.01', changePct: pct, providerInstanceId: 'a', delayKind: 'realtime', quoteAt: null, receivedAt: Date.now() - 61 * 1000, sessionState: 'trading' }, health: 'ok', lastError: null })
+  const build = () => ({ view: { view: 'list', sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [a.id, b.id, c.id], items: { [a.id]: a, [b.id]: b, [c.id]: c } }, preferences: {} }, quotes: { [a.id]: quote('1'), [b.id]: quote('2'), [c.id]: quote('-1') }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } })
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => build(), subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
+  // 市场面由行内「港/美/深」标记与分组 tab 承担, 副标题连同标题带一起取消
+  assert.match(html, /class="ssb-sr-only">股票</, '标题只保留读屏名')
+  assert.ok(!html.includes('自选行情 ·'), '不再有副标题')
+  // 样式块里也有类名, 结构断言只看渲染体
+  const body = html.slice(html.indexOf('</style>'))
+  assert.ok(!body.includes('ssb-header'), '没有独立标题带')
+  assert.ok(!body.includes('ssb-section-head'), '没有独立节头')
+  const bar = body.slice(body.indexOf('ssb-listbar'), body.indexOf('ssb-table-scroll'))
+  assert.match(bar, /全部 · 3/, '分组 tab 落在列表条内')
+  assert.match(bar, /2 涨 1 跌/, '概览与 tab 同行')
+  assert.match(bar, /前更新/, '更新时间跟着概览走')
+  assert.match(bar, /ssb-listbar-meta/, '概览与更新时间是淡小字而非横幅')
+  assert.match(bar, /自选排序/, '排序下拉同一行')
 })
 
 // 卖价不是报价要素, 但目标位必须能在图例里读到, 否则图上只有一条看不见的线
