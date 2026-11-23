@@ -17,7 +17,7 @@ export const MESSAGES = {
 }
 
 function sendJson(res, status, payload) {
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
   res.end(JSON.stringify(payload))
 }
 
@@ -107,6 +107,13 @@ export function createApi({ tunnelsApi, readUi, updateUi, lanOrigin, logSystem }
       return outcome
     } },
     { method: 'DELETE', segments: ['tunnels', ':name'], handler: ({ params }) => tunnelsApi.close({ name: params.name }) },
+    { method: 'GET', segments: ['logs'], handler: ({ url }) => {
+      const limit = url.searchParams.get('limit')
+      return tunnelsApi.logs({
+        name: url.searchParams.get('name') ?? undefined,
+        limit: limit === null ? undefined : Number(limit),
+      })
+    } },
     { method: 'GET', segments: ['status'], handler: async () => {
       const result = await tunnelsApi.list()
       return { ui: readUi(), total: result.tunnels.length, lanOrigin: lanOrigin?.() }

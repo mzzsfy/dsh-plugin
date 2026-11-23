@@ -208,9 +208,9 @@ test('Given 显式 name 冲突 When tunnel_open Then 400 不自动改名', async
   assert.match(again.error, /已占用/)
 })
 
-test('Given 工具面 When 注册 Then 四件工具齐全, list 默认不探测', async () => {
+test('Given 工具面 When 注册 Then 五件工具齐全, list 默认不探测', async () => {
   const { plugin } = await scenario()
-  assert.deepEqual(Object.keys(plugin.tools).sort(), ['tunnel_close', 'tunnel_list', 'tunnel_open', 'tunnel_ports'])
+  assert.deepEqual(Object.keys(plugin.tools).sort(), ['tunnel_close', 'tunnel_list', 'tunnel_logs', 'tunnel_open', 'tunnel_ports'])
   const result = await list(plugin)
   assert.equal(result.ok, true)
 })

@@ -15,7 +15,7 @@ function loadLogic(navigator) {
   const end = clientSource.indexOf('/* LOGIC-END */')
   assert.ok(start >= 0 && end > start, '缺少 LOGIC 标记')
   const code = clientSource.slice(start, end)
-  return new Function('navigator', code + '\nreturn { accessUrlOf, accessLocalOnly, copyText, createRefreshGate, isPageVisible, entryLabelOf, isEntryLabelConflict, defaultEntryFor, entryHintOf, relativeTime, statusOf, statusTextOf, statusToneOf, statsTextOf, tunnelRowVM, portView, suggestName, tunnelBodyOf, liveTunnels, openAgeText, statusBarSummary, statusBarRowVM, PATH_PREFIX, NAME_RE, NAME_HAS_LETTER_RE, ENTRY_PATH, ENTRY_SUBDOMAIN, PORT_MIN, PORT_MAX, STALE_OPEN_MS }')(navigator)
+  return new Function('navigator', code + '\nreturn { accessUrlOf, accessLocalOnly, copyText, createRefreshGate, isPageVisible, entryLabelOf, isEntryLabelConflict, defaultEntryFor, entryHintOf, relativeTime, statusOf, statusTextOf, statusToneOf, statsTextOf, tunnelRowVM, portView, suggestName, tunnelBodyOf, liveTunnels, openAgeText, statusBarSummary, statusBarRowVM, filterRequestLogs, requestLogToneOf, requestLogStatusText, requestLogMsText, requestLogTimeText, PATH_PREFIX, NAME_RE, NAME_HAS_LETTER_RE, ENTRY_PATH, ENTRY_SUBDOMAIN, PORT_MIN, PORT_MAX, STALE_OPEN_MS }')(navigator)
 }
 
 function constantOf(source, name) {
@@ -281,4 +281,56 @@ test('页面可见性判定: 仅 hidden 视为不可见', () => {
   assert.equal(logic.isPageVisible({ visibilityState: 'visible' }), true)
   assert.equal(logic.isPageVisible({ visibilityState: 'hidden' }), false)
   assert.equal(logic.isPageVisible(undefined), true, '无 document 环境按可见处理')
+})
+
+test('请求日志: 过滤按隧道/方法/路径/状态/错误匹配, 空查询原样返回', () => {
+  const logic = loadLogic(undefined)
+  const items = [
+    { tunnel: 'app', method: 'GET', path: '/p/app/a?x=1', status: 200 },
+    { tunnel: 'web', method: 'POST', path: '/p/web/b', status: 502, error: 'ECONNREFUSED' },
+    { tunnel: 'jup', method: 'GET', kind: 'ws', path: '/api/kernels/abc/channels', status: 101 },
+    { tunnel: 'abort', method: 'GET', kind: 'http', path: '/p/abort/x', status: 0 },
+  ]
+  assert.equal(logic.filterRequestLogs(items, ''), items)
+  assert.deepEqual(logic.filterRequestLogs(items, 'APP').map((item) => item.tunnel), ['app'])
+  assert.deepEqual(logic.filterRequestLogs(items, 'post').map((item) => item.tunnel), ['web'])
+  assert.deepEqual(logic.filterRequestLogs(items, 'kernels').map((item) => item.tunnel), ['jup'])
+  assert.deepEqual(logic.filterRequestLogs(items, '502').map((item) => item.tunnel), ['web'])
+  assert.deepEqual(logic.filterRequestLogs(items, 'econnrefused').map((item) => item.tunnel), ['web'])
+  assert.deepEqual(logic.filterRequestLogs(items, 'WS').map((item) => item.tunnel), ['jup'])
+  assert.deepEqual(logic.filterRequestLogs(items, '中断').map((item) => item.tunnel), ['abort'])
+  assert.deepEqual(logic.filterRequestLogs(items, 'missing'), [])
+  assert.deepEqual(logic.filterRequestLogs(undefined, 'app'), [])
+})
+
+test('请求日志: 状态色只有 ok/warn/danger 三档, 0 视为中断', () => {
+  const logic = loadLogic(undefined)
+  assert.equal(logic.requestLogToneOf(101), 'ok')
+  assert.equal(logic.requestLogToneOf(200), 'ok')
+  assert.equal(logic.requestLogToneOf(302), 'ok')
+  assert.equal(logic.requestLogToneOf(404), 'warn')
+  assert.equal(logic.requestLogToneOf(500), 'danger')
+  assert.equal(logic.requestLogToneOf(504), 'danger')
+  assert.equal(logic.requestLogToneOf(0), 'danger')
+  assert.equal(logic.requestLogStatusText(0), '中断')
+  assert.equal(logic.requestLogStatusText(101), '101')
+})
+
+test('请求日志: 耗时按毫秒/秒收敛, 非法值给占位', () => {
+  const logic = loadLogic(undefined)
+  assert.equal(logic.requestLogMsText(0), '0ms')
+  assert.equal(logic.requestLogMsText(12), '12ms')
+  assert.equal(logic.requestLogMsText(999), '999ms')
+  assert.equal(logic.requestLogMsText(1000), '1.0s')
+  assert.equal(logic.requestLogMsText(1543), '1.5s')
+  assert.equal(logic.requestLogMsText(-1), '—')
+  assert.equal(logic.requestLogMsText('abc'), '—')
+})
+
+test('请求日志: 时间文本对非法输入给占位', () => {
+  const logic = loadLogic(undefined)
+  assert.equal(logic.requestLogTimeText(''), '—')
+  assert.equal(logic.requestLogTimeText(undefined), '—')
+  assert.equal(logic.requestLogTimeText('not-a-date'), '—')
+  assert.notEqual(logic.requestLogTimeText('2026-11-23T10:00:00.000Z'), '—')
 })

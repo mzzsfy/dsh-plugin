@@ -1,4 +1,4 @@
-// 「允许 ai 使用」开关注册面 BDD: 开关决定 tunnel_open/list/ports/close 是否向 ai 注册,
+// 「允许 ai 使用」开关注册面 BDD: 开关决定 tunnel_open/list/ports/close/logs 是否向 ai 注册,
 // 关闭即注销(干净禁用), GUI/REST 同表不受影响。覆盖双形态读写:
 // legacy 设置节(watch 回写)与 0.1.7+ volatile ref(loader 原地热更 + loader/volatile-update)。
 import test from 'node:test'
@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import { busStub, resetBusStub } from './_mocks.common-tools.mjs'
 import { FakeHost } from './support/fake-host.mjs'
 
-const TOOL_NAMES = ['tunnel_open', 'tunnel_list', 'tunnel_ports', 'tunnel_close']
+const TOOL_NAMES = ['tunnel_open', 'tunnel_list', 'tunnel_ports', 'tunnel_close', 'tunnel_logs']
 
 // 工具注册面桩: 只关心「谁被注册/何时被注销」
 function createToolsService() {
@@ -124,7 +124,7 @@ async function callApi(webServer, method, path, body) {
 
 const openTunnel = (webServer) => callApi(webServer, 'POST', '/tunnels', { name: 'app', targetPort: 80 })
 
-test('默认注册四件工具, status 暴露 aiTools 开', async () => {
+test('默认注册五件工具, status 暴露 aiTools 开', async () => {
   const { webServer, tools, dispose } = await applyPlugin()
   try {
     assert.deepEqual(tools.names().sort(), [...TOOL_NAMES].sort())
@@ -216,6 +216,24 @@ test('0.1.7 写路径: aiTools 经 configEditor 落 profile 条目, ref 写穿�
   } finally { dispose() }
 })
 
+test('REST ui-settings 更新 requestLogLimit: 合法值即时生效, 越界 400', async () => {
+  const settings = createSettingsService({ requestLogLimit: 500 })
+  const { webServer, dispose } = await applyPlugin({}, { settings: settings.service })
+  try {
+    const bad = await callApi(webServer, 'POST', '/ui-settings', { requestLogLimit: 2001 })
+    assert.equal(bad.status, 400)
+    assert.match(bad.payload.error, /requestLogLimit/)
+    const badFraction = await callApi(webServer, 'POST', '/ui-settings', { requestLogLimit: 1.5 })
+    assert.equal(badFraction.status, 400)
+    const ok = await callApi(webServer, 'POST', '/ui-settings', { requestLogLimit: 2 })
+    assert.equal(ok.payload.ok, true)
+    assert.equal(ok.payload.ui.requestLogLimit, 2)
+    assert.equal(settings.store.tunnel.requestLogLimit, 2)
+    const logs = await callApi(webServer, 'GET', '/logs')
+    assert.equal(logs.payload.limit, 2)
+  } finally { dispose() }
+})
+
 test('ui-settings 校验: 非布尔 400, 空补丁 400', async () => {
   const { webServer, dispose } = await applyPlugin()
   try {
@@ -263,8 +281,10 @@ test('Config volatile 标记面: 偏好字段 live, dataDir 不进 UI', async ()
   const { Config, SETTINGS_SCHEMA } = await import('../src/index.js')
   assert.equal(Config.dict.aiTools.meta.volatile, true)
   assert.equal(Config.dict.connectTimeoutMs.meta.volatile, true)
+  assert.equal(Config.dict.requestLogLimit.meta.volatile, true)
   assert.equal(Config.dict.dataDir.meta.volatile, undefined)
   assert.equal(SETTINGS_SCHEMA.dict.aiTools.meta.default, true)
+  assert.equal(SETTINGS_SCHEMA.dict.requestLogLimit.meta.default, 500)
   assert.equal(SETTINGS_SCHEMA.dict.dataDir, undefined, 'legacy 设置节不收环境路径')
 })
 

@@ -179,10 +179,10 @@ test.after(async () => {
   }
 })
 
-test('场景1 工具注册: Given apply Then 注册 tunnel_open/list/ports/close 四件', async () => {
+test('场景1 工具注册: Given apply Then 注册 tunnel_open/list/ports/close/logs 五件', async () => {
   const { host, plugin } = await scenario()
   cleanup.push(() => plugin.dispose(), () => host.dispose())
-  assert.deepEqual(Object.keys(plugin.tools).sort(), ['tunnel_close', 'tunnel_list', 'tunnel_open', 'tunnel_ports'])
+  assert.deepEqual(Object.keys(plugin.tools).sort(), ['tunnel_close', 'tunnel_list', 'tunnel_logs', 'tunnel_open', 'tunnel_ports'])
 })
 
 test('场景2 路径模式 open: Given 合法参数 Then 注册 /p/<名> 前缀路由并落盘, 不再有 wsPaths', async () => {

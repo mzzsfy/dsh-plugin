@@ -19,6 +19,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { setupCommonTools, createChangeNotifier } from '@mzzsfy/dsh-common-tools/host'
 import { createApi, MESSAGES, ROUTE_PREFIX as API_PREFIX } from './api.mjs'
 import { probeTcpPort, scanListeningPorts } from './discovery.mjs'
+import { createRequestLog, DEFAULT_REQUEST_LOG_LIMIT, REQUEST_LOG_KIND_HTTP, REQUEST_LOG_KIND_WS, REQUEST_LOG_LIMIT_MAX, REQUEST_LOG_LIMIT_MIN, REQUEST_LOG_QUERY_MAX } from './request-log.mjs'
 import { withRouteGate } from './route-gate.mjs'
 
 export const name = 'dsh-tunnel'
@@ -53,6 +54,8 @@ const LISTENER_PROP = 'dshTunnelListener'
 const DISPATCH_PROP = 'dshTunnelDispatch'
 // 超时载体: 同代际切换, 配置变更后旧包装器读到新值
 const TIMEOUT_PROP = 'dshTunnelTimeout'
+// 日志载体: 监听层包装器调用期读取, 重载后请求按当前代 logger 落缓冲
+const LOG_PROP = 'dshTunnelLog'
 const TIMED_OUT_MARK = Symbol.for('dsh-tunnel.timedOut')
 
 const renderJson = (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }]
@@ -73,7 +76,9 @@ const TIMEOUT_MAX_MS = 60 * 1000
 const timeoutField = () => z.number().step(1).min(TIMEOUT_MIN_MS).max(TIMEOUT_MAX_MS).default(DEFAULT_CONNECT_TIMEOUT)
   .description('等待目标响应头的超时, 头到即解除(SSE 等长流不受影响)')
 const aiToolsField = () => z.boolean().default(true)
-  .description('允许 ai 调用隧道工具(tunnel_open/list/ports/close), 关闭即向 ai 注销; 设置页与 REST 管理不受影响')
+  .description('允许 ai 调用隧道工具(tunnel_open/list/ports/close/logs), 关闭即向 ai 注销; 设置页与 REST 管理不受影响')
+const requestLogLimitField = () => z.number().step(1).min(REQUEST_LOG_LIMIT_MIN).max(REQUEST_LOG_LIMIT_MAX).default(DEFAULT_REQUEST_LOG_LIMIT)
+  .description('内存中滚动保留的最近请求条数, 0 关闭; 不落盘, 插件停用即清空')
 
 // 字段级 volatile 标记: 0.1.7+ 该字段进自动配置节并支持 loader 原地热更;
 // 旧宿主 schemastery 无 volatile 方法, 特性检测原样返回(dsh-maintain 同构)
@@ -84,11 +89,13 @@ export const Config = z.object({
   dataDir: z.string().default(join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'dsh-tunnel'))
     .description('隧道表持久化目录'),
   aiTools: volatileField(aiToolsField()),
+  requestLogLimit: volatileField(requestLogLimitField()),
 })
 
 export const SETTINGS_SCHEMA = z.object({
   connectTimeoutMs: timeoutField(),
   aiTools: aiToolsField(),
+  requestLogLimit: requestLogLimitField(),
 })
 
 function validateName(value) {
@@ -286,8 +293,53 @@ function noteProxyStatus(record, status, error) {
   }
 }
 
-function forwardHttp(req, res, { record, url, timeoutMs, proto }) {
+const LOG_STATUS_ABORTED = 0
+const STATUS_BAD_GATEWAY = 502
+const STATUS_GATEWAY_TIMEOUT = 504
+const UPGRADE_STATUS_DEFAULT = 101
+const UPGRADE_STATUS_LINE_MAX = 16
+const STATUS_LINE_RE = /^HTTP\/\d+(?:\.\d+)? (\d{3})/
+
+// 首字节通常是完整状态行; 取不到时沿用握手成功的既有假设
+function upgradeStatusOf(chunk) {
+  const match = STATUS_LINE_RE.exec(chunk.subarray(0, UPGRADE_STATUS_LINE_MAX).toString('latin1'))
+  return match === null ? UPGRADE_STATUS_DEFAULT : Number(match[1])
+}
+
+// autoSelectFamily 的 AggregateError 自身 message 为空, 逐个取内层错误码
+function errorTextOf(error) {
+  const message = String(error?.message ?? '')
+  if (message !== '') return message
+  if (Array.isArray(error?.errors) && error.errors.length > 0) {
+    return error.errors.map((item) => item?.code ?? item?.message ?? String(item)).join(', ')
+  }
+  return String(error?.code ?? error)
+}
+
+// 一次转发只落一条日志: 响应头到达即记录, 失败或客户端提前断开再补记。
+function createLogEmitter(log, record, req, kind) {
+  const startedAt = Date.now()
+  const tunnel = record?.name
+  let emitted = false
+  return (status, error) => {
+    if (emitted) return
+    emitted = true
+    log?.({
+      at: new Date(startedAt).toISOString(),
+      tunnel,
+      kind,
+      method: req.method,
+      path: req.url,
+      status,
+      ms: Date.now() - startedAt,
+      ...(error === undefined ? {} : { error }),
+    })
+  }
+}
+
+function forwardHttp(req, res, { record, url, timeoutMs, proto, log }) {
   touchStats(record)
+  const emitLog = createLogEmitter(log, record, req, REQUEST_LOG_KIND_HTTP)
   const proxyReq = http.request({
     host: 'localhost',
     port: record.targetPort,
@@ -306,6 +358,7 @@ function forwardHttp(req, res, { record, url, timeoutMs, proto }) {
     proxyReq.destroy()
   })
   proxyReq.on('response', (proxyRes) => {
+    emitLog(proxyRes.statusCode)
     noteProxyStatus(record, proxyRes.statusCode)
     // 仅路径模式改写 Location: 子域名根部署下同源根绝对路径本就正确
     if (record.entry === ENTRY_PATH) rewriteLocation(proxyRes, PATH_PREFIX + record.name)
@@ -321,14 +374,20 @@ function forwardHttp(req, res, { record, url, timeoutMs, proto }) {
     proxyRes.on('error', () => res.destroy())
   })
   proxyReq.on('error', (error) => {
+    // 客户端已断开时 stats 与日志统一停在 0, 不再补记 502
+    if (res.destroyed) return
     if (res.headersSent) return res.destroy()
-    const status = socketTimedOut(proxyReq) ? 504 : 502
-    noteProxyStatus(record, status, error.message)
-    respondProxyError(req, res, record, status, `目标不可达: ${error.message}`)
+    const status = socketTimedOut(proxyReq) ? STATUS_GATEWAY_TIMEOUT : STATUS_BAD_GATEWAY
+    const reason = errorTextOf(error)
+    emitLog(status, reason)
+    noteProxyStatus(record, status, reason)
+    respondProxyError(req, res, record, status, `目标不可达: ${reason}`)
   })
   // 客户端在响应任意阶段断开都回收上游连接(aborted 只覆盖请求体阶段, SSE/GET 不触发)
   res.on('close', () => {
-    if (!res.writableEnded) proxyReq.destroy()
+    if (res.writableEnded) return
+    emitLog(LOG_STATUS_ABORTED, '客户端断开')
+    proxyReq.destroy()
   })
   req.pipe(proxyReq)
 }
@@ -345,8 +404,9 @@ function markTimedOut(proxyReq) {
 // 升级透传: 重建请求头直写目标 socket(握手头 connection/upgrade/sec-websocket-* 与
 // 端到端头保留, Content-Length/Transfer-Encoding/逐跳头丢弃), 之后双向管道;
 // 任一侧关闭即双向回收(否则正常关闭会留下目标侧悬挂连接)
-function forwardUpgrade(req, socket, head, { record, url, timeoutMs, proto }) {
+function forwardUpgrade(req, socket, head, { record, url, timeoutMs, proto, log }) {
   touchStats(record)
+  const emitLog = createLogEmitter(log, record, req, REQUEST_LOG_KIND_WS)
   const headerLines = Object.entries(forwardedHeaders(req, proto, { upgrade: true }))
     .map(([key, value]) => `${key}: ${value}`)
     .join('\r\n')
@@ -357,15 +417,22 @@ function forwardUpgrade(req, socket, head, { record, url, timeoutMs, proto }) {
     socket.destroy()
   }
   let established = false
-  upstream.setTimeout(timeoutMs, destroyAll)
-  // 目标首字节(101 握手)到达即解除空闲计时, 建立后的长连接不受连接超时误杀
-  upstream.once('data', () => {
+  upstream.setTimeout(timeoutMs, () => {
+    emitLog(STATUS_GATEWAY_TIMEOUT, '目标响应超时')
+    destroyAll()
+  })
+  // 目标首字节(握手响应)到达即解除空闲计时, 建立后的长连接不受连接超时误杀
+  upstream.once('data', (chunk) => {
     established = true
     upstream.setTimeout(0)
-    noteProxyStatus(record, 101)
+    const status = upgradeStatusOf(chunk)
+    emitLog(status)
+    noteProxyStatus(record, status)
   })
   upstream.on('error', (error) => {
-    noteProxyStatus(record, 502, error.message)
+    const reason = errorTextOf(error)
+    emitLog(STATUS_BAD_GATEWAY, reason)
+    noteProxyStatus(record, STATUS_BAD_GATEWAY, reason)
     // 握手前失败回一个明确的 502, 比让客户端只看到连接被重置可诊断
     if (!established && socket.writable) {
       socket.end('HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n')
@@ -374,9 +441,15 @@ function forwardUpgrade(req, socket, head, { record, url, timeoutMs, proto }) {
     }
     destroyAll()
   })
-  upstream.on('close', destroyAll)
+  upstream.on('close', () => {
+    if (!established) emitLog(STATUS_BAD_GATEWAY, '目标连接关闭')
+    destroyAll()
+  })
   socket.on('error', destroyAll)
-  socket.on('close', destroyAll)
+  socket.on('close', () => {
+    if (!established) emitLog(LOG_STATUS_ABORTED, '客户端断开')
+    destroyAll()
+  })
   upstream.on('connect', () => {
     upstream.write(headText)
     if (head.length > 0) upstream.write(head)
@@ -468,7 +541,7 @@ function installListener(webServer, server) {
     const match = dispatch('request', req)
     if (match !== undefined) {
       try {
-        forwardHttp(req, res, { ...match, timeoutMs: readTimeout(webServer), proto: protocolOf(webServer) })
+        forwardHttp(req, res, { ...match, timeoutMs: readTimeout(webServer), proto: protocolOf(webServer), log: readLogger(webServer) })
       } catch (error) {
         console.warn(`${WARN_TAG}HTTP 转发失败: ${error.message}`)
         if (!res.headersSent) respondJson(res, 500, { ok: false, error: '隧道转发失败' })
@@ -484,7 +557,7 @@ function installListener(webServer, server) {
       // 按当前代际的 socket 集合登记: 旧代 dispose 只回收自己接入的连接
       const generation = webServer[DISPATCH_PROP]
       trackUpgradedSocket(webServer, socket, generation, match.record)
-      forwardUpgrade(req, socket, head, { ...match, timeoutMs: readTimeout(webServer), proto: protocolOf(webServer) })
+      forwardUpgrade(req, socket, head, { ...match, timeoutMs: readTimeout(webServer), proto: protocolOf(webServer), log: readLogger(webServer) })
       return
     }
     for (const listener of originals.upgrade) listener.call(server, req, socket, head)
@@ -521,6 +594,10 @@ function readTimeout(webServer) {
   return Number.isInteger(value) ? value : DEFAULT_CONNECT_TIMEOUT
 }
 
+function readLogger(webServer) {
+  return webServer[LOG_PROP]
+}
+
 function protocolOf(webServer) {
   return webServer.protocol === 'https:' ? 'https' : 'http'
 }
@@ -539,7 +616,10 @@ export function apply(ctx, config) {
 
   // 可变绑定: 偏好改动经 legacy watch / 0.1.7+ volatile-update 回写
   let connectTimeoutMs = DEFAULT_CONNECT_TIMEOUT
+  let requestLogLimit = DEFAULT_REQUEST_LOG_LIMIT
   const dataDir = config.dataDir
+  const requestLog = createRequestLog(() => requestLogLimit)
+  const logRequest = (entry) => requestLog.record(entry)
 
   const settingsRef = { current: null }
   const unwrapRef = (value) => (typeof value?.get === 'function' ? value.get() : value)
@@ -566,6 +646,11 @@ export function apply(ctx, config) {
   const applyPreferences = () => {
     const timeout = Number(readPref('connectTimeoutMs'))
     if (Number.isInteger(timeout) && timeout >= TIMEOUT_MIN_MS && timeout <= TIMEOUT_MAX_MS) connectTimeoutMs = timeout
+    const logLimit = Number(readPref('requestLogLimit'))
+    if (Number.isInteger(logLimit) && logLimit >= REQUEST_LOG_LIMIT_MIN && logLimit <= REQUEST_LOG_LIMIT_MAX && logLimit !== requestLogLimit) {
+      requestLogLimit = logLimit
+      requestLog.trim()
+    }
     syncToolsRegistration()
   }
 
@@ -591,6 +676,7 @@ export function apply(ctx, config) {
         url: targetPathOf(req.url, PATH_PREFIX + record.name),
         timeoutMs: connectTimeoutMs,
         proto: protocolOf(webServer),
+        log: logRequest,
       }),
     })
   }
@@ -750,6 +836,11 @@ export function apply(ctx, config) {
       const healths = args.probe === true ? await Promise.all(list.map((row) => probeRowHealth(row))) : []
       return { ok: true, tunnels: list.map((row, index) => rowView(row, healths[index])) }
     },
+    logs(args = {}) {
+      const name = typeof args?.name === 'string' && args.name.trim() !== '' ? args.name.trim() : undefined
+      const limit = Number.isInteger(args?.limit) && args.limit > 0 ? Math.min(REQUEST_LOG_QUERY_MAX, args.limit) : undefined
+      return { ok: true, items: requestLog.list({ name, limit }), limit: requestLogLimit }
+    },
     async update(args) {
       const currentName = args?.name
       const patch = args?.patch
@@ -900,6 +991,7 @@ export function apply(ctx, config) {
   const timeoutOf = () => connectTimeoutMs
   webServer[DISPATCH_PROP] = dispatch
   webServer[TIMEOUT_PROP] = timeoutOf
+  webServer[LOG_PROP] = logRequest
   installListener(webServer, server)
 
   // 激活恢复: 先入行表再激活, 激活失败的行留在磁盘待下次重试(不得被后续 persist 抹掉)
@@ -991,6 +1083,29 @@ export function apply(ctx, config) {
       },
     }),
     defineTool({
+      name: 'tunnel_logs',
+      description: '查看穿透隧道的请求日志(内存环形缓冲, 本次运行最多保留 requestLogLimit 条, 插件停用即清空)。返回最近请求的时间/隧道/方法/路径/状态码/耗时与错误; name 可选按隧道名过滤, limit 可选限制返回条数。',
+      parameters: {
+        name: { type: 'string', description: '可选隧道名, 只返回该隧道的日志' },
+        limit: { type: 'number', description: '最多返回条数 1..2000, 省略返回当前缓冲' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: true,
+          properties: {
+            ok: { type: 'boolean', required: true },
+            items: { type: 'array', items: { type: 'object', additionalProperties: true } },
+            limit: { type: 'number', description: '当前容量上限' },
+          },
+        },
+        render: renderJson,
+      },
+      async execute(args) {
+        return api.logs(args ?? {})
+      },
+    }),
+    defineTool({
       name: 'tunnel_ports',
       description: '列出本机正在监听、可能适合开放为隧道的端口(端口/绑定地址/进程/是否候选/已使用的隧道名)。默认只返回开发候选; all=true 返回全部非系统监听。',
       parameters: {
@@ -1056,9 +1171,20 @@ export function apply(ctx, config) {
   })
   ctx.on('loader/volatile-update', applyPreferences)
 
-  const UI_PREF_KEYS = ['aiTools']
-  const uiBooleanError = (keys) => keys.join('/') + ' 须为布尔'
-  const readUi = () => ({ aiTools: aiToolsNow() })
+  const UI_PREF_KEYS = ['aiTools', 'requestLogLimit']
+  const uiValidators = {
+    aiTools: (value) => {
+      if (typeof value !== 'boolean') throw new Error('aiTools 须为布尔')
+      return value
+    },
+    requestLogLimit: (value) => {
+      if (!Number.isInteger(value) || value < REQUEST_LOG_LIMIT_MIN || value > REQUEST_LOG_LIMIT_MAX) {
+        throw new Error(`requestLogLimit 须为 ${REQUEST_LOG_LIMIT_MIN}..${REQUEST_LOG_LIMIT_MAX} 整数`)
+      }
+      return value
+    },
+  }
+  const readUi = () => ({ aiTools: aiToolsNow(), requestLogLimit })
   const persistPatch = async (patch) => {
     const svc = settingsRef.current
     if (svc) {
@@ -1076,10 +1202,9 @@ export function apply(ctx, config) {
     const patch = {}
     for (const key of UI_PREF_KEYS) {
       if (body?.[key] === undefined) continue
-      if (typeof body[key] !== 'boolean') throw new Error(uiBooleanError([key]))
-      patch[key] = body[key]
+      patch[key] = uiValidators[key](body[key])
     }
-    if (Object.keys(patch).length === 0) throw new Error(uiBooleanError(UI_PREF_KEYS))
+    if (Object.keys(patch).length === 0) throw new Error('aiTools 须为布尔; requestLogLimit 须为整数')
     if (!(await persistPatch(patch))) return { ok: false, error: SETTINGS_UNAVAILABLE }
     applyPreferences()
     changes.refresh()
@@ -1120,6 +1245,7 @@ export function apply(ctx, config) {
     // 载体置空即纯穿透: 监听层常驻, 禁用后全体原路放行; 只清本代令牌, 不误伤新代
     if (webServer[DISPATCH_PROP] === dispatch) webServer[DISPATCH_PROP] = undefined
     if (webServer[TIMEOUT_PROP] === timeoutOf) webServer[TIMEOUT_PROP] = undefined
+    if (webServer[LOG_PROP] === logRequest) webServer[LOG_PROP] = undefined
     // 只回收本代接入的 upgrade socket: 新代连接在它自己的集合里, 不得误杀
     for (const socket of dispatch.sockets) socket.destroy()
     dispatch.sockets.clear()
