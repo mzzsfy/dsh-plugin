@@ -290,7 +290,7 @@ function mountOverlay() {
         deferred.push({ url: target, push: (inputs) => resolve({ ok: true, status: 200, json: async () => ({ inputs, aligned: true }) }) })
       })
     }
-    return { ok: true, status: 200, json: async () => payloadFor(target) }
+    return { ok: true, status: 200, json: async () => payloadFor() }
   }
   const payloadFor = () => ({ enabled: true })
   const windowStub = { __ModuleLoader__: { load: (module) => modules.push(module) }, addEventListener() {} }
