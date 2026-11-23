@@ -737,14 +737,6 @@ window.__ModuleLoader__.load({
     const MARKET_LABEL = { XSHG: '沪', XSHE: '深', XHKG: '港', XNAS: '美', XNYS: '美', XJPX: '日', XKRX: '韩', XLON: '英' }
     // 客户端 K线数据保鲜期, 与服务端 kline-cache 同量级: 分时是实时数据, 日K盘中会动, 周月K一天一换
     const KLINE_MAX_AGE = { trend: 60 * 1000, '1d': 60 * 60 * 1000, '1w': 24 * 60 * 60 * 1000, '1M': 24 * 60 * 60 * 1000 }
-    // 副标题市场面: 沪深两所合并一档, 按固定优先级输出, 避免随添加顺序抖动
-    const MARKET_SCOPE = { XSHG: '沪深A股', XSHE: '沪深A股', XHKG: '港股', XNAS: '美股', XNYS: '美股', XJPX: '日股', XKRX: '韩股', XLON: '英股' }
-    const SCOPE_ORDER = ['沪深A股', '港股', '美股', '日股', '韩股', '英股']
-    const scopeText = ids => {
-      const present = new Set(ids.map(id => MARKET_SCOPE[id.split(':')[0]]).filter(Boolean))
-      const listed = SCOPE_ORDER.filter(scope => present.has(scope))
-      return `自选行情 · ${listed.length ? listed.join('、') : SCOPE_ORDER.join('、')}`
-    }
     function Button({ children, onClick, primary, danger, className = '', ...props }) { return h('button', { type: 'button', className: `ssb-button${primary ? ' ssb-primary' : ''}${danger ? ' ssb-danger' : ''} ${className}`, onClick, ...props }, children) }
     function Toggle({ label, checked, onChange, disabled = false }) {
       return h('label', { className: 'ssb-switch' }, h('input', { type: 'checkbox', checked, disabled, onChange: e => onChange(e.target.checked) }), h('span', { className: 'ssb-switch__track' }, h('span', { className: 'ssb-switch__thumb' })), h('span', null, label))
@@ -892,7 +884,9 @@ window.__ModuleLoader__.load({
       const stats = active.ids.reduce((acc, id) => { const pct = Number(data.quotes[id]?.quote?.changePct); if (Number.isNaN(pct)) return acc; acc.up += pct > 0; acc.down += pct < 0; const item = w.items[id], last = Number(data.quotes[id]?.quote?.last), costBase = costBaseOf(item.marks); if (costBase != null && last) { acc.held += 1; acc.pl += (last - costBase) / costBase * 100 } return acc }, { up: 0, down: 0, held: 0, pl: 0 })
       // 持仓合计为等权均值(无仓位数量数据, 百分比求和会随只数放大; 均值是最不坏近似)
       const heldText = stats.held ? ` · 持仓盈亏 ${signed(Number((stats.pl / stats.held).toFixed(1)))}%（等权）` : ''
-      const statsText = `${active.ids.length} 只 · ${stats.up} 涨 ${stats.down} 跌${heldText}${freshnessText(data.quotes) ? ` · ${freshnessText(data.quotes)}` : ''}`
+      // 只数已由分组 tab 自带, 概览只留涨跌与更新时间: 一行淡色小字挂在 tab 条右侧
+      const freshness = freshnessText(data.quotes)
+      const metaText = `${stats.up} 涨 ${stats.down} 跌${heldText}${freshness ? ` · ${freshness}` : ''}`
       const isTagTab = active.key.startsWith(TAG_PREFIX)
       // 重命名草稿绑定的是标签名: 切换 tab 后残留的草稿不再渲染
       const renameDraft = isTagTab && view.tagRename?.from === active.label ? view.tagRename : null
@@ -902,6 +896,11 @@ window.__ModuleLoader__.load({
         h(Button, { disabled: busy.write, onClick: () => runtime.updateView({ tagRename: { from: active.label, to: active.label, error: '' } }) }, '重命名'),
         // 解散成功后激活键失效, 显式回到全部而不是让 resolveTab 静默兜底; 失败时保留原地由顶部横幅报错
         h(Button, { disabled: busy.write, onClick: () => runtime.mutate('tagRemove', { tag: active.label }).then(() => runtime.updateView({ activeTab: ALL_TAB_KEY, tagRename: null })).catch(() => { }) }, '解散')) : null
+      const sortSelect = h(Select, { value: view.sort, label: '自选排序', options: [{ value: 'manual', label: '手动顺序' }, { value: 'desc', label: '涨幅优先' }, { value: 'asc', label: '跌幅优先' }], onChange: value => runtime.updateView({ sort: value }) })
+      // 列表条: 分组 tab 与概览/标签管理/排序共用一行, 节头取消后表头之上不再有空带
+      const listBar = w.order.length ? h('div', { className: 'ssb-listbar' },
+        tabBar,
+        h('div', { className: 'ssb-listbar-tools' }, h('span', { className: 'ssb-listbar-meta' }, metaText), tagTools, sortSelect)) : null
       const renameForm = renameDraft ? h('form', { className: 'ssb-inline-form ssb-tag-rename', onSubmit: e => {
         e.preventDefault()
         const to = String(renameDraft.to || '').trim()
@@ -916,9 +915,8 @@ window.__ModuleLoader__.load({
         renameDraft.error ? h('small', { className: 'ssb-form-error', role: 'alert' }, renameDraft.error) : null) : null
       return h('section', { className: 'ssb-list-pane' },
         sourcesBanner,
-        h('div', { className: 'ssb-section-head' }, h('h2', null, `自选 · ${w.order.length}`), w.order.length ? h('span', { className: 'ssb-muted' }, statsText) : null, tagTools, h(Select, { value: view.sort, label: '自选排序', options: [{ value: 'manual', label: '手动顺序' }, { value: 'desc', label: '涨幅优先' }, { value: 'asc', label: '跌幅优先' }], onChange: value => runtime.updateView({ sort: value }) })),
+        listBar,
         renameForm,
-        tabBar,
         !w.order.length ? h('div', { className: 'ssb-empty' }, h('p', null, '添加第一只自选，集中查看价格和来源。'), h(Button, { primary: true, onClick: () => runtime.updateView({ view: 'search' }) }, '添加自选')) :
           h('div', { className: 'ssb-table-scroll', role: 'tabpanel', id: WATCHLIST_PANEL_ID, 'aria-label': active.label, onScroll: e => runtime.updateView({ scrollTop: e.currentTarget.scrollTop }), ref: node => { if (node && Math.abs(node.scrollTop - (view.scrollTop || 0)) > 1) node.scrollTop = view.scrollTop || 0 } },
             // 表头: 让每列含义自解释; 窄容器整体隐藏(降级为行内键值对)
@@ -2375,7 +2373,18 @@ window.__ModuleLoader__.load({
 .ssb-tag-chip { display:inline-flex; align-items:center; height:24px; padding:0 4px 0 8px; border-radius:999px; background:var(--ssb-accent-wash); color:var(--ssb-accent); font-size:11px; }
 .ssb-tag-x { display:inline-flex; align-items:center; justify-content:center; min-width:24px; height:24px; border:0; background:transparent; color:inherit; font:inherit; line-height:1; padding:0; cursor:pointer; }.ssb-tag-x:hover { color:var(--ssb-danger); }
 .ssb-tag-pill { border:1px dashed var(--ssb-border); background:transparent; color:var(--ssb-text-sub); border-radius:999px; height:24px; padding:0 10px; font:inherit; font-size:11px; cursor:pointer; }.ssb-tag-pill:hover { border-color:var(--ssb-accent); color:var(--ssb-accent); }
-.ssb-tag-rename { padding:0 16px 8px; }.ssb-section-head .ssb-toolbar { margin:0; }.ssb-tab { font:inherit; font-size:13px; color:var(--ssb-text-sub); background:transparent; border:0; border-bottom:2px solid transparent; padding:10px 2px; cursor:pointer; }.ssb-tab-on { color:var(--ssb-text); border-bottom-color:var(--ssb-accent); font-weight:600; }.ssb-header,.ssb-toolbar,.ssb-section-head,.ssb-row-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }.ssb-header { justify-content:space-between; align-items:flex-start; margin-bottom:16px; gap:16px; }.ssb-header-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }.ssb-header p { margin:6px 0 0; }.ssb-section-head { justify-content:space-between; padding:16px; }.ssb-section-head h2[tabindex="-1"]:focus { outline:none; }.ssb-toolbar { margin:12px 0; }
+.ssb-tag-rename { padding:0 16px 8px; }.ssb-section-head .ssb-toolbar { margin:0; }.ssb-tab { font:inherit; font-size:13px; color:var(--ssb-text-sub); background:transparent; border:0; border-bottom:2px solid transparent; padding:10px 2px; cursor:pointer; }.ssb-tab-on { color:var(--ssb-text); border-bottom-color:var(--ssb-accent); font-weight:600; }.ssb-toolbar,.ssb-section-head,.ssb-row-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }.ssb-section-head { justify-content:space-between; padding:16px; }.ssb-root h2[tabindex="-1"]:focus { outline:none; }.ssb-toolbar { margin:12px 0; }
+/* 顶栏与列表条各占一行: 标题区与节头取消后, 视图切换+操作、分组+概览+排序各挤进一行 */
+.ssb-sr-only { position:absolute; width:1px; height:1px; margin:-1px; padding:0; overflow:hidden; clip-path:inset(50%); white-space:nowrap; border:0; }
+.ssb-topbar { display:flex; align-items:center; justify-content:space-between; gap:16px; margin:0 0 16px; border-bottom:.5px solid var(--ssb-border); }
+.ssb-topbar .ssb-tablist { flex:1 1 auto; min-width:0; overflow-x:auto; border-bottom:0; margin:0; }
+.ssb-topbar-actions { display:flex; align-items:center; gap:8px; flex:0 0 auto; flex-wrap:wrap; }
+.ssb-listbar { display:flex; align-items:center; gap:8px; padding:0 16px; border-bottom:.5px solid var(--ssb-border); }
+.ssb-listbar .ssb-tabs { flex:1 1 auto; min-width:0; border-bottom:0; padding:0; }
+.ssb-listbar .ssb-toolbar { margin:0; }
+.ssb-listbar-tools { display:flex; align-items:center; gap:8px; flex:0 0 auto; }
+/* 概览只剩涨跌与更新时间: 11px 淡色小字挂在 tab 条右端, 不另占横幅 */
+.ssb-listbar-meta { font-size:11px; line-height:16px; color:var(--ssb-text-dim); white-space:nowrap; }
 .ssb-button { color:var(--ssb-text); background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); min-height:32px; padding:0 12px; font:inherit; font-size:13px; cursor:pointer; transition:background .15s; white-space:nowrap; }.ssb-button:hover { background:var(--dsw-alias-interactive-bg-hover); }.ssb-button.ssb-primary { background:var(--ssb-accent); color:var(--ssb-on-accent); border-color:var(--ssb-accent); }.ssb-button.ssb-primary:hover { background:var(--ssb-accent-deep); }.ssb-button.ssb-danger { color:var(--ssb-danger); }.ssb-root button:disabled { opacity:.5; cursor:not-allowed; }.ssb-root :focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:2px; }
 .ssb-root input:not([type=checkbox]) { background:var(--ssb-bg); color:var(--ssb-text); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); min-height:32px; padding:6px 8px; font:inherit; max-width:100%; }
 .ssb-select { position:relative; display:inline-flex; min-width:0; max-width:100%; }
@@ -2443,6 +2452,8 @@ window.__ModuleLoader__.load({
   .ssb-row-main { grid-template-columns:12px minmax(80px,1fr) 68px 64px 56px 16px; height:auto; }
   .ssb-cell-open,.ssb-cell-range,.ssb-cell-amount,.ssb-cell-amplitude,.ssb-cell-pl { display:none; }
   .ssb-row-sub { display:flex; gap:10px; margin-top:2px; padding-left:20px; font-size:12px; color:var(--ssb-text-dim); font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); }
+  /* 窄容器先让出概览小字: 分组 tab 与排序比"几分钟前更新"更需要位置 */
+  .ssb-listbar-meta { display:none; }
 }
 .ssb-kv { display:inline-flex; gap:4px; white-space:nowrap; }
 /* 悬浮盯盘: 固定右下角, 尺寸以 4px 刻度, 只做轻边框分层不挂阴影 */
@@ -2568,7 +2579,7 @@ window.__ModuleLoader__.load({
 .ssb-switch { display:inline-flex; align-items:center; gap:8px; cursor:pointer; position:relative; }.ssb-switch input[type="checkbox"] { position:absolute; opacity:0; width:1px; height:1px; }.ssb-switch__track { display:inline-flex; flex-shrink:0; align-items:center; width:34px; height:19px; padding:3px; border-radius:999px; background:var(--ssb-bg-muted); border:1px solid var(--ssb-border); transition:background .15s ease; }.ssb-switch__thumb { width:13px; height:13px; border-radius:50%; background:var(--ssb-text-sub); transition:transform .15s ease; }.ssb-switch input[type="checkbox"]:checked + .ssb-switch__track { background:var(--ssb-accent); }.ssb-switch input[type="checkbox"]:checked + .ssb-switch__track .ssb-switch__thumb { transform:translateX(13px); background:var(--ssb-bg); }.ssb-switch input[type="checkbox"]:focus-visible + .ssb-switch__track { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:2px; }.ssb-switch input[type="checkbox"]:disabled + .ssb-switch__track { opacity:.5; cursor:not-allowed; }.ssb-switch:hover .ssb-switch__track { border-color:var(--ssb-accent); }
 @media(max-width:720px) { .ssb-detail-grid { grid-template-columns:minmax(0,1fr); } }
 @media(max-width:959px) { .ssb-content { grid-template-columns:minmax(0,1fr); }.ssb-page { padding:16px; } }
-@media(max-width:479px) { .ssb-page { padding:12px; }.ssb-header { align-items:flex-start; gap:12px; }.ssb-aux { display:none; }.ssb-table td,.ssb-table th { padding:8px; }.ssb-form-grid { grid-template-columns:minmax(0,1fr); }.ssb-detail-price { font-size:24px; }.ssb-button { min-height:36px; }.ssb-section-head { padding:12px; } }
+@media(max-width:479px) { .ssb-page { padding:12px; }.ssb-topbar { flex-wrap:wrap; gap:8px; }.ssb-table td,.ssb-table th { padding:8px; }.ssb-form-grid { grid-template-columns:minmax(0,1fr); }.ssb-detail-price { font-size:24px; }.ssb-button { min-height:36px; }.ssb-section-head { padding:12px; }.ssb-listbar { padding:0 12px; } }
 @media(prefers-reduced-motion:reduce) { .ssb-root * { transition:none; } }
 `
     function StockPage({ runtime, layout }) {
@@ -2583,20 +2594,22 @@ window.__ModuleLoader__.load({
       }, [view.view])
       return h('div', { className: `ssb-root${data?.control?.preferences?.colorMode === 'green-up' ? ' ssb-green-up' : ''}`, ref: root },
         React.createElement('style', { 'data-plugin': '@mzzsfy/dsh-stock-assistant', dangerouslySetInnerHTML: { __html: CSS } }),
-        h('div', { className: 'ssb-page' }, h('header', { className: 'ssb-header' },
-          h('div', null, h('h1', null, '股票'), h('p', { className: 'ssb-muted' }, scopeText(data?.control?.watchlist?.order || []))),
-          h('div', { className: 'ssb-header-actions' },
-            h(Button, { disabled: !data || state.busy.refresh, onClick: quiet(() => runtime.refresh()) }, state.busy.refresh ? '刷新中…' : '刷新'),
-            h(Button, { primary: floating.open, 'aria-pressed': floating.open, onClick: () => setFloating({ open: !floating.open }) }, floating.open ? '收起盯盘' : '悬浮盯盘'),
-            h('div', { className: 'ssb-more', style: { position: 'relative' } }, h(Button, { 'aria-label': '更多操作', 'aria-expanded': !!view.menuOpen, onClick: () => runtime.updateView({ menuOpen: !view.menuOpen }) }, '更多'), view.menuOpen ? h('div', { className: 'ssb-menu', style: { position: 'absolute', right: 0, top: 'calc(100% + 4px)', background: 'var(--ssb-bg)', border: '1px solid var(--ssb-border)', borderRadius: 'var(--ssb-radius-md)', padding: '8px', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10, minWidth: '140px' }, role: 'menu' },
-              h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '4px 8px' } }, h(Toggle, { label: '暂停采集', checked: state.paused, onChange: runtime.setPaused })),
-              h('div', { className: 'ssb-muted', style: { padding: '0 8px', fontSize: '11px' } }, `${(data?.control?.providers || []).filter(p => p.enabled).length}/${(data?.control?.providers || []).length} 源启用${state.data?.klineReady ? ` · K线 ${Object.keys(state.data.klineReady).length} 市场` : ''}`),
-              h(Button, { onClick: () => { runtime.updateView({ view: 'list', overlay: 'settings', menuOpen: false }) } }, '设置'),
-              h(Button, { onClick: () => { runtime.updateView({ menuOpen: false }); layout.selectPanel(null) } }, '返回对话')) : null))),
-        h('nav', { className: 'ssb-tablist', 'aria-label': '股票视图' },
-          h('button', { type: 'button', className: 'ssb-tab' + (view.view === 'list' ? ' ssb-tab-on' : ''), 'aria-current': view.view === 'list' ? 'page' : undefined, onClick: () => runtime.updateView({ view: 'list' }) }, '自选'),
-          h('button', { type: 'button', className: 'ssb-tab' + (view.view === 'browse' ? ' ssb-tab-on' : ''), 'aria-current': view.view === 'browse' ? 'page' : undefined, onClick: () => { runtime.updateView({ view: 'browse' }); if (!runtime.getSnapshot().view.browseRows) quiet(() => runtime.loadBrowse('XSHG', 0))() } }, '市场'),
-          h('button', { type: 'button', className: 'ssb-tab' + (view.view === 'search' ? ' ssb-tab-on' : ''), 'aria-current': view.view === 'search' ? 'page' : undefined, onClick: () => runtime.updateView({ view: 'search' }) }, '搜索')),
+        h('div', { className: 'ssb-page' },
+          // 面板身份由侧栏入口与页签承担, 标题只留给读屏: 顶部不再有一条标题带把行情往下压
+          h('div', { className: 'ssb-topbar' },
+            h('h1', { className: 'ssb-sr-only' }, '股票'),
+            h('nav', { className: 'ssb-tablist', 'aria-label': '股票视图' },
+              h('button', { type: 'button', className: 'ssb-tab' + (view.view === 'list' ? ' ssb-tab-on' : ''), 'aria-current': view.view === 'list' ? 'page' : undefined, onClick: () => runtime.updateView({ view: 'list' }) }, '自选'),
+              h('button', { type: 'button', className: 'ssb-tab' + (view.view === 'browse' ? ' ssb-tab-on' : ''), 'aria-current': view.view === 'browse' ? 'page' : undefined, onClick: () => { runtime.updateView({ view: 'browse' }); if (!runtime.getSnapshot().view.browseRows) quiet(() => runtime.loadBrowse('XSHG', 0))() } }, '市场'),
+              h('button', { type: 'button', className: 'ssb-tab' + (view.view === 'search' ? ' ssb-tab-on' : ''), 'aria-current': view.view === 'search' ? 'page' : undefined, onClick: () => runtime.updateView({ view: 'search' }) }, '搜索')),
+            h('div', { className: 'ssb-topbar-actions' },
+              h(Button, { disabled: !data || state.busy.refresh, onClick: quiet(() => runtime.refresh()) }, state.busy.refresh ? '刷新中…' : '刷新'),
+              h(Button, { primary: floating.open, 'aria-pressed': floating.open, onClick: () => setFloating({ open: !floating.open }) }, floating.open ? '收起盯盘' : '悬浮盯盘'),
+              h('div', { className: 'ssb-more', style: { position: 'relative' } }, h(Button, { 'aria-label': '更多操作', 'aria-expanded': !!view.menuOpen, onClick: () => runtime.updateView({ menuOpen: !view.menuOpen }) }, '更多'), view.menuOpen ? h('div', { className: 'ssb-menu', style: { position: 'absolute', right: 0, top: 'calc(100% + 4px)', background: 'var(--ssb-bg)', border: '1px solid var(--ssb-border)', borderRadius: 'var(--ssb-radius-md)', padding: '8px', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10, minWidth: '140px' }, role: 'menu' },
+                h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '4px 8px' } }, h(Toggle, { label: '暂停采集', checked: state.paused, onChange: runtime.setPaused })),
+                h('div', { className: 'ssb-muted', style: { padding: '0 8px', fontSize: '11px' } }, `${(data?.control?.providers || []).filter(p => p.enabled).length}/${(data?.control?.providers || []).length} 源启用${state.data?.klineReady ? ` · K线 ${Object.keys(state.data.klineReady).length} 市场` : ''}`),
+                h(Button, { onClick: () => { runtime.updateView({ view: 'list', overlay: 'settings', menuOpen: false }) } }, '设置'),
+                h(Button, { onClick: () => { runtime.updateView({ menuOpen: false }); layout.selectPanel(null) } }, '返回对话')) : null))),
           // 浮层(z-index 60)盖住页面后, 普通文档流里的错误横幅会被压在下面: 保存 409/500 用户完全看不到。
           // 浮层打开时把横幅提到浮层之上固定在顶部, 关掉浮层恢复文档流布局。
           state.error ? h('div', { className: `ssb-banner ssb-error${view.overlay ? ' ssb-banner-floating' : ''}`, role: 'alert' }, state.error, h(Button, { onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) }, '检查设置'), h(Button, { onClick: () => runtime.clearError() }, '关闭')) : null,
