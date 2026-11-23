@@ -137,7 +137,7 @@ const PREFLIGHT_URL = '/api/maintain/preflight'
 const SAFE_MODE_RESTORE_URL = '/api/maintain/safe-mode/restore'
 const RESTART_URL = '/api/maintain/restart'
 const RELEASE_NOTES_URL = '/api/maintain/release-notes'
-const UPGRADE_SUCCESS_SEEN_KEY = 'dsh-maintain:upgrade-success-seen'
+const UPGRADE_RECEIPT_SEEN_KEY = 'dsh-maintain:upgrade-success-seen'
 const seenUpgradeReceipts = new Set()
 const UPGRADE_POLL_MS = 2 * 1000
 // 升级提示浮条挂 body,脱离 React 组件树,SPA 切页不消失
@@ -545,18 +545,17 @@ function installDisabled(status, busy, restarting) {
 }
 // LOGIC-END installDisabled
 
-// 安装按钮的预检门:环境硬失败不可越过;插件硬阻断仅当显式勾选安全模式且候选可禁用时可越过。
-// 预检尚未加载时保持原有安装门禁,不阻塞旧宿主。
+// 环境阻断不可越过;启用前置升级时,插件阻断交给切槽前复检。
 // LOGIC-BEGIN canStartInstall
-function canStartInstall(status, busy, restarting, preflight, safeMode) {
+function canStartInstall(status, busy, restarting, preflight, safeMode, upgradePlugins = false) {
   if (installDisabled(status, busy, restarting)) return false
   if (!preflight) return true
   if (preflight.environmentOk === false) return false
   const blocked = preflight.pluginSummary ? preflight.pluginSummary.block : 0
-  const safeModeOverride = preflight.okWithSafeMode === undefined
-    ? safeMode && preflight.safeMode && preflight.safeMode.available
-    : preflight.okWithSafeMode === true
-  if (blocked > 0 && !safeModeOverride) return false
+  const safeModeOverride = safeMode && (preflight.okWithSafeMode === undefined
+    ? preflight.safeMode && preflight.safeMode.available
+    : preflight.okWithSafeMode === true)
+  if (blocked > 0 && !safeModeOverride && upgradePlugins !== true) return false
   return true
 }
 // LOGIC-END canStartInstall
@@ -677,12 +676,12 @@ function SettingsCard(props) {
   )
 }
 
-// 成功回执只提示一次:按 operationId 记录已读,下一次进入设置页不再重复展示历史成功。
+// 回执只提示一次:按 operationId 记录已读,成功路径自动确认,失败/待重启由用户点「知道了」。
 function upgradeReceiptKey(last) {
   if (!last) return null
   const identity = last.operationId
     || [last.targetVersion || '', last.finishedAt || last.startedAt || ''].join('|')
-  return UPGRADE_SUCCESS_SEEN_KEY + ':' + identity
+  return UPGRADE_RECEIPT_SEEN_KEY + ':' + identity
 }
 
 function upgradeReceiptSeen(key) {
@@ -697,26 +696,72 @@ function markUpgradeReceiptSeen(key) {
   try { window.localStorage.setItem(key, '1') } catch {}
 }
 
-// 新宿主启动后的插件同步升级:独立进度卡,避免复用已结束的宿主升级状态。
-function PluginUpgradeCard(props) {
-  const pluginUpgrade = props.status.pluginUpgrade
-  if (!pluginUpgrade || pluginUpgrade.running !== true) return null
-  return h('div', { className: 'dm-card' },
-    h('div', { className: 'dm-card__head' }, h('span', { className: 'dm-card__title' }, '插件同步升级')),
-    h('div', { className: 'dm-progress' },
-      h('div', { className: 'dm-field__control' },
-        h('span', { className: 'dm-warn' }, pluginUpgrade.phaseLabel || '升级插件'),
-        h('span', { className: 'dm-meta' }, '已用时 ' + fmtElapsed(pluginUpgrade.startedAt))),
-      pluginUpgrade.phaseElapsedMs > 0
-        ? h('div', { className: 'dm-progress__meta' }, '本阶段已用时 ' + fmtDuration(pluginUpgrade.phaseElapsedMs))
-        : null,
-      pluginUpgrade.outputTail
-        ? h('pre', { className: 'dm-log', 'aria-label': '插件升级输出' }, pluginUpgrade.outputTail)
-        : h('div', { className: 'dm-progress__meta' }, '等待插件升级输出…')),
-  )
+// 插件前置升级是否带失败:有逐项失败或整体异常都算,决定主结果用警告而非成功语义。
+// LOGIC-BEGIN hasPluginUpgradeFailure
+function hasPluginUpgradeFailure(plugins) {
+  if (!plugins) return false
+  if (plugins.error) return true
+  const items = Array.isArray(plugins.items) ? plugins.items : []
+  return items.some((item) => item && item.state === 'failed')
+}
+// LOGIC-END hasPluginUpgradeFailure
+
+// 成功回执自动隐藏的条件:成功、无插件失败、无待手动重启提示。
+// 失败/待重启结果保留卡片,由用户点「知道了」手动确认,避免信息被静默丢弃。
+// LOGIC-BEGIN shouldAutoAckReceipt
+function shouldAutoAckReceipt(last) {
+  if (!last || last.ok !== true) return false
+  if (last.pending === true || last.exitScheduled === false) return false
+  return !hasPluginUpgradeFailure(last.plugins)
+}
+// LOGIC-END shouldAutoAckReceipt
+
+// 「知道了」只服务不会自动隐藏的落定记录:运行中与自动 ack 的成功历史都不提供。
+// LOGIC-BEGIN canDismissUpgradeReceipt
+function canDismissUpgradeReceipt(upgrade, last, autoReceiptKey) {
+  return Boolean(last && !upgrade.running && !autoReceiptKey)
+}
+// LOGIC-END canDismissUpgradeReceipt
+
+// 插件升级结果摘要:总数 + 更新/失败/跳过计数,供结果卡使用。
+// LOGIC-BEGIN pluginUpgradeSummaryLine
+function pluginUpgradeSummaryLine(plugins) {
+  if (!plugins || plugins.requested !== true) return null
+  const items = Array.isArray(plugins.items) ? plugins.items : []
+  if (items.length === 0) return null
+  const count = (state) => items.filter((item) => item && item.state === state).length
+  return '插件 ' + items.length + ' 个:更新 ' + count('updated')
+    + ',失败 ' + count('failed') + ',跳过 ' + count('skipped')
+}
+// LOGIC-END pluginUpgradeSummaryLine
+
+const PLUGIN_ITEM_LABELS = Object.freeze({
+  pending: ['等待', ''],
+  checking: ['检查中', 'warn'],
+  upgrading: ['升级中', 'warn'],
+  updated: ['已更新', 'pass'],
+  failed: ['失败', 'block'],
+  skipped: ['跳过', 'warn'],
+})
+
+// 逐插件状态列表:面板在进行中与结束后都用同一份明细,避免"只看到总数"。
+function PluginItemList(props) {
+  const items = Array.isArray(props.items) ? props.items : []
+  if (items.length === 0) return null
+  return h('div', { className: 'dm-checks' }, items.map((item) => {
+    const label = PLUGIN_ITEM_LABELS[item.state] || [item.state, '']
+    return h('div', { className: 'dm-check', key: item.name },
+      h('span', { className: 'dm-check__status' + (label[1] ? ' dm-check__status--' + label[1] : '') }, label[0]),
+      h('div', { className: 'dm-check__body' },
+        h('div', null, item.name + (item.from || item.to
+          ? ' ' + (item.from || '未知') + (item.to ? ' → ' + item.to : '')
+          : '')),
+        item.error ? h('div', { className: 'dm-check__detail' }, item.error) : null,
+        item.reason ? h('div', { className: 'dm-check__detail' }, item.reason) : null))
+  }))
 }
 
-// 升级状态区:进行中显示阶段时间线与 npm 输出尾部;结束后显示结果与插件健康摘要。
+// 升级状态区:进行中显示阶段/插件时间线、逐插件状态与 npm 输出尾部;结束后显示结果与插件健康摘要。
 function UpgradeCard(props) {
   const upgrade = props.status.upgrade
   const last = upgrade && upgrade.last
@@ -727,12 +772,11 @@ function UpgradeCard(props) {
   const historical = Boolean(upgrade && (upgrade.historical === true
     || (last && last.historical === true)
     || (props.status.bootAt && lastStartedAt && lastStartedAt < props.status.bootAt)))
-  const pluginUpgradeWarning = Boolean(last && last.plugins
-    && (last.plugins.error || (Array.isArray(last.plugins.failed) && last.plugins.failed.length > 0)))
-  const pluginUpgradePending = Boolean(last && last.plugins && last.plugins.pending === true)
-  const receiptKey = upgrade && !upgrade.running && last && last.ok === true && !pluginUpgradeWarning && !pluginUpgradePending
-    ? upgradeReceiptKey(last)
-    : null
+  const pluginUpgradeWarning = Boolean(last && hasPluginUpgradeFailure(last.plugins))
+  // 任何已落定记录都生成回执 key:失败记录由「知道了」手动确认,不再永久占据面板。
+  const receiptKey = upgrade && !upgrade.running && last ? upgradeReceiptKey(last) : null
+  const autoReceiptKey = shouldAutoAckReceipt(last) ? receiptKey : null
+  const [dismissedKey, setDismissedKey] = useState(null)
   const receiptRef = useRef({ key: null, seen: false })
   if (receiptRef.current.key !== receiptKey) {
     receiptRef.current = {
@@ -741,16 +785,30 @@ function UpgradeCard(props) {
     }
   }
   useEffect(() => {
-    if (!receiptKey || receiptRef.current.seen) return
+    if (!autoReceiptKey || receiptRef.current.seen) return
+    markUpgradeReceiptSeen(autoReceiptKey)
+    if (last && last.operationId) {
+      post(RECEIPT_ACK_URL, { operationId: last.operationId }).catch(() => {})
+    }
+  }, [autoReceiptKey])
+  if (!upgrade || (!upgrade.running && !last)) return null
+  if (receiptRef.current.seen || (receiptKey !== null && dismissedKey === receiptKey)) return null
+  function dismissReceipt() {
+    if (!receiptKey) return
+    setDismissedKey(receiptKey)
     markUpgradeReceiptSeen(receiptKey)
     if (last && last.operationId) {
       post(RECEIPT_ACK_URL, { operationId: last.operationId }).catch(() => {})
     }
-  }, [receiptKey])
-  if (!upgrade || (!upgrade.running && !last)) return null
-  if (receiptRef.current.seen) return null
+  }
+  const receiptDismissible = canDismissUpgradeReceipt(upgrade, last, autoReceiptKey)
   return h('div', { className: 'dm-card' },
-    h('div', { className: 'dm-card__head' }, h('span', { className: 'dm-card__title' }, historical ? '上次升级' : '升级')),
+    h('div', { className: 'dm-card__head' },
+      h('span', { className: 'dm-card__title' }, historical ? '上次升级' : '升级'),
+      receiptDismissible
+        ? h('div', { className: 'dm-card__actions' },
+            h('button', { className: 'dm-btn dm-btn--ghost', onClick: dismissReceipt }, '知道了'))
+        : null),
     upgrade.running
       ? h('div', { className: 'dm-progress' },
           h('div', { className: 'dm-field__control' },
@@ -760,6 +818,9 @@ function UpgradeCard(props) {
           progress && progress.phaseElapsedMs > 0
             ? h('div', { className: 'dm-progress__meta' }, '本阶段已用时 ' + fmtDuration(progress.phaseElapsedMs))
             : null,
+          progress && Array.isArray(progress.items) && progress.items.length > 0
+            ? h(PluginItemList, { items: progress.items })
+            : null,
           progress && progress.outputTail
             ? h('pre', { className: 'dm-log', 'aria-label': 'npm 输出' }, progress.outputTail)
             : h('div', { className: 'dm-progress__meta' }, '等待 npm 输出…'))
@@ -767,12 +828,16 @@ function UpgradeCard(props) {
           h('span', { className: 'dm-field__label' }, historical ? '上次结果' : '结果'),
           h('div', { className: 'dm-field__main' },
             last.ok
-              ? h('span', { className: 'dm-ok' },
-                  historical
-                    ? (last.landed === true ? '上次升级完成,已运行目标版本' : '上次升级完成,已切换版本链接')
-                    : last.exitScheduled === true
-                      ? '升级完成,宿主正在退出切换版本'
-                      : last.landed === true ? '升级完成,已运行目标版本' : '升级完成,已切换版本链接')
+              ? pluginUpgradeWarning
+                ? h('span', { className: 'dm-warn' }, historical
+                    ? '上次宿主升级完成,但插件同步升级有失败'
+                    : '宿主升级完成,但插件同步升级有失败')
+                : h('span', { className: 'dm-ok' },
+                    historical
+                      ? (last.landed === true ? '上次升级完成,已运行目标版本' : '上次升级完成,已切换版本链接')
+                      : last.exitScheduled === true
+                        ? '升级完成,宿主正在退出切换版本'
+                        : last.landed === true ? '升级完成,已运行目标版本' : '升级完成,已切换版本链接')
               : last.pending === true
                 ? h('div', { className: 'dm-notice dm-notice--warn' }, '上次升级已切换版本,当前仍在运行旧版本,等待宿主重启')
                 : last.landed === true
@@ -794,17 +859,15 @@ function UpgradeCard(props) {
                     : '自动重启未勾选:请手动重启宿主加载新版本,重启前不能再次发起升级')
               : null,
             pluginUpgrade && pluginUpgrade.requested === true
-              ? pluginUpgrade.pending === true
-                ? h('div', { className: 'dm-field__hint' }, '插件同步升级:等待新宿主启动后按目标版本执行')
-                : h('div', { className: pluginUpgrade.failed && pluginUpgrade.failed.length > 0 ? 'dm-notice dm-notice--warn' : 'dm-field__hint' },
-                    '插件同步升级:更新 ' + ((pluginUpgrade.updated || []).length) + ' 个'
-                    + ((pluginUpgrade.failed || []).length > 0 ? ',失败 ' + pluginUpgrade.failed.length + ' 个' : '')
-                    + ((pluginUpgrade.skipped || []).length > 0 ? ',跳过 ' + pluginUpgrade.skipped.length + ' 个' : '')
-                    + (pluginUpgrade.error ? ';' + pluginUpgrade.error : ''),
-                    (pluginUpgrade.failed || []).length > 0
-                      ? h('div', { className: 'dm-check__detail' },
-                          pluginUpgrade.failed.map((row) => row.name + ':' + row.error).join('; '))
-                      : null)
+              && (pluginUpgrade.items.length > 0 || pluginUpgrade.error)
+              ? h('div', { className: pluginUpgradeWarning ? 'dm-notice dm-notice--warn' : 'dm-field__hint' },
+                  pluginUpgradeSummaryLine(pluginUpgrade),
+                  pluginUpgrade.error ? h('div', null, pluginUpgrade.error) : null,
+                  pluginUpgrade.items.length > 0
+                    ? h('details', { className: 'dm-details' },
+                        h('summary', null, '插件明细'),
+                        h(PluginItemList, { items: pluginUpgrade.items }))
+                    : null)
               : null,
             health && health.ok === false
               ? h('div', { className: 'dm-notice dm-notice--error' },
@@ -906,7 +969,10 @@ function UpgradeDialog(props) {
     ? preflight.safeMode
     : {}
   const candidates = Array.isArray(safeModeInfo.candidates) ? safeModeInfo.candidates : []
-  const startDisabled = !preflight || preflightError !== null || !canStartInstall(status, props.busy, props.restarting, preflight, safeMode)
+  const canUpgradePlugins = status.upgradePluginsAvailable === true && status.pluginUpgradeMode === 'pre-switch'
+  const upgradeBeforeSwitch = canUpgradePlugins && upgradePlugins
+  const startDisabled = !preflight || preflightError !== null
+    || !canStartInstall(status, props.busy, props.restarting, preflight, safeMode, upgradeBeforeSwitch)
   const finishLine = autoRestart
     ? '安装完成后宿主将立即退出切换版本:托管启动时由进程管理器拉起,手动终端启动时需你重新运行宿主;页面随宿主恢复自动刷新。'
     : '安装完成后宿主继续运行当前版本,需手动重启宿主加载新版本;重启前不能再次发起升级。'
@@ -959,24 +1025,21 @@ function UpgradeDialog(props) {
         : null,
       h('label', { className: 'dm-switch' },
         ...switchToggle({
-          checked: upgradePlugins,
-          disabled: !autoRestart || status.upgradePluginsAvailable !== true || status.pluginUpgradeMode !== 'post-restart',
+          checked: upgradeBeforeSwitch,
+          disabled: !canUpgradePlugins,
           onChange: (e) => setUpgradePlugins(e.target.checked),
         }),
-        '同时升级所有插件',
+        '先升级插件再切换槽位',
       ),
       h('div', { className: 'dm-dialog__hint' },
-        status.upgradePluginsAvailable === true && status.pluginUpgradeMode === 'post-restart'
-          ? '宿主升级完成后按新宿主兼容性升级 profile 插件,只升不降;无更高版本、不兼容或 Git 插件会跳过,单项失败不阻断宿主升级。'
+        canUpgradePlugins
+          ? '先更新当前宿主可安装的 registry 插件,再用目标宿主复检。检查或升级失败、复检不可用或仍有不兼容插件时,不切槽、不重启。Git 与内置插件不更新。'
           : '当前宿主未加载新的插件升级流程,请先重启宿主加载新版本。'),
       h('div', { className: 'dm-dialog__hint' }, finishLine),
       h('label', { className: 'dm-switch' },
         ...switchToggle({ checked: autoRestart, onChange: (e) => {
           setAutoRestart(e.target.checked)
-          if (!e.target.checked) {
-            setSafeMode(false)
-            setUpgradePlugins(false)
-          }
+          if (!e.target.checked) setSafeMode(false)
         } }),
         '安装后自动重启宿主',
       ),
@@ -985,7 +1048,7 @@ function UpgradeDialog(props) {
         h('button', {
           className: 'dm-btn dm-btn--primary',
           disabled: startDisabled,
-          onClick: () => props.onConfirm(status.channelLatest, autoRestart, safeMode, upgradePlugins),
+          onClick: () => props.onConfirm(status.channelLatest, autoRestart, safeMode, upgradeBeforeSwitch),
         }, preflight === null ? '检查中…' : '开始安装'),
       ),
     ),
@@ -1417,7 +1480,6 @@ function MaintainApp() {
       onReleaseNotes: () => { setRestartArmed(false); setNotesVersion(status.channelLatest) },
       onRestart,
     }),
-    h(PluginUpgradeCard, { status }),
     h(UpgradeCard, { status, restartArmed, restarting, activeWorkTotal, onRestart }),
     h(SafeModeCard, { status, busy, restarting, onRestore: onRestoreSafeMode }),
     h(OpsCard, { armed: restartArmed, restarting, activeWorkTotal, onRestart }),

@@ -145,8 +145,11 @@ export async function performManagedUpgrade({ layout, runningPackage, targetVers
       keepLock = validation?.timedOut === true || validation?.stillRunning === true
       throw new Error(validation?.stderrTail || validation?.stdoutTail || '候选验证失败')
     }
-    await phase('ready-to-switch')
+    // 提交前阶段承接插件升级与最终核验:失败即中止,链接与运行槽都不动,
+    // 新宿主不会在插件未就绪时启动
+    await phase('pre-switch')
     await beforeSwitch({ candidatePackage: pkg, operationId })
+    await phase('ready-to-switch')
     state.slot = slot === layout.a ? 'a' : 'b'
     state.targetPackage = pkg
     state.phase = 'awaiting-restart'

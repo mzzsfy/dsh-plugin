@@ -246,7 +246,7 @@ test('源码契约: 安装入口在通道最新版未知时禁用', () => {
   // 版本卡「安装」共用 installDisabled;确认弹窗在它之上叠加预检门 canStartInstall
   assert.equal(CLIENT_SOURCE.split('disabled: installDisabled(status, props.busy, props.restarting)').length - 1, 1,
     '版本卡安装按钮必须使用 installDisabled')
-  assert.ok(CLIENT_SOURCE.includes('!canStartInstall(status, props.busy, props.restarting, preflight, safeMode)'),
+  assert.ok(CLIENT_SOURCE.includes('!canStartInstall(status, props.busy, props.restarting, preflight, safeMode, upgradeBeforeSwitch)'),
     '确认弹窗开始安装必须叠加预检门')
   assert.ok(!CLIENT_SOURCE.includes("disabled: props.busy.upgrade || props.restarting || (status.upgrade"), '不得回退到无 channelLatest 守卫的旧表达式')
 })
@@ -286,4 +286,12 @@ test('源码契约: 分区标题为 18px/600(L1 设置类)', () => {
   const weight = match[1].match(/font-weight:(\d+)/)
   assert.equal(weight && weight[1], '600', '分区标题权重必须 600')
   assert.ok(!/font-size:1[0-6]px/.test(match[1]), '分区标题不得回退到小字号')
+})
+
+// 插件前置升级协议字面量:host 常量与 client 门禁必须同一值,单侧改名会让开关永久禁用而无人察觉
+test('源码契约: client 的前置升级模式字面量与 host 常量一致', async () => {
+  const { PLUGIN_UPGRADE_MODE } = await import('../src/plugin-upgrade.mjs')
+  const literals = CLIENT_SOURCE.match(/'pre-switch'|'post-restart'/g) || []
+  assert.ok(literals.length > 0, 'client.js 必须按模式字面量决定开关可用性')
+  assert.deepEqual([...new Set(literals)], ["'" + PLUGIN_UPGRADE_MODE + "'"])
 })

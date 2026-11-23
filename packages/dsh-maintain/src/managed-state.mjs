@@ -58,32 +58,43 @@ export async function readManagedState(layout) {
   return readJson(join(layout.root, 'state.json'))
 }
 
+// 插件前置升级记录:逐插件状态(等待/检查/升级/已更新/失败/跳过),切槽前完成。
+// 兼容 0.17.0 及更早的 post-restart 结构:updated/failed/skipped 三数组在读取时归一为 items,
+// 避免旧 state.json 的插件失败历史被静默丢弃后自动 ack;旧 pending 意图在新宿主上无法补做,
+// 以 error 明示需重新发起升级,而不是留一个永远等不到执行者的标记。
 export function normalizePluginUpgrade(value) {
   if (!value || typeof value !== 'object' || value.requested !== true) return null
-  const rows = (list) => (Array.isArray(list) ? list : [])
+  const legacyRows = (list, state) => (Array.isArray(list) ? list : [])
+    .map((row) => (row && typeof row === 'object' ? { ...row, state } : row))
+  const rawItems = Array.isArray(value.items)
+    ? value.items
+    : [
+        ...legacyRows(value.updated, 'updated'),
+        ...legacyRows(value.failed, 'failed'),
+        ...legacyRows(value.skipped, 'skipped'),
+      ]
+  const items = rawItems
     .filter((row) => row && typeof row.name === 'string')
     .slice(0, PLUGIN_UPGRADE_MAX_ROWS)
-  return {
-    requested: true,
-    pending: value.pending === true,
-    updated: rows(value.updated).map((row) => ({
+    .map((row) => ({
       name: row.name,
+      state: typeof row.state === 'string' ? row.state : 'pending',
       from: row.from ?? null,
       to: row.to ?? null,
       application: row.application ?? null,
-    })),
-    failed: rows(value.failed).map((row) => ({
-      name: row.name,
-      from: row.from ?? null,
-      to: row.to ?? null,
-      error: typeof row.error === 'string' ? row.error : '未知错误',
+      error: typeof row.error === 'string' ? row.error : row.state === 'failed' ? '未知错误' : null,
+      reason: typeof row.reason === 'string' ? row.reason : null,
       restoreFailed: row.restoreFailed === true,
-    })),
-    skipped: rows(value.skipped).map((row) => ({
-      name: row.name,
-      reason: typeof row.reason === 'string' ? row.reason : '未说明',
-    })),
-    error: typeof value.error === 'string' ? value.error : null,
+    }))
+  const legacyPending = value.pending === true && !Array.isArray(value.items)
+  const total = Number.isInteger(value.total) && value.total >= items.length ? value.total : items.length
+  return {
+    requested: true,
+    total,
+    items,
+    error: typeof value.error === 'string'
+      ? value.error
+      : legacyPending ? '旧版本遗留的插件升级意图未执行(前置升级自本版生效),需重新发起升级' : null,
   }
 }
 

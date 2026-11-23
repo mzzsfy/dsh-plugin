@@ -126,6 +126,35 @@ test('提交窗口新增工作时不切链接', async t => {
   await assert.rejects(realpath(f.layout.link), { code: 'ENOENT' })
 })
 
+// 插件前置升级就在 beforeSwitch 内:它抛错等价于"插件失败",必须停在切换之前,
+// 链接/槽位/state 与锁都要回到可再次发起的干净状态。
+test('beforeSwitch 抛错不切链接、锁释放、state 落定 failed 且可重试', async t => {
+  const f = await setup(t)
+  const pluginGate = async () => { throw new Error('插件升级未完成,已中止切换槽位: @scope/a') }
+  let error = null
+  try {
+    await f.api.performManagedUpgrade({ ...f, runningPackage: f.originalPackage, targetVersion: '2.0.0', beforeSwitch: pluginGate })
+  } catch (thrown) {
+    error = thrown
+  }
+  assert.ok(error)
+  assert.match(error.message, /插件升级未完成/)
+  assert.notEqual(error.switched, true)
+  assert.notEqual(error.indeterminate, true)
+  assert.deepEqual(f.events, ['install', 'validate'])
+  await assert.rejects(realpath(f.layout.link), { code: 'ENOENT' })
+  await assert.rejects(readFile(join(f.layout.root, 'upgrade.lock')), { code: 'ENOENT' })
+  const state = JSON.parse(await readFile(join(f.layout.root, 'state.json'), 'utf8'))
+  assert.equal(state.phase, 'failed')
+  assert.match(state.error, /插件升级未完成/)
+  // 失败落定后同一目标可再次发起:锁已释放,不被"进行中"拒绝
+  await assert.rejects(
+    f.api.performManagedUpgrade({ ...f, runningPackage: f.originalPackage, targetVersion: '2.0.0', beforeSwitch: pluginGate }),
+    (retry) => retry.message !== '升级进行中' && /插件升级未完成/.test(retry.message),
+  )
+  assert.deepEqual(f.events, ['install', 'validate', 'install', 'validate'])
+})
+
 test('同prefix并发仅一个安装；损坏或古老锁不能TTL放行', async t => {
   const f = await setup(t)
   await mkdir(f.layout.root, { recursive: true })
