@@ -1,21 +1,16 @@
-import { mkdir, open, readFile, writeFile, rename, rm, realpath, stat } from 'node:fs/promises'
+import { mkdir, open, readFile, rm, realpath, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { parseSemver } from './core.mjs'
 import { selectInactiveSlot, clearInactiveSlot, activateInstallation } from './managed-layout.mjs'
 import { runProcess } from './managed-process.mjs'
+import { saveManagedState } from './managed-state.mjs'
 
 export const MANAGED_TIMEOUT_MS = 10 * 60 * 1000
 
 // 候选验证超时:依赖树检查与CLI冒烟均为本地短操作,远短于安装时长
 const MANAGED_VALIDATE_TIMEOUT_MS = 60 * 1000
-
-export async function saveManagedState(layout, state) {
-  const temp = join(layout.root, 'state.json.next')
-  await writeFile(temp, JSON.stringify(state, null, 2))
-  await rename(temp, join(layout.root, 'state.json'))
-}
 
 export async function findNpmCli(execPath = process.execPath) {
   const node = await realpath(execPath)
@@ -106,7 +101,7 @@ export async function validateCandidate({ slot, candidatePackage, env, nodePath 
 }
 
 export async function performManagedUpgrade({ layout, runningPackage, targetVersion, registryBase, env,
-  install = installCandidate, validate, beforeSwitch, activate = activateInstallation, onPhase = () => {}, onOutput = () => {}, activePackages = [], operationId = randomUUID(), nodePath, npmCli, previousVersion = null }) {
+  install = installCandidate, validate, beforeSwitch, withSwitchLock = (commit) => commit(), assertCanSwitch, activate = activateInstallation, onPhase = () => {}, onOutput = () => {}, activePackages = [], operationId = randomUUID(), nodePath, npmCli, previousVersion = null, profileId }) {
   if (!parseSemver(targetVersion)) throw new Error('必须指定合法精确版本')
   if (typeof validate !== 'function' || typeof beforeSwitch !== 'function') throw new Error('缺少隔离验证或提交前门控')
   await mkdir(layout.root, { recursive: true })
@@ -118,11 +113,18 @@ export async function performManagedUpgrade({ layout, runningPackage, targetVers
   }
   let keepLock = false
   let switched = false
+  let activationStarted = false
+  let operationRecorded = false
   const state = {
     operationId, targetVersion, previousVersion, prefix: layout.prefix, originalPackage: layout.originalPackage,
-    runningPackage, phase: 'accepted', startedAt: Date.now(), bin: layout.bin,
+    runningPackage, profileId, phase: 'accepted', startedAt: Date.now(), bin: layout.bin,
   }
-  const phase = async value => { state.phase = value; await saveManagedState(layout, state); onPhase({ ...state }) }
+  const phase = async value => {
+    state.phase = value
+    await saveManagedState(layout, state)
+    operationRecorded = true
+    onPhase({ ...state })
+  }
   try {
     await handle.writeFile(JSON.stringify({ operationId, pid: process.pid, startedAt: state.startedAt }))
     const slot = await selectInactiveSlot(layout, runningPackage)
@@ -145,30 +147,60 @@ export async function performManagedUpgrade({ layout, runningPackage, targetVers
       keepLock = validation?.timedOut === true || validation?.stillRunning === true
       throw new Error(validation?.stderrTail || validation?.stdoutTail || '候选验证失败')
     }
-    // 提交前阶段承接插件升级与最终核验:失败即中止,链接与运行槽都不动,
-    // 新宿主不会在插件未就绪时启动
+    // 最终核验不修改 profile；失败即中止，不切换安装链接。
     await phase('pre-switch')
-    await beforeSwitch({ candidatePackage: pkg, operationId })
     await phase('ready-to-switch')
-    state.slot = slot === layout.a ? 'a' : 'b'
-    state.targetPackage = pkg
-    state.phase = 'awaiting-restart'
-    state.switchedAt = Date.now()
-    await saveManagedState(layout, state)
+    let commitError
+    let activated
+    try {
+      activated = await withSwitchLock(async () => {
+        try {
+          await beforeSwitch({ candidatePackage: pkg, operationId })
+          state.slot = slot === layout.a ? 'a' : 'b'
+          state.targetPackage = pkg
+          state.phase = 'awaiting-restart'
+          state.switchedAt = Date.now()
+          await saveManagedState(layout, state)
+          // 进入切换后由布局层完成提交或报告不确定。
+          activationStarted = true
+          const result = await activate(layout, pkg, { runningPackage, assertCanSwitch })
+          switched = true
+          return result
+        } catch (error) {
+          commitError = error
+          throw error
+        }
+      })
+    } catch (error) {
+      // 宿主锁清理异常可能覆盖提交异常，保留原有回滚判定。
+      if (commitError && commitError !== error) {
+        console.warn('[dsh-maintain] profile 写锁清理失败: ' + (error?.message ?? error))
+      }
+      throw commitError ?? error
+    }
     onPhase({ ...state })
-    const activated = await activate(layout, pkg, { runningPackage })
-    switched = true
     return { ...state, slot: activated.slot, targetPackage: activated.candidatePackage, switched: true }
   } catch (error) {
-    keepLock ||= switched || error.indeterminate === true || error.stillRunning === true || error.timedOut === true || error.rollbackFailed === true
+    let requiresHostExit = keepLock || switched || error.indeterminate === true
+      || error.stillRunning === true || error.timedOut === true || error.rollbackFailed === true
+    keepLock = requiresHostExit || error.stateLockReleaseFailed === true
     state.phase = keepLock ? 'indeterminate' : 'failed'
     state.error = error.message
-    try { await saveManagedState(layout, state); onPhase({ ...state }) } catch { keepLock = true; state.phase = 'indeterminate' }
+    if (operationRecorded) {
+      try {
+        await saveManagedState(layout, state)
+        onPhase({ ...state })
+      } catch (writeError) {
+        keepLock = true
+        // 未进入激活时，落盘故障只需封锁后续维护操作。
+        requiresHostExit ||= activationStarted
+        error.message += '；失败结果无法落盘：' + writeError.message
+      }
+    }
     error.operationId = operationId
     error.switched = switched
-    // 状态不确定(超时/仍在运行/回滚失败/阶段落盘失败)统一标记,调用方据此强制退出宿主:
-    // 旧进程不能带着未知磁盘状态继续提供升级入口
     error.indeterminate = keepLock
+    error.requiresHostExit = requiresHostExit
     throw error
   } finally {
     await handle.close()

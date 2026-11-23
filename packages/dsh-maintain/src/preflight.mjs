@@ -5,13 +5,14 @@ import { join } from 'node:path'
 
 import { compareSemver, fetchVersionManifest, parseSemver } from './core.mjs'
 import { selectInactiveSlot } from './managed-layout.mjs'
-import { readManagedState } from './managed-state.mjs'
+import { readManagedState, STATE_LOCK_FILE } from './managed-state.mjs'
 import { findNpmCli } from './managed-upgrade.mjs'
-import { PLUGIN_BLOCK, scanProfilePlugins } from './plugin-compat.mjs'
+import { scanProfilePlugins } from './plugin-compat.mjs'
 
 export const CHECK_PASS = 'pass'
 export const CHECK_WARN = 'warn'
 export const CHECK_BLOCK = 'block'
+export const ONLINE_UPGRADE_DISABLED = '在线插件同步升级和安全模式升级已关闭；当前只支持单独升级宿主'
 
 const KB = 1024
 const MB = KB * 1024
@@ -87,7 +88,7 @@ function pluginSummary(pluginScan) {
 export function buildPreflightReport({ targetVersion, checks = [], pluginScan = null, now }) {
   const scan = pluginScan && typeof pluginScan === 'object'
     ? pluginScan
-    : { available: false, reason: '未执行插件扫描', plugins: [], safeModeCandidates: [] }
+    : { available: false, reason: '未执行插件扫描', plugins: [] }
   const normalized = checks.map(normalizeCheck)
   const summary = pluginSummary(scan)
   if (!normalized.some((check) => check.id === 'plugins')) {
@@ -106,38 +107,21 @@ export function buildPreflightReport({ targetVersion, checks = [], pluginScan = 
     block: normalized.filter((check) => check.status === CHECK_BLOCK).length,
   }
   const nonPluginBlock = normalized.some((check) => check.status === CHECK_BLOCK && check.id !== 'plugins')
-  const pluginBlock = summary.block > 0
-  const safeModeCandidates = Array.isArray(scan.safeModeCandidates) ? scan.safeModeCandidates : []
-  const protectedPlugins = Array.isArray(scan.protectedPlugins) ? scan.protectedPlugins : []
-  const uncovered = (Array.isArray(scan.plugins) ? scan.plugins : [])
-    .filter((plugin) => plugin?.status === PLUGIN_BLOCK && !safeModeCandidates.some((candidate) => candidate.name === plugin.name))
-  const safeModeAvailable = scan.available === true
-    && scan.safeModeAvailable === true
-    && safeModeCandidates.length > 0
-    && uncovered.length === 0
-  const ok = counts.block === 0
-  const protectedBlock = uncovered.filter((plugin) => plugin.safeModeProtected === true)
   return {
     targetVersion,
     at: now,
-    ok,
+    ok: counts.block === 0,
     environmentOk: !nonPluginBlock,
-    okWithSafeMode: !nonPluginBlock && (!pluginBlock || safeModeAvailable),
+    okWithSafeMode: false,
     summary: counts,
     checks: normalized,
     plugins: Array.isArray(scan.plugins) ? scan.plugins : [],
     pluginSummary: summary,
     safeMode: {
-      available: safeModeAvailable,
-      reason: safeModeAvailable
-        ? null
-        : protectedBlock.length > 0
-          ? '不兼容插件属于保护项,不能自动禁用: ' + protectedBlock.map((plugin) => plugin.name).join(',')
-          : (scan.reason || (scan.available === true && scan.safeModeAvailable === false
-              ? 'pluginManager.setBundleEnabled 不可用'
-              : '没有需要禁用的插件')),
-      candidates: safeModeCandidates,
-      protected: protectedPlugins.map((plugin) => plugin.name),
+      available: false,
+      reason: ONLINE_UPGRADE_DISABLED,
+      candidates: [],
+      protected: [],
     },
   }
 }
@@ -152,13 +136,13 @@ async function checkPermission(layout, accessImpl, rootExists = true) {
   }
 }
 
-async function checkResidualLock(layout, statImpl) {
+async function checkResidualLock(layout, statImpl, id, label, file) {
   try {
-    await statImpl(join(layout.root, 'upgrade.lock'))
-    return { id: 'lock', label: '升级锁', status: CHECK_BLOCK, detail: '存在残留 upgrade.lock,需人工核验后再升级' }
+    await statImpl(join(layout.root, file))
+    return { id, label, status: CHECK_BLOCK, detail: file + ' 正被持有或残留，请稍后重试或核验' }
   } catch (error) {
-    if (error?.code === 'ENOENT') return { id: 'lock', label: '升级锁', status: CHECK_PASS, detail: '无残留升级锁' }
-    return { id: 'lock', label: '升级锁', status: CHECK_WARN, detail: '无法检查升级锁: ' + (error?.message ?? error) }
+    if (error?.code === 'ENOENT') return { id, label, status: CHECK_PASS, detail: '无残留' + label }
+    return { id, label, status: CHECK_WARN, detail: '无法检查' + label + ': ' + (error?.message ?? error) }
   }
 }
 
@@ -171,7 +155,6 @@ export async function runPreflight({
   profileDir,
   installAnchor,
   pluginManager,
-  safeModeWhitelist = [],
   registryBase,
   requiredBytes = null,
   now = Date.now(),
@@ -212,7 +195,8 @@ export async function runPreflight({
   }
   if (layout) {
     checks.push(await checkPermission(layout, accessImpl, layoutRootExists))
-    checks.push(await checkResidualLock(layout, statImpl))
+    checks.push(await checkResidualLock(layout, statImpl, 'lock', '升级锁', 'upgrade.lock'))
+    checks.push(await checkResidualLock(layout, statImpl, 'state-lock', '状态写锁', STATE_LOCK_FILE))
     let state = null
     try {
       state = await readManagedStateImpl(layout)
@@ -252,9 +236,9 @@ export async function runPreflight({
   }
   let pluginScan
   try {
-    pluginScan = await scanPluginsImpl({ profileDir, installAnchor, targetVersion, pluginManager, safeModeWhitelist })
+    pluginScan = await scanPluginsImpl({ profileDir, installAnchor, targetVersion, pluginManager })
   } catch (error) {
-    pluginScan = { available: false, reason: error?.message ?? String(error), plugins: [], safeModeCandidates: [] }
+    pluginScan = { available: false, reason: error?.message ?? String(error), plugins: [] }
   }
   return buildPreflightReport({ targetVersion, checks, pluginScan, now })
 }

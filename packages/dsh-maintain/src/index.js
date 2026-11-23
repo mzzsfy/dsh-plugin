@@ -4,8 +4,11 @@
 // 条目 config 节(Config 导出 + volatile 热更),检查结果仅存内存。
 
 import { readFileSync, realpathSync } from 'node:fs'
+import { lstat, mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
+import { createRequire } from 'node:module'
 import { basename, dirname, join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import z from '@deepseek-ai/schemastery'
 
 import {
@@ -24,26 +27,24 @@ import { createLayout, readSelectedVersion } from './managed-layout.mjs'
 import { performManagedUpgrade, validateCandidate } from './managed-upgrade.mjs'
 import {
   clearSafeModeRecord,
+  drainManagedStateWrites,
   finalizeManagedState,
   markUpgradeReceiptSeen,
-  mergeManagedState,
+  managedProfileId,
   readManagedState,
   readSafeModeRecord,
   reconcileManagedState,
   summarizePluginHealth,
   writeSafeModeRecord,
 } from './managed-state.mjs'
-import { isSafeModeProtectedPlugin, normalizeSafeModeWhitelist, SAFE_MODE_WHITELIST_MAX, scanCandidatePlugins, scanProfilePlugins } from './plugin-compat.mjs'
-import { upgradeProfilePlugins, supportsPluginUpgrade, PLUGIN_UPGRADE_MODE } from './plugin-upgrade.mjs'
+import { isSafeModeProtectedPlugin, normalizeSafeModeWhitelist, SAFE_MODE_WHITELIST_MAX, scanCandidatePlugins } from './plugin-compat.mjs'
 import {
   appendProgressOutput,
   createProgress,
   progressSnapshot,
-  updateProgressItems,
   updateProgressPhase,
-  updateProgressPlugin,
 } from './progress.mjs'
-import { runPreflight } from './preflight.mjs'
+import { ONLINE_UPGRADE_DISABLED, runPreflight } from './preflight.mjs'
 import { withRouteGate } from './route-gate.mjs'
 
 export const name = 'dsh-maintain'
@@ -77,6 +78,60 @@ export const POLL_INTERVAL_MAX_SEC = 30 * 24 * 60 * 60
 
 // 日志单行化:拼入 console.warn 的动态串不得携带换行,防日志结构被打散
 const singleLine = (text) => String(text ?? '').replace(/[\r\n]+/g, ' ')
+
+function rescueCommand(profileName) {
+  const target = profileName?.toLowerCase() === 'rescue' ? 'dsh-rescue' : 'rescue'
+  return `dsh ${target} --from-default-profile web --no-open --port 3081`
+}
+
+function rescueGuideText(home, command) {
+  return [
+    'DSH 故障救援说明',
+    '',
+    '本宿主的 DSH 用户目录: ' + home,
+    '先在宿主机器的终端设置 DSH_HOME 为上述目录，再运行以下命令。',
+    'PowerShell: $env:DSH_HOME = ' + "'" + home.replaceAll("'", "''") + "'",
+    'Git Bash / Linux / macOS: export DSH_HOME=' + "'" + home.replaceAll("'", "'\\''") + "'",
+    '',
+    '启动临时救援界面（在运行 DSH 的机器上执行）:',
+    command,
+    '命令会重建指定的救援 profile，删除其中原有插件与配置。若该名称已被使用，请先备份，或改用一个尚不存在的自定义名称。不要使用原故障 profile 的名称。端口被占用时可换一个端口。',
+    '打开终端显示的网址进入救援界面（--no-open 不会自动打开浏览器）。救援界面使用独立 profile；在其中操作插件不会修复原 profile。家目录级 cordis.patch.yml 仍会作用于救援 profile。',
+    '',
+    '排查原 profile（下面以 web 为例，其他 profile 请替换 web）:',
+    'dsh --profile web --dump-default-config',
+    'dsh --profile web --dump-config',
+    '这两条命令只检查配置组合，不验证插件能否运行。查看 DSH 用户目录 logs 下的 startup-*.log 或启动终端的错误信息；分享日志前检查是否包含凭据。',
+    '',
+    '修复插件前先备份 DSH 用户目录 profiles/web 下的 package.json、pnpm-lock.yaml 和 cordis.patch.yml。停止原宿主及其自动重启进程，避免并发修改。',
+    '缺少已声明的依赖时，可运行 dsh plugin --profile web install；确认需要安装新插件时运行 dsh plugin --profile web add <包名>。',
+    '要卸载 profile 的直接依赖包，可运行 dsh plugin --profile web remove <包名>。只需停用某 bundle 的配置层时，可从 profiles/web/package.json 的 dsh.profile.bundles 数组中移除该包名，保留 dependencies；同一组件若被其他层引入仍可能加载。',
+    '如需禁用具体组件，编辑 profiles/web/cordis.patch.yml 中对应当前组合配置的 entry id。文件若为默认空数组 []，将 [] 替换为以下内容；只有已有的块式列表（以 - 开头）可以按相同缩进追加，非空方括号列表须先转换成块式列表，保留原条目:',
+    '- id: <启动日志中的 entry id>',
+    '  disabled: true',
+    '配置文件语法损坏时，先备份再修复。DSH 用户目录下的 cordis.patch.yml 是所有 profile 共用的高优先级层，也应检查。',
+    '修复后使用原来的启动方式重启原 profile。',
+    '',
+    '如果升级后 DSH 本体本身无法启动，先检查安装前后版本与受管目录 .dsh-maintain/state.json，再确认另一个安装槽可用后进行人工回退；不要删除安装槽。',
+    ''
+  ].join('\n')
+}
+
+async function writeRescueGuide(home, command) {
+  if (typeof home !== 'string' || home.length === 0) return false
+  const destination = join(home, 'rescue.txt')
+  const temp = destination + '.' + randomUUID() + '.next'
+  try {
+    await mkdir(home, { recursive: true })
+    await writeFile(temp, rescueGuideText(home, command), { encoding: 'utf8', flag: 'wx' })
+    await rename(temp, destination)
+    return true
+  } catch (error) {
+    await rm(temp, { force: true }).catch(() => {})
+    console.warn('[dsh-maintain] 救援说明写入失败: ' + singleLine(error?.message ?? error))
+    return false
+  }
+}
 
 // 受管升级只接受精确版本:范围/标签/空串一律拒绝,通道目标经 dist-tags 解析为精确值
 const parseSemverStrict = (version) => (typeof version === 'string' ? parseSemver(version.trim()) : null) !== null
@@ -209,6 +264,58 @@ export const API_PATHS = Object.freeze({
 
 // 宿主进程启动时刻:重启探测的第三代际信号(容器内 pid 恒 1 且零失联时 pid 信号失效)
 const BOOT_AT = Date.now() - Math.round(process.uptime() * 1000)
+const BOOT_ID = globalThis[Symbol.for('@mzzsfy/dsh-maintain.boot-id')] ??= randomUUID()
+const maintenanceByPrefix = globalThis[Symbol.for('@mzzsfy/dsh-maintain.maintenance-by-prefix')] ??= new Map()
+const runningInstalls = globalThis[Symbol.for('@mzzsfy/dsh-maintain.running-installs')] ??= new Map()
+
+function maintenanceGate(prefix) {
+  let key = null
+  try { key = realpathSync.native(prefix) } catch {}
+  const existing = maintenanceByPrefix.get(key)
+  if (existing) return existing
+  const gate = {
+    upgrade: { running: false, last: null, profileId: null },
+    upgradeStarting: false, restoringPlugins: false, restartChecking: false, restartScheduled: false, active: false,
+  }
+  if (key !== null) maintenanceByPrefix.set(key, gate)
+  return gate
+}
+
+async function withProfileSwitchLock({ installAnchor, profileId }, commit) {
+  // 与运行中的插件管理器从同一依赖位置解析写锁。
+  let withFileLock
+  try {
+    const host = createRequire(installAnchor)
+    const manager = createRequire(host.resolve('@deepseek-ai/dsh-plugin-manager'))
+    const entry = manager.resolve('@deepseek-ai/dsh-atomic-write')
+    const lockModule = await import(pathToFileURL(entry).href)
+    withFileLock = lockModule.withFileLock
+    if (typeof withFileLock !== 'function') throw new Error('缺少 withFileLock')
+  } catch (error) {
+    throw new Error('无法加载运行宿主的 profile 写锁，已停止切槽', { cause: error })
+  }
+  return withFileLock(join(profileId, 'package.json'), async () => {
+    // 写锁可接管已退出的 owner，但它启动的 pnpm 仍可能在写。
+    const record = join(profileId, '.plugin-manager', 'run.json')
+    try {
+      await lstat(record)
+    } catch (error) {
+      if (error?.code === 'ENOENT') return commit()
+      throw new Error('无法核验包管理运行记录 .plugin-manager/run.json，已停止切槽', { cause: error })
+    }
+    throw new Error('存在遗留包管理运行记录 .plugin-manager/run.json，请先核验并处理遗留包管理任务，再重试升级')
+  })
+}
+
+async function assertNoUpgradeLock(layout) {
+  try {
+    await lstat(join(layout.root, 'upgrade.lock'))
+  } catch (error) {
+    if (error?.code === 'ENOENT') return
+    throw Object.assign(new Error('无法核验升级锁: ' + (error?.message ?? error)), { status: 409 })
+  }
+  throw Object.assign(new Error('存在 upgrade.lock，请先确认受管升级已结束'), { status: 409 })
+}
 
 // 默认值导出仅供 parity 测试作 host 侧锚点;行为入口全部经 readSettings 回落
 export const DEFAULT_CHANNEL = 'latest'
@@ -223,7 +330,7 @@ export const Config = volatileWrap(z.object({
   channel: z.string().default(DEFAULT_CHANNEL).description('追踪通道:npm dist-tag 名(latest/next/alpha 等,以检查返回的通道列表为准)'),
   pollIntervalSec: z.number().default(DEFAULT_POLL_INTERVAL_SEC).description('轮询间隔秒数,仅正数启用周期检查'),
   registryBase: z.string().default(DEFAULT_REGISTRY_BASE).description('npm registry 基地址,官方源不可达时改为镜像地址'),
-  safeModeWhitelist: z.array(z.string()).default([]).description('安全模式不自动禁用的插件名(精确包名,逗号/换行分隔)'),
+  safeModeWhitelist: z.array(z.string()).default([]).description('保留的旧安全模式白名单，不参与当前升级'),
 }))
 
 function volatileWrap(schema) {
@@ -407,9 +514,25 @@ export function discoverRunningInstall({ argv1 = process.argv[1], installAnchor,
   }
 }
 
+function runningInstallForProcess(installAnchor) {
+  // argv 指向的 dsh_link 可在提交时改变，成功发现后保留本进程的实际运行槽。
+  const argv1 = process.argv[1]
+  const key = JSON.stringify([argv1, installAnchor])
+  const cached = runningInstalls.get(key)
+  if (cached) return cached
+  const discovered = discoverRunningInstall({ argv1, installAnchor })
+  if (discovered.error === null) runningInstalls.set(key, discovered)
+  return discovered
+}
+
 /** @param {import('@deepseek-ai/cordis').Context} ctx */
 export function apply(ctx, config, dependencies = {}) {
-  const maintenance = { active: false }
+  // 运行入口在 apply 时固定。HMR 新 fiber 复用同一个安装前缀的门闩。
+  const installAnchor = ctx.profileContext?.installAnchor
+  const managedInstall = dependencies.runningInstall !== undefined
+    ? dependencies.runningInstall
+    : runningInstallForProcess(installAnchor)
+  const maintenance = maintenanceGate(managedInstall.prefix)
   // 显式暂停契约(F08):维护态即"已切换/切换中、当前暂停、重启后可用";
   // pre-step 拒绝携带结构化说明,与 status 快照/审计同口径。
   // 宿主把 pre-step 作为事件派发(官方消费方一律 ctx.on),没有 hooks 服务面
@@ -482,21 +605,13 @@ export function apply(ctx, config, dependencies = {}) {
   const runningVersionReady = resolveCurrentHostVersion()
     .then((version) => { runningVersion = version })
     .catch(() => {})
-  let upgrade = { running: false, last: null }
-  let upgradeStarting = false
+  let landingHealthSettled = false
   let checkInFlight = null
   let nextDueAt = null
-  let restartScheduled = false
-  // 受管安装发现:apply 时刻缓存(链接切换后不再重新 realpath 推断运行版)。
-  // 发现失败不阻塞面板,仅升级入口拒绝并带原因
-  const installAnchor = ctx.profileContext?.installAnchor
-  const managedInstall = dependencies.runningInstall !== undefined
-    ? dependencies.runningInstall
-    : discoverRunningInstall({ installAnchor })
   const profileDir = ctx.profileContext?.dir
-  const scanPluginsImpl = typeof dependencies.scanPlugins === 'function'
-    ? dependencies.scanPlugins
-    : scanProfilePlugins
+  const resolveProfileId = dependencies.resolveProfileId ?? managedProfileId
+  const profileIdReady = Promise.resolve().then(() => resolveProfileId(profileDir)).catch(() => null)
+  const suggestedRescueCommand = rescueCommand(ctx.profileContext?.name)
   const runPreflightImpl = typeof dependencies.runPreflight === 'function'
     ? dependencies.runPreflight
     : runPreflight
@@ -567,7 +682,7 @@ export function apply(ctx, config, dependencies = {}) {
     }
     const dispose = timerCtx.interval(() => {
       // restartScheduled 窗口内不再发起检查:关机延迟期间的网络请求与磁盘读取都是半写状态风险
-      if (restartScheduled || checkInFlight !== null || nextDueAt === null || Date.now() < nextDueAt) return
+      if (maintenance.restartScheduled || checkInFlight !== null || nextDueAt === null || Date.now() < nextDueAt) return
       runCheck().then(scheduleNext, scheduleNext)
     }, TICK_MS)
     ctx.effect(() => dispose, 'dsh-maintain poll interval')
@@ -579,7 +694,6 @@ export function apply(ctx, config, dependencies = {}) {
     return judgeVersion({ currentVersion: runningVersion, tags: snapshot.tags, channel: readSettings(ctx, config).channel })
   }
 
-  let landingHealth = null
   // 已落地/已降级的状态也允许在新进程启动时复核一次,避免旧版本把平台不支持插件误判后永久卡 degraded
   const LANDING_RECHECK_PHASES = new Set(['awaiting-restart', 'healthy', 'degraded', 'landed'])
 
@@ -602,7 +716,9 @@ export function apply(ctx, config, dependencies = {}) {
       pending: reconciled.pending,
       error: reconciled.error,
       receiptSeen: reconciled.receiptSeen === true,
+      receiptLocalOnly: reconciled.receiptLocalOnly === true,
       health: reconciled.health,
+      receiptResult: reconciled.receiptResult,
       plugins: reconciled.plugins,
     }
   }
@@ -610,36 +726,51 @@ export function apply(ctx, config, dependencies = {}) {
   async function currentStatus() {
     // 等运行版本首读落定:apply 即发起,此处仅吸收启动窗口的微小延迟
     await runningVersionReady
-    const cfg = readSettings(ctx, config)
-    const judged = judgeNow()
     const layout = managedInstall.error === null ? await getLayout().catch(() => null) : null
+    // 先取完成标记，避免把旧磁盘快照和稍后设置的完成标记组合在同一响应。
+    const healthSettledAtRead = landingHealthSettled
+    const profileId = await profileIdReady
     const persistedState = layout ? await readManagedState(layout) : null
     const persistedLast = formatLastUpgrade(reconcileManagedState({
       state: persistedState,
       runningVersion,
       runningPackage: managedInstall.runningPackage ?? managedInstall.originalPackage,
+      bootId: BOOT_ID,
+      profileId,
     }))
-    const safeModeRecord = layout ? await readSafeModeRecord(layout) : null
+    const safeModeRecord = layout && profileId ? await readSafeModeRecord(layout, { profileId }) : null
+    const upgrade = maintenance.upgrade.profileId === profileId ? maintenance.upgrade : { running: false, last: null }
     const progress = upgrade.running ? progressSnapshot(upgrade.progress, Date.now()) : null
-    // 进程内 last 才代表本次启动发起的升级;state.json 里的结果只作历史记录展示,
-    // 不能让用户误以为刷新页面就发生了一次新升级。同一 operationId 的已读标记要合并,
-    // 否则未重启宿主时刷新页面会绕过回执隐藏。
-    const persistedReceiptSeen = Boolean(
-      upgrade.last
-      && persistedLast
-      && upgrade.last.operationId === persistedLast.operationId
-      && persistedLast.receiptSeen === true,
-    )
+    // 仅将同一操作、同一终态的回执合入本进程结果。
+    const persistedReceiptSeen = !upgrade.running && upgrade.last?.ok !== null
+      && upgrade.last?.operationId === persistedLast?.operationId
+      && upgrade.last?.ok === persistedLast?.ok
+      && persistedLast?.receiptSeen === true
     const visibleLast = upgrade.last
-      ? { ...upgrade.last, receiptSeen: upgrade.last.receiptSeen === true || persistedReceiptSeen }
+      ? {
+          ...upgrade.last,
+          receiptSeen: persistedReceiptSeen,
+          receiptResult: persistedReceiptSeen ? persistedLast.receiptResult : null,
+          receiptLocalOnly: upgrade.last.ok === false && (
+            upgrade.last.operationId !== persistedLast?.operationId || persistedLast?.ok !== false
+          ),
+        }
       : (persistedLast ? { ...persistedLast, historical: true } : null)
     const upgradeView = upgrade.running
       ? { running: true, last: visibleLast, progress, historical: false }
       : { running: false, last: visibleLast, historical: visibleLast?.historical === true }
+    const cfg = readSettings(ctx, config)
+    const judged = judgeNow()
     return {
       packageName: TARGET_PACKAGE,
+      rescueHome: ctx.profileContext?.home ?? null,
+      rescueCommand: suggestedRescueCommand,
       pid: process.pid,
       bootAt: BOOT_AT,
+      bootId: BOOT_ID,
+      healthChecking: typeof appReadyService?.onReady === 'function' && !healthSettledAtRead
+        && profileId != null && persistedState?.profileId === profileId
+        && persistedLast?.landed === true && persistedLast.ok === null && !upgrade.last,
       pollRunning,
       runningVersion,
       runningSource: managedInstall.error === null ? 'managed-layout' : 'unknown',
@@ -653,8 +784,8 @@ export function apply(ctx, config, dependencies = {}) {
       pollIntervalSec: cfg.pollIntervalSec,
       registryBase: cfg.registryBase,
       safeModeWhitelist: cfg.safeModeWhitelist,
-      upgradePluginsAvailable: supportsPluginUpgrade(ctx.get('pluginManager')),
-      pluginUpgradeMode: PLUGIN_UPGRADE_MODE,
+      upgradePluginsAvailable: false,
+      pluginUpgradeMode: 'disabled',
       tags: snapshot.tags,
       channelLatest: judged.channelLatest,
       // 非法 semver 的 tag(远端可控)不得让安装按钮可用:宿主入口按精确版本拒绝
@@ -665,13 +796,21 @@ export function apply(ctx, config, dependencies = {}) {
       checkError: snapshot.error,
       upgrade: upgradeView,
       lastUpgrade: visibleLast,
-      health: upgrade.last?.health ?? persistedLast?.health ?? landingHealth,
+      health: visibleLast?.health ?? null,
       safeMode: safeModeRecord ? { ...safeModeRecord, active: true } : { active: false },
       activeWork: collectActiveWork(ctx),
     }
   }
 
-  async function defaultBeforeSwitch() {
+  let disposed = false
+  ctx.effect(() => () => { disposed = true }, 'dsh-maintain upgrade guard')
+
+  function assertUpgradeAttached() {
+    if (disposed) throw new Error('维护插件已卸载，已停止尚未提交的升级')
+  }
+
+  function assertUpgradeCanProceed() {
+    assertUpgradeAttached()
     const activeWork = collectActiveWork(ctx)
     if (activeWork.detectionAvailable !== true || activeWork.total > 0) {
       throw new Error('提交窗口检测到活跃工作或检测不可用(detectionAvailable=' + activeWork.detectionAvailable + ' total=' + activeWork.total + ')')
@@ -710,7 +849,7 @@ export function apply(ctx, config, dependencies = {}) {
   // 宿主退出调度唯一入口:手动重启(HTTP 入口)与升级落定(内部入口)共用,
   // 置双向互斥标记、留审计、延迟终止进程。调度窗口内升级被 409,手动重启幂等
   function scheduleHostExit({ detail, delayMs }) {
-    restartScheduled = true
+    maintenance.restartScheduled = true
     maintenance.active = true
     audit('restart', 'triggered', detail + ' delayMs=' + delayMs)
     // 退出延迟与响应冲刷解耦:客户端在冲刷完成前断连会让 end 回调失效,绑定其上会使重启悬空;
@@ -718,7 +857,10 @@ export function apply(ctx, config, dependencies = {}) {
     // 不交 appExit:其关停链 dispose 会把在跑回合收成 turn/end aborted(disposed),
     // 自动继续只认非人为中断(error/interrupted/max-tokens),重启后不会续跑;
     // 直接终止进程让日志停在 turn/start,下次启动由 interruptedTurnClosers 补 interrupted 后续跑
-    setTimeout(() => exitHost(RESTART_EXIT_CODE), delayMs)
+    setTimeout(async () => {
+      await drainManagedStateWrites()
+      exitHost(RESTART_EXIT_CODE)
+    }, delayMs)
   }
 
   function assertBundleChange(result, action) {
@@ -728,213 +870,31 @@ export function apply(ctx, config, dependencies = {}) {
     }
   }
 
-  // 插件升级失败明细:一行内列出名称/目标版本/原因,作为中止切槽的错误正文
-  function failedPluginText(items) {
-    return (Array.isArray(items) ? items : [])
-      .filter((item) => item.state === 'failed')
-      .map((item) => item.name + (item.to ? '@' + item.to : '') + '(' + (item.error || '未知错误') + ')')
-      .join('; ')
-  }
-
-  // 受管升级全流程:布局发现→编排(安装/验证/提交前插件升级/切换,锁与阶段持久化在编排器内)
-  // →成功后按单次 autoRestart 意图收尾。任何阶段失败保留原版本服务,
-  // 锁与阶段状态由编排器落盘;切换状态未知时无视意图强制退出。
-  // 安全模式在切换前禁用未验证插件,失败且未切换时恢复启用,成功则由新宿主接管。
-  // 插件升级前置到切槽前:新宿主启动时加载的必须是已升级插件,失败即不切槽。
-  async function performManagedUpgradeFlow({ targetVersion, registryBase, autoRestart, safeMode = false, upgradePlugins = false }) {
+  // 当前只允许受管宿主安装，不写活动 profile 的包资产。切换链接后等待实际启动和健康确认。
+  async function performManagedUpgradeFlow({ targetVersion, registryBase, autoRestart, profileId }) {
     const startedAt = Date.now()
+    const operationId = randomUUID()
     const last = {
-      operationId: null,
+      operationId,
       targetVersion,
       previousVersion: runningVersion,
       startedAt,
       finishedAt: null,
-      ok: false,
+      ok: null,
+      pending: false,
       switched: false,
       phase: null,
       slot: null,
       error: null,
       exitScheduled: false,
-      safeMode: { requested: safeMode, disabled: [] },
-      plugins: upgradePlugins ? { requested: true, items: [], total: 0, error: null } : null,
     }
     let progress = createProgress(startedAt)
-    upgrade = { running: true, last, progress }
-    let layout = null
-    let safeModeRecord = null
-    let disabledPlugins = []
-    let pluginManager = null
-    // 宿主 update-state 事件按 requestId 归属到当前插件,用于「禁用/启用 xxx 插件」文案
-    let offPluginState = null
-    const pluginRequests = new Map()
-    const setPluginProgress = (plugin) => {
-      progress = updateProgressPlugin(progress, plugin)
-      upgrade.progress = progress
-    }
-    const setPluginItems = (items) => {
-      progress = updateProgressItems(progress, items)
-      upgrade.progress = progress
-    }
-    const subscribePluginSteps = () => {
-      if (offPluginState !== null || typeof ctx.on !== 'function') return
-      try {
-        const off = ctx.on('plugin-manager/update-state', (event) => {
-          const request = event && pluginRequests.get(event.requestId)
-          if (!request) return
-          setPluginProgress({ ...request, step: event.step })
-        }, { global: true })
-        if (typeof off === 'function') offPluginState = off
-      } catch (error) {
-        // 事件面缺失只影响步骤文案,插件级进度仍由 upgradeProfilePlugins 推进
-        console.warn('[dsh-maintain] 插件升级步骤事件不可用: ' + singleLine(error?.message ?? error))
-      }
-    }
-    const restoreSafeMode = async () => {
-      const failures = []
-      for (const plugin of disabledPlugins) {
-        try {
-          const result = await pluginManager.setBundleEnabled(plugin.name, true)
-          // overridden 表示更高优先级配置已使插件生效,恢复目标已达成,不当作失败
-          if (result?.application === 'overridden') continue
-          assertBundleChange(result, '恢复插件 ' + plugin.name)
-        } catch (error) {
-          failures.push({ name: plugin.name, error: error?.message ?? String(error) })
-        }
-      }
-      return failures
-    }
-    // 切槽前插件阶段:升级 profile 内全部可更新插件,再按目标宿主复检。
-    // 任一插件升级失败或复检仍有不兼容插件即抛出,编排器不切换链接。
-    const upgradePluginsBeforeSwitch = async ({ candidatePackage } = {}) => {
-      if (!upgradePlugins) return
-      if (!candidatePackage) throw new Error('缺少候选宿主路径,无法复检插件,已中止切换槽位')
-      pluginManager = ctx.get('pluginManager')
-      if (!supportsPluginUpgrade(pluginManager)) {
-        throw new Error('先升级插件再切槽不可用:pluginManager 缺少 listBundles/listVersions/updateBundle')
-      }
-      subscribePluginSteps()
-      try {
-        const result = await upgradeProfilePlugins({
-          pluginManager,
-          registryBase,
-          onOutput: (chunk) => {
-            progress = appendProgressOutput(progress, chunk, Date.now())
-            upgrade.progress = progress
-          },
-          onItem: (event) => {
-            if (event.kind === 'snapshot') {
-              setPluginItems(event.items)
-              // 上一个插件已到终态时清空当前插件,避免间隙里仍显示它的禁用/启用文案
-              const current = progress.plugin
-              if (current) {
-                const row = event.items.find((item) => item.name === current.name)
-                if (row && row.state !== 'pending' && row.state !== 'checking' && row.state !== 'upgrading') {
-                  setPluginProgress(null)
-                }
-              }
-            }
-            if (event.kind === 'step') {
-              // 先落到通用「正在升级插件」;宿主 update-state 事件到达再细化为禁用/启用/恢复
-              const request = { name: event.name, index: event.index, total: event.total, step: 'upgrading' }
-              pluginRequests.set(event.requestId, request)
-              setPluginProgress(request)
-            }
-          },
-        })
-        last.plugins = { requested: true, items: result.items, total: result.total, error: null }
-        const failed = failedPluginText(result.items)
-        if (failed.length > 0) throw new Error('插件升级未完成,已中止切换槽位: ' + failed)
-        // 用候选槽的 app-boot 检查升级后实际落盘的插件。
-        const scanCandidate = dependencies.scanPlugins ?? scanCandidatePlugins
-        const scan = await scanCandidate({
-          profileDir,
-          candidateSlot: resolve(candidatePackage, '../../..'),
-          installAnchor: join(candidatePackage, 'package.json'),
-          targetVersion,
-          pluginManager,
-          safeModeWhitelist: readSettings(ctx, config).safeModeWhitelist,
-          strict: true,
-        })
-        if (scan?.available !== true || !Array.isArray(scan.plugins)) {
-          throw new Error('目标版本插件复检不可用,已中止切换槽位: ' + (scan?.reason || '无法确认插件兼容性'))
-        }
-        const blocked = scan.plugins.filter((plugin) => plugin.status === 'block')
-        if (blocked.length > 0) {
-          const protectedBlocked = blocked.filter((plugin) => plugin.safeModeProtected === true)
-          throw new Error('升级后仍有插件与目标版本不兼容,已中止切换槽位: '
-            + blocked.map((plugin) => plugin.name + (plugin.version ? ' ' + plugin.version : '')).join(', ')
-            + (protectedBlocked.length > 0
-              ? ';其中保护/白名单插件需先发布兼容版本'
-              : ';可关闭「先升级插件再切换槽位」改用安全模式升级,或先让这些插件发布兼容版本'))
-        }
-      } finally {
-        pluginRequests.clear()
-        setPluginProgress(null)
-      }
-    }
-    const beforeSwitch = async (info) => {
-      await defaultBeforeSwitch()
-      if (upgradePlugins) {
-        await upgradePluginsBeforeSwitch(info)
-        await defaultBeforeSwitch()
-      }
-    }
-    audit('upgrade', 'triggered', 'targetVersion=' + targetVersion + (safeMode ? ' safeMode=true' : '') + (upgradePlugins ? ' plugins=true' : ''))
+    maintenance.upgrade = { running: true, last, progress, profileId }
+    audit('upgrade', 'triggered', 'targetVersion=' + targetVersion)
     try {
-      pluginManager = ctx.get('pluginManager')
-      layout = await getLayout()
+      const layout = await getLayout()
+      assertUpgradeCanProceed()
       maintenance.active = true
-      last.operationId = randomUUID()
-      if (safeMode) {
-        const scan = await scanPluginsImpl({
-          profileDir,
-          installAnchor,
-          targetVersion,
-          pluginManager,
-          safeModeWhitelist: readSettings(ctx, config).safeModeWhitelist,
-        })
-        if (!scan.available || !pluginManager || typeof pluginManager.setBundleEnabled !== 'function') {
-          throw new Error('安全模式不可用: ' + (scan.reason || 'pluginManager.setBundleEnabled 不可用'))
-        }
-        const candidates = scan.safeModeCandidates
-        if (candidates.length > 0) {
-          try {
-            for (const candidate of candidates) {
-              const result = await pluginManager.setBundleEnabled(candidate.name, false)
-              disabledPlugins.push({ name: candidate.name, version: candidate.version ?? null, status: candidate.status })
-              assertBundleChange(result, '禁用插件 ' + candidate.name)
-            }
-          } catch (error) {
-            const failures = await restoreSafeMode()
-            if (failures.length > 0) {
-              const remaining = disabledPlugins.filter((plugin) => failures.some((row) => row.name === plugin.name))
-              try {
-                await writeSafeModeRecord(layout, {
-                  operationId: last.operationId,
-                  targetVersion,
-                  previousVersion: runningVersion,
-                  createdAt: Date.now(),
-                  disabled: remaining,
-                })
-                last.safeMode = { requested: true, disabled: remaining }
-              } catch {}
-            }
-            disabledPlugins = []
-            throw new Error('禁用插件失败: ' + (error?.message ?? error) + (failures.length ? '; 恢复失败: ' + failures.map((row) => row.name).join(',') : ''))
-          }
-          safeModeRecord = {
-            operationId: last.operationId,
-            targetVersion,
-            previousVersion: runningVersion,
-            createdAt: Date.now(),
-            disabled: disabledPlugins,
-          }
-          await writeSafeModeRecord(layout, safeModeRecord)
-          last.safeMode = { requested: true, disabled: safeModeRecord.disabled }
-          audit('safe-mode', 'entered', 'operationId=' + last.operationId + ' disabled=' + disabledPlugins.length)
-        }
-      }
-      await defaultBeforeSwitch()
       const result = await runManagedUpgrade({
         layout,
         runningPackage: managedInstall.runningPackage ?? managedInstall.originalPackage,
@@ -942,22 +902,49 @@ export function apply(ctx, config, dependencies = {}) {
         registryBase,
         operationId: last.operationId,
         previousVersion: runningVersion,
+        profileId,
         validate: validateCandidate,
-        beforeSwitch,
+        withSwitchLock: (commit) => withProfileSwitchLock({ installAnchor, profileId }, commit),
+        assertCanSwitch: assertUpgradeCanProceed,
+        beforeSwitch: async ({ candidatePackage } = {}) => {
+          assertUpgradeCanProceed()
+          let scan
+          if (candidatePackage) {
+            try {
+              scan = await scanCandidatePlugins({
+                profileDir,
+                installAnchor: join(candidatePackage, 'package.json'),
+                candidateSlot: resolve(candidatePackage, '..', '..', '..'),
+                targetVersion,
+                pluginManager: ctx.get('pluginManager'),
+              })
+            } catch (error) {
+              audit('upgrade', 'plugin-rescan-unavailable', 'detail=' + singleLine(error?.message ?? error))
+            }
+          }
+          assertUpgradeCanProceed()
+          if (scan?.available === false) {
+            audit('upgrade', 'plugin-rescan-unavailable', 'detail=' + singleLine(scan.reason))
+          }
+          const incompatible = (scan?.plugins ?? []).filter((plugin) => plugin.status === 'block')
+          if (incompatible.length > 0) {
+            throw new Error('提交窗口发现插件与目标版本不兼容: ' + incompatible.map((plugin) => plugin.name).join(', '))
+          }
+        },
         onPhase: (state) => {
           last.phase = state.phase
           last.slot = state.slot ?? null
           last.operationId = state.operationId ?? last.operationId
           progress = updateProgressPhase(progress, state.phase, Date.now())
-          upgrade.progress = progress
+          maintenance.upgrade.progress = progress
         },
         onOutput: (chunk) => {
           progress = appendProgressOutput(progress, chunk, Date.now())
-          upgrade.progress = progress
+          maintenance.upgrade.progress = progress
         },
       })
       Object.assign(last, {
-        ok: true,
+        pending: result.phase === 'awaiting-restart',
         switched: result.switched === true,
         phase: result.phase,
         slot: result.slot ?? null,
@@ -965,8 +952,7 @@ export function apply(ctx, config, dependencies = {}) {
         finishedAt: Date.now(),
       })
       last.elapsedMs = last.finishedAt - last.startedAt
-      // 插件前置升级已在切槽前落定,结果只随本次升级记录回显
-      audit('upgrade', 'ok', 'operationId=' + last.operationId + ' slot=' + last.slot + ' phase=' + last.phase)
+      audit('upgrade', 'awaiting-restart', 'operationId=' + last.operationId + ' slot=' + last.slot + ' phase=' + last.phase)
       // 切换已发生:异步重读链接槽版本,状态面板的「已装/待重启」不依赖下一次定时检查;
       // 不阻塞落定/退出调度(读盘失败保持旧快照)
       resolveInstalledVersion().then((version) => { snapshot.installedVersion = version }).catch(() => {})
@@ -988,37 +974,9 @@ export function apply(ctx, config, dependencies = {}) {
       last.elapsedMs = last.finishedAt - last.startedAt
       last.error = error && error.message ? error.message : String(error)
       last.switched = error.switched === true
-      last.phase = 'failed'
-      if (last.plugins) {
-        const touched = Array.isArray(last.plugins.items)
-          && last.plugins.items.some((item) => item.state !== 'pending')
-        last.plugins = {
-          ...last.plugins,
-          error: last.plugins.error || (error.switched === true
-            ? '插件已升级,但切槽后状态不确定'
-            : touched ? '插件阶段已中止,宿主未切换槽位' : '插件阶段未执行'),
-        }
-      }
-      const shouldRestore = safeModeRecord !== null && error.switched !== true && error.indeterminate !== true
-      if (shouldRestore) {
-        const failures = await restoreSafeMode()
-        if (failures.length === 0) {
-          try { await clearSafeModeRecord(layout) } catch {}
-          last.safeMode = { requested: true, disabled: [], restored: true }
-          audit('safe-mode', 'restored', 'operationId=' + last.operationId + ' reason=upgrade-failed')
-        } else {
-          last.safeModeRestoreError = failures
-          const remaining = (safeModeRecord?.disabled ?? disabledPlugins).filter((plugin) => failures.some((row) => row.name === plugin.name))
-          try {
-            if (remaining.length > 0) await writeSafeModeRecord(layout, { ...safeModeRecord, disabled: remaining })
-          } catch {}
-          audit('safe-mode', 'restore-failed', 'operationId=' + last.operationId + ' failed=' + failures.map((row) => row.name).join(','))
-        }
-      }
-      if (error.switched === true || error.indeterminate === true) {
-        // switched 只表达「链接确已切换」;超时/回滚失败等状态不确定时 phase 标 indeterminate
-        // 并强制退出,避免旧进程带着未知磁盘状态继续提供升级入口
-        last.phase = 'indeterminate'
+      last.phase = last.switched || error.indeterminate === true ? 'indeterminate' : 'failed'
+      last.pending = false
+      if (last.switched || error.requiresHostExit === true) {
         last.exitScheduled = true
         scheduleHostExit({ detail: 'reason=post-switch-state-indeterminate operationId=' + (last.operationId ?? 'unknown'), delayMs: RESTART_DELAY_MS })
       } else {
@@ -1027,16 +985,7 @@ export function apply(ctx, config, dependencies = {}) {
       console.warn('[dsh-maintain] 受管升级失败: ' + singleLine(last.error))
       audit('upgrade', 'failed', 'phase=' + last.phase + ' error=' + singleLine(last.error))
     } finally {
-      if (layout && last.plugins) {
-        try { await mergeManagedState(layout, { plugins: last.plugins }) } catch (error) {
-          console.warn('[dsh-maintain] 插件升级结果写入状态失败: ' + singleLine(error?.message ?? error))
-        }
-      }
-      if (typeof offPluginState === 'function') {
-        try { offPluginState() } catch {}
-        offPluginState = null
-      }
-      upgrade = { running: false, last }
+      maintenance.upgrade = { running: false, last, profileId }
     }
   }
 
@@ -1047,13 +996,13 @@ export function apply(ctx, config, dependencies = {}) {
     if (managedInstall.error !== null) return
     let layout
     try { layout = await getLayout() } catch { return }
+    const profileId = await profileIdReady
+    if (!profileId) return
     const state = await readManagedState(layout)
-    const reconciled = reconcileManagedState({
-      state,
-      runningVersion,
-      runningPackage: managedInstall.runningPackage ?? managedInstall.originalPackage,
-    })
-    if (!reconciled || !reconciled.landed || !LANDING_RECHECK_PHASES.has(state.phase)) return
+    if (state?.profileId !== profileId) return
+    const runningPackage = managedInstall.runningPackage ?? managedInstall.originalPackage
+    const reconciled = reconcileManagedState({ state, profileId, runningVersion, runningPackage })
+    if (disposed || !reconciled?.landed || reconciled.failed || !LANDING_RECHECK_PHASES.has(state.phase)) return
     const pluginManager = ctx.get('pluginManager')
     const inventoryService = ctx.get('pluginInventory') ?? ctx.pluginInventory
     let inventory = []
@@ -1089,29 +1038,30 @@ export function apply(ctx, config, dependencies = {}) {
       bundleRows: bundles,
       bundleAvailable,
       checkedAt: Date.now(),
+      bootId: BOOT_ID,
       unavailableReason: [inventoryError, bundleError].filter(Boolean).join('; ') || null,
     })
     const healthPhase = health.ok === true ? 'healthy' : health.ok === false ? 'degraded' : 'landed'
-    landingHealth = health
+    if (disposed || maintenance.restartScheduled) return
     try {
-      await finalizeManagedState(layout, { phase: healthPhase, health, finishedAt: Date.now() })
+      const finalized = await finalizeManagedState(layout, { phase: healthPhase, health, operationId: reconciled.operationId, profileId, runningVersion, runningPackage })
+      if (!finalized) return
     } catch (error) {
       console.warn('[dsh-maintain] 落地健康状态写入失败: ' + singleLine(error?.message ?? error))
+      return
     }
     audit('upgrade', healthPhase, 'operationId=' + (reconciled.operationId ?? 'unknown') + ' failedPlugins=' + health.failed.length)
   }
 
-  // appReady 为可选服务:旧宿主缺失时延后一拍;健康检查失败只影响展示,不影响宿主
+  // 缺少就绪信号时保持未确认，不能用定时器代替真实启动。
   const appReadyService = ctx.get('appReady') ?? ctx.appReady
   const runLandingHealthSafely = () => {
     return runLandingHealth().catch((error) => {
       console.warn('[dsh-maintain] 落地健康检查异常: ' + singleLine(error?.message ?? error))
-    })
+    }).finally(() => { landingHealthSettled = true })
   }
   if (typeof appReadyService?.onReady === 'function') {
     ctx.effect(() => appReadyService.onReady(runLandingHealthSafely), 'dsh-maintain app ready health')
-  } else {
-    setTimeout(runLandingHealthSafely, 0)
   }
 
   function requestedTargetVersion(requestBody) {
@@ -1145,7 +1095,7 @@ export function apply(ctx, config, dependencies = {}) {
     {
       path: API_PATHS.REFRESH,
       handler: route('POST', async (req, res) => {
-        if (restartScheduled) {
+        if (maintenance.restartScheduled) {
           sendJson(res, 409, { error: '重启已调度,禁止检查更新' })
           return
         }
@@ -1208,7 +1158,7 @@ export function apply(ctx, config, dependencies = {}) {
           return
         }
         if (!(await persistPatch(res, { registryBase: base }))) return
-        if (restartScheduled) {
+        if (maintenance.restartScheduled) {
           // 保存生效但不发起检查:关机窗口内网络请求与磁盘读取都是半写状态风险
           sendJson(res, 200, await currentStatus())
           return
@@ -1311,26 +1261,27 @@ export function apply(ctx, config, dependencies = {}) {
           sendJson(res, 400, { error: 'safeMode 必须是布尔值或缺省' })
           return
         }
-        if (safeMode && autoRestart === false) {
-          sendJson(res, 400, { error: '安全模式升级必须自动重启:禁用插件需要新宿主生效' })
-          return
-        }
         const upgradePlugins = requestBody.upgradePlugins === undefined ? false : requestBody.upgradePlugins
         if (typeof upgradePlugins !== 'boolean') {
           sendJson(res, 400, { error: 'upgradePlugins 必须是布尔值或缺省' })
           return
         }
-        const pluginManager = ctx.get('pluginManager')
-        if (upgradePlugins && !supportsPluginUpgrade(pluginManager)) {
-          audit('upgrade', 'rejected', 'reason=plugin-upgrade-unavailable')
-          sendJson(res, 409, { error: '先升级插件再切槽不可用:pluginManager 缺少 listBundles/listVersions/updateBundle' })
+        if (upgradePlugins || safeMode) {
+          audit('upgrade', 'rejected', 'reason=online-plugin-writes-disabled')
+          sendJson(res, 409, { error: ONLINE_UPGRADE_DISABLED })
+          return
+        }
+        if (maintenance.restoringPlugins) {
+          audit('upgrade', 'rejected', 'reason=plugin-restore-running')
+          sendJson(res, 409, { error: '正在恢复插件，禁止升级' })
           return
         }
         // 与重启调度双向互斥:restartScheduled 置位到进程终止的窗口内触发升级,
         // 切换后的退出会与新宿主交错
-        if (upgrade.running || upgradeStarting || restartScheduled) {
-          audit('upgrade', 'rejected', restartScheduled ? 'reason=restart-scheduled' : 'reason=running')
-          sendJson(res, 409, { error: restartScheduled ? '重启已调度,禁止触发升级' : '升级进行中' })
+        if (maintenance.upgrade.running || maintenance.upgradeStarting || maintenance.restartChecking || maintenance.restartScheduled) {
+          const restarting = maintenance.restartChecking || maintenance.restartScheduled
+          audit('upgrade', 'rejected', restarting ? 'reason=restart-scheduled' : 'reason=running')
+          sendJson(res, 409, { error: restarting ? '重启已调度或正在核验,禁止触发升级' : '升级进行中' })
           return
         }
         if (managedInstall.error !== null) {
@@ -1356,8 +1307,13 @@ export function apply(ctx, config, dependencies = {}) {
         }
         // 服务端环境门:不信任客户端弹窗(直接 POST/预检后环境变化仍须阻断),与 preflight 路由同源
         // 门闩从首个 await 前同步置位,预检窗口内的并发请求一律 409;flow 首行同步接管 running
-        upgradeStarting = true
+        maintenance.upgradeStarting = true
         try {
+        const profileId = await profileIdReady
+        if (!profileId) {
+          sendJson(res, 409, { error: '无法确认当前 profile 身份，已拒绝升级' })
+          return
+        }
         let preflightLayout = null
         let preflightLayoutError = managedInstall.error
         if (preflightLayoutError === null) {
@@ -1373,7 +1329,6 @@ export function apply(ctx, config, dependencies = {}) {
             profileDir,
             installAnchor,
             pluginManager: ctx.get('pluginManager'),
-            safeModeWhitelist: readSettings(ctx, config).safeModeWhitelist,
             registryBase: readSettings(ctx, config).registryBase,
             requiredBytes: null,
             fetchVersionManifestImpl: fetchTargetManifest,
@@ -1391,47 +1346,26 @@ export function apply(ctx, config, dependencies = {}) {
           })
           return
         }
-        // 普通升级先拦已知不兼容插件;前置插件升级允许尝试修复,由候选槽复检决定能否切换。
-        // 安全模式仍只禁用自身候选集合,不覆盖白名单。
-        let pluginScan
-        try {
-          pluginScan = await scanPluginsImpl({
-            profileDir,
-            installAnchor,
-            targetVersion,
-            pluginManager,
-            safeModeWhitelist: readSettings(ctx, config).safeModeWhitelist,
+        // 与环境检查消费同一份报告，不能丢弃已知不兼容结果。
+        const incompatible = (environment.plugins ?? []).filter((plugin) => plugin.status === 'block')
+        if (incompatible.length > 0) {
+          audit('upgrade', 'rejected', 'reason=plugin-incompatible count=' + incompatible.length)
+          sendJson(res, 409, {
+            error: '插件与目标版本不兼容,已拒绝升级: ' + incompatible.map((plugin) => plugin.name).join(','),
+            incompatible,
           })
-        } catch (error) {
-          pluginScan = { available: false, reason: error?.message ?? String(error), plugins: [], safeModeCandidates: [] }
-        }
-        if (safeMode && (!pluginScan.available || typeof pluginManager?.setBundleEnabled !== 'function')) {
-          audit('upgrade', 'rejected', 'reason=safe-mode-unavailable')
-          sendJson(res, 409, { error: '安全模式不可用: ' + (pluginScan.reason || 'pluginManager.setBundleEnabled 不可用') })
           return
-        }
-        const incompatible = pluginScan.available ? pluginScan.plugins.filter((plugin) => plugin.status === 'block') : []
-        if (!upgradePlugins && incompatible.length > 0) {
-          const candidateNames = new Set((pluginScan.safeModeCandidates ?? []).map((plugin) => plugin.name))
-          const uncovered = incompatible.filter((plugin) => !candidateNames.has(plugin.name))
-          if (!safeMode || uncovered.length > 0) {
-            audit('upgrade', 'rejected', 'reason=plugin-incompatible count=' + incompatible.length)
-            sendJson(res, 409, {
-              error: '插件与目标版本不兼容,已拒绝升级: ' + incompatible.map((plugin) => plugin.name).join(',')
-                + (uncovered.length > 0 ? ';其中 ' + uncovered.map((plugin) => plugin.name).join(',') + ' 无法通过安全模式禁用' : ''),
-              incompatible,
-              safeMode: { available: pluginScan.safeModeAvailable === true && uncovered.length === 0, candidates: pluginScan.safeModeCandidates },
-            })
-            return
-          }
         }
         // 编排先入内存门闩再取快照:响应快照必须呈现 running=true,并发请求才能被 409 挡住
         await runningVersionReady
-        const flow = performManagedUpgradeFlow({ targetVersion, registryBase: readSettings(ctx, config).registryBase, autoRestart, safeMode, upgradePlugins })
-        sendJson(res, 200, { ok: true, targetVersion, status: await currentStatus() })
+        assertUpgradeAttached()
+        const rescueGuideWritten = await writeRescueGuide(ctx.profileContext?.home, suggestedRescueCommand)
+        assertUpgradeAttached()
+        const flow = performManagedUpgradeFlow({ targetVersion, registryBase: readSettings(ctx, config).registryBase, autoRestart, profileId })
+        sendJson(res, 200, { ok: true, targetVersion, rescueGuideWritten, status: await currentStatus() })
         void flow
         } finally {
-          upgradeStarting = false
+          maintenance.upgradeStarting = false
         }
       }),
     },
@@ -1440,6 +1374,11 @@ export function apply(ctx, config, dependencies = {}) {
       handler: route('POST', async (req, res) => {
         const body = await readJsonBody(req)
         const operationId = typeof body.operationId === 'string' ? body.operationId.trim() : ''
+        const result = body.result
+        if (result !== 'succeeded' && result !== 'failed') {
+          sendJson(res, 400, { error: 'result 必须是 succeeded 或 failed' })
+          return
+        }
         if (operationId.length === 0) {
           sendJson(res, 400, { error: 'operationId 不能为空' })
           return
@@ -1449,9 +1388,28 @@ export function apply(ctx, config, dependencies = {}) {
           sendJson(res, 409, { error: '受管安装不可用: ' + (error?.message ?? error) })
           return
         }
-        const state = await markUpgradeReceiptSeen(layout, operationId)
+        await runningVersionReady
+        const profileId = await profileIdReady
+        if (disposed || maintenance.restartScheduled) {
+          sendJson(res, 409, { error: '维护插件已卸载或重启已调度，禁止确认回执' })
+          return
+        }
+        let state
+        try {
+          state = await markUpgradeReceiptSeen(layout, operationId, {
+            runningVersion,
+            runningPackage: managedInstall.runningPackage ?? managedInstall.originalPackage,
+            profileId,
+            bootId: BOOT_ID,
+            expectedOk: result === 'succeeded',
+          })
+        } catch (error) {
+          if (error?.code !== 'STATE_LOCK_BUSY') throw error
+          sendJson(res, 409, { error: error.message })
+          return
+        }
         if (state === null) {
-          sendJson(res, 409, { error: '没有匹配的升级记录' })
+          sendJson(res, 409, { error: '没有匹配且已确认结果的升级记录' })
           return
         }
         sendJson(res, 200, await currentStatus())
@@ -1460,8 +1418,8 @@ export function apply(ctx, config, dependencies = {}) {
     {
       path: API_PATHS.PREFLIGHT,
       handler: route('POST', async (req, res) => {
-        if (upgrade.running || upgradeStarting || restartScheduled) {
-          sendJson(res, 409, { error: upgrade.running ? '升级进行中' : restartScheduled ? '重启已调度,禁止预检' : '升级启动中' })
+        if (maintenance.upgrade.running || maintenance.upgradeStarting || maintenance.restartScheduled || maintenance.restartChecking) {
+          sendJson(res, 409, { error: maintenance.upgrade.running ? '升级进行中' : maintenance.upgradeStarting ? '升级启动中' : '重启进行中,禁止预检' })
           return
         }
         const rawBody = await readBody(req)
@@ -1482,7 +1440,6 @@ export function apply(ctx, config, dependencies = {}) {
             profileDir,
             installAnchor,
             pluginManager: ctx.get('pluginManager'),
-            safeModeWhitelist: readSettings(ctx, config).safeModeWhitelist,
             registryBase: readSettings(ctx, config).registryBase,
             requiredBytes: null,
             fetchVersionManifestImpl: fetchTargetManifest,
@@ -1491,27 +1448,31 @@ export function apply(ctx, config, dependencies = {}) {
           sendJson(res, 409, { error: '预检失败: ' + (error?.message ?? String(error)), checks: [] })
           return
         }
-        // 预检报告可能来自旧宿主/注入实现,统一补齐安全模式字段,避免客户端读到 null 后整块设置页崩溃
-        const safeMode = report?.safeMode && typeof report.safeMode === 'object'
-          ? report.safeMode
-          : { available: false, reason: '预检未返回安全模式信息', candidates: [], protected: [] }
-        sendJson(res, 200, { ...report, safeMode })
+        sendJson(res, 200, {
+          ...report,
+          okWithSafeMode: false,
+          safeMode: { available: false, reason: ONLINE_UPGRADE_DISABLED, candidates: [], protected: [] },
+        })
       }),
     },
     {
       path: API_PATHS.SAFE_MODE_RESTORE,
       handler: route('POST', async (req, res) => {
-        if (upgrade.running || upgradeStarting || restartScheduled) {
-          sendJson(res, 409, { error: upgrade.running ? '升级进行中,禁止恢复插件' : restartScheduled ? '重启已调度,禁止恢复插件' : '升级启动中,禁止恢复插件' })
+        if (maintenance.restoringPlugins || maintenance.upgrade.running || maintenance.upgradeStarting || maintenance.restartScheduled || maintenance.restartChecking) {
+          sendJson(res, 409, { error: maintenance.restoringPlugins ? '正在恢复插件' : maintenance.restartChecking || maintenance.restartScheduled ? '重启已调度或正在核验,禁止恢复插件' : '升级进行中,禁止恢复插件' })
           return
         }
+        maintenance.restoringPlugins = true
+        try {
         let layout
         try { layout = await getLayout() } catch (error) {
           sendJson(res, 409, { error: '受管安装不可用: ' + (error?.message ?? error) })
           return
         }
-        const record = await readSafeModeRecord(layout)
-        if (!record) {
+        await assertNoUpgradeLock(layout)
+        const profileId = await profileIdReady
+        const record = profileId && await readSafeModeRecord(layout, { profileId })
+        if (disposed || !record) {
           sendJson(res, 409, { error: '没有可恢复的安全模式记录' })
           return
         }
@@ -1543,49 +1504,72 @@ export function apply(ctx, config, dependencies = {}) {
           audit('safe-mode', 'restore-failed', 'count=' + failures.length)
         }
         sendJson(res, 200, { restored: failures.length === 0, count: restored, failures, requiresRestart: true })
+        } finally {
+          maintenance.restoringPlugins = false
+        }
       }),
     },
     {
       path: API_PATHS.RESTART,
       handler: route('POST', async (req, res) => {
-        // body 读取必须在全部门控之前:幂等检查到 scheduleHostExit 置位之间不得插入
-        // await,否则并发请求双双越过幂等门,双重调度退出
+        // 同步取得核验门闩后才检查磁盘锁，防止同进程在异步读盘时开始升级或重复调度。
         const rawBody = await readBody(req)
         // 'null' 字面量解析为 null:按空体处理,防 null.force 形态的内部错误外泄
         const requestBody = rawBody ? parseJsonBody(rawBody) : {}
         // 与升级门闩互斥:升级子进程经 detached+unref 存活于宿主死后,
         // 重启后新宿主门闩归零会放行第二次升级,双 npm install 并发写全局目录
-        if (upgrade.running || upgradeStarting) {
+        if (maintenance.restoringPlugins) {
+          audit('restart', 'rejected', 'reason=plugin-restore-running')
+          sendJson(res, 409, { error: '正在恢复插件，禁止重启' })
+          return
+        }
+        if (maintenance.upgrade.running || maintenance.upgradeStarting) {
           audit('restart', 'rejected', 'reason=upgrade-running')
           sendJson(res, 409, { error: '升级进行中,禁止重启;等待升级完成后重试' })
           return
         }
-        if (restartScheduled) {
+        if (maintenance.restartScheduled) {
           sendJson(res, 200, { ok: true, restarting: true })
           return
         }
-        // 活跃工作门控:重启可被 force 越过(升级后自动重启链路无法等待人工确认,
-        // 对齐 dsh-service:升级不可越/重启 force 可越)
-        const activeWork = collectActiveWork(ctx)
-        if (activeWork.total > 0 && requestBody.force !== true) {
-          audit('restart', 'rejected', 'reason=active-work total=' + activeWork.total)
-          sendJson(res, 409, {
-            error: '存在活跃工作(共 ' + activeWork.total + ' 项:agents ' + activeWork.agents + '/jobs ' + activeWork.jobs + '/terminals ' + activeWork.terminals + '),重启会中断它们;确认无误请带 force 重试',
-            items: activeWork,
-            detectionAvailable: activeWork.detectionAvailable,
-          })
+        if (maintenance.restartChecking) {
+          sendJson(res, 409, { error: '正在核验重启，请稍后重试' })
           return
         }
-        // 响应先发,退出调度经统一入口(与升级落定关机同一条链)
-        sendJson(res, 200, { ok: true, restarting: true })
-        scheduleHostExit({ detail: 'forced=' + (requestBody.force === true), delayMs: RESTART_DELAY_MS })
+        maintenance.restartChecking = true
+        try {
+          // 安装布局损坏也不能绕过已知 prefix 的升级锁。
+          if (managedInstall.error === null) {
+            const managedRoot = join(managedInstall.prefix, '.dsh-maintain')
+            await assertNoUpgradeLock({ root: managedRoot })
+          }
+          if (disposed) {
+            sendJson(res, 409, { error: '维护插件已卸载，已取消重启' })
+            return
+          }
+          // 对齐 dsh-service：重启的活跃工作检查可用 force 确认。
+          const activeWork = collectActiveWork(ctx)
+          if (activeWork.total > 0 && requestBody.force !== true) {
+            audit('restart', 'rejected', 'reason=active-work total=' + activeWork.total)
+            sendJson(res, 409, {
+              error: '存在活跃工作(共 ' + activeWork.total + ' 项:agents ' + activeWork.agents + '/jobs ' + activeWork.jobs + '/terminals ' + activeWork.terminals + '),重启会中断它们;确认无误请带 force 重试',
+              items: activeWork,
+              detectionAvailable: activeWork.detectionAvailable,
+            })
+            return
+          }
+          sendJson(res, 200, { ok: true, restarting: true })
+          scheduleHostExit({ detail: 'forced=' + (requestBody.force === true), delayMs: RESTART_DELAY_MS })
+        } finally {
+          maintenance.restartChecking = false
+        }
       }),
     },
     {
       path: API_PATHS.RELEASE_NOTES,
       handler: route('GET', async (req, res) => {
         // 关机窗口内不发上游请求:退出延迟 2 秒小于上游超时,与 refresh 同纪律
-        if (restartScheduled) {
+        if (maintenance.restartScheduled) {
           sendJson(res, 409, { error: '重启已调度,禁止查询更新内容' })
           return
         }

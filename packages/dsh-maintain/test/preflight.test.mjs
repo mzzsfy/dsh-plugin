@@ -1,5 +1,5 @@
 // preflight:升级前检查报告聚合与单项判定。
-// Given 环境检查与插件扫描结果 When 生成报告 Then block/warn/pass 与安全模式可用性一致。
+// M0 A1: 环境与插件兼容检查照常执行，报告不提供安全模式绕过。
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -40,10 +40,10 @@ test('buildPreflightReport:任一环境 block 时总体不通过,安全模式不
   assert.equal(report.environmentOk, false)
   assert.equal(report.okWithSafeMode, false)
   assert.equal(report.summary.block, 2)
-  assert.equal(report.safeMode.candidates.length, 2)
+  assert.deepEqual(report.safeMode.candidates, [])
 })
 
-test('buildPreflightReport:仅插件 block 且安全模式可用时,安全模式路径可通过', () => {
+test('buildPreflightReport:扫描提供禁用候选也不能绕过插件不兼容', () => {
   const report = buildPreflightReport({
     targetVersion: '0.2.2-rc.3',
     checks: [{ id: 'disk', label: '磁盘空间', status: CHECK_PASS, detail: 'ok' }],
@@ -56,11 +56,17 @@ test('buildPreflightReport:仅插件 block 且安全模式可用时,安全模式
     now: 100,
   })
   assert.equal(report.ok, false)
-  assert.equal(report.okWithSafeMode, true)
-  assert.equal(report.safeMode.available, true)
+  assert.equal(report.environmentOk, true)
+  assert.equal(report.pluginSummary.block, 1)
+  assert.equal(report.checks.find((check) => check.id === 'plugins').status, CHECK_BLOCK)
+  assert.equal(report.okWithSafeMode, false)
+  assert.equal(report.safeMode.available, false)
+  assert.match(report.safeMode.reason, /已关闭/)
+  assert.deepEqual(report.safeMode.candidates, [])
+  assert.deepEqual(report.safeMode.protected, [])
 })
 
-test('buildPreflightReport:默认保护插件不兼容时不允许用安全模式掩盖', () => {
+test('buildPreflightReport:保护项仍计为不兼容，但不公布安全模式保护名单', () => {
   const report = buildPreflightReport({
     targetVersion: '0.2.2-rc.3',
     checks: [{ id: 'disk', label: '磁盘空间', status: CHECK_PASS, detail: 'ok' }],
@@ -74,10 +80,9 @@ test('buildPreflightReport:默认保护插件不兼容时不允许用安全模�
     now: 100,
   })
   assert.equal(report.ok, false)
-  assert.equal(report.okWithSafeMode, false)
-  assert.equal(report.safeMode.available, false)
-  assert.match(report.safeMode.reason, /保护项/)
-  assert.deepEqual(report.safeMode.protected, ['@mzzsfy/dsh-auto-trust-all'])
+  assert.equal(report.pluginSummary.block, 1)
+  assert.deepEqual(report.safeMode.protected, [])
+  assert.match(report.safeMode.reason, /已关闭/)
 })
 
 test('buildPreflightReport:插件扫描不可用时只降级为 warn,不阻断', () => {

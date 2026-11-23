@@ -125,6 +125,22 @@ test('初次接入只新增包内链接，原文件不改且命令入口目标�
   }
 })
 
+test('切槽末端门控拒绝时仍保持旧链接和命令入口', async t => {
+  const f = await fixture(t)
+  const first = await f.install('a', '2.0.0')
+  await f.api.activateInstallation(f.layout, first, { runningPackage: f.originalPackage })
+  const next = await f.install('b', '3.0.0')
+  const originalTarget = await realpath(f.layout.link)
+  const originalEntries = await Promise.all(f.layout.entryPaths.map(path => readFile(path, 'utf8')))
+  const rejection = new Error('切槽前插件已卸载')
+  await assert.rejects(f.api.activateInstallation(f.layout, next, {
+    runningPackage: first,
+    assertCanSwitch: () => { throw rejection },
+  }), (error) => error === rejection && error.rollbackFailed === undefined)
+  assert.equal(await realpath(f.layout.link), originalTarget)
+  assert.deepEqual(await Promise.all(f.layout.entryPaths.map(path => readFile(path, 'utf8'))), originalEntries)
+})
+
 test('连续十轮升级交替复用A/B且不在当前目录安装', async t => {
   const f = await fixture(t)
   let running = f.originalPackage
