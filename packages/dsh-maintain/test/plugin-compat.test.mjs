@@ -223,32 +223,51 @@ for (const strict of [false, true]) {
   })
 }
 
-// Given 扫描依赖失败 When 分别默认和严格扫描 Then 仅严格模式关闭放行。
-for (const [label, overrides, strictReason, defaultReason] of [
-  ['豁免读取异常', {
-    loadEvaluator: () => ({ evaluate: () => undefined, readExemptions: async () => { throw new Error('exemptions-broken') } }),
-  }, /豁免.*exemptions-broken/, /未声明/],
+// Given 全局豁免读取失败 When 扫描 Then 仅严格模式不可用。
+for (const strict of [false, true]) {
+  test('scanProfilePlugins:' + (strict ? 'strict' : '默认') + ' 豁免读取异常', async () => {
+    const report = await scanFixture({
+      strict,
+      loadEvaluator: () => ({ evaluate: () => undefined, readExemptions: async () => { throw new Error('exemptions-broken') } }),
+    })
+    assert.equal(report.available, !strict)
+    if (strict) {
+      assert.equal(report.safeModeAvailable, false)
+      assert.match(report.reason, /豁免.*exemptions-broken/)
+      assert.deepEqual(report.plugins, [])
+    } else {
+      assert.equal(report.plugins[0].status, PLUGIN_WARN)
+      assert.match(report.plugins[0].reasons.join(' '), /未声明/)
+    }
+  })
+}
+
+// Given 单插件读取或判定失败 When 扫描 Then 仅该插件标为未知警告。
+for (const [label, overrides, reason] of [
   ['manifest 读取失败', {
     readFileImpl: async () => { throw new Error('manifest-ENOENT') },
-  }, /@scope\/plugin.*manifest.*manifest-ENOENT/, /读取插件清单失败.*manifest-ENOENT/],
+  }, /读取插件清单失败.*manifest-ENOENT/],
   ['manifest 解析失败', {
     readFileImpl: async () => '{broken-json',
-  }, /@scope\/plugin.*manifest/, /读取插件清单失败/],
+  }, /读取插件清单失败/],
   ['evaluator 抛错', {
     loadEvaluator: () => ({ evaluate: () => { throw new Error('evaluator-broken') }, readExemptions: () => ({}) }),
-  }, /@scope\/plugin.*兼容判定失败.*evaluator-broken/, /兼容判定失败.*evaluator-broken/],
+  }, /兼容判定失败.*evaluator-broken/],
+  ['manifest 缺少对象', {
+    readFileImpl: async () => 'null',
+  }, /读取插件清单失败/],
+  ['manifest 抛出无法转为字符串的值', {
+    readFileImpl: async () => { throw Object.create(null) },
+  }, /读取插件清单失败.*未知错误/],
 ]) {
   for (const strict of [false, true]) {
     test('scanProfilePlugins:' + (strict ? 'strict' : '默认') + ' ' + label, async () => {
-      const report = await scanFixture({ ...overrides, ...(strict ? { strict } : {}) })
-      assert.equal(report.available, !strict)
-      if (strict) {
-        assert.equal(report.safeModeAvailable, false)
-        assert.match(report.reason, strictReason)
-      } else {
-        assert.equal(report.plugins[0].status, PLUGIN_WARN)
-        assert.match(report.plugins[0].reasons.join(' '), defaultReason)
-      }
+      const report = await scanFixture({ ...overrides, strict })
+      assert.equal(report.available, true)
+      assert.equal(report.reason, null)
+      assert.equal(report.plugins.length, 1)
+      assert.equal(report.plugins[0].status, PLUGIN_WARN)
+      assert.match(report.plugins[0].reasons.join(' '), reason)
     })
   }
 }
@@ -308,7 +327,7 @@ test('scanProfilePlugins:strict 不读取已禁用、未安装、官方及非 bu
   assert.deepEqual(report.plugins, [])
 })
 
-test('scanProfilePlugins:strict 任一保护插件读取失败不可被先前成功插件掩盖', async () => {
+test('scanProfilePlugins:strict 保护插件读取失败仍报告警告且不进入安全模式候选', async () => {
   const report = await scanFixture({
     strict: true,
     pluginManager: { listBundles: async () => [
@@ -320,9 +339,50 @@ test('scanProfilePlugins:strict 任一保护插件读取失败不可被先前成
       return JSON.stringify(manifest())
     },
   })
-  assert.equal(report.available, false)
-  assert.match(report.reason, /@mzzsfy\/dsh-maintain.*protected-manifest-broken/)
+  assert.equal(report.available, true)
+  const protectedPlugin = report.plugins.find((row) => row.name === MAINTAIN_BUNDLE)
+  assert.equal(protectedPlugin.status, PLUGIN_WARN)
+  assert.match(protectedPlugin.reasons.join(' '), /protected-manifest-broken/)
+  assert.equal(protectedPlugin.safeModeProtected, true)
+  assert.equal(protectedPlugin.safeModeCandidate, false)
 })
+
+// Given 候选中同时有明确不兼容和未知项 When Worker 严格复检 Then 两种顺序都保留明确阻断。
+for (const [label, names] of [
+  ['未知项在前', ['malformed', 'throws', 'blocked']],
+  ['明确阻断在前', ['blocked', 'malformed', 'throws']],
+]) {
+  test('候选复检:' + label + ' 时只警告未知项并保留明确阻断', async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'maintain-candidate-scan-'))
+    t.after(() => rm(root, { recursive: true, force: true }))
+    const candidateSlot = join(root, 'slot')
+    const installAnchor = join(candidateSlot, 'package.json')
+    const profileDir = join(root, 'profile')
+    const evaluatorDir = join(candidateSlot, 'node_modules', '@deepseek-ai', 'dsh-app-boot')
+    await mkdir(evaluatorDir, { recursive: true })
+    await writeFile(join(evaluatorDir, 'index.js'), `exports.readProfileVersionExemptions = () => ({})
+      exports.evaluatePluginCompatibility = ({ name }) => {
+        if (name === 'throws') throw Symbol('evaluator-broken')
+        return { requirements: { 'engines.dsh': '>=0.3.0' } }
+      }`)
+    for (const name of names) {
+      const dir = join(profileDir, 'node_modules', name)
+      await mkdir(dir, { recursive: true })
+      await writeFile(join(dir, 'package.json'), name === 'malformed' ? '{broken-json' : JSON.stringify(manifest({ name })))
+    }
+    const report = await scanCandidatePlugins({
+      profileDir, installAnchor, targetVersion: TARGET, candidateSlot,
+      pluginManager: { listBundles: async () => names.map((name) => ({ name, enabled: true, installed: true })) },
+    })
+    assert.deepEqual(report.plugins.filter((row) => row.status === PLUGIN_BLOCK).map((row) => row.name), ['blocked'])
+    assert.equal(report.available, true)
+    assert.equal(report.reason, null)
+    const warnings = report.plugins.filter((row) => row.status === PLUGIN_WARN)
+    assert.deepEqual(warnings.map((row) => row.name), ['malformed', 'throws'])
+    assert.match(warnings[0].reasons.join(' '), /读取插件清单失败/)
+    assert.match(warnings[1].reasons.join(' '), /兼容判定失败.*evaluator-broken/)
+  })
+}
 
 test('候选复检:拒绝解析到槽外的评估器,同槽重装后读取新评估器', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'maintain-candidate-scan-'))

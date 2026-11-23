@@ -110,6 +110,92 @@ test('完整升级先安装验证再最终门控与切换，锁释放且只记�
   await assert.rejects(readFile(join(f.layout.root, 'upgrade.lock')), { code: 'ENOENT' })
 })
 
+test('候选复扫和切槽共用一个 profile 临界区，安装与验证在锁外', async t => {
+  const f = await setup(t)
+  const activate = (await import('../src/managed-layout.mjs')).activateInstallation
+  const events = []
+  await f.api.performManagedUpgrade({
+    ...f, runningPackage: f.originalPackage, targetVersion: '2.0.0',
+    install: async (input) => { events.push('install'); return f.install(input) },
+    validate: async (input) => { events.push('validate'); return f.validate(input) },
+    withSwitchLock: async (commit) => {
+      events.push('locked')
+      try { return await commit() } finally { events.push('released') }
+    },
+    beforeSwitch: async () => {
+      events.push('scan')
+      const state = JSON.parse(await readFile(join(f.layout.root, 'state.json'), 'utf8'))
+      assert.equal(state.phase, 'ready-to-switch')
+      assert.equal(state.targetPackage, undefined)
+    },
+    activate: async (...args) => {
+      events.push('activate')
+      const state = JSON.parse(await readFile(join(f.layout.root, 'state.json'), 'utf8'))
+      assert.equal(state.phase, 'awaiting-restart')
+      assert.equal(state.targetPackage, args[1])
+      return activate(...args)
+    },
+  })
+  assert.deepEqual(events, ['install', 'validate', 'locked', 'scan', 'activate', 'released'])
+})
+
+test('无法取得 profile 写锁时不复扫、不切槽、不要求退出', async t => {
+  const f = await setup(t)
+  const entry = process.platform === 'win32' ? join(f.prefix, 'dsh.cmd') : join(f.prefix, 'bin/dsh')
+  const originalEntry = await readFile(entry)
+  await assert.rejects(f.api.performManagedUpgrade({
+    ...f, runningPackage: f.originalPackage, targetVersion: '2.0.0',
+    withSwitchLock: async () => { throw new Error('profile 正在改包') },
+  }), { message: 'profile 正在改包', switched: false, indeterminate: false })
+  assert.deepEqual(f.events, ['install', 'validate'])
+  assert.deepEqual(await readFile(entry), originalEntry)
+  if (process.platform !== 'win32') assert.equal(await realpath(entry), join(f.originalPackage, 'lib/bin.js'))
+  await assert.rejects(readFile(join(f.layout.root, 'upgrade.lock')), { code: 'ENOENT' })
+  await assert.rejects(realpath(f.layout.link), { code: 'ENOENT' })
+})
+
+test('profile 锁释放失败不能掩盖切槽回滚失败', async t => {
+  const f = await setup(t)
+  await assert.rejects(f.api.performManagedUpgrade({
+    ...f, runningPackage: f.originalPackage, targetVersion: '2.0.0',
+    withSwitchLock: async (commit) => {
+      try { return await commit() } finally { throw new Error('释放 profile 写锁失败') }
+    },
+    activate: async () => { throw Object.assign(new Error('切槽回滚失败'), { rollbackFailed: true }) },
+  }), (error) => error.indeterminate === true && error.requiresHostExit === true
+    && error.switched === false && /切槽回滚失败/.test(error.message))
+  const state = JSON.parse(await readFile(join(f.layout.root, 'state.json'), 'utf8'))
+  assert.equal(state.phase, 'indeterminate')
+  assert.ok(await readFile(join(f.layout.root, 'upgrade.lock'), 'utf8'))
+})
+
+test('初次落盘被状态锁阻止时保留历史、释放升级锁且不要求退出', async t => {
+  const f = await setup(t)
+  const previous = '{"operationId":"op-previous","phase":"healthy"}'
+  await writeFile(join(f.layout.root, 'state.json'), previous)
+  await writeFile(join(f.layout.root, 'state.json.lock'), 'held')
+  await assert.rejects(f.api.performManagedUpgrade({ ...f, runningPackage: f.originalPackage, targetVersion: '2.0.0' }), {
+    code: 'STATE_LOCK_BUSY', switched: false, indeterminate: false,
+  })
+  assert.deepEqual(f.events, [])
+  assert.equal(await readFile(join(f.layout.root, 'state.json'), 'utf8'), previous)
+  await assert.rejects(readFile(join(f.layout.root, 'upgrade.lock')), { code: 'ENOENT' })
+})
+
+test('同 prefix 的旧宿主持过期预检进入 runner 时不覆盖已切槽操作', async t => {
+  const f = await setup(t)
+  const options = { ...f, runningPackage: f.originalPackage, targetVersion: '2.0.0' }
+  await f.api.performManagedUpgrade({ ...options, profileId: 'profile-a', operationId: 'op-a' })
+  const path = join(f.layout.root, 'state.json')
+  const awaitingRestart = await readFile(path, 'utf8')
+  await assert.rejects(f.api.performManagedUpgrade({ ...options, profileId: 'profile-b', operationId: 'op-b' }), {
+    switched: false, indeterminate: false,
+  })
+  assert.deepEqual(f.events, ['install', 'validate', 'guard'])
+  assert.equal(JSON.parse(awaitingRestart).profileId, 'profile-a')
+  assert.equal(await readFile(path, 'utf8'), awaitingRestart)
+})
+
 test('候选安装失败只尝试一次，不验证切换，也不改原bin', async t => {
   const f = await setup(t)
   let attempts = 0
@@ -126,8 +212,20 @@ test('提交窗口新增工作时不切链接', async t => {
   await assert.rejects(realpath(f.layout.link), { code: 'ENOENT' })
 })
 
-// 插件前置升级就在 beforeSwitch 内:它抛错等价于"插件失败",必须停在切换之前,
-// 链接/槽位/state 与锁都要回到可再次发起的干净状态。
+test('最终落盘窗口卸载后不切换安装链接', async t => {
+  const f = await setup(t)
+  let disposed = false
+  await assert.rejects(f.api.performManagedUpgrade({
+    ...f, runningPackage: f.originalPackage, targetVersion: '2.0.0',
+    onPhase: ({ phase }) => { if (phase === 'ready-to-switch') disposed = true },
+    beforeSwitch: async () => {
+      if (disposed) throw new Error('维护插件已卸载')
+    },
+  }), /维护插件已卸载/)
+  await assert.rejects(realpath(f.layout.link), { code: 'ENOENT' })
+  assert.equal(JSON.parse(await readFile(join(f.layout.root, 'state.json'), 'utf8')).phase, 'failed')
+})
+
 test('beforeSwitch 抛错不切链接、锁释放、state 落定 failed 且可重试', async t => {
   const f = await setup(t)
   const pluginGate = async () => { throw new Error('插件升级未完成,已中止切换槽位: @scope/a') }
@@ -180,8 +278,8 @@ test('npm超时将槽隔离，下一请求不得直接复用', async t => {
   const f = await setup(t)
   const error = await f.api.performManagedUpgrade({ ...f, runningPackage: f.originalPackage, targetVersion: '2.0.0', install: async () => ({ ok: false, timedOut: true, stderrTail: 'timeout' }) }).then(() => null, (thrown) => thrown)
   assert.match(error.message, /timeout/)
-  // 状态不确定标记必须透传给调用方(否则 index 不会强制退出宿主)
   assert.equal(error.indeterminate, true)
+  assert.equal(error.requiresHostExit, true)
   assert.equal(error.switched, false)
   await assert.rejects(f.api.performManagedUpgrade({ ...f, runningPackage: f.originalPackage, targetVersion: '2.0.0' }), /锁|隔离|进行中/)
   assert.deepEqual(f.events, [])
@@ -219,6 +317,19 @@ test('入口切换回滚失败保留锁并标记不可判定', async t => {
   const state = JSON.parse(await readFile(join(f.layout.root, 'state.json'), 'utf8'))
   assert.equal(state.phase, 'indeterminate')
 })
+test('进入激活后故障且失败状态无法落盘时仍要求保护性退出', async t => {
+  const f = await setup(t)
+  const stateLock = join(f.layout.root, 'state.json.lock')
+  await assert.rejects(f.api.performManagedUpgrade({
+    ...f, runningPackage: f.originalPackage, targetVersion: '2.0.0',
+    activate: async () => {
+      await writeFile(stateLock, 'fixture', { flag: 'wx' })
+      throw new Error('激活未完成')
+    },
+  }), { message: /激活未完成.*失败结果无法落盘/, switched: false, indeterminate: true, requiresHostExit: true })
+  assert.ok(await readFile(join(f.layout.root, 'upgrade.lock'), 'utf8'))
+})
+
 test('非法精确版本不清空任何目录或启动安装', async t => {
   const f = await setup(t)
   await assert.rejects(f.api.performManagedUpgrade({ ...f, runningPackage: f.originalPackage, targetVersion: 'latest;bad' }), /版本/)

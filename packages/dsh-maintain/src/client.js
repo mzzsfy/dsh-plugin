@@ -223,66 +223,168 @@ function post(url, body) {
   return api(url, { method: 'POST', body: body === undefined ? '{}' : JSON.stringify(body) })
 }
 
-// 升级观察器:模块级单例,升级进行中每拍拉取状态并广播,组件挂载与否不影响;
-// 发现任意一拍不在进行中即升级落定,展示结果浮条后停止轮询;
-// 总时长上限覆盖 npm 安装全时长(超时 + 强杀宽限,与 host MANAGED_TIMEOUT_MS 对拍):
-// 超限说明宿主或进程管理器异常,浮条转状态未知。
-// 代际令牌防重叠拍:顺序自调度(settle 后排下一拍),单请求带超时,stop 后迟到拍经验代际丢弃
+// 升级和启动健康复查共用一个顺序状态请求；仅升级可脱离面板继续观察。
 const UPGRADE_WATCH_MAX_MS = 32 * 60 * 1000
+const HEALTH_WATCH_MAX_MS = 60 * 1000
 const UPGRADE_POLL_TIMEOUT_MS = 5 * 1000
-const upgradeWatch = { generation: null, startedAt: 0, listeners: new Set() }
+const upgradeWatch = { generation: null, listeners: new Set() }
 
 function broadcastUpgradeStatus(status) {
   for (const listener of upgradeWatch.listeners) listener(status)
 }
 
 function stopUpgradeWatch() {
+  const generation = upgradeWatch.generation
+  if (!generation) return
   upgradeWatch.generation = null
+  clearTimeout(generation.timer)
+  generation.controller.abort()
 }
 
 function subscribeUpgradeStatus(listener) {
   upgradeWatch.listeners.add(listener)
-  return () => upgradeWatch.listeners.delete(listener)
+  return () => {
+    upgradeWatch.listeners.delete(listener)
+    if (upgradeWatch.listeners.size === 0 && upgradeWatch.generation?.operation === null) stopUpgradeWatch()
+  }
 }
 
-function ensureUpgradeWatch() {
-  if (upgradeWatch.generation !== null) return
-  const generation = {}
+function watchedUpgrade(snapshot) {
+  const last = snapshot.upgrade.last
+  return { operationId: last?.operationId, startedAt: last?.startedAt, targetVersion: last?.targetVersion }
+}
+
+function matchesWatchedUpgrade(operation, bootId, snapshot) {
+  const last = snapshot?.upgrade?.last
+  if (!last || !snapshot.bootId) return false
+  const sameBoot = snapshot.bootId === bootId
+  if (operation.operationId) {
+    return last.operationId === operation.operationId && (sameBoot || snapshot.upgrade.running === false)
+  }
+  // 受理时布局可能尚未读完。同宿主按启动时刻与目标关联，失败也可能始终没有 ID。
+  return sameBoot && last.historical !== true
+    && Number.isFinite(operation.startedAt) && last.startedAt === operation.startedAt
+    && last.targetVersion === operation.targetVersion
+}
+
+function promoteUpgradeWatch(generation, snapshot) {
+  const wasUpgrading = generation.operation !== null
+  generation.operation = watchedUpgrade(snapshot)
+  generation.healthHandoff = null
+  generation.bootId = snapshot.bootId
+  generation.bootAt = snapshot.bootAt
+  generation.deadlineAt = Date.now() + UPGRADE_WATCH_MAX_MS
+  if (!wasUpgrading) showUpgradeFloat(null)
+}
+
+function ensureUpgradeWatch(snapshot, accepted = false) {
+  const upgrading = snapshot?.upgrade?.running === true
+  const active = upgradeWatch.generation
+  if (accepted && snapshot?.upgrade?.running === false && snapshot.upgrade.last) {
+    stopUpgradeWatch()
+    broadcastUpgradeStatus(snapshot)
+    showUpgradeFloat(snapshot.upgrade.last)
+    return
+  }
+  if (!upgrading && (snapshot?.healthChecking !== true || !snapshot.bootId || upgradeWatch.listeners.size === 0)) return
+  if (active) {
+    if (upgrading && (accepted || (active.operation === null && active.healthHandoff === null))) {
+      promoteUpgradeWatch(active, snapshot)
+    }
+    return
+  }
+  const operationId = snapshot.upgrade?.last?.operationId
+  const generation = {
+    operation: null,
+    healthHandoff: !upgrading && operationId
+      ? { operationId, startedAt: snapshot.upgrade.last.startedAt, previousBoots: new Set() } : null,
+    bootId: snapshot.bootId,
+    bootAt: snapshot.bootAt,
+    deadlineAt: Date.now() + HEALTH_WATCH_MAX_MS,
+    controller: new AbortController(),
+    timer: null,
+  }
   upgradeWatch.generation = generation
-  upgradeWatch.startedAt = Date.now()
-  showUpgradeFloat(null)
+  if (upgrading) promoteUpgradeWatch(generation, snapshot)
   let pollFailures = 0
   const tick = async () => {
     if (upgradeWatch.generation !== generation) return
-    if (Date.now() - upgradeWatch.startedAt >= UPGRADE_WATCH_MAX_MS) {
-      upgradeWatch.generation = null
-      showUpgradeFloat('unknown')
+    if (Date.now() >= generation.deadlineAt) {
+      stopUpgradeWatch()
+      if (generation.operation !== null) showUpgradeFloat('unknown')
       return
     }
+    const operation = generation.operation
     try {
-      const next = await api(STATUS_URL, { signal: AbortSignal.timeout(UPGRADE_POLL_TIMEOUT_MS) })
+      const requestTimeout = operation === null
+        ? AbortSignal.timeout(Math.min(UPGRADE_POLL_TIMEOUT_MS, Math.max(0, generation.deadlineAt - Date.now())))
+        : AbortSignal.timeout(UPGRADE_POLL_TIMEOUT_MS)
+      const signal = AbortSignal.any([generation.controller.signal, requestTimeout])
+      const next = await api(STATUS_URL, { signal })
       if (upgradeWatch.generation !== generation) return
       pollFailures = 0
-      broadcastUpgradeStatus(next)
-      const upgrade = next ? next.upgrade : null
-      if (upgrade && upgrade.running === true && upgrade.progress) updateUpgradeFloatProgress(upgrade.progress)
-      // 落定即终判:切换成功由切换退出接管守卫进入重启等待,失败浮条展示原因
-      if (!upgrade || upgrade.running !== true) {
-        upgradeWatch.generation = null
-        if (upgrade && upgrade.last) showUpgradeFloat(upgrade.last)
+      // 受理前的拍只释放单飞槽，不能覆盖新事务状态或触发重启接管。
+      if (operation !== generation.operation) return
+      if (operation === null && Date.now() >= generation.deadlineAt) {
+        stopUpgradeWatch()
         return
       }
+      if (operation !== null && !matchesWatchedUpgrade(operation, generation.bootId, next)) return
+      const upgrade = next?.upgrade
+      const healthHandoff = generation.healthHandoff
+      if (healthHandoff !== null) {
+        if (!next?.bootId || healthHandoff.previousBoots.has(next.bootId)) return
+        const sameBoot = next.bootId === generation.bootId
+        const last = upgrade?.last
+        if (upgrade?.running === true) {
+          // 当前宿主明确启动的新操作可接管观察。
+          if (!sameBoot || !last?.operationId || last.operationId === healthHandoff.operationId
+            || !Number.isFinite(last.startedAt) || !Number.isFinite(healthHandoff.startedAt)
+            || last.startedAt <= healthHandoff.startedAt) return
+        } else {
+          if (last?.operationId !== healthHandoff.operationId) return
+          if (!sameBoot) {
+            if (Number.isFinite(next.bootAt) && next.bootAt < generation.bootAt) return
+            healthHandoff.previousBoots.add(generation.bootId)
+            generation.bootId = next.bootId
+            generation.bootAt = next.bootAt
+          }
+        }
+      }
+      broadcastUpgradeStatus(next)
+      if (operation === null && upgrade?.running === true) promoteUpgradeWatch(generation, next)
+      if (generation.operation === null) {
+        if (next?.bootId !== generation.bootId || next.healthChecking !== true) stopUpgradeWatch()
+      } else if (upgrade.running === true) {
+        generation.operation.operationId ||= upgrade.last?.operationId
+        if (upgrade.progress) updateUpgradeFloatProgress(upgrade.progress)
+      } else if (upgradeWatch.listeners.size > 0 && next.healthChecking === true && next.bootId !== generation.bootId) {
+        // 健康接管仍绑定原事务，后续重启只推进 boot，沿用此处设定的截止时间。
+        generation.healthHandoff = { operationId: operation.operationId, startedAt: upgrade.last.startedAt, previousBoots: new Set([generation.bootId]) }
+        generation.operation = null
+        generation.bootId = next.bootId
+        generation.bootAt = next.bootAt
+        generation.deadlineAt = Date.now() + HEALTH_WATCH_MAX_MS
+        removeUpgradeFloat()
+      } else {
+        stopUpgradeWatch()
+        showUpgradeFloat(upgrade.last)
+      }
     } catch (pollError) {
-      if (upgradeWatch.generation !== generation) return
+      if (upgradeWatch.generation !== generation || operation !== generation.operation) return
+      if (operation === null && Date.now() >= generation.deadlineAt) {
+        stopUpgradeWatch()
+        return
+      }
       pollFailures += 1
-      // 失败限频:首条与之后每 15 条(约 30 秒)一条,防宿主重启窗口刷屏
       if (pollFailures === 1 || pollFailures % 15 === 0) {
         console.warn('[dsh-maintain] 升级状态轮询失败: ' + (pollError && pollError.message ? pollError.message : String(pollError)))
       }
+    } finally {
+      if (upgradeWatch.generation === generation) generation.timer = setTimeout(tick, UPGRADE_POLL_MS)
     }
-    if (upgradeWatch.generation === generation) setTimeout(tick, UPGRADE_POLL_MS)
   }
-  tick()
+  void tick()
 }
 
 function ensureUpgradeFloatStyle() {
@@ -303,14 +405,24 @@ function ensureUpgradeFloatStyle() {
   document.head.appendChild(style)
 }
 
-// 升级落定的浮条终态文案:按退出调度与失败原因分流;
-// 未调度退出(单次意图关闭)不得宣称宿主退出与页面恢复
 // LOGIC-BEGIN upgradeFinalText
-function upgradeFinalText(state) {
-  if (state.ok !== true) return '升级失败:' + (state.error || '详情见版本与运维页')
-  return state.exitScheduled === true
-    ? '升级完成,宿主正在退出切换版本,页面恢复后可直接使用'
-    : '升级完成,已切换版本链接;请手动重启宿主加载新版本'
+function upgradeFinalText(state, inReceipt = false) {
+  if (state.phase === 'indeterminate') {
+    const guidance = '升级异常终止；安装目录已隔离待人工核验'
+    return guidance + (inReceipt ? (state.error ? '：' + state.error : '。') : '，详情见版本与运维页')
+  }
+  switch (upgradeResultKind(state)) {
+    case 'pending':
+      if (state.exitScheduled === true) return '已切换版本链接，宿主正在退出；重启后将核验升级结果'
+      if (state.error) return '已切换版本链接，但未能自动退出；请手动重启宿主'
+      return '已切换版本链接；请手动重启宿主以加载目标版本'
+    case 'unknown':
+      return '升级结果未确认：' + (state.error || '详情见版本与运维页')
+    case 'failed':
+      return '升级失败：' + (state.error || state.plugins?.error || (hasPluginUpgradeFailure(state.plugins) ? '插件同步升级未完成' : '详情见版本与运维页'))
+    case 'succeeded':
+      return '升级完成，已运行目标版本'
+  }
 }
 // LOGIC-END upgradeFinalText
 
@@ -356,14 +468,8 @@ function showUpgradeFloat(state) {
     text.textContent = '升级进行中,可离开本页,完成后此处提示'
   } else if (state === 'unknown') {
     text.textContent = '升级状态长时间未更新,请刷新页面查看'
-  } else if (state.ok) {
-    text.textContent = upgradeFinalText(state)
-  } else if (state.phase === 'indeterminate') {
-    // 超时强杀/npm 仍在写:槽位已隔离,升级入口锁定直至人工核验,不做"可重跑"误导
-    text.textContent = '升级异常终止;安装目录已隔离待人工核验,详情见版本与运维页'
   } else {
-    // 浮条只做通知,stderr 摘要在版本与运维页完整展示
-    text.textContent = '升级失败:' + (state.error || '详情见版本与运维页')
+    text.textContent = upgradeFinalText(state)
   }
   document.body.appendChild(box)
 }
@@ -378,8 +484,15 @@ function updateUpgradeFloatProgress(progress) {
   if (!progress) return
   const text = document.getElementById(UPGRADE_FLOAT_ID + '__text')
   if (text === null) return
-  text.textContent = '升级中:' + (progress.phaseLabel || progress.phase) + ',已用时 ' + fmtElapsed(progress.startedAt)
+  text.textContent = '升级中:' + upgradePhaseLabel(progress) + ',已用时 ' + fmtElapsed(progress.startedAt)
 }
+
+// LOGIC-BEGIN upgradePhaseLabel
+function upgradePhaseLabel(progress) {
+  if (progress?.phase === 'pre-switch') return '最终核验'
+  return progress?.phaseLabel || progress?.phase || '升级进行中'
+}
+// LOGIC-END upgradePhaseLabel
 
 function fmtTime(ms) {
   const t = Number(ms)
@@ -527,7 +640,7 @@ function WhitelistPicker(props) {
           ? h('div', { className: 'dm-whitelist__empty' }, '当前没有插件')
           : null,
       h('div', { className: 'dm-field__hint' },
-        '勾选即保存;白名单插件不会被安全模式自动禁用。不兼容时安全模式不可用,需先升级或手动禁用。'),
+        '保留旧版设置；当前不参与升级，也不能绕过插件兼容检查。'),
       props.busy ? h('span', { className: 'dm-meta' }, '保存中…') : null,
     ),
   )
@@ -545,31 +658,19 @@ function installDisabled(status, busy, restarting) {
 }
 // LOGIC-END installDisabled
 
-// 环境阻断不可越过;启用前置升级时,插件阻断交给切槽前复检。
 // LOGIC-BEGIN canStartInstall
-function canStartInstall(status, busy, restarting, preflight, safeMode, upgradePlugins = false) {
-  if (installDisabled(status, busy, restarting)) return false
-  if (!preflight) return true
-  if (preflight.environmentOk === false) return false
-  const blocked = preflight.pluginSummary ? preflight.pluginSummary.block : 0
-  const safeModeOverride = safeMode && (preflight.okWithSafeMode === undefined
-    ? preflight.safeMode && preflight.safeMode.available
-    : preflight.okWithSafeMode === true)
-  if (blocked > 0 && !safeModeOverride && upgradePlugins !== true) return false
-  return true
+function canStartInstall(status, busy, restarting, preflight) {
+  return !installDisabled(status, busy, restarting)
+    && preflight?.ok === true && preflight.environmentOk !== false && !(preflight.pluginSummary?.block > 0)
 }
 // LOGIC-END canStartInstall
 
 // LOGIC-BEGIN preflightSummaryLine
 function preflightSummaryLine(preflight) {
   if (!preflight) return '尚未检查'
-  if (preflight.ok) return '检查通过'
   if (preflight.environmentOk === false) return '环境检查未通过'
-  if (preflight.pluginSummary && preflight.pluginSummary.block > 0
-    && (preflight.okWithSafeMode === true || (preflight.okWithSafeMode === undefined && preflight.safeMode && preflight.safeMode.available))) {
-    return '插件不兼容,可开启安全模式'
-  }
-  return '检查未通过'
+  if (preflight.pluginSummary?.block > 0) return '插件不兼容，已阻止安装；请先处理下方兼容明细。'
+  return preflight.ok === true ? '检查通过' : '检查未通过'
 }
 // LOGIC-END preflightSummaryLine
 
@@ -676,12 +777,12 @@ function SettingsCard(props) {
   )
 }
 
-// 回执只提示一次:按 operationId 记录已读,成功路径自动确认,失败/待重启由用户点「知道了」。
-function upgradeReceiptKey(last) {
-  if (!last) return null
+// 复检可能改变结果；已读只适用于同一笔升级的同一个结果。
+function upgradeReceiptKey(last, result) {
   const identity = last.operationId
-    || [last.targetVersion || '', last.finishedAt || last.startedAt || ''].join('|')
-  return UPGRADE_RECEIPT_SEEN_KEY + ':' + identity
+    ? [last.operationId, result]
+    : [null, result, last.targetVersion ?? null, last.finishedAt ?? last.startedAt ?? null]
+  return UPGRADE_RECEIPT_SEEN_KEY + ':' + JSON.stringify(identity)
 }
 
 function upgradeReceiptSeen(key) {
@@ -696,42 +797,54 @@ function markUpgradeReceiptSeen(key) {
   try { window.localStorage.setItem(key, '1') } catch {}
 }
 
-// 插件前置升级是否带失败:有逐项失败或整体异常都算,决定主结果用警告而非成功语义。
+// 与 managed-state 的历史插件失败口径同源。
 // LOGIC-BEGIN hasPluginUpgradeFailure
 function hasPluginUpgradeFailure(plugins) {
   if (!plugins) return false
-  if (plugins.error) return true
+  if (plugins.notRun === true || plugins.failed === true) return true
+  if (typeof plugins.error === 'string' && plugins.error.length > 0) return true
   const items = Array.isArray(plugins.items) ? plugins.items : []
-  return items.some((item) => item && item.state === 'failed')
+  return items.some((item) => item && (item.restoreFailed === true || ['failed', 'not-run', 'rolled-back'].includes(item.state)))
 }
 // LOGIC-END hasPluginUpgradeFailure
 
-// 成功回执自动隐藏的条件:成功、无插件失败、无待手动重启提示。
-// 失败/待重启结果保留卡片,由用户点「知道了」手动确认,避免信息被静默丢弃。
+// LOGIC-BEGIN upgradeResultKind
+function upgradeResultKind(last) {
+  if (!last) return 'unknown'
+  if (last.ok === false || hasPluginUpgradeFailure(last.plugins)) return 'failed'
+  if (last.pending === true) return 'pending'
+  if (last.ok === true && last.plugins?.incomplete !== true) return 'succeeded'
+  return 'unknown'
+}
+// LOGIC-END upgradeResultKind
+
 // LOGIC-BEGIN shouldAutoAckReceipt
 function shouldAutoAckReceipt(last) {
-  if (!last || last.ok !== true) return false
-  if (last.pending === true || last.exitScheduled === false) return false
-  return !hasPluginUpgradeFailure(last.plugins)
+  return upgradeResultKind(last) === 'succeeded' && last.exitScheduled !== false
 }
 // LOGIC-END shouldAutoAckReceipt
 
-// 「知道了」只服务不会自动隐藏的落定记录:运行中与自动 ack 的成功历史都不提供。
+// 结果未落定时，不消费已读标记，也不允许当前确认掩盖之后的终态。
 // LOGIC-BEGIN canDismissUpgradeReceipt
 function canDismissUpgradeReceipt(upgrade, last, autoReceiptKey) {
-  return Boolean(last && !upgrade.running && !autoReceiptKey)
+  const kind = upgradeResultKind(last)
+  return !upgrade.running && !autoReceiptKey && (kind === 'failed' || kind === 'succeeded')
 }
 // LOGIC-END canDismissUpgradeReceipt
 
-// 插件升级结果摘要:总数 + 更新/失败/跳过计数,供结果卡使用。
 // LOGIC-BEGIN pluginUpgradeSummaryLine
 function pluginUpgradeSummaryLine(plugins) {
   if (!plugins || plugins.requested !== true) return null
   const items = Array.isArray(plugins.items) ? plugins.items : []
-  if (items.length === 0) return null
+  const omitted = plugins.omitted ?? 0
+  const total = '插件 ' + (plugins.total ?? items.length) + ' 个'
+  const omittedText = omitted > 0 ? '；省略 ' + omitted + ' 条明细' : ''
+  if (items.length === 0) return omittedText ? total + omittedText : null
   const count = (state) => items.filter((item) => item && item.state === state).length
-  return '插件 ' + items.length + ' 个:更新 ' + count('updated')
+  const notRun = count('not-run')
+  return total + (omitted > 0 ? '（仅统计已显示的明细）:' : ':') + '更新 ' + count('updated')
     + ',失败 ' + count('failed') + ',跳过 ' + count('skipped')
+    + (notRun > 0 ? ',未执行 ' + notRun : '') + omittedText
 }
 // LOGIC-END pluginUpgradeSummaryLine
 
@@ -742,9 +855,11 @@ const PLUGIN_ITEM_LABELS = Object.freeze({
   updated: ['已更新', 'pass'],
   failed: ['失败', 'block'],
   skipped: ['跳过', 'warn'],
+  'not-run': ['未执行', 'warn'],
+  'rolled-back': ['已回滚', 'warn'],
 })
 
-// 逐插件状态列表:面板在进行中与结束后都用同一份明细,避免"只看到总数"。
+// 历史升级回执的逐插件结果。
 function PluginItemList(props) {
   const items = Array.isArray(props.items) ? props.items : []
   if (items.length === 0) return null
@@ -761,46 +876,43 @@ function PluginItemList(props) {
   }))
 }
 
-// 升级状态区:进行中显示阶段/插件时间线、逐插件状态与 npm 输出尾部;结束后显示结果与插件健康摘要。
+// 升级状态区:进行中显示宿主安装进度，结束后显示事务结果、历史插件明细与健康检查。
 function UpgradeCard(props) {
   const upgrade = props.status.upgrade
   const last = upgrade && upgrade.last
   const progress = upgrade && upgrade.progress
   const health = last && last.health
+  const healthFailed = health?.failed ?? []
+  const healthBundleErrors = health?.bundleErrors ?? []
   const pluginUpgrade = last && last.plugins
+  const pluginSummary = pluginUpgradeSummaryLine(pluginUpgrade)
   const lastStartedAt = Number(last && (last.startedAt || last.switchedAt))
   const historical = Boolean(upgrade && (upgrade.historical === true
     || (last && last.historical === true)
     || (props.status.bootAt && lastStartedAt && lastStartedAt < props.status.bootAt)))
-  const pluginUpgradeWarning = Boolean(last && hasPluginUpgradeFailure(last.plugins))
-  // 任何已落定记录都生成回执 key:失败记录由「知道了」手动确认,不再永久占据面板。
-  const receiptKey = upgrade && !upgrade.running && last ? upgradeReceiptKey(last) : null
+  const pluginUpgradeWarning = hasPluginUpgradeFailure(pluginUpgrade)
+  const resultKind = upgradeResultKind(last)
+  const receiptKey = upgrade && !upgrade.running && (resultKind === 'failed' || resultKind === 'succeeded')
+    ? upgradeReceiptKey(last, resultKind) : null
   const autoReceiptKey = shouldAutoAckReceipt(last) ? receiptKey : null
-  const [dismissedKey, setDismissedKey] = useState(null)
-  const receiptRef = useRef({ key: null, seen: false })
-  if (receiptRef.current.key !== receiptKey) {
-    receiptRef.current = {
-      key: receiptKey,
-      seen: Boolean(last && last.receiptSeen === true) || upgradeReceiptSeen(receiptKey),
+  const receiptSeen = receiptKey !== null && ((last.receiptSeen === true && last.receiptResult === resultKind) || upgradeReceiptSeen(receiptKey))
+  const [, updateReceipt] = useState(0)
+  function dismissReceipt() {
+    if (!receiptKey || receiptSeen) return
+    const markSeen = () => {
+      markUpgradeReceiptSeen(receiptKey)
+      updateReceipt((version) => version + 1)
     }
+    if (!last.operationId || last.receiptLocalOnly === true) {
+      markSeen()
+      return
+    }
+    post(RECEIPT_ACK_URL, { operationId: last.operationId, result: resultKind }).then(markSeen).catch(() => {})
   }
   useEffect(() => {
-    if (!autoReceiptKey || receiptRef.current.seen) return
-    markUpgradeReceiptSeen(autoReceiptKey)
-    if (last && last.operationId) {
-      post(RECEIPT_ACK_URL, { operationId: last.operationId }).catch(() => {})
-    }
-  }, [autoReceiptKey])
-  if (!upgrade || (!upgrade.running && !last)) return null
-  if (receiptRef.current.seen || (receiptKey !== null && dismissedKey === receiptKey)) return null
-  function dismissReceipt() {
-    if (!receiptKey) return
-    setDismissedKey(receiptKey)
-    markUpgradeReceiptSeen(receiptKey)
-    if (last && last.operationId) {
-      post(RECEIPT_ACK_URL, { operationId: last.operationId }).catch(() => {})
-    }
-  }
+    if (autoReceiptKey && !receiptSeen) dismissReceipt()
+  }, [autoReceiptKey, receiptSeen])
+  if (!upgrade || (!upgrade.running && !last) || receiptSeen) return null
   const receiptDismissible = canDismissUpgradeReceipt(upgrade, last, autoReceiptKey)
   return h('div', { className: 'dm-card' },
     h('div', { className: 'dm-card__head' },
@@ -812,14 +924,11 @@ function UpgradeCard(props) {
     upgrade.running
       ? h('div', { className: 'dm-progress' },
           h('div', { className: 'dm-field__control' },
-            h('span', { className: 'dm-warn' }, progress ? progress.phaseLabel : '升级进行中'),
+            h('span', { className: 'dm-warn' }, upgradePhaseLabel(progress)),
             h('span', { className: 'dm-meta' }, last && last.targetVersion ? '目标 ' + last.targetVersion : ''),
             h('span', { className: 'dm-meta' }, '已用时 ' + fmtElapsed(progress ? progress.startedAt : (last ? last.startedAt : Date.now())))),
           progress && progress.phaseElapsedMs > 0
             ? h('div', { className: 'dm-progress__meta' }, '本阶段已用时 ' + fmtDuration(progress.phaseElapsedMs))
-            : null,
-          progress && Array.isArray(progress.items) && progress.items.length > 0
-            ? h(PluginItemList, { items: progress.items })
             : null,
           progress && progress.outputTail
             ? h('pre', { className: 'dm-log', 'aria-label': 'npm 输出' }, progress.outputTail)
@@ -827,24 +936,10 @@ function UpgradeCard(props) {
       : h('div', { className: 'dm-field' },
           h('span', { className: 'dm-field__label' }, historical ? '上次结果' : '结果'),
           h('div', { className: 'dm-field__main' },
-            last.ok
-              ? pluginUpgradeWarning
-                ? h('span', { className: 'dm-warn' }, historical
-                    ? '上次宿主升级完成,但插件同步升级有失败'
-                    : '宿主升级完成,但插件同步升级有失败')
-                : h('span', { className: 'dm-ok' },
-                    historical
-                      ? (last.landed === true ? '上次升级完成,已运行目标版本' : '上次升级完成,已切换版本链接')
-                      : last.exitScheduled === true
-                        ? '升级完成,宿主正在退出切换版本'
-                        : last.landed === true ? '升级完成,已运行目标版本' : '升级完成,已切换版本链接')
-              : last.pending === true
-                ? h('div', { className: 'dm-notice dm-notice--warn' }, '上次升级已切换版本,当前仍在运行旧版本,等待宿主重启')
-                : last.landed === true
-                  ? h('div', { className: 'dm-notice dm-notice--warn' },
-                      '升级完成,但插件装载检查异常:' + (last.error || (health && health.ok === false ? '插件健康检查未通过' : '详情见日志')))
-                  : h('div', { className: 'dm-notice dm-notice--error' },
-                      '升级失败:' + (last.error || (health && health.ok === false ? '插件装载降级' : '详情见日志'))),
+            resultKind === 'succeeded'
+              ? h('span', { className: 'dm-ok' }, upgradeFinalText(last))
+              : h('div', { className: 'dm-notice ' + (resultKind === 'failed' ? 'dm-notice--error' : 'dm-notice--warn') },
+                  upgradeFinalText(last, true)),
             historical
               ? h('div', { className: 'dm-dialog__hint' },
                   '来自上次宿主运行的记录'
@@ -852,32 +947,30 @@ function UpgradeCard(props) {
                   + (fmtTime(last.switchedAt || last.startedAt || last.finishedAt) ? ' · ' + fmtTime(last.switchedAt || last.startedAt || last.finishedAt) : '')
                   + ';本次启动未发起升级')
               : null,
-            last.ok === true && last.exitScheduled === false
-              ? h('div', { className: 'dm-notice dm-notice--warn' },
-                  last.error
-                    ? '已切换但启动器未提供退出能力,请手动重启宿主'
-                    : '自动重启未勾选:请手动重启宿主加载新版本,重启前不能再次发起升级')
+            last.pending === true && resultKind === 'failed'
+              ? h('div', { className: 'dm-notice dm-notice--warn' }, '版本链接已切换，需重启宿主以加载目标版本。')
               : null,
-            pluginUpgrade && pluginUpgrade.requested === true
-              && (pluginUpgrade.items.length > 0 || pluginUpgrade.error)
+            pluginUpgrade?.requested === true && (pluginSummary || pluginUpgrade.error)
               ? h('div', { className: pluginUpgradeWarning ? 'dm-notice dm-notice--warn' : 'dm-field__hint' },
-                  pluginUpgradeSummaryLine(pluginUpgrade),
+                  pluginSummary,
                   pluginUpgrade.error ? h('div', null, pluginUpgrade.error) : null,
-                  pluginUpgrade.items.length > 0
+                  pluginUpgrade.items?.length > 0
                     ? h('details', { className: 'dm-details' },
                         h('summary', null, '插件明细'),
                         h(PluginItemList, { items: pluginUpgrade.items }))
                     : null)
               : null,
-            health && health.ok === false
+            health?.available === false
+              ? h('div', { className: 'dm-notice dm-notice--warn' },
+                  '插件健康检查不可用:' + (health.unavailableReason || '宿主未提供插件清单'))
+              : null,
+            health?.ok === false || healthFailed.length > 0 || healthBundleErrors.length > 0
               ? h('div', { className: 'dm-notice dm-notice--error' },
-                  '插件健康检查未通过:失败 ' + ((health.failed || []).length) + ' 个,插件错误 ' + ((health.bundleErrors || []).length) + ' 个'
-                  + ((health.failed || []).length > 0 ? '(' + health.failed.map((row) => row.moduleName || row.entryId).join(', ') + ')' : '')
-                  + ((health.bundleErrors || []).length > 0 ? '(' + health.bundleErrors.map((row) => row.name + ':' + row.error).join(', ') + ')' : ''))
-              : health && health.available === false
-                ? h('div', { className: 'dm-notice dm-notice--warn' },
-                    '插件健康检查不可用:' + (health.unavailableReason || '宿主未提供插件清单'))
-                : null,
+                  (health?.ok === false ? '插件健康检查未通过:' : '已发现插件异常:')
+                  + '失败 ' + healthFailed.length + ' 个,插件错误 ' + healthBundleErrors.length + ' 个'
+                  + (healthFailed.length > 0 ? '(' + healthFailed.map((row) => row.moduleName || row.entryId).join(', ') + ')' : '')
+                  + (healthBundleErrors.length > 0 ? '(' + healthBundleErrors.map((row) => row.name + ':' + row.error).join(', ') + ')' : ''))
+              : null,
             Array.isArray(last.safeModeRestoreError) && last.safeModeRestoreError.length > 0
               ? h('div', { className: 'dm-notice dm-notice--error' },
                   '安全模式恢复失败:' + last.safeModeRestoreError.map((row) => row.name).join(','))
@@ -943,7 +1036,7 @@ function switchToggle(props) {
   ]
 }
 
-// 安装确认弹窗:展示版本变更、升级前检查与安全模式;安装即退出切换,由启动方式拉起。
+// 安装确认弹窗:展示版本变更与宿主单独升级的预检。
 // 重装修复(目标==运行版本)与回退(目标低于运行版本)是面板显式意图,窗内分类说明;
 // 自动重启为单次意图(默认开),关闭则安装后宿主继续运行,手动重启加载新版本。
 // 预检失败不允许绕过:宁可阻止一次安装,也不让用户在未知环境上切换。
@@ -951,8 +1044,6 @@ function UpgradeDialog(props) {
   const status = props.status
   const changeLine = buildInstallChangeLine(status)
   const [autoRestart, setAutoRestart] = useState(true)
-  const [safeMode, setSafeMode] = useState(false)
-  const [upgradePlugins, setUpgradePlugins] = useState(false)
   const [preflight, setPreflight] = useState(null)
   const [preflightError, setPreflightError] = useState(null)
   const [attempt, setAttempt] = useState(0)
@@ -962,17 +1053,11 @@ function UpgradeDialog(props) {
     setPreflightError(null)
     post(PREFLIGHT_URL, { targetVersion: status.channelLatest })
       .then((report) => { if (active) setPreflight(report) })
-      .catch((error) => { if (active) setPreflightError(error && error.message ? error.message : String(error)) })
+      .catch((error) => { if (active) setPreflightError(error?.message ?? String(error)) })
     return () => { active = false }
   }, [status.channelLatest, attempt])
-  const safeModeInfo = preflight && preflight.safeMode && typeof preflight.safeMode === 'object'
-    ? preflight.safeMode
-    : {}
-  const candidates = Array.isArray(safeModeInfo.candidates) ? safeModeInfo.candidates : []
-  const canUpgradePlugins = status.upgradePluginsAvailable === true && status.pluginUpgradeMode === 'pre-switch'
-  const upgradeBeforeSwitch = canUpgradePlugins && upgradePlugins
-  const startDisabled = !preflight || preflightError !== null
-    || !canStartInstall(status, props.busy, props.restarting, preflight, safeMode, upgradeBeforeSwitch)
+  const startDisabled = preflightError !== null
+    || !canStartInstall(status, props.busy, props.restarting, preflight)
   const finishLine = autoRestart
     ? '安装完成后宿主将立即退出切换版本:托管启动时由进程管理器拉起,手动终端启动时需你重新运行宿主;页面随宿主恢复自动刷新。'
     : '安装完成后宿主继续运行当前版本,需手动重启宿主加载新版本;重启前不能再次发起升级。'
@@ -1008,39 +1093,22 @@ function UpgradeDialog(props) {
                 h('div', null, plugin.name + (plugin.version ? ' ' + plugin.version : '')),
                 h('div', { className: 'dm-check__detail' }, plugin.reasons.join('; ')))))))
         : null,
-      candidates.length > 0
-        ? h('div', { className: 'dm-notice dm-notice--warn' },
-            h('label', { className: 'dm-switch' },
-              ...switchToggle({
-                checked: safeMode,
-                disabled: safeModeInfo.available !== true || !autoRestart,
-                onChange: (e) => setSafeMode(e.target.checked),
-              }),
-              '安全模式:临时禁用 ' + candidates.length + ' 个未验证或不兼容插件'),
-            h('div', { className: 'dm-dialog__hint' }, '升级成功后可在「版本与运维」页逐个恢复;安全模式升级必须自动重启。'))
-        : null,
-      safeModeInfo.reason
-        && (candidates.length > 0 || (safeModeInfo.protected || []).length > 0)
-        ? h('div', { className: 'dm-dialog__hint' }, '安全模式不可用:' + safeModeInfo.reason)
-        : null,
-      h('label', { className: 'dm-switch' },
-        ...switchToggle({
-          checked: upgradeBeforeSwitch,
-          disabled: !canUpgradePlugins,
-          onChange: (e) => setUpgradePlugins(e.target.checked),
-        }),
-        '先升级插件再切换槽位',
-      ),
       h('div', { className: 'dm-dialog__hint' },
-        canUpgradePlugins
-          ? '先更新当前宿主可安装的 registry 插件,再用目标宿主复检。检查或升级失败、复检不可用或仍有不兼容插件时,不切槽、不重启。Git 与内置插件不更新。'
-          : '当前宿主未加载新的插件升级流程,请先重启宿主加载新版本。'),
+        '插件同步升级不可用：当前宿主未接入离线升级控制器。本次仅安装宿主，不会更新或禁用插件。'),
       h('div', { className: 'dm-dialog__hint' }, finishLine),
+      h('div', { className: 'dm-dialog__hint' },
+        h('div', { className: 'dm-field__control' },
+          h('span', null, '启动失败？救援命令：'),
+          h('code', { className: 'dm-check__detail', style: { whiteSpace: 'nowrap', overflowX: 'auto', maxWidth: '100%' } }, status.rescueCommand || '救援命令不可用')),
+        h('div', { className: 'dm-dialog__hint' }, '先在宿主终端将 DSH_HOME 设为 ' + (status.rescueHome || '宿主实际用户目录（请检查启动配置）') + '。命令会清除同名救援 profile；先备份或改用不存在的名称。'),
+        h('details', { className: 'dm-details' },
+          h('summary', null, '展开救援说明'),
+          h('div', { className: 'dm-check__detail' },
+            '打开终端显示的网址进入救援界面。它不会修复原 profile，也仍会读取家目录级 cordis.patch.yml。',
+            h('br'),
+            '点击「开始安装」后，插件会在安装前更新 DSH 用户目录中的 rescue.txt（默认 ~/.dsh/rescue.txt）。'))),
       h('label', { className: 'dm-switch' },
-        ...switchToggle({ checked: autoRestart, onChange: (e) => {
-          setAutoRestart(e.target.checked)
-          if (!e.target.checked) setSafeMode(false)
-        } }),
+        ...switchToggle({ checked: autoRestart, onChange: (e) => setAutoRestart(e.target.checked) }),
         '安装后自动重启宿主',
       ),
       h('div', { className: 'dm-dialog__actions' },
@@ -1048,7 +1116,7 @@ function UpgradeDialog(props) {
         h('button', {
           className: 'dm-btn dm-btn--primary',
           disabled: startDisabled,
-          onClick: () => props.onConfirm(status.channelLatest, autoRestart, safeMode, upgradeBeforeSwitch),
+          onClick: () => props.onConfirm(status.channelLatest, autoRestart),
         }, preflight === null ? '检查中…' : '开始安装'),
       ),
     ),
@@ -1147,28 +1215,39 @@ function MaintainApp() {
     setBusy((prev) => Object.assign({}, prev, { [key]: value }))
   }
 
-  function load() {
+  function load(isCurrent = () => true) {
     // 首次挂载消费预取快照(缺失/失败回退现拉),此后每次挂载现拉
     const primed = statusPrefetch
     statusPrefetch = null
     const base = primed !== null ? primed.then((snap) => (snap !== null ? snap : api(STATUS_URL))) : api(STATUS_URL)
-    return base
-      .then((next) => { setStatus(next); setError(null); return next })
-      .catch((loadError) => { setError('读取状态失败:' + (loadError && loadError.message ? loadError.message : String(loadError))); return null })
+    return base.then((next) => {
+      if (!isCurrent()) return null
+      setStatus(next)
+      setError(null)
+      return next
+    }).catch((loadError) => {
+      if (isCurrent()) setError('读取状态失败:' + (loadError && loadError.message ? loadError.message : String(loadError)))
+      return null
+    })
   }
 
-  // 挂载即订阅观察器快照,页面刷新落在升级进行中时恢复浮条与观察;
-  // 订阅回调(落定拍)与初始 load 快照(刷新落在调度窗口)两路同走切换退出接管守卫
+  // 观察器快照优先于尚未完成的初始加载，两路共用切换退出接管守卫。
   useEffect(() => {
+    let initialLoadCurrent = true
     const unsubscribe = subscribeUpgradeStatus((snapshot) => {
+      initialLoadCurrent = false
       if (snapshot !== null) setStatus(snapshot)
       takeOverSwitchExit(snapshot)
     })
-    void load().then((next) => {
-      if (next !== null) takeOverSwitchExit(next)
-      if (next !== null && next.upgrade !== null && next.upgrade.running === true) ensureUpgradeWatch()
+    void load(() => initialLoadCurrent).then((next) => {
+      if (!initialLoadCurrent || next === null) return
+      takeOverSwitchExit(next)
+      ensureUpgradeWatch(next)
     })
-    return unsubscribe
+    return () => {
+      initialLoadCurrent = false
+      unsubscribe()
+    }
   }, [])
 
   // 切换退出接管守卫:快照带 exitScheduled 且未在等待/接管态时,以该快照为基线自动进入
@@ -1353,15 +1432,16 @@ function MaintainApp() {
     submitEdit(SAFE_MODE_WHITELIST_URL, { plugins: list }, 'safeModeWhitelist', (error) => '保存失败:' + (error && error.message ? error.message : String(error)))
   }
 
-  function onUpgrade(targetVersion, autoRestart, safeMode, upgradePlugins) {
+  function onUpgrade(targetVersion, autoRestart) {
     setUpgradeDialogOpen(false)
     markBusy('upgrade', true)
-    post(UPGRADE_URL, { targetVersion, autoRestart, safeMode, upgradePlugins })
+    post(UPGRADE_URL, { targetVersion, autoRestart })
       .then((next) => {
         const snapshot = next && next.status ? next.status : next
         setStatus(snapshot); setError(null)
+        if (next?.rescueGuideWritten === false) notify('未能写入救援说明 rescue.txt', 'error')
         // 升级转后台执行:观察器接管状态跟踪与完成提示,页面可离开
-        ensureUpgradeWatch()
+        ensureUpgradeWatch(snapshot, true)
       })
       .catch((upgradeError) => notify('升级触发失败:' + (upgradeError && upgradeError.message ? upgradeError.message : String(upgradeError)), 'error'))
       .then(() => markBusy('upgrade', false))

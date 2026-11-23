@@ -43,11 +43,17 @@ test('runPreflight:安装根不存在视为首次升级可创建', async () => {
   assert.match(layout.detail, /首次升级将创建/)
 })
 
-test('runPreflight:全部检查通过时 ok=true', async () => {
+test('runPreflight:全部检查通过时允许单独升级宿主，但不开放安全模式', async () => {
   const report = await runPreflight(baseOptions())
   assert.equal(report.ok, true)
+  assert.equal(report.environmentOk, true)
   assert.equal(report.summary.block, 0)
   assert.equal(report.checks.find((check) => check.id === 'disk').status, CHECK_PASS)
+  assert.equal(report.okWithSafeMode, false)
+  assert.equal(report.safeMode.available, false)
+  assert.match(report.safeMode.reason, /已关闭/)
+  assert.deepEqual(report.safeMode.candidates, [])
+  assert.deepEqual(report.safeMode.protected, [])
 })
 
 test('runPreflight:残留 upgrade.lock 触发 block', async () => {
@@ -58,7 +64,19 @@ test('runPreflight:残留 upgrade.lock 触发 block', async () => {
   assert.equal(report.checks.find((check) => check.id === 'lock').status, CHECK_BLOCK)
 })
 
-test('runPreflight:插件不兼容且安全模式可用时 okWithSafeMode=true', async () => {
+test('runPreflight:残留 state.json.lock 阻断下一次升级', async () => {
+  const report = await runPreflight(baseOptions({
+    statImpl: async (path) => {
+      if (path.endsWith('state.json.lock')) return { isFile: () => true }
+      if (path === LAYOUT.root) return { isDirectory: () => true }
+      throw Object.assign(new Error('not found'), { code: 'ENOENT' })
+    },
+  }))
+  assert.equal(report.environmentOk, false)
+  assert.equal(report.checks.find((check) => check.id === 'state-lock')?.status, CHECK_BLOCK)
+})
+
+test('runPreflight:插件硬不兼容即阻断，不受扫描返回的安全模式候选影响', async () => {
   const report = await runPreflight(baseOptions({
     scanPluginsImpl: async () => ({
       available: true,
@@ -69,8 +87,13 @@ test('runPreflight:插件不兼容且安全模式可用时 okWithSafeMode=true',
     }),
   }))
   assert.equal(report.ok, false)
-  assert.equal(report.okWithSafeMode, true)
-  assert.equal(report.safeMode.available, true)
+  assert.equal(report.environmentOk, true)
+  assert.equal(report.checks.find((check) => check.id === 'plugins').status, CHECK_BLOCK)
+  assert.equal(report.okWithSafeMode, false)
+  assert.equal(report.safeMode.available, false)
+  assert.match(report.safeMode.reason, /已关闭/)
+  assert.deepEqual(report.safeMode.candidates, [])
+  assert.deepEqual(report.safeMode.protected, [])
 })
 
 test('runPreflight:插件扫描不可用时仅 warn,不阻断', async () => {

@@ -1,5 +1,4 @@
-// 升级回执展示逻辑:插件前置升级失败时不再永久占据面板。
-// Given 落定升级记录 When 判断是否自动隐藏/是否可手动确认 Then 仅成功且无插件失败时自动隐藏,其余保留「知道了」。
+// M0 A10:运行健康与升级结果分离，未确认结果不隐藏，已落定失败保留手动回执。
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -8,9 +7,12 @@ import { clientSource, extractLogic } from './logic-extract.mjs'
 import { normalizePluginUpgrade } from '../src/managed-state.mjs'
 
 const hasPluginUpgradeFailure = extractLogic('hasPluginUpgradeFailure')
-const shouldAutoAckReceipt = extractLogic('shouldAutoAckReceipt', { hasPluginUpgradeFailure })
-const canDismissUpgradeReceipt = extractLogic('canDismissUpgradeReceipt')
+const upgradeResultKind = extractLogic('upgradeResultKind', { hasPluginUpgradeFailure })
+const shouldAutoAckReceipt = extractLogic('shouldAutoAckReceipt', { upgradeResultKind })
+const canDismissUpgradeReceipt = extractLogic('canDismissUpgradeReceipt', { upgradeResultKind })
 const pluginUpgradeSummaryLine = extractLogic('pluginUpgradeSummaryLine')
+const upgradeFinalText = extractLogic('upgradeFinalText', { upgradeResultKind, hasPluginUpgradeFailure })
+const upgradePhaseLabel = extractLogic('upgradePhaseLabel')
 
 test('hasPluginUpgradeFailure:无插件信息/空 items/非失败状态为 false', () => {
   assert.equal(hasPluginUpgradeFailure(null), false)
@@ -57,10 +59,10 @@ test('normalizePluginUpgrade:旧 post-restart 三数组结构归一为 items 并
   assert.equal(shouldAutoAckReceipt({ ok: true, plugins: legacy }), false)
 })
 
-test('normalizePluginUpgrade:旧结构 pending 意图转为需重新升级的明示错误', () => {
+test('normalizePluginUpgrade:旧结构 pending 明示未执行，引导另行安排插件更新', () => {
   const legacy = normalizePluginUpgrade({ requested: true, pending: true, updated: [], failed: [], skipped: [], error: null })
   assert.equal(legacy.pending, undefined)
-  assert.match(legacy.error, /重新发起升级/)
+  assert.match(legacy.error, /未执行.*另行安排/)
   assert.equal(hasPluginUpgradeFailure(legacy), true)
   assert.equal(shouldAutoAckReceipt({ ok: true, plugins: legacy }), false)
 })
@@ -83,6 +85,8 @@ test('canDismissUpgradeReceipt:仅落定且非自动 ack 的记录显示知道�
   assert.equal(canDismissUpgradeReceipt({ running: true }, { ok: false }, null), false)
   assert.equal(canDismissUpgradeReceipt(upgrade, { ok: false }, null), true)
   assert.equal(canDismissUpgradeReceipt(upgrade, { ok: true }, 'receipt-key'), false)
+  assert.equal(canDismissUpgradeReceipt(upgrade, { ok: true, pending: true }, null), false)
+  assert.equal(canDismissUpgradeReceipt(upgrade, { ok: null, landed: true }, null), false)
 })
 
 test('pluginUpgradeSummaryLine:按逐项状态计数', () => {
@@ -101,13 +105,159 @@ test('pluginUpgradeSummaryLine:按逐项状态计数', () => {
   assert.equal(pluginUpgradeSummaryLine({ requested: true, items: [] }), null)
 })
 
-test('UpgradeCard:失败历史提供知道了与插件明细折叠,回执 key 不被成功条件锁死', () => {
+function renderReceipt(last, extraUpgrade = {}, { stored = new Map(), postAck = () => Promise.resolve() } = {}) {
   const source = clientSource()
-  assert.ok(source.includes("'知道了'"), '缺少手动确认入口')
-  assert.ok(source.includes("'插件明细'"), '缺少插件明细折叠标题')
-  assert.match(source, /h\('details'[^]*?'插件明细'/, '插件明细未使用 details 折叠')
-  assert.ok(source.includes('const receiptKey = upgrade && !upgrade.running && last ? upgradeReceiptKey(last) : null'), '回执 key 必须对全部落定记录生成')
-  assert.ok(source.includes('const autoReceiptKey = shouldAutoAckReceipt(last) ? receiptKey : null'), '自动 ack 必须由 shouldAutoAckReceipt 单独判定')
-  assert.ok(source.includes('const receiptDismissible = canDismissUpgradeReceipt(upgrade, last, autoReceiptKey)'), '手动确认入口必须接 canDismissUpgradeReceipt')
-  assert.ok(!source.includes('last.ok === true && !pluginUpgradeWarning'), '回执 key 不应再被成功条件锁死')
+  const components = source.slice(source.indexOf('const PLUGIN_ITEM_LABELS'), source.indexOf('function SafeModeCard('))
+  const receiptStorage = source.slice(source.indexOf('function upgradeReceiptKey('), source.indexOf('// 与 managed-state'))
+  const calls = []
+  const effects = []
+  const scope = {
+    h(type, props, ...children) { return { type, props, children } },
+    useState: (value) => [value, () => {}],
+    useRef: (current) => ({ current }),
+    useEffect: (effect) => effects.push(effect),
+    UPGRADE_RECEIPT_SEEN_KEY: 'receipt-key',
+    seenUpgradeReceipts: new Set(),
+    window: { localStorage: { getItem: (key) => stored.get(key), setItem: (key, value) => stored.set(key, value) } },
+    hasPluginUpgradeFailure, shouldAutoAckReceipt, canDismissUpgradeReceipt, pluginUpgradeSummaryLine,
+    upgradeResultKind, upgradeFinalText, upgradePhaseLabel,
+    fmtTime: () => null, fmtElapsed: () => '1 秒',
+    RECEIPT_ACK_URL: '/api/maintain/upgrade/receipt-ack',
+    post(url, payload) { calls.push({ url, payload }); return postAck() },
+  }
+  const render = new Function(...Object.keys(scope), receiptStorage + '\n' + components + '\nreturn UpgradeCard')(...Object.values(scope))
+  function collect(node) {
+    if (Array.isArray(node)) return node.flatMap(collect)
+    if (node === null || node === undefined || node === false) return []
+    if (typeof node !== 'object') return [node]
+    if (typeof node.type === 'function') return collect(node.type(node.props))
+    return [node, ...node.children.flatMap(collect)]
+  }
+  const nodes = collect(render({ status: { upgrade: { running: false, historical: true, last, ...extraUpgrade } } }))
+  for (const effect of effects) effect()
+  return { nodes, calls, text: nodes.filter((node) => typeof node === 'string').join(' '),
+    dismiss: nodes.find((node) => node.type === 'button' && node.children.includes('知道了')) }
+}
+
+for (const [name, state, expected] of [
+  ['等重启', { ok: true, pending: true, exitScheduled: false }, /等待宿主重启|手动重启宿主/],
+  ['未知', { ok: null, pending: false, landed: true }, /结果.*未确认|状态未知/],
+]) {
+  test('UpgradeCard: ' + name + ' 不绿色且不自动确认', () => {
+    const receipt = renderReceipt({ operationId: 'unconfirmed', ...state })
+    assert.match(receipt.text, expected)
+    assert.ok(!receipt.nodes.some((node) => node.props?.className === 'dm-ok'))
+    assert.doesNotMatch(receipt.text, /升级完成/)
+    assert.deepEqual(receipt.calls, [])
+  })
+}
+
+test('UpgradeCard: 健康宿主的历史失败不显示成功，保留折叠明细且只能手动 ack', () => {
+  const receipt = renderReceipt({
+    operationId: 'previous-failure', ok: false, landed: true, health: { ok: true },
+    plugins: { requested: true, notRun: true, error: '旧版本遗留的插件升级意图未执行。如仍需更新插件，请另行安排', items: [
+      { name: '@scope/a', state: 'not-run' }, { name: '@scope/b', state: 'failed', error: '下载失败' },
+    ] },
+  })
+  assert.doesNotMatch(receipt.text, /升级完成|健康检查.*异常/)
+  assert.match(receipt.text, /未执行 1/)
+  assert.match(receipt.text, /插件明细.*未执行 @scope\/a.*下载失败/)
+  assert.ok(receipt.nodes.some((node) => node.type === 'details' && !node.props.open))
+  assert.deepEqual(receipt.calls, [])
+  assert.ok(receipt.dismiss)
+  receipt.dismiss.props.onClick()
+  assert.deepEqual(receipt.calls, [{ url: '/api/maintain/upgrade/receipt-ack', payload: { operationId: 'previous-failure', result: 'failed' } }])
+})
+
+test('UpgradeCard: 确认成功后，同一笔升级被复检降级时失败记录仍可见', async () => {
+  const stored = new Map()
+  const receipt = renderReceipt({ operationId: 'same-operation', ok: true }, {}, { stored })
+  await Promise.resolve()
+  const failed = renderReceipt({ operationId: 'same-operation', ok: false, error: '复检失败' }, {}, { stored })
+  assert.match(failed.text, /复检失败/)
+  assert.ok(failed.dismiss)
+  assert.deepEqual(receipt.calls, [{ url: '/api/maintain/upgrade/receipt-ack', payload: { operationId: 'same-operation', result: 'succeeded' } }])
+  assert.equal(renderReceipt({ operationId: 'same-operation', ok: true }, {}, { stored }).text, '')
+})
+
+test('UpgradeCard: 服务端成功回执不得遮住同笔失败，而已确认的失败仍应隐藏', () => {
+  const previous = { operationId: 'old-result', ok: false, receiptSeen: true }
+  assert.ok(renderReceipt({ ...previous, receiptResult: 'succeeded' }).dismiss)
+  assert.equal(renderReceipt({ ...previous, receiptResult: 'failed' }).text, '')
+})
+
+test('UpgradeCard: 自动或人工确认被服务端拒绝时保持可见且不记本地已读', async () => {
+  const stored = new Map()
+  const options = { stored, postAck: () => Promise.reject(Object.assign(new Error('结果冲突'), { status: 409 })) }
+  const success = { operationId: 'success-unacked', ok: true }
+  const failed = { operationId: 'failed-unacked', ok: false }
+  renderReceipt(success, {}, options)
+  renderReceipt(failed, {}, options).dismiss.props.onClick()
+  await Promise.resolve()
+  assert.equal(stored.size, 0)
+  assert.match(renderReceipt(success, {}, options).text, /升级完成/)
+  assert.ok(renderReceipt(failed, {}, options).dismiss)
+})
+
+test('UpgradeCard: 无 operationId 的旧回执可以仅本地确认', () => {
+  const stored = new Map()
+  const last = { ok: false, targetVersion: '2.0.0', startedAt: 456 }
+  const receipt = renderReceipt(last, {}, { stored })
+  receipt.dismiss.props.onClick()
+  assert.deepEqual(receipt.calls, [])
+  assert.equal(renderReceipt(last, {}, { stored }).text, '')
+})
+
+test('UpgradeCard: 仅有内存的终态有 operationId 也可以不发请求地手动确认', () => {
+  const stored = new Map()
+  const last = { operationId: 'process-local-failure', ok: false, receiptLocalOnly: true }
+  const receipt = renderReceipt(last, {}, { stored })
+  receipt.dismiss.props.onClick()
+  assert.deepEqual(receipt.calls, [])
+  assert.equal(renderReceipt(last, {}, { stored }).text, '')
+})
+
+test('UpgradeCard: 隔离待核验结果展示真实错误', () => {
+  const receipt = renderReceipt({ operationId: 'indeterminate', ok: false, phase: 'indeterminate', error: '候选槽切换失败' })
+  assert.match(receipt.text, /人工核验.*候选槽切换失败/)
+  assert.doesNotMatch(receipt.text, /详情见版本与运维页/)
+})
+
+for (const ok of [false, null]) {
+  test('UpgradeCard: 健康检查不完整但报告已知错误时，同时显示不可用原因和诊断（ok=' + ok + '）', () => {
+    const receipt = renderReceipt({
+      operationId: 'partial-health', ok: false,
+      health: { ok, available: false, unavailableReason: '快照缺失', failed: [{ moduleName: 'failed-plugin' }], bundleErrors: [{ name: 'failed-bundle', error: '载入异常' }] },
+    })
+    assert.match(receipt.text, /插件健康检查不可用.*快照缺失/)
+    assert.match(receipt.text, /failed-plugin.*failed-bundle.*载入异常/)
+  })
+}
+
+test('UpgradeCard: 历史明细被截断时，说明分项只统计已显示的记录', () => {
+  const receipt = renderReceipt({
+    operationId: 'truncated-failure', ok: false,
+    plugins: { requested: true, total: 101, omitted: 100, items: [{ name: '@scope/a', state: 'failed' }] },
+  })
+  assert.match(receipt.text, /插件 101 个.*仅统计已显示.*失败 1.*省略 100 条/)
+})
+
+test('UpgradeCard: 已知有历史插件明细但没有可显示行，仍说明省略数量', () => {
+  const receipt = renderReceipt({
+    operationId: 'missing-details', ok: null,
+    plugins: { requested: true, total: 2, omitted: 2, items: [], incomplete: true },
+  })
+  assert.match(receipt.text, /插件 2 个.*省略 2 条/)
+  assert.ok(!receipt.nodes.some((node) => node.type === 'details'))
+})
+
+test('UpgradeCard: 运行中只展示通用阶段，不显示在线插件明细', () => {
+  const receipt = renderReceipt({ operationId: 'running', ok: null }, {
+    running: true,
+    progress: { phase: 'pre-switch', phaseLabel: '正在禁用插件 @scope/a(1/1)', items: [{ name: '@scope/a', state: 'upgrading' }] },
+  })
+  assert.match(receipt.text, /最终核验/)
+  assert.doesNotMatch(receipt.text, /@scope\/a|禁用插件|升级中/)
+  assert.equal(receipt.dismiss, undefined)
+  assert.deepEqual(receipt.calls, [])
 })

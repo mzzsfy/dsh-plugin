@@ -100,9 +100,19 @@ function unavailable(reason) {
   return { available: false, safeModeAvailable: false, reason, plugins: [], safeModeCandidates: [], protectedPlugins: [] }
 }
 
+function pluginErrorDetail(error) {
+  try {
+    return String(error?.message ?? error)
+  } catch {
+    return '未知错误'
+  }
+}
+
 async function readManifest(profileDir, name, readFileImpl) {
   const path = join(profileDir, 'node_modules', ...name.split('/'), 'package.json')
-  return JSON.parse(await readFileImpl(path, 'utf8'))
+  const manifest = JSON.parse(await readFileImpl(path, 'utf8'))
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) throw new Error('manifest 不是对象')
+  return manifest
 }
 
 // 新 Worker 不复用上一次候选的模块缓存;只传复检需要的清单字段。
@@ -195,12 +205,11 @@ export async function scanProfilePlugins({
     try {
       manifest = await readManifest(profileDir, row.name, readFileImpl)
     } catch (error) {
-      if (strict) return unavailable('插件 ' + row.name + ' manifest 读取失败: ' + (error?.message ?? error))
       plugins.push({
         name: row.name,
         version: row.version ?? null,
         status: PLUGIN_WARN,
-        reasons: ['读取插件清单失败: ' + (error && error.message ? error.message : String(error)), ...protectedReason],
+        reasons: ['读取插件清单失败: ' + pluginErrorDetail(error), ...protectedReason],
         safeModeProtected: protectedPlugin,
         safeModeWhitelisted: whitelistedPlugin,
         safeModeCandidate: !protectedPlugin
@@ -219,8 +228,7 @@ export async function scanProfilePlugins({
         exemptions,
       })
     } catch (error) {
-      if (strict) return unavailable('插件 ' + row.name + ' 兼容判定失败: ' + (error?.message ?? error))
-      classified = { status: PLUGIN_WARN, reasons: ['兼容判定失败: ' + (error?.message ?? error)] }
+      classified = { status: PLUGIN_WARN, reasons: ['兼容判定失败: ' + pluginErrorDetail(error)] }
     }
     plugins.push({
       name: row.name,

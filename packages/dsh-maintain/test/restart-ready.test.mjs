@@ -197,20 +197,8 @@ test('restartTick 调用点实参完整性:轮询 effect 必须传 readyStreak=p
   assert.match(callSite[1], /readyStreak:\s*prev\.readyStreak/, 'restartTick 调用点缺少 readyStreak: prev.readyStreak 实参')
 })
 
-// 升级浮条终态文案:ok 落定后 stale / 自动重启两条终态分流,失败与未知不在此列
-const clientUpgradeFinalText = extractLogic('upgradeFinalText')
-
 // 重启确认态文案:armed 且有活跃计数时改「仍要重启」
 const clientRestartConfirmLabel = extractLogic('restartConfirmLabel')
-
-test('upgradeFinalText: 按退出调度分流终态,失败附原因', () => {
-  assert.match(clientUpgradeFinalText({ ok: true, switched: true, exitScheduled: true }), /退出/)
-  assert.doesNotMatch(clientUpgradeFinalText({ ok: true, switched: true, exitScheduled: true }), /手动/)
-  assert.match(clientUpgradeFinalText({ ok: true, switched: true, exitScheduled: false }), /手动重启/)
-  assert.doesNotMatch(clientUpgradeFinalText({ ok: true, switched: true, exitScheduled: false }), /正在退出/, '未调度退出不得宣称宿主退出')
-  assert.match(clientUpgradeFinalText({ ok: false, error: '候选验证失败' }), /候选验证失败/)
-  assert.match(clientUpgradeFinalText({ ok: false }), /详情/)
-})
 
 test('restartConfirmLabel: armed 且活跃计数>0 才显示仍要重启文案', () => {
   assert.equal(clientRestartConfirmLabel(false, 0), '重启宿主')
@@ -236,13 +224,7 @@ test('client 切换退出接管:单一守卫函数,订阅回调与初始加载�
   assert.match(guardFn[1], /bootAt:\s*snapshot\.bootAt/, '接管基线必须取快照 bootAt')
   // 两路调用:观察器订阅回调(升级落定拍)+ 初始 load 快照(页面刷新落在调度窗口)
   assert.match(source, /subscribeUpgradeStatus\(\(snapshot\)\s*=>\s*\{[\s\S]*?takeOverSwitchExit\(snapshot\)/, '订阅回调必须走接管守卫')
-  assert.match(source, /void load\(\)\.then\(\(next\)\s*=>\s*\{[\s\S]*?takeOverSwitchExit\(next\)/, '初始快照必须走接管守卫')
-})
-
-test('client 升级观察器:落定即终判,不再延迟补查', () => {
-  const source = clientSource()
-  assert.doesNotMatch(source, /recheckUpgradeSettle/, '补查链必须整体移除')
-  assert.match(source, /if \(!upgrade \|\| upgrade\.running !== true\) \{\s*upgradeWatch\.generation = null\s*if \(upgrade && upgrade\.last\) showUpgradeFloat\(upgrade\.last\)/, '落定拍直接展示结果')
+  assert.match(source, /void load\(\(\)\s*=>\s*initialLoadCurrent\)\.then\(\(next\)\s*=>\s*\{[\s\S]*?takeOverSwitchExit\(next\)/, '初始快照必须走接管守卫')
 })
 
 test('force 发送条件锁定:仅活跃计数>0 的重启确认带 force', () => {
