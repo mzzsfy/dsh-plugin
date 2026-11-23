@@ -1793,6 +1793,18 @@ function heatLevel(tokens, max) {
   return tokens === 0 ? 0 : 1 + Math.floor((tokens / max) * HEAT_LEVEL_BANDS)
 }
 
+// 热力图悬浮读数:token 走带单位缩写(量级一眼可读),请求数同口径千分位;费用行随偏好显隐
+function heatTipRows(cell, t, costDisplay, costCurrency) {
+  return [
+    { key: 'tokens', label: t('tokens'), value: formatTokensCompact(cell.tokens) },
+    { key: 'requests', label: t('requests'), value: formatTokens(cell.requests) },
+    { key: 'rate', label: t('cacheHitRate'), value: cacheRateText(cell.cacheHit, cell.cacheMiss) },
+    ...(costDisplay && cell.cost > 0
+      ? [{ key: 'cost', label: t('cost'), value: `≈ ${formatCost(cell.cost, costCurrency)}` }]
+      : []),
+  ]
+}
+
 // 悬浮定位:鼠标事件跟随指针(右下偏移,越界换侧),键盘聚焦回落元素矩形(上方优先)。
 // 两种锚点共用夹取与箭头贴边逻辑。
 const TIP_GAP_PX = 8
@@ -4528,14 +4540,7 @@ ${HUD_CSS}
                 title: hover.day,
                 sections: [{
                   key: 'main',
-                  rows: [
-                    { key: 'tokens', label: t('tokens'), value: formatTokens(hover.tokens) },
-                    { key: 'requests', label: t('requests'), value: String(hover.requests) },
-                    { key: 'rate', label: t('cacheHitRate'), value: cacheRateText(hover.cacheHit, hover.cacheMiss) },
-                    ...(prefsRef.current.costDisplay && hover.cost > 0
-                      ? [{ key: 'cost', label: t('cost'), value: `≈ ${formatCost(hover.cost, costCurrency)}` }]
-                      : []),
-                  ],
+                  rows: heatTipRows(hover, t, prefsRef.current.costDisplay, costCurrency),
                 }],
               })
             : null))
