@@ -32,4 +32,6 @@ cookies.txt
 **/test/evidence/
 *.jsonl
 *.tmp
+*.TMP
+*~RF*
 /assets/screenshots/_wip/
