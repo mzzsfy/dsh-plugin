@@ -295,6 +295,141 @@ test('目录同步部分失败时给出错误 toast', async () => {
   } finally { await page.unroute(route) }
 })
 
+test('长自选列表用满面板剩余高度，宽屏仍有宽度上限', async () => {
+  const route = '**/api/stock-assistant/snapshot'
+  await page.route(route, async handler => {
+    const response = await handler.fetch()
+    const body = await response.json()
+    const order = Array.from({ length: 40 }, (_, index) => `XSHG:equity:${600000 + index}`)
+    body.data.control.watchlist = { order, items: Object.fromEntries(order.map(id => [id, { id, exchange: 'XSHG', code: id.split(':').at(-1), officialName: '测试标的' }])) }
+    body.data.ensureError = { message: '测试目录错误' }
+    await handler.fulfill({ response, json: body })
+  })
+  try {
+    for (const width of [1600, 640]) {
+      await page.setViewportSize({ width, height: 900 })
+      await page.reload()
+      const list = page.getByRole('tabpanel', { name: '全部' })
+      await list.waitFor()
+      const bounds = await list.evaluate(node => {
+        const root = node.closest('.ssb-root'), pane = node.closest('.ssb-page')
+        return { bottomGap: root.getBoundingClientRect().bottom - node.getBoundingClientRect().bottom, pageWidth: pane.clientWidth, rootWidth: root.clientWidth, rootOverflow: root.scrollHeight - root.clientHeight, listOverflow: node.scrollHeight - node.clientHeight }
+      })
+      assert.ok(bounds.bottomGap >= 0 && bounds.bottomGap <= 32, `列表底部只留页面内边距：${JSON.stringify(bounds)}`)
+      assert.equal(bounds.rootOverflow, 0, '纵向滚动留在列表内')
+      assert.ok(bounds.listOverflow > 0, '长列表仍可滚动')
+      assert.equal(bounds.pageWidth, Math.min(bounds.rootWidth, 1280))
+      assert.equal(await page.getByText('价格与涨跌来自同一数据源。', { exact: false }).count(), 0)
+    }
+    await page.setViewportSize({ width: 640, height: 220 })
+    const shortList = page.getByRole('tabpanel', { name: '全部' })
+    assert.ok((await shortList.boundingBox()).height >= 40, '短面板有横幅时仍能滚动查看自选行')
+  } finally {
+    await page.unroute(route)
+    await page.setViewportSize({ width: 1280, height: 900 })
+  }
+})
+
+test('自选行情列保持间距，窄面板将次要指标放到下一行', async () => {
+  const route = '**/api/stock-assistant/snapshot'
+  const id = 'XSHG:index:000001'
+  await page.route(route, async handler => {
+    const response = await handler.fetch()
+    const body = await response.json()
+    body.data.control.watchlist = { order: [id], items: { [id]: { id, exchange: 'XSHG', code: '000001', officialName: '上证指数', priceScale: 2 } } }
+    body.data.quotes = { [id]: { health: 'ok', quote: { last: '3526.12', changePct: '-0.22', change: '-7.67', open: '3503.52', high: '3544.60', low: '3476.65', previousClose: '3533.79', amount: '683890000000' } } }
+    await handler.fulfill({ response, json: body })
+  })
+  try {
+    await page.reload()
+    const list = page.getByRole('tabpanel', { name: '全部' })
+    await list.getByText('3503.52', { exact: true }).first().waitFor()
+    const columns = await list.evaluate(node => {
+      const cells = [...node.querySelector('.ssb-row-main').children].slice(2, -1)
+      const edges = cells.map(cell => cell.getBoundingClientRect())
+      const headers = [...node.querySelector('.ssb-row-head').children].slice(2, -1)
+      return { gaps: edges.slice(1).map((edge, i) => edge.left - edges[i].right), aligned: headers.every((header, i) => Math.abs(header.getBoundingClientRect().right - edges[i].right) < 1), rangeFits: cells[4].scrollWidth <= cells[4].clientWidth }
+    })
+    assert.ok(columns.gaps.every(gap => gap >= 11), `相邻行情列需要留白：${columns.gaps.join(', ')}`)
+    assert.ok(columns.aligned && columns.rangeFits, '表头和数据对齐，最高/最低完整可读')
+    assert.equal(await list.locator('.ssb-row-main .ssb-cell-range').textContent(), '3544.60 / 3476.65')
+    await page.setViewportSize({ width: 920, height: 900 })
+    await list.locator('.ssb-row-sub').waitFor()
+    assert.match(await list.locator('.ssb-row-sub').textContent(), /开3503\.52高3544\.60低3476\.65/)
+    assert.equal(await list.evaluate(node => node.scrollWidth - node.clientWidth), 0)
+    await page.setViewportSize({ width: 320, height: 900 })
+    assert.ok((await list.getByRole('button', { name: /上证指数/ }).boundingBox()).width >= 80, '极窄面板仍给证券名留出空间')
+    assert.equal(await list.getByText('涨跌额-7.67', { exact: true }).isVisible(), true, '涨跌额在次要行仍可见')
+    assert.equal(await list.evaluate(node => node.scrollWidth - node.clientWidth), 0)
+  } finally {
+    await page.unroute(route)
+    await page.setViewportSize({ width: 1280, height: 900 })
+  }
+})
+
+test('自选拖动重排同步到悬浮盯盘，不额外请求行情', async () => {
+  const base = '**/api/stock-assistant/'
+  const [a, b, c] = ['600001', '600002', '600003'].map(code => `XSHG:equity:${code}`)
+  let order = [a, b, c], refreshes = 0
+  const trends = []
+  const items = Object.fromEntries(order.map((id, index) => [id, { id, exchange: 'XSHG', code: id.split(':').at(-1), officialName: `标的${index + 1}` }]))
+  await page.route(`${base}snapshot`, async handler => {
+    const response = await handler.fetch()
+    const body = await response.json()
+    body.data.control.watchlist = { order, items }
+    body.data.control.preferences.floatRefreshSeconds = 30
+    await handler.fulfill({ response, json: body })
+  })
+  await page.route(`${base}refresh`, handler => {
+    refreshes++
+    return handler.fulfill({ json: { ok: true, data: { quotes: {} } } })
+  })
+  await page.route(`${base}kline?*`, handler => {
+    trends.push(new URL(handler.request().url()).searchParams.get('securityId'))
+    return handler.fulfill({ json: { ok: true, data: { candles: [] } } })
+  })
+  await page.route(`${base}watchlist`, handler => {
+    const { action, payload, expectedRevision } = handler.request().postDataJSON()
+    assert.equal(action, 'reorder')
+    order = payload.order
+    return handler.fulfill({ json: { ok: true, data: { revision: expectedRevision + 1 } } })
+  })
+  try {
+    await page.evaluate(ids => localStorage.setItem('ssb-floating', JSON.stringify({ open: true, ids })), [a, b])
+    await Promise.all([page.waitForResponse(`${base}refresh`), page.reload()])
+    const float = page.getByRole('complementary', { name: '悬浮盯盘' })
+    const names = float.locator('.ssb-float-row-name')
+    assert.deepEqual(await names.allTextContents(), ['标的1', '标的2'])
+    assert.equal(refreshes, 1)
+    await page.locator(`.ssb-row[data-security-id="${b}"]`).dragTo(page.locator(`.ssb-row[data-security-id="${a}"]`), { targetPosition: { x: 28, y: 5 } })
+    await names.first().filter({ hasText: '标的2' }).waitFor()
+    assert.deepEqual(await names.allTextContents(), ['标的2', '标的1'])
+    assert.equal(refreshes, 1)
+    await float.getByRole('button', { name: '选择观测目标' }).click()
+    await float.getByText('跟随自选页手动排序', { exact: true }).waitFor()
+    assert.deepEqual(await float.locator('.ssb-float-picker label').allTextContents(), ['标的2', '标的1', '标的3'])
+    await float.getByRole('button', { name: '完成选择' }).click()
+    await Promise.all([page.waitForResponse(`${base}kline?*`), float.getByRole('button', { name: '图', exact: true }).click()])
+    await page.locator(`.ssb-row[data-security-id="${a}"]`).dragTo(page.locator(`.ssb-row[data-security-id="${b}"]`), { targetPosition: { x: 28, y: 5 } })
+    await page.locator('.ssb-row').first().filter({ hasText: '标的1' }).waitFor()
+    assert.equal(await float.locator('.ssb-float-name').textContent(), '标的2', '重排不切换正在看的分时图')
+    assert.deepEqual(trends, [b])
+    const unseen = 'XSHG:equity:600004'
+    const sharedPreference = await page.evaluate(async ([visible, unseen]) => {
+      const key = 'ssb-floating'
+      const next = JSON.stringify({ ...JSON.parse(localStorage.getItem(key)), ids: [visible, unseen], securityId: unseen })
+      localStorage.setItem(key, next)
+      window.dispatchEvent(new StorageEvent('storage', { key, newValue: next }))
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+      return JSON.parse(localStorage.getItem(key))
+    }, [b, unseen])
+    assert.equal(sharedPreference.securityId, unseen, '快照落后的标签页不能覆盖另一页的选股')
+  } finally {
+    await page.evaluate(() => localStorage.removeItem('ssb-floating'))
+    for (const path of ['snapshot', 'refresh', 'watchlist', 'kline?*']) await page.unroute(`${base}${path}`)
+  }
+})
+
 test('凭据保存失败时在实例卡内提示', async () => {
   await page.reload()
   await page.waitForSelector('.ssb-root')

@@ -34,6 +34,7 @@ test('选择器平铺全部标的, 顶部给计数与全选', async () => {
   const html = renderToStaticMarkup(React.createElement(FloatPicker, { order, items, picked: [order[0]], onPicked() {} }))
   assert.match(html, /已选 1\/3/, '顶部计数')
   assert.match(html, /全选/, '还没选满时给全选')
+  assert.match(html, />跟随自选页手动排序</, '说明顺序来源')
   for (const name of ['上证指数', '贵州茅台', '万科A']) assert.ok(html.includes(name), `${name} 要平铺列出`)
   assert.ok(!html.includes('白酒 · '), '不再按标签分段, 否则多标签的票会重复出现')
   assert.ok(!html.includes('未分组 · '), '未分组段同样取消')
@@ -72,6 +73,16 @@ test('悬浮窗底部取独立偏好, 不借列表间隔', async () => {
   const html = renderToStaticMarkup(React.createElement(api.FloatingTicker, { runtime }))
   assert.match(html, /行情每 3 秒自动刷新/, '底部取悬浮偏好')
   assert.ok(!html.includes('行情每 60 秒'), '列表间隔不参与')
+})
+
+test('自选手动顺序改变后，悬浮列表按新顺序显示已选标的', async () => {
+  const api = await load()
+  api.__store.set('ssb-floating', JSON.stringify({ open: true, mode: 'list', ids: [...order, 'removed'] }))
+  const quotes = { [order[1]]: { quote: { changePct: '2' } }, [order[2]]: { quote: { changePct: '1' } } }
+  const snapshot = { data: { control: { watchlist: { order: [order[2], order[1], order[0]], items }, preferences: {} }, quotes }, view: { sort: 'desc' } }
+  const runtime = { getSnapshot: () => snapshot, subscribe: () => () => {} }
+  const html = renderToStaticMarkup(React.createElement(api.FloatingTicker, { runtime })).split('</style>').at(-1)
+  assert.deepEqual(Array.from(html.matchAll(/class="ssb-float-row-name">([^<]+)/g), match => match[1]), ['上证指数', '万科A', '贵州茅台'])
 })
 
 test('头部与底栏的事件接线传的是同一份回调', async () => {

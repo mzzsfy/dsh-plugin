@@ -852,11 +852,11 @@ window.__ModuleLoader__.load({
       for (const id of order) merged.push(sequence.includes(id) ? visible[index++] : id)
       return merged
     }
+    const pinnedFirst = (items, a, b) => Number(!!items[b]?.pinned) - Number(!!items[a]?.pinned)
     function Watchlist({ runtime, state }) {
       const { data, view, busy } = state, control = data.control, w = control.watchlist
       const sortedOrder = [...w.order].sort((a, b) => {
-        // 显式转布尔: 旧记录可能没有 pinned 字段, Number(undefined) 是 NaN, 比较器会退化成随机序
-        const pinned = Number(!!w.items[b].pinned) - Number(!!w.items[a].pinned)
+        const pinned = pinnedFirst(w.items, a, b)
         if (pinned || view.sort === 'manual') return pinned
         const qa = data.quotes[a]?.quote, qb = data.quotes[b]?.quote
         const aa = qa?.changePct == null ? null : Number(qa.changePct), bb = qb?.changePct == null ? null : Number(qb.changePct)
@@ -987,12 +987,13 @@ window.__ModuleLoader__.load({
                       q?.changePct == null ? h('span', { className: 'ssb-cell-pct ssb-muted' }, '—') : h('span', { className: `ssb-cell-pct ssb-pill${direction}` }, `${signed(q.changePct)}%`),
                       q?.change == null ? h('span', { className: 'ssb-cell-change ssb-muted' }, '—') : h('span', { className: `ssb-cell-change ssb-change${direction}` }, signed(q.change)),
                       h('span', { className: 'ssb-cell-open' }, priceTextOf(q?.open, item.priceScale)),
-                      h('span', { className: 'ssb-cell-range' }, `${priceTextOf(q?.high, item.priceScale)}/${priceTextOf(q?.low, item.priceScale)}`),
+                      h('span', { className: 'ssb-cell-range' }, `${priceTextOf(q?.high, item.priceScale)} / ${priceTextOf(q?.low, item.priceScale)}`),
                       h('span', { className: 'ssb-cell-amount' }, formatAmount(q?.amount)),
                       h('span', { className: 'ssb-cell-amplitude' }, amplitude == null ? '—' : `${amplitude}%`),
                       h('span', { className: `ssb-cell-pl${toneClass(pl?.pct)}` }, pl?.pct == null ? '—' : `${signed(pl.pct.toFixed(1))}%`),
                       h(QuoteStatus, { entry, short: true })),
                     h('div', { className: 'ssb-row-sub' },
+                       h('span', { className: `ssb-kv ssb-kv-change${direction}` }, '涨跌额', q?.change == null ? '—' : signed(q.change)),
                       h('span', { className: 'ssb-kv' }, '开', priceTextOf(q?.open, item.priceScale)),
                       h('span', { className: 'ssb-kv' }, '高', priceTextOf(q?.high, item.priceScale)),
                       h('span', { className: 'ssb-kv' }, '低', priceTextOf(q?.low, item.priceScale)),
@@ -1651,7 +1652,9 @@ window.__ModuleLoader__.load({
       // 时段取最新的一份: 自己拉的和面板的都可能旧, 不能无条件让自己的压过面板的。
       // 时间戳相同取自己那份——自己那份刚由这一拍的刷新拿到, 而面板可能在本次渲染前就已冻结
       const stateOf = id => pickNewest(fetched?.[id]?.quote, quotes?.[id]?.quote)?.sessionState
-      const pickedKey = picked.join(','), stateKey = picked.map(stateOf).join(',')
+      // 轮询只关心选中了哪些标的，不因显示顺序变化而重启
+      const requestIds = [...picked].sort()
+      const pickedKey = requestIds.join(','), stateKey = requestIds.map(stateOf).join(',')
       React.useEffect(() => {
         if (!open || !picked.length || live === false) return
         let dead = false
@@ -1865,7 +1868,7 @@ window.__ModuleLoader__.load({
         h('button', { type: 'button', className: 'ssb-float-icon', 'aria-label': picker ? '完成选择' : '选择观测目标', 'aria-expanded': picker, onClick: () => onPicker(!picker) }, picker ? '✓' : '☰'),
         h('button', { type: 'button', className: 'ssb-float-icon', 'aria-label': '关闭悬浮盯盘', onClick: () => onClose() }, '✕'))
     }
-    // 多标签下一只票会同时属于多个分组, 按段列会重复出现: 选择器平铺全部标的, 顶部只留计数与全选
+    // 选择器平铺全部标的，避免多标签重复列出同一只股票
     function FloatPicker({ order, items, picked, onPicked }) {
       const toggleMany = (ids, on) => { const set = new Set(picked); ids.forEach(id => on ? set.add(id) : set.delete(id)); onPicked([...set]) }
       // 与 tagTabs 同口径: 只有确实存在的标的参与勾选, 否则渲染时读不到名字会整块浮窗消失
@@ -1876,6 +1879,7 @@ window.__ModuleLoader__.load({
           h('div', { key: 'summary', className: 'ssb-picker-head' },
             h('span', null, `已选 ${ids.filter(id => picked.includes(id)).length}/${ids.length}`),
             h('button', { type: 'button', className: 'ssb-picker-all', onClick: () => toggleMany(ids, !allOn) }, allOn ? '全不选' : '全选')),
+          h('p', { key: 'order-hint', className: 'ssb-picker-hint' }, '跟随自选页手动排序'),
           ...ids.map(id => h(Toggle, { key: id, label: items[id].alias || items[id].officialName, checked: picked.includes(id), onChange: () => toggleMany([id], !picked.includes(id)) })),
         ]
         : [h('p', { key: 'empty', className: 'ssb-muted' }, '自选为空')]))
@@ -1937,17 +1941,25 @@ window.__ModuleLoader__.load({
       const [error, setError] = React.useState('')
       const [picker, setPicker] = React.useState(false)
       const items = state.data?.control?.watchlist?.items || {}
-      const order = state.data?.control?.watchlist?.order || []
-      // 勾选的观测目标: 空则退回自选前几只, 但绝不隐式等于全部自选
-      const picked = (Array.isArray(floating.ids) ? floating.ids : order.slice(0, 5)).filter(id => items[id])
+      const order = (state.data?.control?.watchlist?.order || []).filter(id => items[id]).sort((a, b) => pinnedFirst(items, a, b))
+      // 勾选只决定成员，显示顺序始终取自选手动顺序
+      const pickedIds = new Set(Array.isArray(floating.ids) ? floating.ids : order.slice(0, 5))
+      const picked = order.filter(id => pickedIds.has(id))
       const mode = floating.mode === 'kline' ? 'kline' : 'list'
       const open = !!floating.open
-      const securityId = (floating.securityId && picked.includes(floating.securityId) ? floating.securityId : picked[0]) || null
+      const [lastChartId, setLastChartId] = React.useState(null)
+      const preferredId = picked.includes(floating.securityId) ? floating.securityId : null
+      const chartFallbackId = mode === 'kline' && picked.includes(lastChartId) ? lastChartId : null
+      const securityId = preferredId ?? chartFallbackId ?? picked[0] ?? null
       const update = next => setFloating(next)
+      // 快照短暂落后时只在本页选择替代项，不能覆盖其他标签页的选择
+      React.useEffect(() => {
+        setLastChartId(open && mode === 'kline' ? securityId : null)
+      }, [open, mode, securityId])
       const drag = useFloatingDrag(update)
       // 悬浮窗节奏取自独立偏好, 列表间隔不再参与
       const floatRefresh = floatIntervalOf(state.data?.control?.preferences?.floatRefreshSeconds)
-      useFloatingPolling({ open, mode, securityId, picked, items, live: floating.live, floatSeconds: floatRefresh, quotes: state.data?.quotes, fetched, revision: state.data?.control?.revision, setFetched, setTrend, setError })
+      useFloatingPolling({ open, mode, securityId: mode === 'kline' ? securityId : null, picked, items, live: floating.live, floatSeconds: floatRefresh, quotes: state.data?.quotes, fetched, revision: state.data?.control?.revision, setFetched, setTrend, setError })
       // 面板已经刷过的报价先拿来渲染, 悬浮窗自己的 refresh 结果回来后再按 receivedAt 择优:
       // 否则首次打开要干等一轮上游请求, 列表是空的
       const entryOf = id => {
@@ -2363,7 +2375,8 @@ window.__ModuleLoader__.load({
 .ssb-root { height:100%; min-width:0; overflow:auto; color:var(--ssb-text); background:var(--ssb-bg); font:inherit; font-size:13px; line-height:20px; }
 .ssb-float-root { color:var(--ssb-text); font:inherit; font-size:13px; line-height:20px; }
 .ssb-root *,.ssb-float-root * { box-sizing:border-box; }
-.ssb-page { max-width:1200px; margin:0 auto; padding:24px; }
+.ssb-page { height:100%; max-width:1280px; margin:0 auto; display:flex; flex-direction:column; padding:24px; }
+.ssb-page > :not(.ssb-content) { flex-shrink:0; }
 .ssb-root h1 { margin:0; font-size:20px; font-weight:500; line-height:28px; }.ssb-root h2 { margin:0; font-size:16px; font-weight:600; line-height:24px; }.ssb-root h3 { margin:24px 0 12px; font-size:14px; }
 .ssb-tablist { display:flex; gap:24px; border-bottom:.5px solid var(--ssb-border); margin:0 0 16px; }
 /* 自选分组 tab: 横向可滚动, 与设置页 tab 同一形态, 只在容器边距上去掉页面级间距 */
@@ -2399,9 +2412,9 @@ window.__ModuleLoader__.load({
 .ssb-select-option-active { background:var(--ssb-hover); }
 .ssb-select-option[aria-selected="true"] { color:var(--ssb-accent); }
 .ssb-select-option[aria-selected="true"].ssb-select-option-active { background:var(--ssb-accent-wash); }.ssb-select-option-unavailable { color:var(--ssb-danger); cursor:default; }.ssb-select-value-invalid { color:var(--ssb-danger); }.ssb-field { display:flex; flex-direction:column; gap:6px; min-width:0; }.ssb-muted { color:var(--ssb-text-sub); }.ssb-code,.ssb-source { display:block; font-size:11px; }.ssb-code,.ssb-number { font-family:var(--ds-font-family-code); font-variant-numeric:tabular-nums; }.ssb-code { color:var(--ssb-text-sub); margin-top:4px; }.ssb-small { font-size:13px; margin-left:12px; }
-.ssb-content { display:grid; grid-template-columns:minmax(0,1fr); gap:16px; }
+.ssb-content { display:flex; flex:1 0 0; min-height:min-content; }
 /* 浮层须压过宿主侧栏拖拽手柄; 取 60 与其它插件弹窗同档, 仍在宿主抽屉遮罩之下 */
-.ssb-overlay { position:fixed; inset:0; background:color-mix(in srgb, var(--dsw-alias-label-primary) 45%, transparent); display:flex; z-index:60; animation:ssb-fade .15s ease-out; }.ssb-drawer { animation:ssb-slide .2s ease-out; }.ssb-modal-card {}@keyframes ssb-fade { from { opacity:0; } }@keyframes ssb-slide { from { transform:translateX(40px); opacity:0; } }.ssb-overlay-drawer { justify-content:flex-end; }.ssb-overlay-modal { align-items:center; justify-content:center; padding:24px; }.ssb-drawer { width:min(80vw,94vw); height:100%; overflow:auto; background:var(--ssb-bg); border-left:1px solid var(--ssb-border); box-shadow:var(--dsw-shadow-lv3); padding:16px; }.ssb-modal-card { width:min(880px,94vw); max-height:88vh; overflow:auto; background:var(--ssb-bg); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-lg); box-shadow:var(--dsw-shadow-lv3); padding:16px; }.ssb-drawer-head { display:flex; justify-content:flex-end; }.ssb-drawer .ssb-detail, .ssb-drawer .ssb-settings { border:0; padding:0; background:transparent; }.ssb-list-pane,.ssb-detail { border:.5px solid var(--ssb-border); border-radius:var(--ssb-radius-md); min-width:0; }.ssb-detail { padding:16px; background:var(--ssb-bg-sub); }.ssb-detail .ssb-section-head { padding:0; }.ssb-detail-price { font-size:28px; margin:20px 0 4px; }.ssb-table-scroll { max-height:65vh; overflow:auto; border-radius:0 0 var(--ssb-radius-md) var(--ssb-radius-md); }.ssb-foot { margin:12px 0 4px; }.ssb-table { width:100%; border-collapse:collapse; table-layout:auto; }.ssb-table th { color:var(--ssb-text-sub); font-weight:400; font-size:12px; background:var(--ssb-bg-sub); position:sticky; top:0; z-index:1; }.ssb-table td,.ssb-table th { padding:8px 12px; text-align:left; border-top:.5px solid var(--ssb-border); }.ssb-table td.ssb-number { text-align:right; white-space:nowrap; }.ssb-table tr:hover { background:var(--dsw-alias-interactive-bg-hover); }.ssb-selected { background:var(--ssb-accent-wash); }.ssb-stock-name { font:inherit; color:inherit; background:transparent; border:0; padding:0; text-align:left; cursor:pointer; }.ssb-stale td.ssb-number { opacity:.65; }.ssb-up { color:var(--ssb-danger); }.ssb-down { color:var(--ssb-ok); }.ssb-green-up .ssb-up { color:var(--ssb-ok); }.ssb-green-up .ssb-down { color:var(--ssb-danger); }
+.ssb-overlay { position:fixed; inset:0; background:color-mix(in srgb, var(--dsw-alias-label-primary) 45%, transparent); display:flex; z-index:60; animation:ssb-fade .15s ease-out; }.ssb-drawer { animation:ssb-slide .2s ease-out; }.ssb-modal-card {}@keyframes ssb-fade { from { opacity:0; } }@keyframes ssb-slide { from { transform:translateX(40px); opacity:0; } }.ssb-overlay-drawer { justify-content:flex-end; }.ssb-overlay-modal { align-items:center; justify-content:center; padding:24px; }.ssb-drawer { width:min(80vw,94vw); height:100%; overflow:auto; background:var(--ssb-bg); border-left:1px solid var(--ssb-border); box-shadow:var(--dsw-shadow-lv3); padding:16px; }.ssb-modal-card { width:min(880px,94vw); max-height:88vh; overflow:auto; background:var(--ssb-bg); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-lg); box-shadow:var(--dsw-shadow-lv3); padding:16px; }.ssb-drawer-head { display:flex; justify-content:flex-end; }.ssb-drawer .ssb-detail, .ssb-drawer .ssb-settings { border:0; padding:0; background:transparent; }.ssb-list-pane,.ssb-detail { border:.5px solid var(--ssb-border); border-radius:var(--ssb-radius-md); min-width:0; }.ssb-detail { padding:16px; background:var(--ssb-bg-sub); }.ssb-detail .ssb-section-head { padding:0; }.ssb-detail-price { font-size:28px; margin:20px 0 4px; }.ssb-table-scroll { min-height:0; overflow:auto; border-radius:0 0 var(--ssb-radius-md) var(--ssb-radius-md); }.ssb-table { width:100%; border-collapse:collapse; table-layout:auto; }.ssb-table th { color:var(--ssb-text-sub); font-weight:400; font-size:12px; background:var(--ssb-bg-sub); position:sticky; top:0; z-index:1; }.ssb-table td,.ssb-table th { padding:8px 12px; text-align:left; border-top:.5px solid var(--ssb-border); }.ssb-table td.ssb-number { text-align:right; white-space:nowrap; }.ssb-table tr:hover { background:var(--dsw-alias-interactive-bg-hover); }.ssb-selected { background:var(--ssb-accent-wash); }.ssb-stock-name { font:inherit; color:inherit; background:transparent; border:0; padding:0; text-align:left; cursor:pointer; }.ssb-stale td.ssb-number { opacity:.65; }.ssb-up { color:var(--ssb-danger); }.ssb-down { color:var(--ssb-ok); }.ssb-green-up .ssb-up { color:var(--ssb-ok); }.ssb-green-up .ssb-down { color:var(--ssb-danger); }
 /* 列表悬停浮层由宿主 Tooltip 挂在 portal 上, 拿不到插件根作用域的调色变量与色偏, 在这里补一份 */
 .ssb-row-tip { --ssb-ok:var(--dsw-alias-state-success-primary); --ssb-danger:var(--dsw-alias-state-error-primary); }
 /* 离线兜底提示: 图下方一行小字, 说清这条线是当日缓存与补了几个点, 不抢图的视线 */
@@ -2410,12 +2423,13 @@ window.__ModuleLoader__.load({
 .ssb-table td { vertical-align:middle; padding-top:8px; padding-bottom:8px; }.ssb-table td:first-child { max-width:240px; }
 .ssb-stock-name { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
 /* 行情列表: 单行紧凑, 列宽定宽右对齐, 行高按 32px 量级标尺(见 design 规范) */
-.ssb-list-pane { container-type:inline-size; }
-.ssb-list-pane > .ssb-table-scroll { flex:1; min-height:0; }
-.ssb-list-pane > .ssb-foot, .ssb-list-pane > .ssb-banner { flex:0 0 auto; }
+.ssb-list-pane { container-type:inline-size; display:flex; flex:1 1 auto; flex-direction:column; min-height:0; }
+/* 矮窗口优先让整页溢出，保留表头和至少一行行情的滚动空间 */
+.ssb-list-pane > .ssb-table-scroll { flex:1 0 calc(32px + 40px); contain:size; }
+.ssb-list-pane > :not(.ssb-table-scroll) { flex-shrink:0; }
 .ssb-rows { display:flex; flex-direction:column; }
 /* 表头与数据行共用同一套列模板, 保证逐列对齐; 数值列右对齐且等宽数字, 长内容不再挤占相邻列 */
-.ssb-row-head,.ssb-row-main { display:grid; grid-template-columns:12px minmax(140px,1fr) 64px 58px 56px 62px 104px 82px 52px 60px 16px; gap:8px; align-items:center; font-variant-numeric:tabular-nums; }
+.ssb-row-head,.ssb-row-main { display:grid; grid-template-columns:12px minmax(140px,1fr) 76px 72px 72px 80px 132px 88px 56px 64px 16px; column-gap:12px; align-items:center; font-variant-numeric:tabular-nums; }
 .ssb-row-head { height:32px; padding:0 12px; font-size:12px; color:var(--ssb-text-sub); border-bottom:1px solid var(--ssb-border); }
 .ssb-row-head .ssb-cell-price,.ssb-row-head .ssb-cell-pct,.ssb-row-head .ssb-cell-change,.ssb-row-head .ssb-cell-range,.ssb-row-head .ssb-cell-amount,.ssb-row-head .ssb-cell-amplitude,.ssb-row-head .ssb-cell-pl { font-family:inherit; color:inherit; }
 .ssb-row-main > .ssb-cell-price,.ssb-row-main > .ssb-cell-pct,.ssb-row-main > .ssb-cell-change,.ssb-row-main > .ssb-cell-open,.ssb-row-main > .ssb-cell-range,.ssb-row-main > .ssb-cell-amount,.ssb-row-main > .ssb-cell-amplitude,.ssb-row-main > .ssb-cell-pl,.ssb-row-head > span:nth-child(n+3) { justify-self:end; }
@@ -2444,16 +2458,23 @@ window.__ModuleLoader__.load({
 
 
 
-/* 窄容器降级: 单行拆两段, 隐藏列头与宽屏列 */
-.ssb-row-sub { display:none; }
-@container (max-width:700px) {
+/* 宽度不足以保留完整列间距时，次要指标排到下一行 */
+.ssb-row-sub, .ssb-row-sub > .ssb-kv-change { display:none; }
+@container (max-width:976px) {
   .ssb-row-head { display:none; }
   .ssb-row { padding:6px 10px; }
-  .ssb-row-main { grid-template-columns:12px minmax(80px,1fr) 68px 64px 56px 16px; height:auto; }
+  .ssb-row-main { grid-template-columns:12px minmax(0,1fr) 68px 64px 56px 16px; column-gap:8px; height:auto; }
   .ssb-cell-open,.ssb-cell-range,.ssb-cell-amount,.ssb-cell-amplitude,.ssb-cell-pl { display:none; }
-  .ssb-row-sub { display:flex; gap:10px; margin-top:2px; padding-left:20px; font-size:12px; color:var(--ssb-text-dim); font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); }
+  .ssb-row-sub { display:flex; flex-wrap:wrap; gap:2px 10px; margin-top:2px; padding-left:20px; font-size:12px; color:var(--ssb-text-dim); font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); }
+}
+@container (max-width:700px) {
   /* 窄容器先让出概览小字: 分组 tab 与排序比"几分钟前更新"更需要位置 */
   .ssb-listbar-meta { display:none; }
+}
+@container (max-width:380px) {
+  .ssb-row-main { grid-template-columns:12px minmax(0,1fr) 68px 64px 16px; column-gap:4px; }
+  .ssb-row-main > .ssb-cell-change { display:none; }
+  .ssb-row-sub > .ssb-kv-change { display:inline-flex; }
 }
 .ssb-kv { display:inline-flex; gap:4px; white-space:nowrap; }
 /* 悬浮盯盘: 固定右下角, 尺寸以 4px 刻度, 只做轻边框分层不挂阴影 */
@@ -2514,6 +2535,7 @@ window.__ModuleLoader__.load({
 .ssb-picker-head { display:flex; align-items:center; gap:6px; padding:4px 2px 2px; font-size:11px; color:var(--ssb-text-dim); border-top:1px solid var(--ssb-border); }
 .ssb-float-picker .ssb-picker-head:first-child { border-top:none; }
 .ssb-picker-head > span { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ssb-picker-hint { margin:0; padding:0 2px 4px; color:var(--ssb-text-sub); font-size:11px; line-height:16px; }
 .ssb-picker-all { flex:0 0 auto; padding:1px 6px; font:inherit; font-size:11px; color:var(--ssb-accent); background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); cursor:pointer; }
 .ssb-picker-all:hover { border-color:var(--ssb-accent); }
 .ssb-float-row { display:flex; align-items:baseline; column-gap:8px; padding:4px 6px; font:inherit; text-align:left; color:inherit; background:transparent; border:0; border-radius:var(--ssb-radius-sm); cursor:pointer; }
@@ -2578,7 +2600,7 @@ window.__ModuleLoader__.load({
 .ssb-empty { padding:48px 16px; color:var(--ssb-text-sub); text-align:center; font-size:14px; }.ssb-banner { border:1px solid var(--ssb-border); border-left:3px solid var(--ssb-warn); border-radius:var(--ssb-radius-sm); padding:12px; margin:12px 0; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }.ssb-banner-ok { border-left-color:var(--ssb-ok); }.ssb-error { border-left-color:var(--ssb-danger); }.ssb-banner-floating { position:fixed; top:12px; left:50%; transform:translateX(-50%); z-index:80; width:min(720px,92vw); margin:0; background:var(--ssb-bg); box-shadow:var(--dsw-shadow-lv3); }.ssb-banner p { margin:0; }.ssb-search-view { max-width:760px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); background:var(--ssb-bg); padding-bottom:4px; }.ssb-panel-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px; border-bottom:.5px solid var(--ssb-border); flex-wrap:wrap; }.ssb-panel-head h2 { font-size:16px; margin:0; }.ssb-panel-body { padding:16px; display:flex; flex-direction:column; gap:12px; }.ssb-form-row { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; }.ssb-form-row > .ssb-field { flex:0 0 176px; }.ssb-search-label { display:grid; gap:8px; margin-top:20px; }.ssb-form-row > .ssb-search-label { flex:1 1 300px; margin-top:0; }.ssb-results { display:grid; gap:8px; margin:16px; }.ssb-candidate { padding:10px 12px; display:flex; justify-content:space-between; align-items:center; gap:12px; background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); color:var(--ssb-text); font:inherit; cursor:pointer; }.ssb-candidate:hover { border-color:var(--ssb-accent); }.ssb-candidate.ssb-selected { background:var(--ssb-accent-wash); border-color:var(--ssb-accent); }.ssb-peek { display:flex; flex:1; flex-direction:column; gap:2px; text-align:left; cursor:pointer; min-width:0; }.ssb-peek:hover strong { text-decoration:underline; }.ssb-provider { border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); padding:16px; margin:12px 0; min-width:0; }.ssb-provider legend { padding:0 6px; color:var(--ssb-text-sub); }.ssb-provider details { grid-column:1 / -1; }.ssb-provider summary { cursor:pointer; }.ssb-reqlog { margin:8px 0 0; padding:0 0 0 18px; color:var(--ssb-text-sub); }.ssb-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }.ssb-route-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(132px,1fr)); gap:12px; }.ssb-route-cell { display:grid; gap:6px; min-width:0; }.ssb-route-cell-label { color:var(--ssb-text-sub); font-size:11px; }.ssb-route-cell select { width:100%; min-width:0; }.ssb-route-advanced { margin-top:12px; }.ssb-route-advanced > summary { cursor:pointer; }.ssb-route-tune { display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap; padding:8px 0; border-top:1px solid var(--ssb-border); }.ssb-route-tune-label { min-width:32px; color:var(--ssb-text-sub); }.ssb-route-delay { flex:0 0 120px; }
 .ssb-switch { display:inline-flex; align-items:center; gap:8px; cursor:pointer; position:relative; }.ssb-switch input[type="checkbox"] { position:absolute; opacity:0; width:1px; height:1px; }.ssb-switch__track { display:inline-flex; flex-shrink:0; align-items:center; width:34px; height:19px; padding:3px; border-radius:999px; background:var(--ssb-bg-muted); border:1px solid var(--ssb-border); transition:background .15s ease; }.ssb-switch__thumb { width:13px; height:13px; border-radius:50%; background:var(--ssb-text-sub); transition:transform .15s ease; }.ssb-switch input[type="checkbox"]:checked + .ssb-switch__track { background:var(--ssb-accent); }.ssb-switch input[type="checkbox"]:checked + .ssb-switch__track .ssb-switch__thumb { transform:translateX(13px); background:var(--ssb-bg); }.ssb-switch input[type="checkbox"]:focus-visible + .ssb-switch__track { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:2px; }.ssb-switch input[type="checkbox"]:disabled + .ssb-switch__track { opacity:.5; cursor:not-allowed; }.ssb-switch:hover .ssb-switch__track { border-color:var(--ssb-accent); }
 @media(max-width:720px) { .ssb-detail-grid { grid-template-columns:minmax(0,1fr); } }
-@media(max-width:959px) { .ssb-content { grid-template-columns:minmax(0,1fr); }.ssb-page { padding:16px; } }
+@media(max-width:959px) { .ssb-page { padding:16px; } }
 @media(max-width:479px) { .ssb-page { padding:12px; }.ssb-topbar { flex-wrap:wrap; gap:8px; }.ssb-table td,.ssb-table th { padding:8px; }.ssb-form-grid { grid-template-columns:minmax(0,1fr); }.ssb-detail-price { font-size:24px; }.ssb-button { min-height:36px; }.ssb-section-head { padding:12px; }.ssb-listbar { padding:0 12px; } }
 @media(prefers-reduced-motion:reduce) { .ssb-root * { transition:none; } }
 `
@@ -2622,8 +2644,7 @@ window.__ModuleLoader__.load({
           state.paused ? h('div', { className: 'ssb-banner', role: 'status' }, '自动采集已暂停，保留当前行情。', h(Button, { onClick: () => runtime.setPaused(false) }, '恢复采集')) : null,
           state.undo && state.undo.until > Date.now() ? h('div', { className: 'ssb-banner', role: 'status' }, '已移除自选。', h(Button, { disabled: state.busy.write, onClick: quiet(() => runtime.mutate('restore', { removeOperationId: state.undo.removeOperationId })) }, '撤销')) : null,
           !data ? h('div', { className: 'ssb-empty', role: 'status' }, '正在加载股票工具…') : view.view === 'search' ? h(SearchView, { runtime, state }) : view.view === 'browse' ? h(BrowseView, { runtime, state }) : h('div', { className: 'ssb-content' }, h(Watchlist, { runtime, state })),
-          data && view.overlay ? h(Overlay, { runtime, state, layout }) : null,
-          h('p', { className: 'ssb-foot ssb-muted' }, '价格与涨跌来自同一数据源。延迟未知表示来源未明确承诺时效。')))
+          data && view.overlay ? h(Overlay, { runtime, state, layout }) : null))
     }
     return {
       inject: ['slots', 'locale', 'layout'],
