@@ -22,13 +22,11 @@ import { dismissOnboardingEval, verifyTypedEval, newSessionEval, ONBOARDING_CLEA
 import { judgeUpstreamSeen, judgeRoundtrip, judgeImportFailures, judgeFinal } from './compat-judges.mjs'
 import { probeHostGate } from './gate-probe.mjs'
 import { PLATFORM_GATED_BUNDLES, COMPAT_CHAT_MESSAGE, COMPAT_ANTHROPIC_MESSAGE } from './compat-criteria.mjs'
+import { mintSessionCookie, probeActivation } from './activation-probe.mjs'
 
 const BOOT_TIMEOUT_MS = 150 * 1000
 const BOOT_SETTLE_MS = 8 * 1000
 const READY_POLL_MS = 1.5 * 1000
-const ACTIVATION_POLL_MS = 5 * 1000
-// 隔离宿主冷启动 web 前端就绪可达 2 分钟级,窗口须覆盖其后的接口就绪
-const ACTIVATION_POLL_MAX = 40
 const FETCH_TIMEOUT_MS = 10 * 1000
 const KILL_GRACE_MS = 2 * 1000
 
@@ -195,44 +193,6 @@ function extractToken(bootLogPath) {
   const text = readFileSync(bootLogPath, 'utf8')
   const matches = [...text.matchAll(/token=([A-Za-z0-9_-]{8,})/g)]
   return matches.at(-1)?.[1] ?? ''
-}
-
-// activation 全 live 且 findings 0 才提前返回;live 后短暂 findings>0 视为热载瞬态,
-// 继续轮询让其沉降,耗尽轮次仍不满足即按当前终态返回(快照落盘可查),由判定端处置。
-// 未就绪(404/激活中)同样重试至多轮上限
-async function checkActivation(base, token, bundleNames, workDir) {
-  const url = `${base}/dsh-market/installed?token=${token}`
-  const options = { headers: { Origin: base, Referer: `${base}/` } }
-  let lastRaw = ''
-  let lastSeen = null
-  for (let attempt = 1; attempt <= ACTIVATION_POLL_MAX; attempt++) {
-    try {
-      const res = await fetchWithTimeout(url, options)
-      lastRaw = await res.text()
-      const data = JSON.parse(lastRaw)
-      const activation = data.activation
-      if (activation) {
-        const findings = data.diagnostics?.findings ?? []
-        const live = bundleNames.filter((name) => activation[name]?.state === 'live')
-        const notLive = bundleNames.filter((name) => activation[name]?.state !== 'live')
-        lastSeen = {
-          liveAll: notLive.length === 0,
-          notLive,
-          live,
-          findingsCount: findings.length,
-          findingsSample: findings.slice(0, 5),
-          apiShape: Object.keys(data),
-        }
-        if (lastSeen.liveAll && lastSeen.findingsCount === 0) {
-          writeFileSync(join(workDir, 'installed.json'), lastRaw, 'utf8')
-          return lastSeen
-        }
-      }
-    } catch { /* 未就绪(认证页/激活中),继续轮询 */ }
-    await sleep(ACTIVATION_POLL_MS)
-  }
-  writeFileSync(join(workDir, 'installed.json'), lastRaw || '(空响应)', 'utf8')
-  return lastSeen ?? { liveAll: false, notLive: bundleNames, live: [], findingsCount: -1, findingsSample: [], apiShape: [] }
 }
 
 function runBrowserProbe(probeScript, url, pngPath) {
@@ -591,14 +551,6 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
   }
 }
 
-// token URL 铸会话 cookie:fetch 不持 cookie,取 set-cookie 首段自行携带
-async function mintSessionCookie(base, token) {
-  const res = await fetchWithTimeout(`${base}/?token=${token}`, { redirect: 'manual' })
-  const raw = res.headers.get('set-cookie') ?? ''
-  const first = raw.split(';')[0].trim()
-  return first.includes('=') ? first : ''
-}
-
 // 信号收尾:CI/本地中断时 finally 不执行,孤儿宿主会留在独立进程组并让根桥保持重指。
 // 收尾动作与正常路径共用同一 teardown,幂等;信号处理器只负责等待并退出。
 let activeTeardown = null
@@ -779,13 +731,19 @@ async function main() {
     }
     checks.page = pageRes !== null && (pageRes.status === 200 || (pageRes.status >= 300 && pageRes.status < 400))
 
+    // activation 与 gate 共用同一会话 cookie:token URL 只负责铸 cookie,宿主
+    // 0.2.3-alpha.2 起 /dsh-market/installed 不再接受 token 查询参数
+    let sessionCookie = ''
     if (!args.crashOnly) {
+      sessionCookie = await mintSessionCookie(base, token)
+      log(`[${args.version}] 会话 cookie ${sessionCookie === '' ? '未取得(activation 将回退 token 查询)' : '已铸'}`)
       // 平台门控包在 POSIX 按设计不 live,不入 liveAll 期望集
       const expectedLive = process.platform === 'win32'
         ? profile.bundleNames
         : profile.bundleNames.filter((name) => !PLATFORM_GATED_BUNDLES.includes(name))
-      checks.activation = await checkActivation(base, token, expectedLive, workDir)
-      log(`[${args.version}] activation live=${checks.activation.liveAll} findings=${checks.activation.findingsCount}`)
+      checks.activation = await probeActivation({ base, token, cookie: sessionCookie, bundleNames: expectedLive, workDir })
+      const evidence = checks.activation.bodySample === '' ? '' : ` 响应体前 ${checks.activation.bodySample.length} 字: ${checks.activation.bodySample.replace(/\s+/g, ' ')}`
+      log(`[${args.version}] activation live=${checks.activation.liveAll} findings=${checks.activation.findingsCount} auth=${checks.activation.auth} status=${checks.activation.status}${evidence}`)
     }
     checks.browser = await runBrowserProbe(
       fileURLToPath(new URL('./browser-probe.mjs', import.meta.url)),
@@ -797,10 +755,9 @@ async function main() {
     // 插件路由闸门:无 cookie 必须 401/403,带 cookie 必须放行。宿主闸门只挂在它自己的
     // /api prefix 上,插件 exact/更长 prefix 先命中,漏接线在这里必然变红。
     if (!args.crashOnly) {
-      const cookie = await mintSessionCookie(base, token)
       // activation 的 live 名单(短名)给闸门探针:live 包路由 404 即静默禁用
       const livePackages = new Set((checks.activation?.live ?? []).map((name) => name.replace(/^@[^/]+\//, '')))
-      checks.gate = await probeHostGate({ base, cookie, packages: args.only, livePackages })
+      checks.gate = await probeHostGate({ base, cookie: sessionCookie, packages: args.only, livePackages })
       log(`[${args.version}] gate ${checks.gate.ok ? 'ok' : 'FAIL'} (${checks.gate.rows.length} 条路由)`)
       for (const row of checks.gate.rows) log(`[${args.version}]   ${row.ok ? 'OK ' : 'BAD'} ${row.name} ${row.path} 无cookie=${row.anon} 带cookie=${row.auth}`)
     }

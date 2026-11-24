@@ -12,6 +12,9 @@ import { packageDirs, installExternals } from '../install-externals.mjs'
 const PROFILE_PACKAGES_DIR = 'node_modules/@mzzsfy'
 // 宿主内部基座 bundle,随宿主安装解析,不进 profile dependencies
 const HOST_BASE_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
+// --seed-gateway 的 echo 路由依赖该包的装饰器:只在 patch 里写行而不进 bundles,
+// 它的 cordis.patch.yml 不参与合成,市场也会按 unbundled 判停用
+const SEED_GATEWAY_BUNDLE = '@mzzsfy/dsh-llm-pi-gateway'
 
 // 枚举仓库包:bundles = 带 dsh.bundle 标记且 main 入口存在的包;依赖目标 = 全部 @mzzsfy 包。
 // hostVersion 给定时按包 manifest dsh.hostMin 过滤(宿主低于 hostMin 的包不装载:
@@ -88,6 +91,23 @@ export async function installPackageExternals() {
   return installed
 }
 
+// 本轮装载的 bundle 子集:only 为空取全家桶,非空按短名/全名过滤。
+// seed 的 gateway 配置只有在其 bundle 装载时才生效(--only 场景补入,全家桶已含)
+export function selectBundles({ bundles, only = [], seedGateway = false }) {
+  const wanted = new Set(only.map((name) => name.replace(/^@mzzsfy\//, '')))
+  const picked = wanted.size
+    ? bundles.filter((name) => wanted.has(name.replace(/^@mzzsfy\//, '')))
+    : [...bundles]
+  if (wanted.size && picked.length !== wanted.size) {
+    const missing = [...wanted].filter((short) => !picked.some((name) => name.replace(/^@mzzsfy\//, '') === short))
+    throw new Error(`--only 含非 bundle 包或拼写错误: ${missing.join(', ')}`)
+  }
+  if (seedGateway && bundles.includes(SEED_GATEWAY_BUNDLE) && !picked.includes(SEED_GATEWAY_BUNDLE)) {
+    picked.push(SEED_GATEWAY_BUNDLE)
+  }
+  return picked
+}
+
 // only:裸装白名单(包短名或全名),空 = 全家桶。命中包及其 dsh.bundle 标记才入 bundles;
 // dependencies 仍全量(装而不载无副作用,verifyActivation 按 dependencies 记账依赖它)
 // stop:STOP 消费口(pnpm install 分钟级)——为真即中止构建并抛 STOPPED,由 keeper 正常收尾
@@ -104,14 +124,7 @@ export async function buildProfile({ version, workRoot, hostDir, seedGateway = f
   const homeDir = join(workRoot, version, 'home')
   const profileDir = join(homeDir, 'profiles', 'web')
   const { bundles, all } = enumeratePackages({ hostVersion: version })
-  const wanted = new Set(only.map((name) => name.replace(/^@mzzsfy\//, '')))
-  const pickedBundles = wanted.size
-    ? bundles.filter((name) => wanted.has(name.replace(/^@mzzsfy\//, '')))
-    : bundles
-  if (wanted.size && pickedBundles.length !== wanted.size) {
-    const missing = [...wanted].filter((short) => !pickedBundles.some((name) => name.replace(/^@mzzsfy\//, '') === short))
-    throw new Error(`--only 含非 bundle 包或拼写错误: ${missing.join(', ')}`)
-  }
+  const pickedBundles = selectBundles({ bundles, only, seedGateway })
   const unpublished = await probe(all)
   throwIfStopped()
 

@@ -22,6 +22,8 @@ jobs:
   # 隔离 profile 装全部 bundle 包全家桶共启:主测断言正常访问 + activation live +
   # diagnostics findings 0 + 浏览器页面无 Failed to load plugins + LLM 链路,基线只断言不崩溃
   # (方法论:docs/兼容性测试/测试与隔离方法.md,自动化实现 scripts/compat/)。
+  # activation 探针用 token URL 铸会话 cookie 后读 /dsh-market/installed(0.2.3-alpha.2
+  # 起宿主闸门覆盖命名路由,token 查询只对 `/` 生效),与 gate 探针共用同一 cookie。
   # 版本窗口策略见 scripts/compat/window.mjs;显式覆盖:DSH_COMPAT_VERSIONS=版本[,版本~]
   compat:
     name: dsh 兼容性测试(全家桶 boot)

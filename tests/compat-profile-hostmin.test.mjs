@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { enumeratePackages } from '../scripts/compat/profile.mjs'
+import { enumeratePackages, selectBundles } from '../scripts/compat/profile.mjs'
 
 // enumeratePackages dsh.hostMin 装载过滤(待办 #20):宿主低于 hostMin 的 bundle 包
 // 不入 bundles(该代际 API 面未验证,强装复现 shell-select × 0.1.5 boot 崩形态);
@@ -68,4 +68,17 @@ test('真实仓库双槽过滤:所有 hostMin 包在基线槽摘出、主测槽�
     assert.ok(!baseline.bundles.includes(`@mzzsfy/${name}`), `基线槽应摘出 ${name}`)
   }
   assert.deepEqual([...baseline.all].sort(), [...full.all].sort())
+})
+
+// --only 装载子集与 --seed-gateway 的 gateway bundle 补入:seed 配置依赖 gateway
+// 自身的 bundle patch 参与合成,只在 profile patch 写行会退化为 unbundled
+test('selectBundles:--only 过滤、拼写错误报错、seedGateway 补入 gateway', () => {
+  const bundles = ['@mzzsfy/dsh-alpha', '@mzzsfy/dsh-llm-pi-gateway', '@mzzsfy/dsh-beta']
+  assert.deepEqual(selectBundles({ bundles, only: ['dsh-alpha'] }), ['@mzzsfy/dsh-alpha'])
+  assert.deepEqual(selectBundles({ bundles, only: ['@mzzsfy/dsh-alpha'] }), ['@mzzsfy/dsh-alpha'])
+  assert.deepEqual(selectBundles({ bundles, only: ['dsh-alpha'], seedGateway: true }), ['@mzzsfy/dsh-alpha', '@mzzsfy/dsh-llm-pi-gateway'])
+  assert.deepEqual(selectBundles({ bundles, only: ['dsh-llm-pi-gateway'], seedGateway: true }), ['@mzzsfy/dsh-llm-pi-gateway'])
+  assert.deepEqual(selectBundles({ bundles }), bundles)
+  assert.deepEqual(selectBundles({ bundles, seedGateway: true }), bundles)
+  assert.throws(() => selectBundles({ bundles, only: ['dsh-missing'] }), /--only 含非 bundle 包或拼写错误/)
 })
