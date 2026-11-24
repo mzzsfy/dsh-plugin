@@ -198,7 +198,7 @@ test('E5:client 装配接线——默认偏移与下拉选项都经纯函数', (
   const pkgRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
   const client = readFileSync(join(pkgRoot, 'src', 'client.js'), 'utf8')
   // 新建任务:设备时区先过后缀守卫(非整点 → null)
-  assert.match(client, /parsed\.timezone = tzSuffixOffset\(deviceTzOffset\(\)\)/)
+  assert.match(client, /initial\.timezone = tzSuffixOffset\(deviceTzOffset\(\)\)/)
   // 下拉:选项由 tzSelectOptions 派生(不再内联区间数组,当前值永远有 option)
   assert.match(client, /tzSelectOptions\(state\.timezone\)\.map/)
   // 设备偏移不再取整

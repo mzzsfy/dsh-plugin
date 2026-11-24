@@ -1,10 +1,15 @@
 // cron 解析薄封装:croner 承担表达式解析与触发点计算(5/6 段通吃、时区、DST)。
 // 表达式支持内联时区后缀 T±N(语法归 schedule-builder):显式后缀按固定偏移,
 // 无后缀按宿主系统时区(crontab 惯例,与 croner 原生行为一致)。
+// 一条任务可挂多条表达式,按行书写(crontab 多行同构):行内首尾空白归一、空行丢弃、
+// 重复行去重;触发点按各表达式最近一次合并。
 
 import { Cron } from 'croner'
 
 import { splitScheduleTz, formatTzOffset } from './schedule-builder.mjs'
+
+// 单任务表达式条数上限:防止误贴长文本把 tick 计算量放大
+export const MAX_SCHEDULES = 10
 
 // 固定偏移 → croner 时区名(Etc/GMT 为 POSIX 反转:UTC+8 即 Etc/GMT-8)
 function etcGmtName(timezoneOffset) {
@@ -15,6 +20,23 @@ function etcGmtName(timezoneOffset) {
 // croner 构造选项:无后缀不指定时区(宿主系统时区)
 function cronOptions(timezoneOffset) {
   return timezoneOffset === null ? {} : { timezone: etcGmtName(timezoneOffset) }
+}
+
+// 计划文本 → 表达式行:去空白、去空行、去重,保持书写顺序
+export function splitSchedules(schedule) {
+  const lines = String(schedule ?? '').split(/\r?\n/)
+  const unique = []
+  for (const raw of lines) {
+    const line = raw.trim()
+    if (line !== '' && !unique.includes(line)) unique.push(line)
+  }
+  return unique
+}
+
+// 计划文本归一:去空白/空行/重复行后按行重排(落库与校验共用同一形态);
+// 非文本输入归一为空计划,由校验通道报「调度计划不能为空」而不是把数字当成表达式
+export function normalizeSchedule(schedule) {
+  return typeof schedule === 'string' ? splitSchedules(schedule).join('\n') : ''
 }
 
 // 求自 from 起下一次触发点(ms epoch);表达式无未来触发点时返回 null
@@ -32,13 +54,37 @@ export function nextRunsOf(schedule, count, from = new Date()) {
   return job.nextRuns(count, from).map((date) => date.getTime())
 }
 
-// 表达式合法性校验:合法返回 null,非法抛业务错误(后缀与表达式分别报因)
+// 计划级的最近一次触发:各表达式各求一次取最小
+export function nextRunAtOfSchedules(schedule, from = new Date()) {
+  let earliest = null
+  for (const line of splitSchedules(schedule)) {
+    const at = nextRunAtOf(line, from)
+    if (at !== null && (earliest === null || at < earliest)) earliest = at
+  }
+  return earliest
+}
+
+// 计划级的下 N 次触发:各表达式分别求再合并去重排序(每条都取 N 次才不会被单条高频表达式挤掉)
+export function nextRunsOfSchedules(schedule, count, from = new Date()) {
+  const merged = new Set()
+  for (const line of splitSchedules(schedule)) {
+    for (const at of nextRunsOf(line, count, from)) merged.add(at)
+  }
+  return [...merged].sort((a, b) => a - b).slice(0, count)
+}
+
+// 计划合法性:至少一条;条数有上限;逐条校验后缀与表达式(报因带该行原文)
 export function assertValidSchedule(schedule) {
-  const { base } = splitScheduleTz(schedule)
-  try {
-    new Cron(base)
-  } catch (error) {
-    throw new Error('cron 表达式不合法: ' + schedule)
+  const lines = splitSchedules(schedule)
+  if (lines.length === 0) throw new Error('调度计划不能为空')
+  if (lines.length > MAX_SCHEDULES) throw new Error('调度计划最多 ' + MAX_SCHEDULES + ' 条表达式')
+  for (const line of lines) {
+    const { base } = splitScheduleTz(line)
+    try {
+      new Cron(base)
+    } catch {
+      throw new Error('cron 表达式不合法: ' + line)
+    }
   }
 }
 
@@ -73,4 +119,9 @@ export function summarizeCron(schedule, hostOffset = -new Date().getTimezoneOffs
   if (/^\d$/.test(weekday)) return '每周' + (WEEKDAY_LABELS[Number(weekday)] || weekday) + ' ' + clock(hour, minute) + note
   if (day === '*' && weekday === '*') return '每天 ' + clock(hour, minute) + note
   return base + note
+}
+
+// 计划级摘要:逐条摘要以 · 连接(单条时与 summarizeCron 同文)
+export function summarizeSchedules(schedule, hostOffset = -new Date().getTimezoneOffset() / 60) {
+  return splitSchedules(schedule).map((line) => summarizeCron(line, hostOffset)).join(' · ')
 }

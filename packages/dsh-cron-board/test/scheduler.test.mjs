@@ -378,6 +378,42 @@ function suspendNextRunUpdate(store) {
   }
 }
 
+test('scheduler:多表达式计划同刻合并为一次运行,推进取合并后的最早触发', async (t) => {
+  const { store, runner, scheduler, advance, now } = await makeScheduler(t)
+  // Given 计划 = 每分钟 + 每年 1 月 1 日,到期值取更早的那条(刚过期,在宽限内)
+  const job = await store.jobs.create({
+    name: '多计划', kind: 'shell', command: 'echo hi', schedule: '* * * * *\n0 0 1 1 *',
+    enabled: true, timeoutMs: 1000, nextRunAt: now() + 100,
+  })
+  advance(200)
+  // When tick
+  await scheduler.tick()
+  // Then 同刻合并只预占一次运行
+  const rows = store.runs.list(job.id)
+  assert.equal(rows.length, 1)
+  // Then 推进后取每分钟表达式的下一次,而不是一年后那条
+  const updated = store.jobs.get(job.id)
+  assert.ok(updated.nextRunAt > now())
+  assert.ok(updated.nextRunAt - now() <= 60 * 1000)
+  runner.releaseAll()
+})
+
+test('scheduler:recover 保留属于任一表达式的残留触发点', async (t) => {
+  const { store, scheduler } = await makeScheduler(t)
+  // Given 计划两条,nextRunAt 落在较晚的「工作日 9:55」的固定历史触发点上(已过去):
+  // 任何按计划重算都会得到未来值,判据不随运行时刻漂移
+  const schedule = '0 9 * * *\n55 9 * * 1-5'
+  const at = nextRunAtOf('55 9 * * 1-5', new Date('2026-09-17T08:00:00'))
+  const job = await store.jobs.create({
+    name: '多计划残留', kind: 'shell', command: 'x', schedule,
+    enabled: true, timeoutMs: 1000, nextRunAt: at,
+  })
+  // When recover
+  await scheduler.recover()
+  // Then 该值合法保留(不被重算成更早那条表达式的触发点)
+  assert.equal(store.jobs.get(job.id).nextRunAt, at)
+})
+
 test('S4: dispose 等待在飞 tick 收尾,停止后不写调度失败记录', async (t) => {
   const { store, scheduler } = await makeScheduler(t)
   const jobA = await store.jobs.create({

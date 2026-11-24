@@ -357,6 +357,41 @@ function scheduleTzOffset(schedule) {
   }
 }
 
+// 计划行拆分:只去空白与空行、保留重复行 —— 行与表达式一一对应;
+// 去重只发生在服务端落库,预览按表达式文本匹配而非行号
+function splitScheduleLines(schedule) {
+  return String(schedule ?? '').split(/\r?\n/).map((line) => line.trim()).filter((line) => line !== '')
+}
+
+// 预览条目按表达式匹配:服务端预览对重复表达式去重,行数可能少于界面行数,不能用行号对齐;
+// 比较前先规范化(兼容存量里 `T+8` 带空格、前导零等书写差异)
+function previewKeyOf(expression) {
+  try {
+    return buildSchedule(parseSchedule(expression))
+  } catch {
+    return String(expression).trim()
+  }
+}
+
+function schedulePreviewItem(preview, expression) {
+  if (!preview || !Array.isArray(preview.items)) return null
+  const key = previewKeyOf(expression)
+  return preview.items.find((item) => previewKeyOf(item.schedule) === key) ?? null
+}
+
+// 构建器状态数组 → 落库计划文本(逐条生成表达式再按行拼接)
+function deriveScheduleText(states) {
+  return states.map(buildSchedule).join('\n')
+}
+
+// 计划级展示时区:全部表达式时区一致才取该偏移,混合时区返回 null(由调用方回退宿主默认)
+function schedulesTzOffset(schedule) {
+  const lines = splitScheduleLines(schedule)
+  if (lines.length === 0) return null
+  const first = scheduleTzOffset(lines[0])
+  return lines.slice(1).every((line) => scheduleTzOffset(line) === first) ? first : null
+}
+
 const API_PREFIX = '/api/cron-board/'
 /* MODELKEY-BEGIN */
 // 模型表单态 key 序列化(标记段供 test/model-key.test.mjs 提取执行):
@@ -599,6 +634,14 @@ html[data-cb-hide-host-automation-nav] nav > div:has(> button > span > div[data-
 .cb-seg__opt:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
 /* 调度构建器:极浅洗底面板,收纳频率/上下文/表达式/预览 */
 .cb-builder{background:var(--cb-bg-sub);border:.5px solid var(--cb-border);border-radius:var(--cb-radius-md);padding:var(--cb-space-5);display:flex;flex-direction:column;gap:12px}
+/* 计划行列表:一条表达式一行,选中行在下方构建器编辑 */
+.cb-sched-list{display:flex;flex-direction:column;gap:6px;margin-bottom:8px}
+.cb-sched-row{display:flex;align-items:center;gap:8px;min-width:0;background:var(--cb-bg-sub);border:.5px solid var(--cb-border);border-radius:var(--cb-radius-md);padding:6px 10px;cursor:pointer}
+.cb-sched-row:hover{border-color:var(--cb-border-strong)}
+.cb-sched-row--on{border-color:var(--cb-accent);background:var(--cb-accent-wash)}
+.cb-sched-row:focus-visible{outline:2px solid var(--cb-accent);outline-offset:1px}
+.cb-sched-row__summary{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--cb-font-sm);color:var(--cb-text)}
+.cb-sched-add{align-self:flex-start;margin-top:2px}
 .cb-bline{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
 .cb-blabel{font-size:var(--cb-font-sm);color:var(--cb-text-sub);flex:none}
 .cb-time{width:44px;text-align:center;font-variant-numeric:tabular-nums}
@@ -877,7 +920,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           h('span', { className: 'cb-blabel' }, '即将执行'),
           preview
             ? h('span', { className: 'cb-runs' }, preview.nextAt.map((at) => h('span', { key: at, className: 'cb-run' }, formatDateTime(at, displayTzOffset))))
-            : h('span', { className: 'cb-hint' }, previewError || '表达式非法或计算中')))
+            : h('span', { className: 'cb-hint' }, previewError || (preview ? '预览不可用' : '表达式非法或计算中'))))
     }
 
     function JobForm({ job, onDone, wsModel, serverTzOffset }) {
@@ -890,15 +933,22 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         return wsModel.subscribe(update)
       }, [wsModel])
       const editing = Boolean(job && job.id)
-      // 构建器初始状态:新建任务把设备时区偏移固化为显式后缀,
+      // 调度计划 = 一组构建器状态(每条表达式一份,按行落库)。新建默认每天 9 点并固化设备时区,
       // 宿主环境时区异常(如 UTC)时任务仍按设备预期时刻触发;编辑存量保持原表达式语义。
       // 非整点设备时区(+5:30/+5:45)无后缀语法,回退宿主默认 —— 取整成相邻整点会整体错半小时
-      const [scheduleState, setScheduleState] = useState(() => {
-        const parsed = parseSchedule(job ? job.schedule : '0 9 * * *')
-        if (!editing) parsed.timezone = tzSuffixOffset(deviceTzOffset())
-        return parsed
+      const [scheduleStates, setScheduleStates] = useState(() => {
+        const lines = editing ? splitScheduleLines(job.schedule) : []
+        if (lines.length > 0) return lines.map((line) => parseSchedule(line))
+        // 编辑态空计划不伪造默认计划:一旦动构建器就会把假计划写回存量任务
+        if (editing) return [parseSchedule('')]
+        const initial = parseSchedule('0 9 * * *')
+        initial.timezone = tzSuffixOffset(deviceTzOffset())
+        return [initial]
       })
-      const initialSchedule = editing ? job.schedule : buildSchedule(scheduleState)
+      const [activeSchedule, setActiveSchedule] = useState(0)
+      // dirty 基线取服务端原文:未改动即不提交计划;构建器只在用户编辑时回写,
+      // 避免把规范化书写(后缀空格等)当成用户改动
+      const initialSchedule = editing ? job.schedule : deriveScheduleText(scheduleStates)
       const buildForm = () => ({
         name: job ? job.name : '',
         kind: job ? job.kind : 'shell',
@@ -925,6 +975,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const [initialForm] = useState(buildForm)
       const [preview, setPreview] = useState(null)
       const [previewError, setPreviewError] = useState(null)
+      // 预览请求序号:慢的旧响应不得覆盖新响应(防抖只取消定时器,取消不了在飞请求)
+      const previewSeq = useRef(0)
       const [error, setError] = useState(null)
       const [saving, setSaving] = useState(false)
       const [presetCatalog, setPresetCatalog] = useState({ defaultId: '', items: [] })
@@ -936,6 +988,10 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const selectedModelMeta = modelSelected
         ? (modelCatalog.items.find((group) => group.provider === modelSelected.provider) || { models: [] }).models.find((model) => model.id === modelSelected.model)
         : null
+      const replaceScheduleStates = (states) => {
+        setScheduleStates(states)
+        set({ schedule: deriveScheduleText(states) })
+      }
       const applyScheduleState = (next) => {
         // custom 频率下表达式携带合法后缀时以表达式为准(剥离归一并回填时区);
         // 无后缀保留调用方传入的时区(select 与频率切换不丢配置);非法后缀原文保留且时区置空
@@ -947,8 +1003,30 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             next = { ...next, timezone: null }
           }
         }
-        setScheduleState(next)
-        set({ schedule: buildSchedule(next) })
+        replaceScheduleStates(scheduleStates.map((state, index) => (index === activeSchedule ? next : state)))
+      }
+      const addSchedule = () => {
+        const created = parseSchedule('0 9 * * *')
+        created.timezone = tzSuffixOffset(deviceTzOffset())
+        // 新行取已有整点计划之后第一个未占用的整点:同刻重复行不增加任何触发点,保存时会被合并掉
+        const hours = scheduleStates
+          .filter((state) => state.freq !== 'custom' && state.freq !== 'interval' && Number.isInteger(state.hour))
+          .map((state) => state.hour)
+        if (hours.length > 0) {
+          const used = new Set(hours)
+          let hour = (Math.max(...hours) + 1) % (SB_HOUR_MAX + 1)
+          for (let step = 0; step <= SB_HOUR_MAX && used.has(hour); step += 1) hour = (hour + 1) % (SB_HOUR_MAX + 1)
+          created.hour = hour
+        }
+        setActiveSchedule(scheduleStates.length)
+        replaceScheduleStates([...scheduleStates, created])
+      }
+      const removeSchedule = (index) => {
+        if (scheduleStates.length <= 1) return
+        const states = scheduleStates.filter((_, item) => item !== index)
+        // 被删行在选中行之前时选中行前移一位;删的是当前行则收敛到剩余范围内
+        setActiveSchedule(index < activeSchedule ? activeSchedule - 1 : Math.min(activeSchedule, states.length - 1))
+        replaceScheduleStates(states)
       }
 
       // 执行预设目录:会话任务表单打开时拉取一次;服务缺失即空目录,仅「跟随宿主默认」可选
@@ -966,16 +1044,22 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 
       useEffect(() => {
         let alive = true
+        const seq = previewSeq.current + 1
+        previewSeq.current = seq
         // 表达式变更即清空旧错误:防抖窗口内不残留上一次失败文案
         setPreviewError(null)
         const timer = setTimeout(async () => {
           const outcome = await request('POST', 'cron/preview', { schedule: form.schedule })
-          if (!alive) return
+          if (!alive || seq !== previewSeq.current) return
           setPreview(outcome.ok ? outcome.data : null)
           setPreviewError(outcome.ok ? null : outcome.error)
         }, 300)
         return () => { alive = false; clearTimeout(timer) }
       }, [form.schedule])
+
+      // 预览按表达式对齐:当前编辑行只看自己的触发点(空表达式无对应预览)
+      const activeState = scheduleStates[activeSchedule] ?? scheduleStates[0]
+      const activePreview = schedulePreviewItem(preview, activeState ? buildSchedule(activeState) : '')
 
       const submit = async () => {
         if (saving) return
@@ -999,7 +1083,33 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             ariaLabel: '类型',
           }))),
         h(Section, { title: '调度计划' },
-          h(ScheduleBuilder, { scheduleState, onStateChange: applyScheduleState, preview, previewError, serverTzOffset })),
+          // 计划行:每条表达式一行,选中行在下方构建器编辑;单条时不可删除
+          h('div', { className: 'cb-sched-list' },
+            scheduleStates.map((state, index) => {
+              const expression = buildSchedule(state)
+              const item = schedulePreviewItem(preview, expression)
+              // 空表达式(编辑态空计划/自定义清空)不显示空白行
+              const label = item ? item.summary : (expression || '未设置')
+              return h('div', {
+                key: index,
+                className: 'cb-sched-row' + (index === activeSchedule ? ' cb-sched-row--on' : ''),
+                role: 'button',
+                tabIndex: 0,
+                title: item ? item.summary : expression,
+                onClick: () => setActiveSchedule(index),
+                onKeyDown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setActiveSchedule(index) } },
+              },
+                h('span', { className: 'cb-sched-row__summary' }, label),
+                scheduleStates.length > 1
+                  ? h('button', {
+                      className: 'cb-icon cb-button--danger',
+                      title: '删除这条计划',
+                      onClick: (event) => { event.stopPropagation(); removeSchedule(index) },
+                    }, '删除')
+                  : null)
+            }),
+            h('button', { className: 'cb-linkbtn cb-sched-add', onClick: addSchedule }, '+ 添加时间')),
+          h(ScheduleBuilder, { scheduleState: activeState, onStateChange: applyScheduleState, preview: activePreview, previewError, serverTzOffset })),
         form.kind === 'shell'
           ? h(Section, { title: '运行配置(shell)' },
               h(Field, { label: '命令', hint: '经由宿主 shell 执行,支持环境变量插值 $NAME' },
@@ -1414,9 +1524,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const [notice, setNotice] = useState(null)
       // 日志视图:{ runId, text, truncated, tailLines };服务端缺省只回尾部窗口,全文经导出按钮取
       const [logView, setLogView] = useState(null)
-      // 展示时区随所选任务:显式后缀用其偏移,无后缀用宿主默认(调度与展示同源)
+      // 展示时区随所选任务:全部表达式时区一致才用其偏移,混合时区回退宿主默认(调度与展示同源)
       const selectedJob = jobs.find((job) => job.id === jobId)
-      const displayTzOffset = scheduleTzOffset(selectedJob ? selectedJob.schedule : null) ?? (typeof serverTzOffset === 'number' ? serverTzOffset : undefined)
+      const displayTzOffset = schedulesTzOffset(selectedJob ? selectedJob.schedule : null) ?? (typeof serverTzOffset === 'number' ? serverTzOffset : undefined)
 
       useEffect(() => {
         let alive = true

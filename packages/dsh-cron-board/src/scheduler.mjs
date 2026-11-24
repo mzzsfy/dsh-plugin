@@ -2,7 +2,7 @@
 // 经执行链闸门入队,收尾由执行链负责。misfire 语义:错过触发点超过一个
 // tick 周期即视为停机期间错过,不补跑,记 skipped 并推进(轻量取舍,设计 §4.1)。
 
-import { nextRunAtOf } from './cron.mjs'
+import { nextRunAtOf, nextRunAtOfSchedules, splitSchedules } from './cron.mjs'
 
 const SKIPPED_MISFIRE_MESSAGE = '停机期间错过'
 const INTERRUPTED_MESSAGE = 'dsh 重启中断'
@@ -18,9 +18,14 @@ export function createScheduler({ store, executor, readTickMs, onChange, logSyst
   let inFlight = null
   let disposed = false
 
-  // 历史版本编辑残留的自愈:nextRunAt 不在当前 schedule 的触发点上即重算,
-  // 防残留值到点误执行;合法触发点与空值(无未来触发点)不动,保留宽限执行与 misfire 语义
+  // 历史版本编辑残留的自愈:nextRunAt 不在计划内任一表达式的触发点上即重算,
+  // 防残留值到点误执行;合法触发点与空值(无未来触发点)不动,保留宽限执行与 misfire 语义。
+  // 逐条探测只在 recover 自愈路径发生,条数上界即计划行数上限,不进入 tick 热路径
   function isLegalTrigger(schedule, at) {
+    return splitSchedules(schedule).some((line) => isLegalLineTrigger(line, at))
+  }
+
+  function isLegalLineTrigger(schedule, at) {
     if (nextRunAtOf(schedule, new Date(at - 1000)) === at) return true
     return isMappedDstTrigger(schedule, at)
   }
@@ -55,7 +60,7 @@ export function createScheduler({ store, executor, readTickMs, onChange, logSyst
     for (const job of store.jobs.list()) {
       if (typeof job.nextRunAt !== 'number' || Number.isNaN(job.nextRunAt)) continue
       if (isLegalTrigger(job.schedule, job.nextRunAt)) continue
-      await store.jobs.updateRuntime(job.id, { nextRunAt: nextRunAtOf(job.schedule, new Date(now())) })
+      await store.jobs.updateRuntime(job.id, { nextRunAt: nextRunAtOfSchedules(job.schedule, new Date(now())) })
     }
   }
 
@@ -91,8 +96,9 @@ export function createScheduler({ store, executor, readTickMs, onChange, logSyst
           // misfire 判定须在推进前读取到期值(update 会原地改写任务对象)
           const dueAt = job.nextRunAt
           const misfired = nowMs - dueAt > graceMs
-          // 先推进再执行:执行慢或并发堵不引发重复触发
-          const nextAt = nextRunAtOf(job.schedule, new Date(nowMs))
+          // 先推进再执行:执行慢或并发堵不引发重复触发;
+          // 多条表达式取各自下一次触发中的最早值,同刻多条表达式合并为一次运行
+          const nextAt = nextRunAtOfSchedules(job.schedule, new Date(nowMs))
           await store.jobs.updateRuntime(job.id, { nextRunAt: nextAt, lastRunAt: nowMs })
           // 停止流程落在推进的 await 之间:不再派发,本触发点归入重启后的 misfire 语义
           if (disposed) break

@@ -8,14 +8,9 @@ node_modules/
 *-lock.*
 
 .worktrees/
+
+# 非特殊文档统一不入库
 /docs/*
-!/docs/调研-股票侧边栏插件.md
-!/docs/开发-股票侧边栏插件.md
-!/docs/dsh-stock-assistant/
-!/docs/兼容性测试/
-/docs/兼容性测试/*
-/docs/dsh-stock-assistant/*
-!/docs/dsh-stock-assistant/design.md
 
 # 凭据与本地证据永不入库
 .env

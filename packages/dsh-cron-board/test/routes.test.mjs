@@ -12,7 +12,7 @@ import { createStore } from '../src/store.mjs'
 import { createLogger } from '../src/logger.mjs'
 import { createExecutor } from '../src/executor.mjs'
 import { createApi } from '../src/api.mjs'
-import { nextRunAtOf } from '../src/cron.mjs'
+import { MAX_SCHEDULES, nextRunAtOf } from '../src/cron.mjs'
 import { DEFAULT_LOG_TAIL_LINES } from '../src/config.mjs'
 import { withRouteGate } from '../src/route-gate.mjs'
 
@@ -1181,4 +1181,119 @@ test('E3: 日志目录清理失败不翻案删除成败(任务行已删即回 ok
   assert.equal(del.status, 200)
   assert.deepEqual(del.payload, { ok: true })
   assert.equal(store.jobs.get(job.id), undefined)
+})
+
+test('多计划:POST 落库按行归一,摘要合并,nextRunAt 取最早触发', async (t) => {
+  const { store, api } = await makeApi(t)
+  // Given 两条不同时区的表达式(含空行与重复行)
+  const schedule = ' 0 9 * * *T+8 \n\n0 9 * * *T+8\n0 1 * * *T-8\n'
+  // When 新建任务
+  const created = await call(api, 'POST', '/api/cron-board/jobs', { name: '多计划', kind: 'shell', command: 'x', schedule })
+  // Then 落库文本归一(去空白/空行/重复行)
+  assert.equal(created.status, 200)
+  assert.equal(created.payload.schedule, '0 9 * * *T+8\n0 1 * * *T-8')
+  // Then nextRunAt 取两条中最先到期的一次
+  const from = new Date()
+  const expected = Math.min(nextRunAtOf('0 9 * * *T+8', from), nextRunAtOf('0 1 * * *T-8', from))
+  assert.equal(created.payload.nextRunAt, expected)
+  // Then 列表摘要把两条计划都展开
+  const listed = await call(api, 'GET', '/api/cron-board/jobs')
+  const row = listed.payload.items.find((item) => item.id === created.payload.id)
+  assert.equal(row.summary, '每天 09:00(UTC+8) · 每天 01:00(UTC-8)')
+  assert.equal(store.jobs.get(created.payload.id).schedule.split('\n').length, 2)
+})
+
+test('多计划:PATCH 改计划重算最早触发,未改计划不动 nextRunAt', async (t) => {
+  const { store, api } = await makeApi(t)
+  // Given 单条计划任务
+  const created = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: '改多计划', kind: 'shell', command: 'x', schedule: '0 9 * * *T+0',
+  })
+  const before = created.payload.nextRunAt
+  // When 只改名(不带 schedule)
+  const renamed = await call(api, 'PATCH', '/api/cron-board/jobs/' + created.payload.id, { name: '改名', updatedAt: created.payload.updatedAt })
+  // Then nextRunAt 保持原值,不因局部更新推进
+  assert.equal(renamed.status, 200)
+  assert.equal(store.jobs.get(created.payload.id).nextRunAt, before)
+  // When 改成两条计划
+  const patched = await call(api, 'PATCH', '/api/cron-board/jobs/' + created.payload.id, {
+    schedule: '0 9 * * *T+0\n30 8 1 * *',
+    updatedAt: renamed.payload.updatedAt,
+  })
+  // Then 触发点按两条重新取最早
+  assert.equal(patched.status, 200)
+  const from = new Date()
+  const expected = Math.min(nextRunAtOf('30 8 1 * *', from), nextRunAtOf('0 9 * * *T+0', from))
+  assert.equal(store.jobs.get(created.payload.id).nextRunAt, expected)
+})
+
+test('多计划:任一条非法或永不触发即整份计划 400', async (t) => {
+  const { store, api } = await makeApi(t)
+  // When 第二条非法表达式
+  const bad = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: '坏第二条', kind: 'shell', command: 'x', schedule: '0 9 * * *\nnot-a-cron',
+  })
+  // Then 400 且文案带该行原文
+  assert.equal(bad.status, 400)
+  assert.match(bad.payload.error, /cron 表达式不合法: not-a-cron/)
+  assert.equal(store.jobs.list().length, 0)
+  // When 一条正常一条永不触发
+  const impossible = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: '混合', kind: 'shell', command: 'x', schedule: '0 9 * * *\n0 0 30 2 *',
+  })
+  // Then 整份计划拒绝(不静默丢弃无未来触发点的那条)
+  assert.equal(impossible.status, 400)
+  assert.match(impossible.payload.error, /未来触发点/)
+  assert.equal(store.jobs.list().length, 0)
+  // When 空计划
+  const empty = await call(api, 'POST', '/api/cron-board/jobs', { name: '空', kind: 'shell', command: 'x', schedule: ' \n ' })
+  // Then 400
+  assert.equal(empty.status, 400)
+  assert.match(empty.payload.error, /调度计划不能为空/)
+})
+
+test('多计划:超过上限的计划整份 400', async (t) => {
+  const { store, api } = await makeApi(t)
+  // Given 上限 + 1 条互不重复的合法表达式
+  const lines = Array.from({ length: MAX_SCHEDULES + 1 }, (_, index) => index + ' 9 * * *')
+  // When 新建
+  const res = await call(api, 'POST', '/api/cron-board/jobs', { name: '超限', kind: 'shell', command: 'x', schedule: lines.join('\n') })
+  // Then 400 且提示上限,不落库
+  assert.equal(res.status, 400)
+  assert.match(res.payload.error, new RegExp('最多 ' + MAX_SCHEDULES + ' 条'))
+  assert.equal(store.jobs.list().length, 0)
+})
+
+test('多计划:cron preview 对重复表达式去重(表单按表达式匹配行)', async (t) => {
+  const { api } = await makeApi(t)
+  // When 同一条表达式写两行
+  const res = await call(api, 'POST', '/api/cron-board/cron/preview', {
+    schedule: '0 9 * * *T+8\n0 9 * * *T+8',
+  })
+  // Then items 去重为一条(重复行不产生额外触发点),合并不重复
+  assert.equal(res.status, 200)
+  assert.equal(res.payload.items.length, 1)
+  assert.equal(res.payload.summary, '每天 09:00(UTC+8)')
+})
+
+test('多计划:cron preview 返回逐条摘要与合并触发点', async (t) => {
+  const { api } = await makeApi(t)
+  // When 预览两条表达式
+  const res = await call(api, 'POST', '/api/cron-board/cron/preview', {
+    schedule: '0 9 * * *T+8\n30 8 * * 1-5T+0',
+  })
+  // Then 逐条给出摘要与三次触发点,顺序与计划行一致
+  assert.equal(res.status, 200)
+  assert.equal(res.payload.items.length, 2)
+  assert.equal(res.payload.items[0].summary, '每天 09:00(UTC+8)')
+  assert.equal(res.payload.items[1].summary, '工作日 08:30(UTC+0)')
+  assert.equal(res.payload.items[0].nextAt.length, 3)
+  // Then 合并摘要与合并触发点(升序、去重)同口径
+  assert.equal(res.payload.summary, '每天 09:00(UTC+8) · 工作日 08:30(UTC+0)')
+  assert.equal(res.payload.nextAt.length, 3)
+  assert.deepEqual([...res.payload.nextAt].sort((a, b) => a - b), res.payload.nextAt)
+  // Then 单条表达式同样返回 items(表单按行对齐读取)
+  const single = await call(api, 'POST', '/api/cron-board/cron/preview', { schedule: '0 9 * * *T+0' })
+  assert.equal(single.payload.items.length, 1)
+  assert.equal(single.payload.items[0].schedule, '0 9 * * *T+0')
 })

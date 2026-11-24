@@ -3,11 +3,13 @@
 // 错误语义对齐仓内惯例:业务错误中文透传,系统级错误收敛固定文案并落服务端日志。
 // 写方法成功受理即经 notifyChange 发布总线变更(通知面/数据面分离,客户端 refetch 快照)。
 
-import { assertValidSchedule, nextRunAtOf, nextRunsOf, summarizeCron } from './cron.mjs'
+import { assertValidSchedule, normalizeSchedule, nextRunAtOf, nextRunAtOfSchedules, nextRunsOf, nextRunsOfSchedules, splitSchedules, summarizeCron, summarizeSchedules } from './cron.mjs'
 import { DEFAULT_LOG_TAIL_LINES, DEFAULT_MAX_EXPANSION, DEFAULT_TIMEOUT_MS, SESSION_UNAVAILABLE_REASON } from './config.mjs'
 import { maskValue } from './env-text.mjs'
 
 const ROUTE_PREFIX = '/api/cron-board'
+// 编辑表单预览的触发点条数(单条表达式与合并计划同口径)
+const PREVIEW_RUNS = 3
 // 写请求体上限:客户端契约里的长 prompt/env 导入都远小于此值,超限即 413(测试引用同一常量)
 export const BODY_MAX_BYTES = 64 * 1024
 
@@ -316,12 +318,14 @@ function normalizeJob(body, { requireFutureTrigger = true } = {}) {
   if (body.kind !== 'shell' && body.kind !== 'session') throw new Error(MESSAGES.badKind)
   const command = typeof body.command === 'string' ? body.command.trim() : ''
   if (kind === 'shell' && command === '') throw new Error(MESSAGES.commandRequired)
-  const schedule = typeof body.schedule === 'string' ? body.schedule.trim() : ''
+  const schedule = normalizeSchedule(body.schedule)
   assertValidSchedule(schedule)
-  // 无未来触发点(如 2 月 30 日)的表达式合法但永不执行:新建或改期时拒绝;
-  // 旧数据里的此类表达式仍允许停用/改名等维护性 PATCH,避免任务彻底不可操作
-  const nextAt = nextRunAtOf(schedule)
-  if (requireFutureTrigger && nextAt === null) throw new Error(MESSAGES.noFutureTrigger)
+  // 无未来触发点(如 2 月 30 日)的表达式合法但永不执行:新建或改期时逐条拒绝
+  // (任一表达式永不触发即整份计划不完整);旧数据里的此类表达式仍允许停用/改名等维护性 PATCH
+  // 逐行只求值一次:校验用的下一次触发点与合并 nextAt 共用同一批结果
+  const lineNext = splitSchedules(schedule).map((line) => nextRunAtOf(line))
+  if (requireFutureTrigger && lineNext.includes(null)) throw new Error(MESSAGES.noFutureTrigger)
+  const nextAt = lineNext.reduce((min, at) => (at === null ? min : min === null || at < min ? at : min), null)
   const normalized = {
     name,
     kind,
@@ -505,14 +509,24 @@ export function createApi({ store, logger, executor, scheduler, periodic, report
       },
     },
     {
-      // 编辑表单实时预览:croner 服务端解析,前端不引解析依赖(定案 §6.2)
+      // 编辑表单实时预览:croner 服务端解析,前端不引解析依赖(定案 §6.2);
+      // 逐条给出摘要与未来触发点,合并摘要/合并触发点供多表达式计划整体展示
       method: 'POST',
       segments: ['cron', 'preview'],
       handler: async ({ req, res }) => {
         const body = await readJsonBody(req)
-        const schedule = typeof body.schedule === 'string' ? body.schedule.trim() : ''
+        const schedule = normalizeSchedule(body.schedule)
         assertValidSchedule(schedule)
-        sendJson(res, 200, { summary: summarizeCron(schedule), nextAt: nextRunsOf(schedule, 3) })
+        const items = splitSchedules(schedule).map((line) => ({
+          schedule: line,
+          summary: summarizeCron(line),
+          nextAt: nextRunsOf(line, PREVIEW_RUNS),
+        }))
+        sendJson(res, 200, {
+          summary: summarizeSchedules(schedule),
+          nextAt: nextRunsOfSchedules(schedule, PREVIEW_RUNS),
+          items,
+        })
       },
     },
     {
@@ -587,8 +601,8 @@ export function createApi({ store, logger, executor, scheduler, periodic, report
       method: 'GET',
       segments: ['jobs'],
       handler: async ({ res }) => {
-        // summary 人话摘要随行返回,前端不引解析依赖
-        const items = store.jobs.list().map((job) => ({ ...job, summary: summarizeCron(job.schedule) }))
+        // summary 人话摘要随行返回,前端不引解析依赖;多条表达式以 · 连接
+        const items = store.jobs.list().map((job) => ({ ...job, summary: summarizeSchedules(job.schedule) }))
         sendJson(res, 200, { items, ...storageWarning(store) })
       },
     },
@@ -624,7 +638,7 @@ export function createApi({ store, logger, executor, scheduler, periodic, report
         // 改期才重算触发点;未携带 schedule 的局部更新(改名/开关/并发)不得推进 nextRunAt,
         // 否则临近的待触发运行被推到下一周期
         if (body.nextRunAt !== undefined) patch.nextRunAt = fields.nextRunAt
-        else if (body.schedule !== undefined) patch.nextRunAt = nextRunAtOf(fields.schedule)
+        else if (body.schedule !== undefined) patch.nextRunAt = nextRunAtOfSchedules(fields.schedule)
         // 乐观锁 CAS:比较与写入在 store 同一临界区,并发 PATCH 只有首个基线命中
         const outcome = await store.jobs.updateIf(params.id, body.updatedAt, patch)
         if (!outcome.ok) {

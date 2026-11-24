@@ -46,6 +46,14 @@ function edit(patch) {
 
 test('job-patch:无改动只提交 updatedAt 基线(不重提任何字段)', () => {
   assert.deepEqual(edit({}), { updatedAt: BASELINE.updatedAt })
+  // 多表达式计划同理:未改动时 schedule 字符串原样比较,不因多行被判脏
+  const multi = { ...BASELINE, schedule: '0 9 * * *\n30 8 * * 1-5T+8' }
+  assert.deepEqual(helpers.jobUpdatePayload(multi, { ...multi }), { updatedAt: BASELINE.updatedAt })
+  // 计划行增减或改序即视为改动
+  assert.deepEqual(
+    helpers.jobUpdatePayload(multi, { ...multi, schedule: '30 8 * * 1-5T+8\n0 9 * * *' }),
+    { schedule: '30 8 * * 1-5T+8\n0 9 * * *', updatedAt: BASELINE.updatedAt },
+  )
 })
 
 test('job-patch:只提交改动字段,未改动字段不出现在载荷中(防旧快照回滚他处变更)', () => {
