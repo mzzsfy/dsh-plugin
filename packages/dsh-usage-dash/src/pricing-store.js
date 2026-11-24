@@ -30,7 +30,7 @@ export const pricingDomain = defineDomain({
 const EMPTY_RECORD = Object.freeze({ rules: Object.freeze([]), revision: 0, updatedAt: 0 })
 
 // 读入即归一:存量规则(迁移前的 profile 配置或旧版本写入)可能在数组里重复
-// 默认价,口径必须与 matchPrice 的「同档取首条」一致
+// 同模式无条件规则,与匹配器「同档取表内首条」口径一致
 const normalizeRecord = (record) => ({ ...record, rules: normalizePricingRules(record.rules) })
 
 export class PricingStore {

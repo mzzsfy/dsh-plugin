@@ -13,7 +13,7 @@ import { MAX_SLOTS, aggregateRange, attachCosts } from './query.js'
 import { CYCLE_DEFAULT, cycleWindowOf } from './cycle.js'
 import { buildBudgetStatus, buildSummary } from './summary.js'
 import { simulateWhatIf } from './whatif.js'
-import { CURRENCIES, CONDITION_KINDS, UNIT_PER_MILLION, isTwoSegmentModel } from './pricing.js'
+import { CURRENCIES, CONDITION_KINDS, GLOBAL_DEFAULT_MODEL, UNIT_PER_MILLION, isTwoSegmentModel } from './pricing.js'
 import { FEATURE_KEYS, normalizeFeatures } from './features.js'
 import {
   GRANULARITY_DAILY,
@@ -60,6 +60,7 @@ const MESSAGE_BACKUP_UNAVAILABLE = `${ERROR_PREFIX}backup snapshot unavailable`
 const MESSAGE_METHOD_NOT_ALLOWED = `${ERROR_PREFIX}method not allowed`
 const MESSAGE_RANGE_REQUIRED = `${ERROR_PREFIX}from and to are required`
 const MESSAGE_INVALID_PRICING = `${ERROR_PREFIX}invalid pricing rules`
+const MESSAGE_PRICING_FALLBACK_REQUIRED = `${ERROR_PREFIX}an unconditional */* fallback is required`
 const MESSAGE_INVALID_FEATURES = `${ERROR_PREFIX}invalid feature switches`
 const MESSAGE_FEATURES_UNAVAILABLE = `${ERROR_PREFIX}feature switches unavailable`
 const MESSAGE_INVALID_CYCLE = `${ERROR_PREFIX}invalid billing cycle`
@@ -305,20 +306,19 @@ const minuteHandler = (deps) => async (req, res) => {
   writeJson(res, { ok: true, value: { ...value, timeZone: deps.timeZone } })
 }
 
-// pricing 端点:GET 回 {revision, rules};POST 整表替换经 zod 校验后写入并回读。
-// settings 未激活时能力缺席,GET 走空值桩,POST 拒 503——能力缺席属服务暂
-// 不可用而非请求状态冲突,不用 409
-const INACTIVE_PRICING = { active: false, rules: () => [], revision: () => 0 }
-
+// 定价域未就绪时区分不可用与正常空表。
 const pricingHandler = (deps) => async (req, res) => {
-  const pricing = deps.pricing ?? INACTIVE_PRICING
+  const pricing = deps.pricing
+  if (!pricing?.active) throw usageError(HTTP_STATUS_UNAVAILABLE, MESSAGE_PRICING_UNAVAILABLE)
   if ((req.method ?? METHOD_GET) === METHOD_GET) {
     writeJson(res, { ok: true, value: { revision: pricing.revision(), rules: pricing.rules() } })
     return
   }
-  if (!pricing.active) throw usageError(HTTP_STATUS_UNAVAILABLE, MESSAGE_PRICING_UNAVAILABLE)
   const parsed = pricingRulesSchema.safeParse((await readJsonBody(req))?.rules)
   if (!parsed.success) throw usageError(HTTP_STATUS_BAD_REQUEST, MESSAGE_INVALID_PRICING)
+  if (parsed.data.length > 0 && !parsed.data.some((rule) => rule.model === GLOBAL_DEFAULT_MODEL && rule.conditions.length === 0)) {
+    throw usageError(HTTP_STATUS_BAD_REQUEST, MESSAGE_PRICING_FALLBACK_REQUIRED)
+  }
   const rules = await pricing.replace(parsed.data)
   writeJson(res, { ok: true, value: { revision: pricing.revision(), rules } })
 }

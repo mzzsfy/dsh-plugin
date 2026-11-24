@@ -10,6 +10,7 @@ import {
   costOf,
   isTwoSegmentModel,
   matchPrice,
+  resolvePricingRule,
 } from '../src/pricing.js'
 
 // 锚定日期一律本地时区构造,期望只依赖本地分量,与运行机时区无关
@@ -87,8 +88,8 @@ test('无精确子集直接查通配子集', () => {
   assert.deepEqual(matchPrice([wildcard], 'other/c', SUNDAY), wildcard.price)
 })
 
-test('匹配链:全名优先于模型名、供应商、全通配', () => {
-  // Given 四档规则并存 When 匹配 Then 依次全名 > 模型名 > 供应商 > 全通配
+test('匹配链:全名优先于供应商、跨供应商精确型号、全通配', () => {
+  // Given 四档规则并存 When 匹配 Then 依次全名 > 供应商 > 跨供应商精确型号 > 全通配
   const rules = [
     makeRule({ model: 'x/*', price: { input: 3 } }),
     makeRule({ model: '*/*', price: { input: 4 } }),
@@ -98,13 +99,78 @@ test('匹配链:全名优先于模型名、供应商、全通配', () => {
   assert.deepEqual(matchPrice(rules, 'x/a', SUNDAY), { input: 1 })
 })
 
-test('匹配链:模型名通配优先于供应商通配', () => {
-  // Given '*/a' 与 'x/*' 并存 When 匹配 x/a Then 模型名精确档胜
+test('匹配链:精确供应商优先于跨供应商的精确型号', () => {
+  // Given '*/a' 与 'x/*' 并存 When 匹配 x/a Then 精确供应商档胜
   const rules = [
-    makeRule({ model: 'x/*', price: { input: 3 } }),
     makeRule({ model: '*/a', price: { input: 2 } }),
+    makeRule({ model: 'x/*', price: { input: 3 } }),
   ]
-  assert.deepEqual(matchPrice(rules, 'x/a', SUNDAY), { input: 2 })
+  assert.deepEqual(matchPrice(rules, 'x/a', SUNDAY), { input: 3 })
+})
+
+test('resolvePricingRule 先按供应商比较精确、文字长度、通配形态', () => {
+  const patterns = ['*/abcd', 'a*d/abcd', '*cd/abcd', 'ab*/abcd', 'abc*/abcd', 'abcd/*']
+  const rules = patterns.map((model) => makeRule({ model }))
+  const resolved = resolvePricingRule(rules, 'abcd/abcd', SUNDAY)
+  assert.equal(resolved.winner, rules[5])
+  assert.deepEqual(resolved.candidates.map(({ model }) => model), patterns.toReversed())
+  assert.deepEqual(resolved.conflictRules, [])
+})
+
+test('resolvePricingRule 供应商同档时先比较型号长度再比较通配形态', () => {
+  const patterns = ['p/*', 'p/a*d', 'p/*cd', 'p/ab*', 'p/a*cd', 'p/abcd']
+  const rules = patterns.map((model) => makeRule({ model }))
+  const resolved = resolvePricingRule(rules, 'p/abcd', SUNDAY)
+  assert.equal(resolved.winner, rules[5])
+  assert.deepEqual(resolved.candidates.map(({ model }) => model), patterns.toReversed())
+})
+
+test('单星可匹配零字符与型号内斜杠，前后缀不可重叠', () => {
+  const rule = makeRule({ model: 'a*c/deepseek/*-chat' })
+  assert.equal(matchPrice([rule], 'ac/deepseek/-chat', SUNDAY), rule.price)
+  assert.equal(matchPrice([rule], 'abc/deepseek/custom/deepseek-chat', SUNDAY), rule.price)
+  assert.equal(matchPrice([makeRule({ model: 'p/ab*bc' })], 'p/abc', SUNDAY), null)
+  assert.equal(matchPrice([makeRule({ model: 'ab*bc/*' })], 'abc/x', SUNDAY), null)
+  assert.equal(matchPrice([makeRule({ model: 'p/a.+' })], 'p/abc', SUNDAY), null)
+})
+
+test('resolvePricingRule 排除任一条件未满足的规则，仅报告最高并列组', () => {
+  const sunday = { kind: 'weekdays', days: [0] }
+  const daytime = { kind: 'dailyWindow', from: '10:00', to: '12:00' }
+  const sixth = { kind: 'monthDays', from: 6, to: 6 }
+  const monday = { kind: 'weekdays', days: [1] }
+  const baseline = makeRule({ model: 'p/abc*' })
+  const first = makeRule({ model: 'p/abc*', conditions: [sunday, daytime], price: { input: 2 } })
+  const second = makeRule({ model: 'p/abc*', conditions: [sunday, sixth], price: { input: 3 } })
+  const third = makeRule({ model: 'p/abc*', conditions: [daytime, sixth], price: { input: 4 } })
+  const excluded = makeRule({ model: 'p/abcd', conditions: [sunday, monday] })
+  const lower = makeRule({ model: 'p/abc*', conditions: [sunday] })
+  const lowerTie = makeRule({ model: 'p/abc*', conditions: [daytime] })
+  const lowerAxis = makeRule({ model: '*/abcd', conditions: [sunday, sixth, daytime] })
+  const rules = Object.freeze([excluded, baseline, lower, first, second, lowerTie, lowerAxis, third])
+  const date = localTime(6, 11)
+  const resolved = resolvePricingRule(rules, 'p/abcd', date)
+  assert.equal(resolved.winner, first)
+  assert.deepEqual(resolved.candidates, [first, second, third, lower, lowerTie, baseline, lowerAxis])
+  assert.deepEqual(resolved.conflictRules, [first, second, third])
+  assert.equal(matchPrice(rules, 'p/abcd', date), first.price)
+})
+
+test('规则模式原地修改后按当前值匹配', () => {
+  const rule = makeRule({ model: 'p/gpt*' })
+  const rules = [rule]
+  assert.equal(matchPrice(rules, 'p/gpt', SUNDAY), rule.price)
+  rule.model = 'p/o*'
+  assert.equal(matchPrice(rules, 'p/gpt', SUNDAY), null)
+  assert.equal(matchPrice(rules, 'p/o3', SUNDAY), rule.price)
+})
+
+test('resolvePricingRule 无合法命中时返回空结果', () => {
+  const patterns = ['p/**', '**/m', 'p/b c', 'p/', 'p/m\n']
+  for (const pattern of patterns) {
+    const result = resolvePricingRule([makeRule({ model: pattern })], pattern, SUNDAY)
+    assert.deepEqual(result, { winner: null, candidates: [], conflictRules: [] }, pattern)
+  }
 })
 
 test('匹配链:供应商通配优先于全通配', () => {
@@ -377,6 +443,11 @@ test('未知 kind 与非法日期不成立', () => {
   assert.equal(conditionMatches({ kind: 'lunarPhase' }, SUNDAY), false)
   assert.equal(conditionMatches(null, SUNDAY), false)
   assert.equal(conditionMatches({ kind: 'weekdays', days: [0] }, new Date(Number.NaN)), false)
+})
+
+test('继承自对象原型的名称不是合法条件类型', () => {
+  assert.equal(conditionMatches({ kind: 'toString' }, SUNDAY), false)
+  assert.equal(conditionMatches({ kind: 'constructor' }, SUNDAY), false)
 })
 
 test('同值 Date 与毫秒数结果一致', () => {

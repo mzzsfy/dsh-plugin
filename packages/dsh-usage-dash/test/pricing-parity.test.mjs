@@ -11,6 +11,7 @@ import {
   conditionMatches as hostConditionMatches,
   isTwoSegmentModel as hostIsTwoSegmentModel,
   normalizePricingRules as hostNormalizePricingRules,
+  resolvePricingRule as hostResolvePricingRule,
   UNIT_PER_MILLION as hostUnitPerMillion,
   CURRENCIES as hostCurrencies,
   CONDITION_KINDS as hostConditionKinds,
@@ -26,6 +27,7 @@ const {
   conditionMatches: clientConditionMatches,
   isTwoSegmentModel: clientIsTwoSegmentModel,
   normalizePricingRules: clientNormalizePricingRules,
+  resolvePricingRule: clientResolvePricingRule,
   UNIT_PER_MILLION: clientUnitPerMillion,
   CURRENCIES: clientCurrencies,
   CONDITION_KINDS: clientConditionKinds,
@@ -79,6 +81,7 @@ const CONDITION_VECTORS = [
   { name: 'dateRange 非零填充不成立', condition: { kind: 'dateRange', from: '2026-1-1', to: '2026-1-31' }, date: MON_JAN15, expected: false },
   { name: 'dateRange 2 月 30 号滚月后不命中', condition: { kind: 'dateRange', from: '2026-02-01', to: '2026-02-28' }, date: FEB_30_ROLLS_TO_MAR02, expected: false },
   { name: '未知 kind 不成立', condition: { kind: 'hourly', days: [0] }, date: SUNDAY_0930, expected: false },
+  { name: '对象原型的 kind 不成立', condition: { kind: 'toString' }, date: SUNDAY_0930, expected: false },
   { name: '非法 Date 不成立', condition: { kind: 'weekdays', days: [0] }, date: null, expected: false },
   { name: 'condition 形状残缺不成立', condition: null, date: SUNDAY_0930, expected: false },
 ]
@@ -114,8 +117,22 @@ const MATCH_VECTORS = [
     rules: [ruleOf('*/*', 5), ruleOf('x/a', 1)], model: 'x/a', date: MATCH_SUNDAY_1000, expected: priceOf(1),
   },
   {
-    name: '匹配链:模型名通配优先于供应商通配',
-    rules: [ruleOf('x/*', 3), ruleOf('*/a', 2)], model: 'x/a', date: MATCH_SUNDAY_1000, expected: priceOf(2),
+    name: '匹配链:精确供应商优先于跨供应商的精确型号',
+    rules: [ruleOf('*/a', 2), ruleOf('x/*', 3)], model: 'x/a', date: MATCH_SUNDAY_1000, expected: priceOf(3),
+  },
+  {
+    name: '供应商和多级型号分别使用一个星号',
+    rules: [ruleOf('open*/deepseek/*-chat', 3), ruleOf('*/deepseek/demo-chat', 2)],
+    model: 'openrouter/deepseek/demo-chat', date: MATCH_SUNDAY_1000, expected: priceOf(3),
+  },
+  {
+    name: '前后缀不重叠且可零字符消费',
+    rules: [ruleOf('x/ab*bc', 2), ruleOf('x/a*bc', 3)], model: 'x/abc', date: MATCH_SUNDAY_1000, expected: priceOf(3),
+  },
+  {
+    name: '同档条件更多者胜',
+    rules: [ruleOf('x/a', 1), ruleOf('x/a', 2, [{ kind: 'weekdays', days: [0] }])],
+    model: 'x/a', date: MATCH_SUNDAY_1000, expected: priceOf(2),
   },
   {
     name: '匹配链:供应商通配优先于全通配',
@@ -273,6 +290,60 @@ test(`matchPrice 双侧一致(${MATCH_VECTORS.length} 向量)`, () => {
   }
 })
 
+test('resolvePricingRule 双侧按条件数排序且只报告最高实质并列', () => {
+  const sunday = { kind: 'weekdays', days: [0] }
+  const atTen = { kind: 'dailyWindow', from: '10:00', to: '10:00' }
+  const short = ruleOf('ven*/m', 1, [sunday])
+  const failed = ruleOf('vendor/m', 2, [{ kind: 'weekdays', days: [1] }])
+  const first = ruleOf('ven*/m', 3, [sunday, atTen])
+  const lowerAxis = ruleOf('*/m', 4, [sunday, atTen])
+  const second = ruleOf('ven*/m', 5, [sunday, atTen])
+  const rules = [short, failed, first, lowerAxis, second]
+  const expected = { winner: first, candidates: [first, second, short, lowerAxis], conflictRules: [first, second] }
+  const timestamp = new Date(...MATCH_SUNDAY_1000).getTime()
+  for (const resolve of [hostResolvePricingRule, clientResolvePricingRule]) {
+    const result = resolve(rules, 'vendor/m', timestamp)
+    assert.deepEqual(result, expected)
+    assert.equal(result.winner, first)
+    assert.equal(result.conflictRules[1], second)
+    assert.deepEqual(resolve(rules, 'vendor/m', NaN), { winner: null, candidates: [], conflictRules: [] })
+  }
+})
+
+test('稀疏条件数组不虚增匹配优先级', () => {
+  const valid = ruleOf('x/a', 1, [{ kind: 'weekdays', days: [0] }])
+  const malformed = ruleOf('x/a', 2, new Array(2))
+  const rules = [valid, malformed]
+  const date = new Date(...MATCH_SUNDAY_1000)
+  for (const match of [hostMatchPrice, clientMatchPrice]) {
+    assert.equal(match(rules, 'x/a', date), valid.price)
+  }
+  for (const resolve of [hostResolvePricingRule, clientResolvePricingRule]) {
+    assert.deepEqual(resolve(rules, 'x/a', date), { winner: valid, candidates: [valid], conflictRules: [] })
+  }
+})
+
+test('resolvePricingRule 双侧按平台优先比较两段的长度和形态', () => {
+  const rules = [
+    ruleOf('*/abcd', 1),
+    ruleOf('a*d/abcd', 2),
+    ruleOf('*cd/abcd', 3),
+    ruleOf('ab*/abcd', 4),
+    ruleOf('abc*/abcd', 5),
+    ruleOf('abcd/a*d', 6),
+    ruleOf('abcd/*cd', 7),
+    ruleOf('abcd/ab*', 8),
+    ruleOf('abcd/a*cd', 9),
+    ruleOf('abcd/abcd', 10),
+  ]
+  for (const resolve of [hostResolvePricingRule, clientResolvePricingRule]) {
+    const result = resolve(rules, 'abcd/abcd', new Date(...MATCH_SUNDAY_1000))
+    assert.equal(result.winner, rules[9])
+    assert.deepEqual(result.candidates, rules.toReversed())
+    assert.deepEqual(result.conflictRules, [])
+  }
+})
+
 const SEGMENT_VECTORS = [
   { name: '两段合法', model: 'a/b', expected: true },
   { name: '通配段合法', model: '*/*', expected: true },
@@ -286,6 +357,11 @@ const SEGMENT_VECTORS = [
   { name: '段含尾随空白非法', model: 'a/ ', expected: false },
   { name: '段内含空白非法', model: 'a /b', expected: false },
   { name: '通配段含空白非法', model: '* /b', expected: false },
+  { name: '供应商与型号各有一星', model: 've*/models/*-chat', expected: true },
+  { name: '供应商多星非法', model: 'v**/b', expected: false },
+  { name: '多级型号共用星号上限', model: 'v/b*/c*', expected: false },
+  { name: '末尾换行非法', model: 'v/b\n', expected: false },
+  { name: '非字符串非法', model: null, expected: false },
 ]
 
 test(`isTwoSegmentModel 双侧一致(${SEGMENT_VECTORS.length} 向量)`, () => {
@@ -331,26 +407,26 @@ test(`路由引用键双侧一致(${REF_VECTORS.length} 向量)`, () => {
   assert.equal(clientTurnModelOf(null), clientModelUnrouted)
 })
 
-// 归一为双实现共享的同一语义:默认价取首条无条件、组末,`*/*` 恒最后。
+// 归一仅去除同模型重复无条件规则,跨模型保留原序。
 // 同一输入喂双侧,除顺序外再断言保留下来的对象引用与原数组一致(不得克隆或改写)
 const NORMALIZE_VECTORS = [
   {
-    name: '重复 */* 保留首条并移到最后',
+    name: '重复 */* 保留首条原位',
     rules: [
       { model: '*/*', price: { input: 1 }, conditions: [] },
       { model: 'p/m', price: { input: 3 }, conditions: [] },
       { model: '*/*', price: { input: 9 }, conditions: [] },
     ],
-    expected: [['p/m', 3], ['*/*', 1]],
+    expected: [['*/*', 1], ['p/m', 3]],
   },
   {
-    name: '同模型首条无条件为默认价,条件规则前置',
+    name: '同模型首条无条件为默认价,与条件规则相对顺序不变',
     rules: [
       { model: 'p/m', price: { input: 1 }, conditions: [] },
       { model: 'p/m', price: { input: 2 }, conditions: [{ kind: 'weekdays', days: [1] }] },
       { model: 'p/m', price: { input: 3 }, conditions: [] },
     ],
-    expected: [['p/m', 2], ['p/m', 1]],
+    expected: [['p/m', 1], ['p/m', 2]],
   },
   {
     name: '全条件组不合成默认价',
@@ -377,4 +453,13 @@ test(`规则归一双侧一致(${NORMALIZE_VECTORS.length} 向量)`, () => {
     assert.deepEqual(host.map((rule) => [rule.model, rule.price.input]), vector.expected, vector.name)
     for (const rule of host) assert.ok(vector.rules?.includes(rule), `${vector.name}: 保留原对象引用`)
   }
+})
+
+// 存量规则可缺 currency 或写 null:格式化不得把开发者字面量渲染给用户
+test('Given 规则货币缺省或为 null, When 格式化费用, Then 只输出数值不带符号', () => {
+  for (const currency of [null, undefined, '']) {
+    const text = core.formatCost(1.5, currency)
+    assert.equal(text, '1.50', `currency=${String(currency)}`)
+  }
+  assert.equal(core.formatCost(1.5, '¥'), '¥1.50')
 })

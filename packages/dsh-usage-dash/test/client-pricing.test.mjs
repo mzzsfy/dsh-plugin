@@ -11,7 +11,6 @@ const {
   ensureGlobalDefault,
   normalizePricingRules,
   partitionGroupOf,
-  persistablePricingRules,
 } = core
 
 const t = (key, params = {}) => key === 'stats.cost' ? `费用 ≈ ${params.cost}` : key
@@ -127,25 +126,6 @@ test('Given 只有 */* 条件规则 When ensureGlobalDefault Then 仍补默认�
   assert.deepEqual(ensured.rules.map((item) => [item.model, item.conditions.length]), [['*/*', 1], ['*/*', 0]])
 })
 
-test('Given 合成全局槽仍全零 When persistablePricingRules Then 保存草稿剔除它', () => {
-  const ensured = ensureGlobalDefault([rule('a/b')], '¥')
-  assert.deepEqual(persistablePricingRules(ensured.rules, true).map((item) => item.model), ['a/b'])
-})
-
-test('Given 合成全局槽填了价 When persistablePricingRules Then 保留它', () => {
-  const ensured = ensureGlobalDefault([rule('a/b')], '¥')
-  ensured.rules.at(-1).price.input = 1
-  assert.deepEqual(persistablePricingRules(ensured.rules, true).map((item) => item.model), ['a/b', '*/*'])
-})
-
-test('Given 全局条件规则全零且缺默认价 When 保存 Then 只剔除合成默认槽,保留条件规则', () => {
-  const conditional = rule('*/*', price(0, 0, 0, 0), [{ kind: 'weekdays', days: [1] }])
-  const ensured = ensureGlobalDefault([rule('a/b'), conditional], '¥')
-  assert.equal(ensured.synthetic, true)
-  const persisted = persistablePricingRules(ensured.rules, true)
-  assert.deepEqual(persisted.map((item) => [item.model, item.conditions.length]), [['a/b', 0], ['*/*', 1]])
-})
-
 test('Given 组内首条无条件规则 When partitionGroupOf Then 首条是默认价而非末条', () => {
   const group = { model: 'a/b', slots: [
     { index: 0, rule: rule('a/b', price(1)) },
@@ -160,11 +140,11 @@ test('Given 宿主投影键 When 读取常量 Then 与宿主注册键一致', ()
   assert.equal(MODEL_USAGE_PROJECTION, 'usageDashModelUsage')
 })
 
-test('Given 客户端与宿主同一规则表 When 归一 Then 输出同序', () => {
-  const rules = [rule('*/*', price(2)), rule('a/b', price(1)), rule('a/b', price(3), [{ kind: 'weekdays', days: [1] }])]
+test('Given 无条件副本与不同范围交错 When 加载编辑器草稿 Then 去除副本并保留其余规则编号顺序', () => {
+  const rules = [rule('*/*', price(2)), rule('a/b', price(1)), rule('a/b', price(3), [{ kind: 'weekdays', days: [1] }]), rule('a/b', price(4))]
   assert.deepEqual(normalizePricingRules(rules).map((item) => [item.model, item.price.input]), [
-    ['a/b', 3],
-    ['a/b', 1],
     ['*/*', 2],
+    ['a/b', 1],
+    ['a/b', 3],
   ])
 })

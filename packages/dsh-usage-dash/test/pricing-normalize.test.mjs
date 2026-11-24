@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { GLOBAL_DEFAULT_MODEL, normalizePricingRules } from '../src/pricing.js'
+import { GLOBAL_DEFAULT_MODEL, normalizePricingRules, resolvePricingRule } from '../src/pricing.js'
 
 const rule = (model, input, conditions = []) => ({
   model,
@@ -12,10 +12,7 @@ const rule = (model, input, conditions = []) => ({
 })
 const condition = { kind: 'weekdays', days: [1] }
 
-test('Given 同模型多条无条件规则 When 归一 Then 保留首条为默认并置组末', () => {
-  // Given a/b 的首条价格 1、次条价格 2
-  // When 归一
-  // Then 价格 1 保留在默认位,价格 2 删除,数组顺序为默认价
+test('Given 同模型多条无条件规则 When 归一 Then 仅保留首条', () => {
   const first = rule('a/b', 1)
   const second = rule('a/b', 2)
   const normalized = normalizePricingRules([first, second])
@@ -23,14 +20,20 @@ test('Given 同模型多条无条件规则 When 归一 Then 保留首条为默�
   assert.equal(normalized[0], first)
 })
 
-test('Given 无条件规则排在条件规则前 When 归一 Then 条件规则升到默认价前', () => {
-  // Given [默认, 条件]
-  // When 归一
-  // Then [条件, 默认],条件规则不会排在默认价之后成为死规则
+test('Given 无条件规则排在条件规则前 When 归一 Then 保留原序', () => {
   const fallback = rule('a/b', 1)
   const special = rule('a/b', 2, [condition])
   const normalized = normalizePricingRules([fallback, special])
-  assert.deepEqual(normalized, [special, fallback])
+  assert.deepEqual(normalized, [fallback, special])
+})
+
+test('Given 同优先级的不同通配模式交错 When 归一 Then 保留胜者顺序', () => {
+  const ineligible = rule('p/a*cd', 1, [{ kind: 'weekdays', days: [1] }])
+  const winner = rule('p/ab*d', 2, [{ kind: 'weekdays', days: [0] }])
+  const tied = rule('p/a*cd', 3, [{ kind: 'weekdays', days: [0] }])
+  const normalized = normalizePricingRules([ineligible, winner, tied])
+  assert.deepEqual(normalized, [ineligible, winner, tied])
+  assert.equal(resolvePricingRule(normalized, 'p/abcd', new Date(2026, 8, 6)).winner, winner)
 })
 
 test('Given 组内只有条件规则 When 归一 Then 全部保留且不合成默认价', () => {
@@ -39,15 +42,12 @@ test('Given 组内只有条件规则 When 归一 Then 全部保留且不合成�
   assert.deepEqual(normalizePricingRules([first, second]), [first, second])
 })
 
-test('Given 多条 */* 规则 When 归一 Then 保留首条并整体移到其他模型之后', () => {
-  // Given */* 首条 1、次条 2,中间夹一个精确模型
-  // When 归一
-  // Then 精确模型在前,*/* 只保留首条在最后
+test('Given 多条 */* 规则 When 归一 Then 首条留在原位', () => {
   const globalFirst = rule(GLOBAL_DEFAULT_MODEL, 1)
   const exact = rule('p/m', 3)
   const globalSecond = rule(GLOBAL_DEFAULT_MODEL, 2)
   const normalized = normalizePricingRules([globalFirst, exact, globalSecond])
-  assert.deepEqual(normalized, [exact, globalFirst])
+  assert.deepEqual(normalized, [globalFirst, exact])
 })
 
 test('Given 空数组或非数组 When 归一 Then 返回空数组', () => {
@@ -62,7 +62,7 @@ test('Given 同模型条件规则与多条无条件 When 归一 Then 默认价�
   const late = rule('a/b', 3, [{ kind: 'weekdays', days: [2] }])
   const duplicate = rule('a/b', 4)
   const normalized = normalizePricingRules([early, fallback, late, duplicate])
-  assert.deepEqual(normalized, [early, late, fallback])
+  assert.deepEqual(normalized, [early, fallback, late])
 })
 
 test('Given 缺失 conditions 的存量规则 When 归一 Then 视为无条件默认价', () => {

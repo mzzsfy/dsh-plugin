@@ -883,6 +883,7 @@ const MESSAGES_ZH = {
   requestCurrentTag: '当前',
   settingsSection: '显示与增强',
   settingsSectionDesc: '官方弹窗补全与费用显示开关',
+  sectionDesc: '按模型与时点估算费用，定价规则与快照试算都在这里',
   displayGroup: '显示补全',
   displayGroupDesc: '官方用量与费用显示',
   recentGroup: '最近请求',
@@ -941,6 +942,79 @@ const MESSAGES_ZH = {
   turnTokensUnreported: '该提供商未上报此桶',
   pricing: '定价规则',
   pricingUnavailable: '定价规则不可用',
+  'pricing.retry': '重新加载定价',
+  'pricing.reset': '清空定价',
+  'pricing.confirmReset': '确认永久清空定价',
+  'pricing.views': '定价视图',
+  'pricing.models': '模型',
+  'pricing.rules': '规则',
+  'pricing.edit': '编辑',
+  'pricing.now': '此刻',
+  'pricing.snapshot': '所选快照',
+  'pricing.localSnapshot': '估算时点（{zone}）',
+  'pricing.localZone': '本地时间',
+  'pricing.providerSlash': '平台模式不能包含斜杠。请在型号字段输入带斜杠的型号。',
+  'pricing.duplicateDefault': '同一范围只能有一条无条件规则。',
+  'pricing.loading': '正在加载定价规则…',
+  'pricing.backNow': '回到此刻',
+  'pricing.search': '搜索平台或型号',
+  'pricing.searchPlaceholder': '也可输入完整的 平台/型号 试算',
+  'pricing.estimated': '快照估算花费',
+  'pricing.priced': '已定价组合',
+  'pricing.fallback': '默认价计费',
+  'pricing.noObserved': '当前统计范围内暂无已观察到的模型。',
+  'pricing.noSearchResults': '暂无匹配的已观察模型。',
+  'pricing.previousModels': '上一页型号',
+  'pricing.nextModels': '下一页型号',
+  'pricing.configure': '配置定价',
+  'pricing.modelCount': '{n} 个型号',
+  'pricing.probe': '未观察到的型号 · 试算',
+  'pricing.unpriced': '未定价',
+  'pricing.unpricedCount': '{n} 个已观察到的组合未定价',
+  'pricing.noMatch': '此时点没有规则为该组合计价。',
+  'pricing.active': '生效',
+  'pricing.inactive': '不生效',
+  'pricing.unconditional': '无条件',
+  'pricing.showOthers': '显示其他 {n} 条规则',
+  'pricing.hideOthers': '收起其他规则',
+  'pricing.withStar': '带 *',
+  'pricing.withoutStar': '不带 *',
+  'pricing.globalFallback': '全局默认价',
+  'pricing.conflict': '同优先级冲突',
+  'pricing.billing': '计费 {n}',
+  'pricing.taken': '被接管 {n}',
+  'pricing.ruleModels': '规则 {rule} 的型号',
+  'pricing.ruleModelsKinds': '型号清单类型',
+  'pricing.no.billing': '此时点没有计费型号。',
+  'pricing.no.taken': '此时点没有被接管的型号。',
+  'pricing.takenBy': '由 {rule} 计费',
+  'pricing.takeoverDetail': '{rule} 接管 {n} 个组合',
+  'pricing.ruleEstimate': '快照估算 {cost} · {tokens} token',
+  'pricing.tree': '看规则树',
+  'pricing.jump': '跳到模型',
+  'pricing.close': '关闭',
+  'pricing.fallbackRequired': '填写无条件的全局默认价（*/*）后再保存。',
+  'pricing.disable': '停用定价',
+  'pricing.confirmDisable': '确认清空定价草稿',
+  'pricing.invalidResponse': '保存失败，定价响应无效。',
+  'pricing.validationSummary': '请检查标出的定价字段。',
+  'pricing.providerPattern': '平台模式',
+  'pricing.modelPattern': '型号模式',
+  'pricing.helpLabel': '匹配规则说明',
+  'pricing.help': '先比较平台，再比较型号。每段精确优先，其次是带 * 的模式（更长优先；同长度按前缀、后缀、中缀），最后才是单独的 *。条件必须全部成立，同档条件多者优先，仍并列时按规则编号选择第一条。每段最多一个 *，可匹配零个或多个字符。',
+  'pricing.batch': '批量套用',
+  'pricing.batchTitle': '批量套用价格',
+  'pricing.batchTargets': '精确型号',
+  'pricing.batchHint': '保留来源规则的平台模式。每行一个型号，也可用逗号分隔。已有同范围的规则会跳过。',
+  'pricing.batchEmpty': '输入型号后预览计费。',
+  'pricing.batchInvalid': '请输入不含 * 或空白的精确型号。',
+  'pricing.batchInvalidSource': '请先修正来源规则的价格、模式或条件。',
+  'pricing.batchStatus': '此快照将新增 {added} 条规则，跳过 {skipped} 条。',
+  'pricing.batchSkip': '已有同范围规则，跳过',
+  'pricing.batchUnobserved': '当前范围内暂无用量',
+  'pricing.batchConditionsOff': '此快照没有符合条件的组合',
+  'pricing.batchCancel': '取消',
+  'pricing.batchConfirm': '添加到草稿',
   pricingModel: '模型',
   pricingModelPlaceholder: 'provider/model,段可通配如 */*',
   pricingCurrency: '货币',
@@ -1142,6 +1216,7 @@ const MESSAGES_EN = {
   requestCurrentTag: 'Current',
   settingsSection: 'Display & enhancements',
   settingsSectionDesc: 'Official dialog additions and cost display',
+  sectionDesc: 'Estimates cost per model and point in time; pricing rules and snapshot probes live here',
   displayGroup: 'Display additions',
   displayGroupDesc: 'Official usage and cost display',
   recentGroup: 'Recent requests',
@@ -1200,6 +1275,79 @@ const MESSAGES_EN = {
   turnTokensUnreported: 'Not reported by this provider',
   pricing: 'Pricing rules',
   pricingUnavailable: 'Pricing rules unavailable',
+  'pricing.retry': 'Reload pricing',
+  'pricing.reset': 'Clear pricing',
+  'pricing.confirmReset': 'Confirm permanent clearing',
+  'pricing.views': 'Pricing views',
+  'pricing.models': 'Models',
+  'pricing.rules': 'Rules',
+  'pricing.edit': 'Edit',
+  'pricing.now': 'Now',
+  'pricing.snapshot': 'Selected snapshot',
+  'pricing.localSnapshot': 'Estimate at ({zone})',
+  'pricing.localZone': 'local time',
+  'pricing.providerSlash': 'Provider patterns cannot contain a slash. Enter model names containing slashes in the model field.',
+  'pricing.duplicateDefault': 'Only one unconditional rule is allowed per scope.',
+  'pricing.loading': 'Loading pricing rules…',
+  'pricing.backNow': 'Back to now',
+  'pricing.search': 'Find a provider or model',
+  'pricing.searchPlaceholder': 'Enter a full provider/model to test its price',
+  'pricing.estimated': 'Snapshot cost estimate',
+  'pricing.priced': 'Priced combinations',
+  'pricing.fallback': 'Fallback billing',
+  'pricing.noObserved': 'No models were observed in this usage range.',
+  'pricing.noSearchResults': 'No observed models match the search.',
+  'pricing.previousModels': 'Previous models',
+  'pricing.nextModels': 'Next models',
+  'pricing.configure': 'Configure pricing',
+  'pricing.modelCount': '{n} models',
+  'pricing.probe': 'Unobserved model · price check',
+  'pricing.unpriced': 'Unpriced',
+  'pricing.unpricedCount': '{n} observed combinations are unpriced',
+  'pricing.noMatch': 'No rule prices this combination at the selected time.',
+  'pricing.active': 'Active',
+  'pricing.inactive': 'Inactive',
+  'pricing.unconditional': 'Unconditional',
+  'pricing.showOthers': 'Show {n} other rules',
+  'pricing.hideOthers': 'Hide other rules',
+  'pricing.withStar': 'With *',
+  'pricing.withoutStar': 'Without *',
+  'pricing.globalFallback': 'Global fallback',
+  'pricing.conflict': 'Equal-priority conflict',
+  'pricing.billing': 'Billing {n}',
+  'pricing.taken': 'Overridden {n}',
+  'pricing.ruleModels': 'Models for rule {rule}',
+  'pricing.ruleModelsKinds': 'Model list types',
+  'pricing.no.billing': 'No models are billed by this rule at the selected time.',
+  'pricing.no.taken': 'No models are overridden at the selected time.',
+  'pricing.takenBy': 'Billed by {rule}',
+  'pricing.takeoverDetail': '{rule} takes over {n} combinations',
+  'pricing.ruleEstimate': 'Snapshot estimate {cost} · {tokens} tokens',
+  'pricing.tree': 'View rule tree',
+  'pricing.jump': 'Go to model',
+  'pricing.close': 'Close',
+  'pricing.fallbackRequired': 'Enter an unconditional global fallback (*/*) before saving.',
+  'pricing.disable': 'Disable pricing',
+  'pricing.confirmDisable': 'Confirm clearing pricing draft',
+  'pricing.invalidResponse': 'Save failed because the pricing response was invalid.',
+  'pricing.validationSummary': 'Review the highlighted pricing fields.',
+  'pricing.providerPattern': 'Provider pattern',
+  'pricing.modelPattern': 'Model pattern',
+  'pricing.helpLabel': 'Matching syntax and priority',
+  'pricing.help': 'Compare the provider first, then the model. In each segment, exact comes first, then patterns with * (longer first; for equal lengths, prefix, suffix, then infix), then a lone *. All conditions must match. More conditions take priority on a tie. Remaining ties go to the first rule by number. Each segment accepts at most one *, which matches zero or more characters.',
+  'pricing.batch': 'Apply in bulk',
+  'pricing.batchTitle': 'Apply prices in bulk',
+  'pricing.batchTargets': 'Exact model names',
+  'pricing.batchHint': 'Keeps the source rule’s provider pattern. Enter one model per line or separate with commas. Rules with the same scope are skipped.',
+  'pricing.batchEmpty': 'Enter models to preview their pricing.',
+  'pricing.batchInvalid': 'Enter exact model names without * or spaces.',
+  'pricing.batchInvalidSource': 'Correct the source rule’s prices, patterns, or conditions first.',
+  'pricing.batchStatus': 'At this snapshot, {added} rules will be added and {skipped} skipped.',
+  'pricing.batchSkip': 'Same scope already exists; skipped',
+  'pricing.batchUnobserved': 'No usage in this range',
+  'pricing.batchConditionsOff': 'No matching conditions at this snapshot',
+  'pricing.batchCancel': 'Cancel',
+  'pricing.batchConfirm': 'Add to draft',
   pricingModel: 'Model',
   pricingModelPlaceholder: 'provider/model, segments may be */*',
   pricingCurrency: 'Currency',
@@ -2422,9 +2570,11 @@ const TOKENS_PER_MILLION = 1000 * 1000
 const MODEL_WILDCARD = '*'
 const SEGMENT_SEPARATOR = '/'
 const PROVIDER_UNSET = 'default'
-// 档位权重:vendor 段通配 1 档、model 段通配 2 档,和越小越优先(模型名精确档恒优于供应商精确档)
-const VENDOR_WILDCARD_TIER = 1
-const MODEL_WILDCARD_TIER = 2
+const SEGMENT_EXACT = 0
+const SEGMENT_PREFIX = 1
+const SEGMENT_SUFFIX = 2
+const SEGMENT_INFIX = 3
+const SEGMENT_ANY = 4
 const MINUTES_PER_HOUR = 60
 
 const minutesOfDay = (date) => date.getHours() * MINUTES_PER_HOUR + date.getMinutes()
@@ -2480,9 +2630,9 @@ const CONDITION_MATCHERS = {
 
 // 单条件判定;未知 kind、形状残缺或非法 Date 一律不成立
 function conditionMatches(condition, date) {
-  const matcher = condition && CONDITION_MATCHERS[condition.kind]
-  if (!matcher || !(date instanceof Date) || Number.isNaN(date.getTime())) return false
-  return matcher(condition, date)
+  if (!condition || typeof condition.kind !== 'string' || !Object.hasOwn(CONDITION_MATCHERS, condition.kind)
+    || !(date instanceof Date) || Number.isNaN(date.getTime())) return false
+  return CONDITION_MATCHERS[condition.kind](condition, date)
 }
 
 // 形状残缺规则跳过:缺 model/price、unit 非 perMillion、conditions 非数组(缺失视为无条件)
@@ -2493,62 +2643,123 @@ function isRuleShaped(rule) {
     && (rule.conditions === undefined || rule.conditions === null || Array.isArray(rule.conditions))
 }
 
-// 规则模型键必须两段式:首个 / 前 vendor 段、后模型段(允许含 /),首位斜杠或无斜杠均非法
+// 规则以首个斜杠分段,其后的斜杠属于型号。
 function splitRuleSegments(pattern) {
+  if (typeof pattern !== 'string') return null
   const slash = pattern.indexOf(SEGMENT_SEPARATOR)
   return slash > 0 ? [pattern.slice(0, slash), pattern.slice(slash + SEGMENT_SEPARATOR.length)] : null
 }
 
-// 段须非空且不含空白:含空白的模型键永不匹配真实请求
-function isTwoSegmentModel(pattern) {
+const compilePricingSegment = (segment) => {
+  if (segment === '' || /\s/.test(segment)) return null
+  const star = segment.indexOf(MODEL_WILDCARD)
+  if (star < 0) return { kind: SEGMENT_EXACT, head: segment, tail: '', literalLength: segment.length }
+  if (star !== segment.lastIndexOf(MODEL_WILDCARD)) return null
+  const head = segment.slice(0, star)
+  const tail = segment.slice(star + MODEL_WILDCARD.length)
+  const kind = head ? (tail ? SEGMENT_INFIX : SEGMENT_PREFIX) : (tail ? SEGMENT_SUFFIX : SEGMENT_ANY)
+  return { kind, head, tail, literalLength: head.length + tail.length }
+}
+
+const compilePricingModel = (pattern) => {
   const segments = splitRuleSegments(pattern)
-  return segments !== null && segments.every((segment) => /^\S+$/.test(segment))
+  if (!segments) return null
+  const provider = compilePricingSegment(segments[0])
+  const model = compilePricingSegment(segments[1])
+  return provider && model ? { provider, model } : null
 }
 
-// 请求侧模型键按同构规则分段,无 / 或首位斜杠时 vendor 段缺省归 default(与存储行口径一致)
-function splitRequestSegments(model) {
-  return splitRuleSegments(model) ?? [PROVIDER_UNSET, model]
+const isTwoSegmentModel = (pattern) => compilePricingModel(pattern) !== null
+
+// 请求侧无斜杠或首位斜杠时沿用缺省供应商。
+const splitRequestSegments = (model) => splitRuleSegments(model) ?? [PROVIDER_UNSET, model]
+
+// 只缓存规则的模式编译结果,条目随规则引用回收,改写 model 时重新编译。
+const pricingPatternCache = new WeakMap()
+const compiledPricingModel = (rule) => {
+  const source = rule.model
+  const cached = pricingPatternCache.get(rule)
+  if (cached?.source === source) return cached.pattern
+  const pattern = compilePricingModel(source)
+  pricingPatternCache.set(rule, { source, pattern })
+  return pattern
 }
 
-// 段级比对:规则段为通配或与请求段相等;两段全过才成立,通配段按各自档位计权
-function matchTier(ruleSegments, requestSegments) {
-  const [ruleVendor, ruleModel] = ruleSegments
-  const [requestVendor, requestModel] = requestSegments
-  if (ruleVendor !== MODEL_WILDCARD && ruleVendor !== requestVendor) return null
-  if (ruleModel !== MODEL_WILDCARD && ruleModel !== requestModel) return null
-  return (ruleVendor === MODEL_WILDCARD ? VENDOR_WILDCARD_TIER : 0)
-    + (ruleModel === MODEL_WILDCARD ? MODEL_WILDCARD_TIER : 0)
+const pricingSegmentMatches = (segment, value) => {
+  if (segment.kind === SEGMENT_EXACT) return value === segment.head
+  if (segment.kind === SEGMENT_ANY) return true
+  return value.length >= segment.literalLength && value.startsWith(segment.head) && value.endsWith(segment.tail)
 }
+
+const comparePricingSegments = (a, b) => {
+  if (a.kind === SEGMENT_EXACT || b.kind === SEGMENT_EXACT) return a.kind - b.kind
+  return b.literalLength - a.literalLength || a.kind - b.kind
+}
+
+const comparePricingPriority = (a, aCount, b, bCount) =>
+  comparePricingSegments(a.provider, b.provider) || comparePricingSegments(a.model, b.model) || bCount - aCount
 
 const toLocalDate = (timestamp) => {
   const date = timestamp instanceof Date ? timestamp : new Date(timestamp)
   return Number.isNaN(date.getTime()) ? null : date
 }
 
-// 匹配链:全名 > 模型名(vendor 通配)> 供应商(model 通配)> '*/*' 全通;
-// 档位最小者胜,同档按数组序取首个;高档条件不满足自然落低档;无命中为 null(调用方计 unpriced)
-function matchPriceRule(rules, model, timestamp) {
+const pricingConditionsMatch = (conditions, date) => {
+  for (let index = 0; index < conditions.length; index += 1) {
+    if (!conditionMatches(conditions[index], date)) return false
+  }
+  return true
+}
+
+// 热路径单遍择优;解释路径复用相同的匹配和比较,另收集所有候选。
+const selectPricingRule = (rules, model, timestamp, candidates) => {
+  if (!Array.isArray(rules) || rules.length === 0 || typeof model !== 'string') return null
   const date = toLocalDate(timestamp)
-  if (!Array.isArray(rules) || !date || typeof model !== 'string') return null
-  const requestSegments = splitRequestSegments(model)
-  let bestTier = Infinity
-  let bestRule = null
+  if (!date) return null
+  const [requestProvider, requestModel] = splitRequestSegments(model)
+  let winner = null
+  let bestPattern = null
+  let bestCount = 0
   for (const rule of rules) {
     if (!isRuleShaped(rule)) continue
-    const ruleSegments = splitRuleSegments(rule.model)
-    if (!ruleSegments) continue
-    const tier = matchTier(ruleSegments, requestSegments)
-    if (tier === null || tier >= bestTier) continue
-    const conditions = Array.isArray(rule.conditions) ? rule.conditions : []
-    if (!conditions.every((condition) => conditionMatches(condition, date))) continue
-    bestTier = tier
-    bestRule = rule
+    const pattern = compiledPricingModel(rule)
+    if (!pattern || !pricingSegmentMatches(pattern.provider, requestProvider)
+      || !pricingSegmentMatches(pattern.model, requestModel)) continue
+    const conditions = rule.conditions
+    const conditionCount = conditions?.length ?? 0
+    // 只取胜者时,无法超越当前胜者的规则不再评估条件。
+    const isBetter = bestPattern === null || comparePricingPriority(pattern, conditionCount, bestPattern, bestCount) < 0
+    if (!isBetter && !candidates) continue
+    if (conditionCount > 0 && !pricingConditionsMatch(conditions, date)) continue
+    if (candidates) candidates.push({ rule, pattern, conditionCount })
+    if (isBetter) {
+      bestPattern = pattern
+      bestCount = conditionCount
+      winner = rule
+    }
   }
-  return bestRule === null ? null : { rule: bestRule, price: bestRule.price }
+  return winner
+}
+
+const resolvePricingRule = (rules, model, timestamp) => {
+  const ranked = []
+  const winner = selectPricingRule(rules, model, timestamp, ranked)
+  const compare = (a, b) => comparePricingPriority(a.pattern, a.conditionCount, b.pattern, b.conditionCount)
+  // 稳定排序保留同优先级原序,冲突仅含与首条实质并列的规则。
+  ranked.sort(compare)
+  const candidates = ranked.map(({ rule }) => rule)
+  const firstLower = ranked.findIndex((entry) => compare(entry, ranked[0]) !== 0)
+  const topCount = firstLower === -1 ? ranked.length : firstLower
+  return { winner, candidates, conflictRules: topCount > 1 ? candidates.slice(0, topCount) : [] }
+}
+
+function matchPriceRule(rules, model, timestamp) {
+  const rule = selectPricingRule(rules, model, timestamp)
+  return rule === null ? null : { rule, price: rule.price }
 }
 
 function matchPrice(rules, model, timestamp) {
-  return matchPriceRule(rules, model, timestamp)?.price ?? null
+  return selectPricingRule(rules, model, timestamp)?.price ?? null
 }
 
 const BUCKET_PRICE_KEYS = [
@@ -2589,12 +2800,14 @@ const COST_APPROX = '≈'
 const UNIT_PRICE_DECIMALS = 6
 const THOUSANDS_PATTERN = /(\d)(?=(\d{3})+(?!\d))/g
 
-// 千分位 + 至少 decimals 位小数,正值小于 10^-decimals 时小数位 +2;货币空串不加符号,「≈」前缀由调用方拼
+// 千分位 + 至少 decimals 位小数,正值小于 10^-decimals 时小数位 +2;
+// 货币非字符串(存量规则可能缺省或为 null)按无符号处理,「≈」前缀由调用方拼
 function formatCost(value, currency, decimals = COST_DECIMALS) {
+  const symbol = typeof currency === 'string' ? currency : ''
   const microThreshold = 10 ** -decimals
   const used = value > 0 && value < microThreshold ? decimals + (COST_MICRO_DECIMALS - COST_DECIMALS) : decimals
   const [whole, fraction] = value.toFixed(used).split('.')
-  return `${currency}${whole.replace(THOUSANDS_PATTERN, '$1,')}.${fraction}`
+  return `${symbol}${whole.replace(THOUSANDS_PATTERN, '$1,')}.${fraction}`
 }
 
 const COST_CENT_SCALE = 100
@@ -3415,36 +3628,18 @@ function coercePricingRules(rules) {
 // 服务端规则为纯 JSON,编辑副本深拷贝与缓存脱钩
 const copyRules = (rules) => JSON.parse(JSON.stringify(rules))
 
-// 与宿主 pricing.js 同源:同模型保留首条无条件默认价并置组末,条件规则前置;*/* 恒最后。
-// 编辑器加载即归一,存量多条无条件规则不会继续出现「显示价不是生效价」。
+// 只去除同模型后续无条件规则,保留其余原序,避免归一改变不同模式间的平局结果。
 const normalizePricingRules = (rules) => {
   if (!Array.isArray(rules)) return []
-  const groups = new Map()
-  for (const rule of rules) {
-    if (!rule || typeof rule !== 'object') continue
-    const model = typeof rule.model === 'string' ? rule.model : ''
-    if (!groups.has(model)) groups.set(model, [])
-    groups.get(model).push(rule)
-  }
-  const regular = []
-  const global = []
-  for (const [model, group] of groups) {
-    const fallback = group.find((rule) => (rule.conditions ?? []).length === 0)
-    const conditional = group.filter((rule) => (rule.conditions ?? []).length !== 0)
-    const ordered = fallback ? [...conditional, fallback] : conditional
-    if (model === MODEL_UNROUTED) global.push(...ordered)
-    else regular.push(...ordered)
-  }
-  return [...regular, ...global]
-}
-
-// 编辑器展示顺序:全局兜底恒最后,不受规则表首次出现顺序影响
-const displayGroupsOf = (rules) => {
-  const groups = groupRulesOf(rules)
-  return [
-    ...groups.filter((group) => group.model !== MODEL_UNROUTED),
-    ...groups.filter((group) => group.model === MODEL_UNROUTED),
-  ]
+  const seen = new Set()
+  return rules.filter((rule) => {
+    if (!rule || typeof rule !== 'object') return false
+    if (rule.conditions != null && (!Array.isArray(rule.conditions) || rule.conditions.length !== 0)) return true
+    const model = rule.model
+    if (seen.has(model)) return false
+    seen.add(model)
+    return true
+  })
 }
 
 // 货币为编辑器级全局设置:整表统一,规则内 currency 由切换值派生(wire 形态不变)
@@ -3458,12 +3653,6 @@ const defaultPricingRule = (currency = CURRENCIES[0], model = '') => ({
   conditions: [],
 })
 
-// 值全为空/零视为未配置:合成 */* 槽没有填价时不应写入 wire
-const isZeroPricingRule = (rule) => PRICE_KEYS.every((key) => {
-  const value = rule?.price?.[key]
-  return value === '' || value === null || value === undefined || Number(value) === 0
-})
-
 // 编辑器加载:归一后若无 */* 默认价,补一条未配置的全局槽;synthetic 标记供保存时剔除
 const ensureGlobalDefault = (rules, currency) => {
   const hasGlobalFallback = rules.some((rule) => rule.model === MODEL_UNROUTED
@@ -3475,13 +3664,6 @@ const ensureGlobalDefault = (rules, currency) => {
     synthetic: true,
   }
 }
-
-// 保存前草稿:合成全局槽仍全零时剔除,避免把「未配置」落成免费兜底
-const persistablePricingRules = (rules, syntheticGlobal) => syntheticGlobal
-  ? rules.filter((rule) => !(rule.model === MODEL_UNROUTED
-    && (rule.conditions ?? []).length === 0
-    && isZeroPricingRule(rule)))
-  : rules
 
 const patchItemAt = (array, index, patch) => array.map((item, i) => (i === index ? { ...item, ...patch } : item))
 
@@ -3499,9 +3681,17 @@ function groupRulesOf(rules) {
   return [...groups.values()]
 }
 
-// 组内划分:首条无条件规则即该模型的实际默认价(与 matchPrice 同档取首条一致),
-// UI 禁条件/排序/删除;其余为附加计费规则。归一会把默认价移到组末,渲染层仍按此口径取槽,
-// 避免存量数据里「显示末条、实际首条」再次分叉。
+// 组卡 memo 判等:依赖「草稿规则对象不可变」——改名/改价/换币都新建对象,插入移动只重排引用。
+// 因此逐槽比 rule 引用即可覆盖字段变化;errors/t/actions/currency 按引用比较。
+function pricingGroupPropsEqual(a, b) {
+  if (a.currency !== b.currency || a.errors !== b.errors || a.t !== b.t || a.actions !== b.actions) return false
+  if (a.group.slots.length !== b.group.slots.length) return false
+  return a.group.slots.every((slot, index) => slot.rule === b.group.slots[index].rule && slot.index === b.group.slots[index].index)
+}
+
+// 组内划分:首条无条件规则即该模型的实际默认价(与匹配器同档取表内首条一致),
+// UI 禁条件/排序/删除;其余为附加计费规则。归一只删除同模式后续无条件副本、不重排,
+// 因此渲染层按「组内首条无条件」取槽,与计费胜者同口径。
 function partitionGroupOf(group) {
   const fallbackIndex = group.slots.findIndex((slot) => (slot.rule.conditions ?? []).length === 0)
   if (fallbackIndex < 0) return { defaultSlot: null, extras: group.slots }
@@ -3583,10 +3773,26 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     const PRICING_SAVED_NOTICE_MS = 3 * 1000
     let cached = null
     let pricingFlight = null
+    // 最近一次取价失败原因:transport(请求失败或存储降级 503)与 invalid(回包结构非法)后果不同,
+    // 只有后者才值得提供清空自救,前者重载即可,不能让瞬时失败诱导删表
+    let pricingFailure = null
     const pricingListeners = new Set()
-    const validPricing = value => value && Number.isFinite(value.revision) && Array.isArray(value.rules)
+    // 只校验渲染所需的结构。旧规则允许进入编辑页修正其模式、时刻或日期。
+    const validStoredCondition = (condition) => {
+      if (!CONDITION_KINDS.includes(condition?.kind)) return false
+      if (condition.kind === 'weekdays') return Array.isArray(condition.days) && condition.days.every(isValidWeekday)
+      if (condition.kind === 'monthDays') return Number.isInteger(condition.from) && Number.isInteger(condition.to)
+      return typeof condition.from === 'string' && typeof condition.to === 'string'
+    }
+    const validPricing = (value) => value && Number.isFinite(value.revision) && Array.isArray(value.rules)
+      && value.rules.every((rule) => isRuleShaped(rule)
+        && (rule.currency == null || CURRENCIES.includes(rule.currency))
+        && PRICE_KEYS.every((key) => Number.isFinite(rule.price[key]) && rule.price[key] >= 0)
+        && (rule.conditions ?? []).every(validStoredCondition))
     const applyPricingValue = (value, mutation = false) => {
       if (!validPricing(value) || (cached && value.revision < cached.revision)) return cached
+      // 成功写入即恢复健康,后续不可用态不会误沿用旧的失败原因
+      pricingFailure = null
       const refresh = mutation || (cached !== null && value.revision !== cached.revision)
       cached = { revision: value.revision, rules: value.rules, fetchedAt: Date.now() }
       for (const listener of pricingListeners) listener(cached, refresh)
@@ -3609,13 +3815,22 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       return parseEnvelope(json)
     }
 
-    // value 缺形状按失败处理:回退旧值,无旧值为 null(费用显示占位)
+    // value 缺形状按失败处理:回退旧值,无旧值为 null(费用显示占位);失败原因留给编辑器区分处理
     const fetchPricing = async (force = false) => {
       if (!force && cached && Date.now() - cached.fetchedAt < PRICING_CACHE_TTL_MS) return cached
       if (!pricingFlight) {
         pricingFlight = (async () => {
           const result = await requestGet(ENDPOINTS.pricing)
-          return validPricing(result.ok ? result.value : null) ? applyPricingValue(result.value) : cached
+          if (!result.ok) {
+            pricingFailure = 'transport'
+            return cached
+          }
+          if (!validPricing(result.value)) {
+            pricingFailure = 'invalid'
+            return cached
+          }
+          pricingFailure = null
+          return applyPricingValue(result.value)
         })().finally(() => { pricingFlight = null })
       }
       return pricingFlight
@@ -3730,7 +3945,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     }
 
     // 危险删除按钮:首点进武装态(垃圾桶变"确认删除"文字),再点才执行,超时自动解除
-    function DeleteArmedButton({ labelKey, confirmKey, onConfirm, t = defaultT }) {
+    function DeleteArmedButton({ labelKey, confirmKey, onConfirm, showLabel = false, tone = 'default', t = defaultT }) {
       const [armed, setArmed] = useState(false)
       const armedTimerRef = useRef(null)
       useEffect(() => () => {
@@ -3747,36 +3962,39 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         onConfirm()
       }
       return h('button', {
-        className: cx('ud-btn ud-btn--text', armed && 'ud-delete-armed'), type: 'button', onClick: click,
+        className: cx('ud-btn ud-btn--text', tone === 'danger' && 'ud-btn--danger-text', armed && 'ud-delete-armed'), type: 'button', onClick: click,
         'aria-label': t(labelKey), title: t(labelKey),
-      }, armed ? t(confirmKey) : h(Icon, { paths: ICONS.trash }))
+      }, armed ? t(confirmKey) : showLabel ? t(labelKey) : h(Icon, { paths: ICONS.trash }))
     }
 
     const STYLE_CSS = `
 /* 图表区分色:主色与热力图梯度挂业务蓝派生(brand-primary 在宿主新版主题为单色黑白,不可作数据色);
    speed/ttft 用 success/warn 语义槽,亮暗随宿主别名自动适配 */
-.ud-panel{display:flex;flex-direction:column;gap:16px;font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary);
+.ud-panel{display:flex;flex-direction:column;gap:12px;font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary);
 --ud-chart-1:var(--dsw-alias-state-business-primary);--ud-chart-2:var(--dsw-alias-state-success-primary);--ud-chart-3:var(--dsw-alias-state-warn-primary);--ud-chart-4:hsl(262 84% 65%);--ud-chart-5:hsl(329 85% 55%);--ud-chart-other:var(--dsw-alias-label-tertiary);
 --ud-heat-0:color-mix(in srgb, var(--dsw-alias-label-tertiary) 12%, transparent);--ud-heat-1:color-mix(in srgb, var(--dsw-alias-state-business-primary) 18%, transparent);--ud-heat-2:color-mix(in srgb, var(--dsw-alias-state-business-primary) 36%, transparent);--ud-heat-3:color-mix(in srgb, var(--dsw-alias-state-business-primary) 54%, transparent);--ud-heat-4:color-mix(in srgb, var(--dsw-alias-state-business-primary) 74%, transparent);--ud-heat-5:var(--dsw-alias-state-business-primary);--ud-trend-line:var(--dsw-alias-state-business-primary);--ud-trend-speed:var(--dsw-alias-state-success-primary);--ud-trend-ttft:var(--dsw-alias-state-warn-primary);
 --ud-bg-overlay:var(--dsw-alias-bg-layer-2);--ud-border:var(--dsw-alias-border-l2);--ud-border-strong:var(--dsw-alias-border-l3);--ud-text:var(--dsw-alias-label-primary);--ud-text-sub:var(--dsw-alias-label-secondary);--ud-text-dim:var(--dsw-alias-label-tertiary);--ud-accent:var(--dsw-alias-state-business-primary);--ud-hover-bg:var(--dsw-alias-interactive-bg-hover);--ud-shadow-lv3:var(--dsw-shadow-lv3);--ud-radius-md:var(--dsw-radius-md);--ud-radius-sm:var(--dsw-radius-sm);--ud-card:var(--dsw-alias-bg-layer-1);--ud-card-border:var(--dsw-alias-border-l2)}
+.ud-section-page-head{display:flex;flex-direction:column;gap:2px;min-width:0}
+.ud-section-page-title{margin:0;font-size:18px;line-height:26px;font-weight:600;color:var(--dsw-alias-label-primary)}
+.ud-section-page-desc{margin:0;font-size:13px;line-height:20px;color:var(--dsw-alias-label-tertiary)}
 .ud-toolbar{display:flex;align-items:flex-start;gap:12px}
 .ud-toolbar-main{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:1 1 auto;min-width:0}
-.ud-group{display:flex;align-items:center;gap:2px;padding:4px;border:1px solid var(--ud-card-border);border-radius:var(--dsw-radius-md);background:var(--ud-card)}
+.ud-group{display:flex;align-items:center;gap:2px;padding:3px;border:0;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-module-platform)}
 .ud-seg-item{border:none;background:transparent;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;padding:0 12px;height:28px;border-radius:var(--dsw-radius-sm);cursor:pointer;white-space:nowrap;transition:background .15s,color .15s}
 .ud-seg-item:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
-.ud-seg-item--on{background:var(--dsw-alias-interactive-bg-active);color:var(--dsw-alias-label-primary);font-weight:600}
+.ud-seg-item--on{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent);color:var(--dsw-alias-brand-primary);font-weight:600}
 .ud-custom-range{display:flex;align-items:center;gap:6px}
 .ud-date-input{border:1px solid var(--ud-border-strong);border-radius:var(--dsw-radius-sm);background:var(--ud-card);color:var(--dsw-alias-label-primary);font-size:13px;padding:0 10px;height:32px;box-sizing:border-box}
 .ud-custom-sep{color:var(--dsw-alias-label-tertiary)}
-.ud-btn{border:1px solid var(--ud-border-strong);background:var(--ud-card);color:var(--dsw-alias-label-secondary);border-radius:var(--dsw-radius-sm);padding:0 12px;height:32px;font-size:13px;line-height:1;cursor:pointer;transition:background .15s,color .15s}
+.ud-btn{border:1px solid var(--ud-border-strong);background:transparent;color:var(--dsw-alias-label-secondary);border-radius:var(--dsw-radius-sm);padding:0 14px;height:32px;font-size:14px;line-height:1;cursor:pointer;transition:background .15s,color .15s}
 .ud-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
-.ud-btn:disabled{opacity:.5;cursor:default}
+.ud-btn:disabled{opacity:.5;cursor:not-allowed}
 .ud-toolbar-side{display:flex;align-items:center;gap:8px;flex:none;margin-left:auto;align-self:stretch}
 .ud-toolbar-side .ud-btn--text{display:inline-flex;align-items:center;height:100%}
 .ud-icon-btn{padding:0 12px}
 .ud-icon{display:inline-flex;align-items:center;justify-content:center}
 .ud-btn--text{border:none;background:transparent;color:var(--dsw-alias-label-tertiary);padding:2px 4px}
-.ud-delete-armed{color:var(--dsw-alias-state-error-primary);font-size:12px;white-space:nowrap}
+.ud-delete-armed,.ud-delete-armed:hover{background:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-bg-base);font-size:12px;white-space:nowrap}
 .ud-error{border:1px solid color-mix(in srgb,var(--dsw-alias-state-warn-primary) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 12%,transparent);color:var(--dsw-alias-state-warn-label);border-radius:var(--dsw-radius-sm);padding:8px 12px;font-size:13px;line-height:20px}
 .ud-loading{display:flex;flex-direction:column;gap:8px;padding:24px 0}
 .ud-loading::before,.ud-loading::after{content:"";display:block;height:14px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-skeleton)}
@@ -3910,8 +4128,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-switch input[type="checkbox"]:checked + .ud-switch__track .ud-switch__thumb{transform:translateX(${SWITCH_THUMB_TRAVEL}px)}
 .ud-switch input[type="checkbox"]:focus-visible + .ud-switch__track{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
 .ud-switch input[type="checkbox"]:disabled + .ud-switch__track{opacity:.45;cursor:default}
-.ud-settings-stack{display:flex;flex-direction:column;gap:8px}
-.ud-fold{border:1px solid var(--ud-card-border);border-radius:var(--dsw-radius-md);background:var(--ud-card);overflow:hidden}
+.ud-settings-stack{display:flex;flex-direction:column;gap:16px}
+.ud-fold{border:.5px solid var(--ud-card-border);border-radius:var(--dsw-radius-md);background:var(--ud-card);overflow:hidden}
 .ud-fold-head{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;box-sizing:border-box;padding:12px 16px;border:0;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;text-align:left;cursor:pointer}
 .ud-fold-head:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .ud-fold-head:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px}
@@ -3923,7 +4141,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-fold-caret{display:flex;align-items:center;justify-content:center;color:var(--dsw-alias-label-tertiary);transition:transform .15s ease}
 .ud-fold-caret svg{display:block;width:14px;height:14px}
 .ud-fold--open .ud-fold-caret{transform:rotate(90deg)}
-.ud-fold-body{padding:8px 16px 16px;border-top:.5px solid var(--dsw-alias-border-l1)}
+.ud-fold-body{padding:12px 16px 16px;border-top:.5px solid var(--dsw-alias-border-l2)}
 .ud-fold-body[hidden]{display:none}
 .ud-pref-group{display:flex;flex-direction:column;gap:4px;border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-sm);padding:12px 16px}
 .ud-pref-group + .ud-pref-group{margin-top:8px}
@@ -3932,22 +4150,21 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-pref-group-title{font-size:12px;line-height:18px;font-weight:600;color:var(--dsw-alias-label-secondary)}
 .ud-pref-group-desc{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
 .ud-pref-group--recent{background:color-mix(in srgb,var(--dsw-alias-bg-layer-2) 55%,transparent);border-color:var(--dsw-alias-border-l2)}
-.ud-pref-row{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.ud-pref-row{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:28px}
 .ud-pref-row--disabled .ud-pref-text{opacity:.55}
 .ud-pref-text{display:flex;flex-direction:column;gap:2px;min-width:0}
 .ud-pref-title{font-size:13px;color:var(--dsw-alias-label-primary)}
 .ud-pref-desc{font-size:12px;color:var(--dsw-alias-label-tertiary)}
-.ud-rule{display:flex;flex-direction:column;gap:8px;border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-sm);padding:10px 12px}
-.ud-rule-group{display:flex;flex-direction:column;gap:8px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);padding:10px 12px}
+.ud-rule{display:flex;flex-direction:column;gap:8px;min-width:0}
+.ud-rule-group>.ud-rule{border-top:.5px solid var(--dsw-alias-border-l1);padding-top:12px}
+.ud-rule-group>.ud-rule-group-head+.ud-rule{border-top:0;padding-top:0}
+.ud-rule-group{display:flex;flex-direction:column;gap:8px;border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-sm);padding:12px 16px}
 .ud-rule-group-head{display:flex;align-items:flex-end;gap:8px}
 .ud-rule-group-head .ud-field{flex:1}
 .ud-rule-group-slots{display:flex;flex-direction:column;gap:8px}
-.ud-rule-group-slots .ud-rule{background:color-mix(in srgb,var(--dsw-alias-bg-layer-2) 40%,transparent)}
-.ud-rule-default{border-style:dashed}
+.ud-rule-group-slots{display:flex;flex-direction:column;gap:8px;min-width:0}
 .ud-slot-head{display:flex;align-items:flex-end;gap:8px}
 .ud-slot-head .ud-price-grid{flex:1}
-.ud-rule-head{display:flex;align-items:flex-end;gap:8px}
-.ud-rule-head .ud-field{flex:1}
 .ud-rule-cond{font-size:11px;color:var(--dsw-alias-label-tertiary)}
 .ud-rule-conds{display:flex;flex-direction:column;gap:6px}
 .ud-cond{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
@@ -3958,17 +4175,92 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-cond-fields .ud-input{width:auto}
 .ud-cond-add{display:flex;gap:6px;flex-wrap:wrap}
 .ud-field{display:flex;flex-direction:column;gap:4px;min-width:0}
-.ud-field-label{font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.ud-field-label{font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary)}
 .ud-field-error{font-size:11px;color:var(--dsw-alias-state-error-primary)}
-.ud-input{border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-size:12px;padding:4px 6px;min-width:0;width:100%;box-sizing:border-box}
+.ud-input{border:1px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-size:14px;line-height:20px;min-height:36px;padding:4px 8px;min-width:0;width:100%;box-sizing:border-box}
 .ud-price-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
 .ud-price-grid .ud-input{text-align:right}
 .ud-price-input{position:relative;display:block}
-.ud-price-input .ud-input{padding-left:20px}
-.ud-price-currency{position:absolute;left:7px;top:50%;transform:translateY(-50%);font-size:11px;color:var(--dsw-alias-label-tertiary);pointer-events:none}
+.ud-price-input .ud-input{padding-right:20px}
+.ud-price-currency{position:absolute;right:8px;top:50%;transform:translateY(-50%);font-size:11px;color:var(--dsw-alias-label-tertiary);pointer-events:none}
 .ud-unit-note{font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}
-.ud-pricing-actions{display:flex;align-items:center;gap:8px}
-.ud-rule-add{border:1px dashed var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-tertiary);padding:8px;font-size:12px;cursor:pointer}
+.ud-pricing-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.ud-pricing-board,.ud-pricing-stack{display:grid;gap:12px;min-width:0}
+.ud-pricing-stack{gap:16px}
+.ud-pricing-board [hidden]{display:none!important}
+.ud-pricing-toolbar,.ud-pricing-line,.ud-pricing-clock{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+.ud-pricing-toolbar{justify-content:space-between}
+.ud-pricing-tabs .ud-seg-item{height:30px}
+.ud-pricing-clock{padding:8px;background:var(--dsw-alias-bg-layer-2);border-radius:var(--dsw-radius-md);align-items:end}
+.ud-pricing-board :is(button,input,select,textarea,summary,[tabindex]):focus-visible,.ud-pricing-dialog :is(button,input,select,textarea,summary,[tabindex]):focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
+.ud-pricing-board .ud-input,.ud-pricing-dialog .ud-input{min-height:36px}
+.ud-pricing-pattern{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;flex:1;min-width:0}
+.ud-pricing-pattern .ud-field-error{grid-column:1/-1}
+.ud-pricing-stack{display:grid;gap:12px;min-width:0}
+.ud-pricing-toolrow{display:flex;flex-direction:column;gap:8px;padding-bottom:12px;border-bottom:.5px solid var(--dsw-alias-border-l1)}
+.ud-pricing-rules{display:grid;gap:10px;min-width:0}
+.ud-pricing-group{display:grid;gap:0;min-width:0}
+.ud-pricing-group-head{display:flex;align-items:baseline;gap:6px;padding-bottom:6px}
+.ud-pricing-group-title{font-size:12px;line-height:18px;font-weight:500;color:var(--dsw-alias-label-secondary)}
+.ud-pricing-group-count{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
+.ud-pricing-rows{display:flex;flex-direction:column;min-width:0}
+.ud-pricing-rule{display:flex;flex-direction:column;gap:4px;padding:12px 0;border-bottom:.5px solid var(--dsw-alias-border-l2);min-width:0;cursor:pointer}
+.ud-pricing-rule:last-child{border-bottom:0}
+.ud-pricing-rule--open{padding:8px;margin:0 -8px;border-radius:var(--dsw-radius-sm);background:color-mix(in srgb,var(--dsw-alias-bg-layer-2) 55%,transparent)}
+.ud-pricing-empty{display:flex;flex-direction:column;align-items:center;gap:12px;padding:24px 0;text-align:center}
+.ud-pricing-empty-text{margin:0;font-size:14px;line-height:22px;color:var(--dsw-alias-label-secondary)}
+.ud-pricing-panel{border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-sm);padding:12px 16px;min-width:0}
+.ud-pricing-rule-head{display:flex;align-items:center;gap:8px;width:100%;min-height:32px;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:start;cursor:pointer;border-radius:var(--dsw-radius-sm)}
+.ud-pricing-rule-head:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.ud-pricing-rule-no{flex:none;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
+.ud-pricing-rule-model{flex:1;min-width:0;font-size:14px;line-height:22px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ud-pricing-rule-caret{display:flex;align-items:center;justify-content:center;flex:none;color:var(--dsw-alias-label-tertiary);transition:transform .15s}
+.ud-pricing-rule-caret svg{display:block;width:14px;height:14px}
+.ud-pricing-rule-head[aria-expanded=true] .ud-pricing-rule-caret{transform:rotate(90deg)}
+.ud-pricing-rule-foot{display:flex;align-items:center;gap:8px;margin-top:2px;min-width:0}
+.ud-pricing-rule-foot .ud-pricing-note{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-tertiary)}
+.ud-btn--danger-text{height:28px;padding:0 10px;border-color:transparent;color:var(--dsw-alias-state-error-primary)}
+.ud-btn--danger-text:not(:disabled):hover{background:var(--dsw-alias-interactive-bg-hover-danger);border-color:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary)}
+.ud-pricing-rule-tags{display:flex;flex:none;gap:6px;opacity:.75;transition:opacity .15s}
+.ud-pricing-rule:hover .ud-pricing-rule-tags{opacity:1}
+.ud-rule>.ud-pricing-line .ud-btn--text{height:28px;padding:0 8px}
+.ud-slot-no{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;font-family:var(--ds-font-family-code)}
+.ud-pricing-board h3,.ud-pricing-board p,.ud-pricing-dialog h3,.ud-pricing-dialog p{margin:0}
+.ud-pricing-board h3,.ud-pricing-dialog h3{font-size:14px;line-height:22px}
+.ud-pricing-board code,.ud-pricing-dialog code{font-family:var(--ds-font-family-code);overflow-wrap:anywhere;min-width:0}
+.ud-pricing-summary,.ud-pricing-prices{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0}
+.ud-pricing-summary dt,.ud-pricing-prices dt,.ud-pricing-note{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}
+.ud-pricing-summary dd,.ud-pricing-prices dd{margin:0;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.ud-pricing-summary dd{font-size:18px;font-weight:600;line-height:24px}
+.ud-pricing-row:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.ud-pricing-row[aria-expanded=true] .ud-pricing-rule-caret{transform:rotate(90deg)}
+.ud-pricing-model + .ud-pricing-model{border-top:.5px solid var(--dsw-alias-border-l1)}
+.ud-pricing-row{width:100%;display:flex;gap:8px;justify-content:space-between;align-items:center;flex-wrap:wrap;padding:6px 4px;min-height:32px;text-align:start;border:0;background:transparent;color:inherit;font:inherit;cursor:pointer}
+.ud-pricing-row code{flex:1}
+.ud-pricing-row[aria-expanded=true],.ud-pricing-tree-row--winner{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent)}
+.ud-pricing-chip{display:inline-flex;align-items:center;height:18px;font-weight:500;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;padding:0 8px;font-size:11px;line-height:18px;white-space:nowrap}
+.ud-pricing-chip--button{border:0;cursor:pointer;color:var(--dsw-alias-label-secondary);padding:0 8px;font-size:11px;line-height:18px;font-family:inherit}
+.ud-pricing-chip--button:not(:disabled):hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.ud-pricing-chip--button:disabled{opacity:.5;cursor:not-allowed}
+.ud-pricing-warn{color:var(--dsw-alias-state-warn-primary)}
+.ud-pricing-tree{border-inline-start:2px solid var(--ud-card-border);padding-inline-start:8px;margin:8px 0 8px 8px}
+.ud-pricing-tree ul,.ud-pricing-rule-detail ul,.ud-pricing-dialog-list{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+.ud-pricing-tree-row{display:grid;gap:6px;padding:8px;border-radius:var(--dsw-radius-sm)}
+.ud-pricing-rule-detail{display:grid;gap:6px;margin:6px 0 0}
+.ud-pricing-prices dt{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
+.ud-pricing-prices dd{font-size:13px;line-height:20px}
+.ud-pricing-dialog{box-sizing:border-box;width:min(480px,calc(100vw - 24px));max-height:calc(100dvh - 24px);overflow:auto;padding:16px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);box-shadow:var(--dsw-shadow-lv3);font-size:14px;line-height:22px}
+.ud-pricing-dialog[open],.ud-pricing-dialog form{display:grid;gap:12px}
+.ud-pricing-dialog::backdrop{background:color-mix(in srgb,var(--dsw-alias-label-primary) 45%,transparent)}
+.ud-pricing-dialog-list li{padding:8px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-1)}
+.ud-pricing-dialog button[aria-pressed=true]{border-color:var(--dsw-alias-brand-primary)}
+.ud-pricing-confirm{justify-content:flex-end}
+.ud-btn--primary{border-color:var(--dsw-alias-brand-primary);background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-bg-base);font-weight:600}
+.ud-btn--primary:not(:disabled):hover{border-color:var(--dsw-alias-button-primary-hover);background:var(--dsw-alias-button-primary-hover);color:var(--dsw-alias-bg-base)}
+.ud-pricing-help{width:fit-content;color:var(--dsw-alias-label-secondary);text-decoration:underline dotted;cursor:help;font-size:12px}
+@media(min-width:620px){.ud-pricing-summary,.ud-pricing-prices{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media(max-width:520px){.ud-pricing-board .ud-price-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.ud-pricing-board .ud-slot-head{flex-wrap:wrap}.ud-pricing-board .ud-slot-head .ud-price-grid{flex:1 0 100%}}
+.ud-rule-add{border:.5px dashed var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-tertiary);padding:5px 10px;font-size:12px;line-height:20px;text-align:start;cursor:pointer}
 .ud-rule-add:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 /* dock 内并列条目:官方 pill 满宽不动,空间不足时高收缩因子让自身先收缩(min-width:0 配合 ellipsis),挤压力不转嫁官方 */
 .ud-statsline-root{--ud-dock-gap:0px;text-align:center;max-width:var(--dsh-chat-content-width);box-sizing:border-box;flex:0 999 auto;min-width:0;padding:0;font-size:var(--dsh-content-font-size-secondary);line-height:calc(20px + var(--dsh-content-font-delta-secondary));color:var(--dsw-alias-label-tertiary);white-space:nowrap;text-overflow:ellipsis;margin:0;margin-left:calc(0px - var(--ud-dock-gap));text-indent:var(--ud-dock-gap);display:block;overflow:hidden}
@@ -5585,7 +5877,8 @@ ${HUD_CSS}
 
     // 附加计费规则卡:头行 = 价格四桶 + 上移/下移/删除;下方为条件组合区(组内从上到下首个命中者生效)。
     // 默认价在组内独立成槽,附加规则不再承担兜底语义
-    function PricingExtraRuleCard({ rule, currency, errors, pathPrefix, t, onPatch, onRemove, onMove, canMoveUp, canMoveDown }) {
+    const PricingExtraRuleCard = React.memo(function PricingExtraRuleCard({ rule, currency, errors, pathPrefix, t, actions, slotId, above, below, number }) {
+      const onPatch = (patch) => actions.patch(slotId, patch)
       const errorTextOf = (path) => {
         const key = errors.get(path)
         return key ? h('span', { className: 'ud-field-error' }, t(key)) : null
@@ -5621,7 +5914,7 @@ ${HUD_CSS}
             type: 'number', className: 'ud-input', min: MONTH_DAY_MIN,
             max: MONTH_DAY_MAX, step: 1,
             value: condition[field] ?? '',
-            onChange: (event) => patchCondition({ [field]: event.target.value }),
+            onChange: (event) => patchCondition({ [field]: event.target.value === '' ? '' : Number(event.target.value) }),
           }),
           errorTextOf(`${condPath}.${field}`))
         // 周几 pill 仅 weekdays 条件才构造:其余类型无 days 字段,提前求值会使渲染崩溃白屏
@@ -5656,93 +5949,549 @@ ${HUD_CSS}
           }, '×') : null)
       }
       return h('div', { className: 'ud-rule' },
+        h('div', { className: 'ud-pricing-line' }, h('code', { className: 'ud-slot-no' }, number),
+          h('button', { className: 'ud-btn ud-btn--text', type: 'button', onClick: () => actions.batch(rule) }, t('pricing.batch'))),
         h('div', { className: 'ud-slot-head' },
           h(PricingPriceGrid, {
             rule, currency, errors, pathPrefix, t,
             onPricePatch: (part) => onPatch(part),
           }),
-          canMoveUp ? h('button', {
-            className: 'ud-btn ud-btn--text', type: 'button', onClick: () => onMove(-1),
+          above ? h('button', {
+            className: 'ud-btn ud-btn--text', type: 'button', onClick: () => actions.move(slotId, above),
             'aria-label': t('moveUp'), title: t('moveUp'),
           }, '↑') : null,
-          canMoveDown ? h('button', {
-            className: 'ud-btn ud-btn--text', type: 'button', onClick: () => onMove(1),
+          below ? h('button', {
+            className: 'ud-btn ud-btn--text', type: 'button', onClick: () => actions.move(slotId, below),
             'aria-label': t('moveDown'), title: t('moveDown'),
           }, '↓') : null,
-          h(DeleteArmedButton, { labelKey: 'deleteRule', confirmKey: 'confirmDelete', onConfirm: onRemove, t })),
+          h(DeleteArmedButton, { labelKey: 'deleteRule', confirmKey: 'confirmDelete', onConfirm: () => actions.remove(slotId), t })),
         h('div', { className: 'ud-rule-conds' },
           (rule.conditions ?? []).map((condition, conditionIndex) => conditionRow(condition, conditionIndex)),
           h('div', { className: 'ud-cond-add' },
             h('button', {
               type: 'button', className: 'ud-btn ud-btn--text',
               onClick: () => patchConditions([...(rule.conditions ?? []), defaultCondition(CONDITION_KIND_OPTIONS[0])]),
-            }, `+${t('addCondition')}`))))
-    }
+            }, `+ ${t('addCondition')}`))))
+    })
 
     // 模型组卡:组头 = 模型键输入(整组一次改名)+ 删除整组;组内 = 默认价槽(禁条件/排序/删除,恒兜底)
     // + 附加计费规则列表(从上到下首个命中生效,全不命中落默认价)。全局 */* 组模型键锁定且不可删除。
-    // 组件 key 由调用方锚定首槽位平面索引,改名引发的重新聚合不会丢焦点
-    function PricingModelGroup({ group, currency, errors, t, onModelChange, onGroupRemove, onSlotPatch, onSlotRemove, onSlotMove, onSlotAdd }) {
-      const modelError = group.slots.map((slot) => errors.get(`${slot.index}.model`)).find(Boolean)
+    // 组件 key 锚定草稿组稳定 id(groups 见 pricingDraftGroups),改名重聚合不重建组件、输入焦点不丢
+    const PricingModelGroup = React.memo(function PricingModelGroup({ group, currency, errors, t, actions }) {
+      const modelError = group.slots.map((slot) => errors.get(`${slot.id}.model`)).find(Boolean)
+      const onModelChange = (model, invalidProvider) => actions.rename(group.id, model, invalidProvider)
       const { defaultSlot, extras } = partitionGroupOf(group)
-      const isGlobalDefault = group.model === MODEL_UNROUTED
-      // 新附加规则插到默认价平面位之前(无默认价则组末),保证默认价恒居组末
+      const isGlobalDefault = group.id === PRICING_FALLBACK_GROUP
+      // 新附加规则插到默认价平面位之前(无默认价则组末);归一本身不重排,插入位置只影响新增项
       const insertPosition = defaultSlot ? defaultSlot.index - 1 : group.slots[group.slots.length - 1].index
+      const slash = group.model.indexOf(SEGMENT_SEPARATOR)
+      const provider = slash < 0 ? '' : group.model.slice(0, slash)
+      const model = slash < 0 ? group.model : group.model.slice(slash + 1)
+      const invalidProvider = group.slots[0].rule.invalidProvider
+      const patternField = (label, value, onChange, invalid = Boolean(modelError)) => h('label', { className: 'ud-field' },
+        h('span', { className: 'ud-field-label' }, t(label)),
+        h('input', { type: 'text', className: 'ud-input', value, readOnly: isGlobalDefault,
+          'aria-invalid': invalid, spellCheck: false, autoComplete: 'off',
+          onChange: (event) => onChange(event.target.value),
+        }))
       return h('div', { className: 'ud-rule-group' },
         h('div', { className: 'ud-rule-group-head' },
-          h('label', { className: 'ud-field' },
-            h('span', { className: 'ud-field-label' }, t('pricingModel')),
-            h('input', {
-              type: 'text', className: 'ud-input', value: group.model,
-              placeholder: t('pricingModelPlaceholder'), readOnly: isGlobalDefault,
-              onChange: (event) => onModelChange(event.target.value),
-            }),
-            modelError ? h('span', { className: 'ud-field-error' }, t(modelError)) : null),
+          h('div', { className: 'ud-pricing-pattern' },
+            patternField('pricing.providerPattern', invalidProvider ?? provider, (value) => {
+              if (value.includes(SEGMENT_SEPARATOR)) onModelChange(group.model, value)
+              else onModelChange(`${value}/${model}`)
+            }, invalidProvider !== undefined || Boolean(modelError)),
+            patternField('pricing.modelPattern', model, (value) => onModelChange(`${provider}/${value}`)),
+            invalidProvider !== undefined || modelError ? h('span', { className: 'ud-field-error' },
+              t(invalidProvider !== undefined ? 'pricing.providerSlash' : modelError)) : null),
           isGlobalDefault ? null : h(DeleteArmedButton, {
-            labelKey: 'deleteGroup', confirmKey: 'confirmDelete', onConfirm: onGroupRemove, t,
+            labelKey: 'deleteGroup', confirmKey: 'confirmDelete', onConfirm: () => actions.removeGroup(group.id), t,
           })),
         h('div', { className: 'ud-rule-group-slots' },
-          defaultSlot ? h('div', { className: 'ud-rule ud-rule-default' },
+          defaultSlot ? h('div', { className: 'ud-rule' },
             h('div', { className: 'ud-slot-head' },
               h(PricingPriceGrid, {
                 rule: defaultSlot.rule, currency, errors,
-                pathPrefix: `${defaultSlot.index}.`, t,
-                onPricePatch: (part) => onSlotPatch(defaultSlot.index, part),
+                pathPrefix: `${defaultSlot.id}.`, t,
+                onPricePatch: (part) => actions.patch(defaultSlot.id, part),
               })),
-            h('span', { className: 'ud-rule-cond' }, t('defaultPriceHint'))) : null,
+            h('div', { className: 'ud-pricing-line' },
+              h('code', { className: 'ud-slot-no' }, `#${defaultSlot.index + 1}`),
+              h('span', { className: 'ud-rule-cond' }, t(isGlobalDefault ? 'pricing.globalFallback' : 'pricing.unconditional')),
+              h('button', { className: 'ud-btn ud-btn--text', type: 'button', onClick: () => actions.batch(defaultSlot.rule) }, t('pricing.batch')))) : null,
           extras.map((slot, position) => h(PricingExtraRuleCard, {
-            key: slot.index,
-            rule: slot.rule,
-            currency,
-            errors,
-            pathPrefix: `${slot.index}.`,
-            t,
-            onPatch: (part) => onSlotPatch(slot.index, part),
-            onRemove: () => onSlotRemove(slot.index),
-            onMove: (delta) => onSlotMove(slot.index, extras[position + delta].index),
-            canMoveUp: position > 0,
-            canMoveDown: position < extras.length - 1,
+            key: slot.id, slotId: slot.id, rule: slot.rule, currency, errors, t, actions,
+            pathPrefix: `${slot.id}.`,
+            above: extras[position - 1]?.id, below: extras[position + 1]?.id,
+            number: `#${slot.index + 1}`,
           }))),
         h('button', {
           className: 'ud-rule-add', type: 'button',
-          onClick: () => onSlotAdd(insertPosition, group.model, !defaultSlot),
+          onClick: () => actions.addSlot(insertPosition, group, !defaultSlot),
         }, defaultSlot ? t('addRule') : t('addDefaultPrice')))
+    }, pricingGroupPropsEqual)
+
+    const PRICING_TABS = ['models', 'rules', 'edit']
+    const EMPTY_PRICING_ROWS = []
+    const PRICING_PRICE_LABELS = { input: 'priceInput', output: 'priceOutput', cacheRead: 'priceCacheRead', cacheWrite: 'priceCacheWrite' }
+    const isPricingFallback = (rule) => rule.model === MODEL_UNROUTED && !rule.conditions?.length
+    const pricingRuleNumber = (rules, rule) => `#${rules.indexOf(rule) + 1}`
+
+    function pricingSnapshotOf(rules, observed, moment) {
+      const ruleStats = new Map(rules.map((rule) => [rule, { billing: [], taken: [], conflict: false }]))
+      const rows = new Map()
+      for (const usage of observed) {
+        if (typeof usage.model !== 'string' || !usage.model || usage.model === MODEL_UNROUTED || usage.model === OTHER_MODEL || rows.has(usage.model)) continue
+        const result = resolvePricingRule(rules, usage.model, moment)
+        const row = {
+          ...result, usage, model: usage.model,
+          cost: result.winner && hasTokenBuckets(usage) ? costOf(result.winner.price, usage) : null,
+        }
+        rows.set(usage.model, row)
+        if (row.winner) ruleStats.get(row.winner).billing.push(row)
+        for (const rule of row.candidates) if (row.winner && rule !== row.winner) ruleStats.get(rule).taken.push(row)
+        for (const rule of row.conflictRules) ruleStats.get(rule).conflict = true
+      }
+      return { rows, ruleStats }
     }
 
-    function PricingEditor({ t = defaultT, showTitle = true }) {
+    function pricingConditionsText(rule, t) {
+      return rule.conditions?.map((cond) => {
+        const value = cond.kind === 'weekdays' ? cond.days.map((day) => t(`weekday.${day}`)).join('、') : `${cond.from}–${cond.to}`
+        return `${t(CONDITION_KIND_LABEL_KEYS[cond.kind])} ${value}`
+      }).join(' · ') || t('pricing.unconditional')
+    }
+
+    function PricingPriceReadout({ rule, t }) {
+      return h('dl', { className: 'ud-pricing-prices' }, PRICE_KEYS.map((key) => h('div', { key },
+        h('dt', null, t(PRICING_PRICE_LABELS[key])),
+        h('dd', null, `${rule.currency ?? ''}${rule.price[key]}`))))
+    }
+
+    function PricingTree({ row, rules, t }) {
+      const [othersOpen, setOthersOpen] = useState(false)
+      const detailsId = React.useId()
+      const others = (row.candidates ?? []).filter((rule) => rule !== row.winner)
+      const entry = (rule) => h('li', { key: pricingRuleNumber(rules, rule), className: cx('ud-pricing-tree-row', rule === row.winner && 'ud-pricing-tree-row--winner') },
+        h('div', { className: 'ud-pricing-line' },
+          h('code', null, `${pricingRuleNumber(rules, rule)} ${rule.model}`),
+          h('span', { className: 'ud-pricing-chip' }, t(rule === row.winner ? 'pricing.active' : 'pricing.inactive')),
+          row.conflictRules.includes(rule) ? h('span', { className: 'ud-pricing-chip ud-pricing-warn' }, t('pricing.conflict')) : null),
+        h('span', { className: 'ud-pricing-note' }, pricingConditionsText(rule, t)),
+        h(PricingPriceReadout, { rule, t }))
+      return h('div', { className: 'ud-pricing-tree' },
+        row.winner ? h('ul', null, entry(row.winner)) : h('p', { className: 'ud-pricing-warn' }, t('pricing.noMatch')),
+        others.length ? h('button', {
+          className: 'ud-btn ud-btn--text', type: 'button', 'aria-expanded': othersOpen, 'aria-controls': detailsId,
+          onClick: () => setOthersOpen(!othersOpen),
+        }, t(othersOpen ? 'pricing.hideOthers' : 'pricing.showOthers', { n: others.length })) : null,
+        h('ul', { id: detailsId, hidden: !othersOpen }, othersOpen ? others.map(entry) : null))
+    }
+
+    const PRICING_SEARCH_AUTO_GROUPS = 3
+    const PRICING_MODELS_PER_PAGE = 20
+    const PRICING_SEARCH_SUGGESTIONS = 40
+
+    function PricingModels({ analysis, rules, moment, query, onQuery, selectedModel, onSelect, onEdit, t }) {
+      const listId = React.useId()
+      const [providerOverrides, setProviderOverrides] = useState(() => new Map())
+      const [providerPages, setProviderPages] = useState(() => new Map())
+      const rows = useMemo(() => [...analysis.rows.values()], [analysis])
+      const probeKey = query.trim()
+      const search = probeKey.toLowerCase()
+      const exactObserved = analysis.rows.has(probeKey)
+      const { groups, suggestions } = useMemo(() => {
+        const groups = new Map()
+        const suggestions = []
+        for (const row of rows) {
+          const provider = providerOf(row.model)
+          if (exactObserved ? row.model !== probeKey : search && !row.model.toLowerCase().includes(search) && !provider.toLowerCase().includes(search)) continue
+          if (!groups.has(provider)) groups.set(provider, [])
+          groups.get(provider).push(row)
+          if (suggestions.length < PRICING_SEARCH_SUGGESTIONS) suggestions.push(h('option', { key: row.model, value: row.model }))
+        }
+        return { groups: [...groups].sort(([a], [b]) => a.localeCompare(b, 'en')), suggestions }
+      }, [rows, exactObserved, probeKey, search])
+      const probe = isTwoSegmentModel(probeKey) && !probeKey.includes(MODEL_WILDCARD) && !exactObserved
+        ? { model: probeKey, ...resolvePricingRule(rules, probeKey, moment) } : null
+      const priced = rows.filter((row) => row.winner)
+      const amountsAvailable = rows.length > 0 && rows.every((row) => row.cost !== null)
+      const totals = [
+        ['pricing.estimated', amountsAvailable ? formatCost(rows.reduce((sum, row) => sum + row.cost, 0), aggregateCurrencyOf(rules)) : TOOLTIP_MISSING],
+        ['pricing.priced', `${priced.length}/${rows.length}`],
+        ['pricing.fallback', priced.filter((row) => isPricingFallback(row.winner)).length],
+        ['pricing.rules', rules.length],
+      ]
+      const modelToggle = (row, label, detailId) => h('button', {
+        type: 'button', className: 'ud-pricing-row', 'aria-controls': detailId, 'aria-expanded': selectedModel === row.model,
+        'data-ud-price-model': row.model,
+        onClick: () => onSelect(selectedModel === row.model ? null : row.model),
+      }, h('code', null, label), h('span', { className: cx('ud-pricing-note', !row.winner && 'ud-pricing-warn') },
+        row.winner ? `${pricingRuleNumber(rules, row.winner)} · ${t('priceInput')} ${row.winner.currency ?? ''}${row.winner.price.input} · ${t('priceOutput')} ${row.winner.currency ?? ''}${row.winner.price.output}` : t('pricing.unpriced')),
+      row.winner && isPricingFallback(row.winner) ? h('span', { className: 'ud-pricing-chip' }, t('pricing.globalFallback')) : null,
+      h('span', { className: 'ud-pricing-rule-caret', 'aria-hidden': 'true' }, h(Icon, { paths: ICONS.chevron })))
+      const modelDetails = (row, id) => h('div', { id, hidden: selectedModel !== row.model }, selectedModel === row.model
+        ? h(PricingTree, { key: row.model, row, rules, t }) : null)
+      return h('div', { className: 'ud-pricing-stack' },
+        h('label', { className: 'ud-field' }, h('span', { className: 'ud-field-label' }, t('pricing.search')),
+          h('input', {
+            type: 'search', className: 'ud-input', value: query, list: listId, placeholder: t('pricing.searchPlaceholder'),
+            onChange: (event) => {
+              const value = event.target.value
+              if (value.trim() !== probeKey) {
+                setProviderOverrides(new Map())
+                setProviderPages(new Map())
+              }
+              onQuery(value)
+              onSelect(analysis.rows.has(value.trim()) ? value.trim() : null)
+            },
+          })),
+        h('datalist', { id: listId }, suggestions),
+        probe ? h('div', { className: 'ud-pricing-panel' },
+          h('div', { className: 'ud-pricing-note' }, t('pricing.probe')),
+          modelToggle(probe, probe.model, `${listId}-probe`), modelDetails(probe, `${listId}-probe`)) : null,
+        rows.length ? h('dl', { className: 'ud-pricing-summary' }, totals.map(([key, value]) => h('div', { className: 'ud-card', key },
+          h('dt', null, t(key)), h('dd', null, value)))) : null,
+        rows.length > priced.length ? h('p', { className: 'ud-pricing-warn' }, t('pricing.unpricedCount', { n: rows.length - priced.length })) : null,
+        !rules.length ? h('div', { className: 'ud-pricing-empty' },
+          h('p', { className: 'ud-pricing-empty-text' }, t('pricingNotConfigured')),
+          h('button', { className: 'ud-btn ud-btn--primary', type: 'button', onClick: onEdit }, t('pricing.configure'))) : null,
+        groups.length === 0 ? h('div', { className: 'ud-pricing-empty' },
+          h('p', { className: 'ud-pricing-empty-text' }, t(rows.length ? 'pricing.noSearchResults' : 'pricing.noObserved'))) : null,
+        groups.map(([provider, items], index) => {
+          const open = exactObserved || (providerOverrides.get(provider) ?? index < (search ? PRICING_SEARCH_AUTO_GROUPS : 1))
+          const detailsId = `${listId}-provider-${encodeURIComponent(provider)}`
+          const lastPage = Math.ceil(items.length / PRICING_MODELS_PER_PAGE) - 1
+          const page = Math.min(providerPages.get(provider) ?? 0, lastPage)
+          const start = page * PRICING_MODELS_PER_PAGE
+          const paginate = (next) => setProviderPages((previous) => new Map(previous).set(provider, next))
+          return h('div', { key: provider, className: 'ud-pricing-panel' },
+            h('button', {
+              className: 'ud-pricing-row', type: 'button', 'aria-expanded': open, 'aria-controls': detailsId,
+              onClick: () => setProviderOverrides((previous) => new Map(previous).set(provider, !open)),
+            }, h('code', null, provider), h('span', { className: 'ud-pricing-note' }, t('pricing.modelCount', { n: items.length })),
+            h('span', { className: 'ud-pricing-rule-caret', 'aria-hidden': 'true' }, h(Icon, { paths: ICONS.chevron }))),
+            h('div', { id: detailsId, hidden: !open }, open ? items.slice(start, start + PRICING_MODELS_PER_PAGE).map((row) => {
+              const id = `${listId}-${encodeURIComponent(row.model)}`
+              return h('div', { key: row.model, className: 'ud-pricing-model' }, modelToggle(row, modelNameOf(row.model), id), modelDetails(row, id))
+            }) : null,
+            open && lastPage > 0 ? h('div', { className: 'ud-pricing-line' },
+              h('button', { type: 'button', className: 'ud-btn', disabled: page === 0, onClick: () => paginate(page - 1) }, t('pricing.previousModels')),
+              h('span', { className: 'ud-pricing-note' }, `${page + 1}/${lastPage + 1}`),
+              h('button', { type: 'button', className: 'ud-btn', disabled: page === lastPage, onClick: () => paginate(page + 1) }, t('pricing.nextModels'))) : null))
+        }))
+    }
+
+    function PricingDialog({ title, onClose, children }) {
+      const dialogRef = useRef(null)
+      const closeRef = useRef(onClose)
+      closeRef.current = onClose
+      const titleId = React.useId()
+      useLayoutEffect(() => {
+        const dialog = dialogRef.current
+        if (!dialog) return undefined
+        const owner = dialog.ownerDocument
+        const trigger = owner.activeElement
+        const view = owner.defaultView
+        const onEscape = (event) => {
+          if (event.key !== 'Escape' || !dialog.open || !dialog.contains(event.target)) return
+          event.preventDefault()
+          event.stopImmediatePropagation()
+          if (!event.repeat) closeRef.current()
+        }
+        // 宿主设置也绑定 Escape；先在捕获阶段消费子弹窗内的按键。
+        view.addEventListener('keydown', onEscape, true)
+        dialog.showModal()
+        return () => {
+          view.removeEventListener('keydown', onEscape, true)
+          if (dialog.open) dialog.close()
+          if (trigger?.isConnected) trigger.focus()
+        }
+      }, [])
+      return h('dialog', {
+        className: 'ud-pricing-dialog', ref: dialogRef, 'aria-labelledby': titleId,
+        onCancel: (event) => { event.preventDefault(); onClose() },
+      }, h('h3', { id: titleId }, title), children)
+    }
+
+    function PricingRuleModels({ detail, analysis, rules, onClose, onJump, t }) {
+      const [selected, setSelected] = useState(null)
+      const [kind, setKind] = useState(detail.kind)
+      const stats = analysis.ruleStats.get(detail.rule)
+      if (!stats) return null
+      const current = stats[kind]
+      return h(PricingDialog, { title: t('pricing.ruleModels', { rule: pricingRuleNumber(rules, detail.rule) }), onClose },
+        h('div', { className: 'ud-pricing-line', role: 'group', 'aria-label': t('pricing.ruleModelsKinds') },
+          ['billing', 'taken'].map((name) => h('button', {
+            key: name, className: 'ud-btn', type: 'button', 'aria-pressed': kind === name,
+            onClick: () => { setKind(name); setSelected(null) },
+          }, t(`pricing.${name}`, { n: stats[name].length })))),
+        current.length ? h('ul', { className: 'ud-pricing-dialog-list' }, current.map((row) => h('li', { key: row.model },
+          h('div', { className: 'ud-pricing-line' }, h('code', null, row.model),
+            kind === 'taken' ? h('span', { className: 'ud-pricing-note' }, t('pricing.takenBy', { rule: pricingRuleNumber(rules, row.winner) })) : null,
+            h('button', {
+              type: 'button', className: 'ud-btn', 'aria-expanded': selected === row.model,
+              onClick: () => setSelected(selected === row.model ? null : row.model),
+            }, t('pricing.tree')),
+            h('button', { type: 'button', className: 'ud-btn', onClick: () => { onClose(); onJump(row.model) } }, t('pricing.jump'))),
+          selected === row.model ? h(PricingTree, { key: row.model, row, rules, t }) : null)))
+          : h('p', { className: 'ud-pricing-note' }, t(`pricing.no.${kind}`)),
+        h('button', { className: 'ud-btn', type: 'button', onClick: onClose }, t('pricing.close')))
+    }
+
+    function PricingRuleDetails({ rule, stats, rules, t }) {
+      const takeover = new Map()
+      for (const row of stats.taken) takeover.set(row.winner, (takeover.get(row.winner) ?? 0) + 1)
+      const cost = stats.billing.length && stats.billing.every((row) => row.cost !== null)
+        ? formatCost(stats.billing.reduce((sum, row) => sum + row.cost, 0), rule.currency) : TOOLTIP_MISSING
+      const tokens = formatTokens(stats.billing.reduce((sum, row) => sum + (row.usage.tokens ?? 0), 0))
+      return h('div', { className: 'ud-pricing-rule-detail' },
+        h(PricingPriceReadout, { rule, t }),
+        h('p', { className: 'ud-pricing-note' }, t('pricing.ruleEstimate', { cost, tokens })),
+        takeover.size ? h('ul', null, [...takeover].map(([winner, n]) => {
+          const number = pricingRuleNumber(rules, winner)
+          return h('li', { key: number }, t('pricing.takeoverDetail', { rule: number, n }))
+        })) : null)
+    }
+
+    function PricingRules({ analysis, rules, onEdit, onJump, t }) {
+      const [detail, setDetail] = useState(null)
+      const [expanded, setExpanded] = useState(() => new Set())
+      const labels = [false, true]
+      const items = useMemo(() => rules.map((rule, index) => ({ rule, index, segments: splitRuleSegments(rule.model) ?? ['', rule.model] }))
+        .sort((a, b) => a.segments[0].localeCompare(b.segments[0], 'en') || a.segments[1].localeCompare(b.segments[1], 'en') || a.index - b.index), [rules])
+      const badge = (rule, kind, n) => n > 0 ? h('button', {
+        type: 'button', className: 'ud-pricing-chip ud-pricing-chip--button',
+        onClick: (event) => { event?.stopPropagation(); setDetail({ rule, kind }) },
+      }, t(`pricing.${kind}`, { n })) : null
+      return h('div', { className: 'ud-pricing-rules' },
+        !rules.length ? h('div', { className: 'ud-pricing-empty' },
+          h('p', { className: 'ud-pricing-empty-text' }, t('pricingNotConfigured')),
+          h('button', { className: 'ud-btn ud-btn--primary', type: 'button', onClick: onEdit }, t('pricing.configure'))) : null,
+        labels.map((hasStar) => {
+          const group = items.filter(({ rule }) => rule.model.includes(MODEL_WILDCARD) === hasStar)
+          if (!group.length) return null
+          return h('section', { key: String(hasStar), className: 'ud-pricing-group' },
+            h('div', { className: 'ud-pricing-group-head' },
+              h('span', { className: 'ud-pricing-group-title' }, t(hasStar ? 'pricing.withStar' : 'pricing.withoutStar')),
+              h('span', { className: 'ud-pricing-group-count' }, String(group.length))),
+            h('div', { className: 'ud-pricing-rows' }, group.map(({ rule, index }) => {
+              const stats = analysis.ruleStats.get(rule)
+              const key = `${index}:${rule.model}`
+              const open = expanded.has(key)
+              const toggle = () => setExpanded((previous) => {
+                const next = new Set(previous)
+                if (next.has(key)) next.delete(key)
+                else next.add(key)
+                return next
+              })
+              return h('article', { key, className: cx('ud-pricing-rule', open && 'ud-pricing-rule--open'), onClick: toggle },
+                h('button', {
+                  type: 'button', className: 'ud-pricing-rule-head', 'aria-expanded': open,
+                  onClick: (event) => { event?.stopPropagation(); toggle() },
+                },
+                  h('span', { className: 'ud-pricing-rule-no' }, `#${index + 1}`),
+                  h('code', { className: 'ud-pricing-rule-model' }, rule.model),
+                  isPricingFallback(rule) ? h('span', { className: 'ud-pricing-chip' }, t('pricing.globalFallback')) : null,
+                  stats.conflict ? h('span', { className: 'ud-pricing-chip ud-pricing-warn' }, t('pricing.conflict')) : null,
+                  h('span', { className: 'ud-pricing-rule-caret', 'aria-hidden': 'true' }, h(Icon, { paths: ICONS.chevron }))),
+                h('div', { className: 'ud-pricing-rule-foot' },
+                  h('span', { className: 'ud-pricing-note' }, pricingConditionsText(rule, t)),
+                  h('span', { className: 'ud-pricing-rule-tags' }, badge(rule, 'billing', stats.billing.length), badge(rule, 'taken', stats.taken.length))),
+                open ? h(PricingRuleDetails, { rule, stats, rules, t }) : null)
+            })))
+        }),
+        detail ? h(PricingRuleModels, { detail, analysis, rules, t, onClose: () => setDetail(null), onJump }) : null)
+    }
+
+    function PricingBatch({ source, rules, observed, moment, onClose, onConfirm, t }) {
+      const [input, setInput] = useState('')
+      const inputId = React.useId()
+      const provider = splitRuleSegments(source.model)?.[0] ?? ''
+      const models = [...new Set(input.split(/[\r\n,，]+/).map((value) => value.trim()).filter(Boolean))]
+      const invalid = models.some((model) => model.includes(MODEL_WILDCARD) || !isTwoSegmentModel(`${provider}/${model}`))
+      const validSource = source.invalidProvider === undefined && validatePricingRules([source]).size === 0
+      const { existing, validRules } = useMemo(() => ({
+        existing: new Set(rules.map((rule) => rule.model)),
+        validRules: rules.flatMap((rule) => rule.invalidProvider === undefined && validatePricingRules([rule]).size === 0 ? coercePricingRules([rule]) : []),
+      }), [rules])
+      const observedByModel = useMemo(() => {
+        const index = new Map()
+        for (const row of observed) {
+          if (typeof row.model !== 'string' || row.model === MODEL_UNROUTED || row.model === OTHER_MODEL) continue
+          const model = modelNameOf(row.model)
+          if (!index.has(model)) index.set(model, new Set())
+          index.get(model).add(row.model)
+        }
+        return index
+      }, [observed])
+      const preview = !invalid && validSource ? models.map((model) => {
+        const key = `${provider}/${model}`
+        if (existing.has(key)) return { model, candidate: null }
+        const candidate = { ...copyRules([source])[0], model: key }
+        const [priced] = coercePricingRules([candidate])
+        const scope = { ...priced, conditions: [] }
+        let covered = 0, matches = 0, billing = 0, taken = 0, conflicts = 0
+        const copiedRules = [...validRules, priced]
+        for (const observedKey of observedByModel.get(model) ?? []) {
+          if (!matchPrice([scope], observedKey, moment)) continue
+          covered++
+          const result = resolvePricingRule(copiedRules, observedKey, moment)
+          if (!result.candidates.includes(priced)) continue
+          matches++
+          if (result.winner === priced) billing++
+          else if (result.winner) taken++
+          if (result.conflictRules.includes(priced)) conflicts++
+        }
+        return { model, candidate, covered, matches, billing, taken, conflicts }
+      }) : []
+      const additions = preview.flatMap((row) => row.candidate ? [row.candidate] : [])
+      const status = !validSource ? t('pricing.batchInvalidSource') : invalid ? t('pricing.batchInvalid') : !preview.length ? t('pricing.batchEmpty')
+        : t('pricing.batchStatus', { added: additions.length, skipped: preview.length - additions.length })
+      return h(PricingDialog, { title: t('pricing.batchTitle'), onClose },
+        h('form', { onSubmit: (event) => { event.preventDefault(); if (additions.length) onConfirm(additions) } },
+          h('div', { className: 'ud-card' }, h('code', null, source.model), h('p', { className: 'ud-pricing-note' }, pricingConditionsText(source, t)),
+            h(PricingPriceReadout, { rule: source, t })),
+          h('label', { className: 'ud-field' }, h('span', { className: 'ud-field-label' }, t('pricing.batchTargets')),
+            h('textarea', { className: 'ud-input', rows: 3, autoFocus: true, value: input, 'aria-invalid': invalid,
+              'aria-describedby': `${inputId}-hint ${inputId}-status`, onChange: (event) => setInput(event.target.value) })),
+          h('p', { className: 'ud-pricing-note', id: `${inputId}-hint` }, t('pricing.batchHint')),
+          h('p', { id: `${inputId}-status`, role: 'status' }, status),
+          preview.length ? h('ul', { className: 'ud-pricing-dialog-list' }, preview.map((row) => h('li', { key: row.model, className: 'ud-pricing-line' },
+            h('code', null, row.model), h('span', { className: 'ud-pricing-note' }, !row.candidate ? t('pricing.batchSkip')
+              : !row.covered ? t('pricing.batchUnobserved') : !row.matches ? t('pricing.batchConditionsOff')
+                : `${t('pricing.billing', { n: row.billing })} · ${t('pricing.taken', { n: row.taken })}${row.conflicts ? ` · ${t('pricing.conflict')} ${row.conflicts}` : ''}`)))) : null,
+          h('div', { className: 'ud-pricing-line ud-pricing-confirm' },
+            h('button', { className: 'ud-btn', type: 'button', onClick: onClose }, t('pricing.batchCancel')),
+            h('button', { className: 'ud-btn ud-btn--primary', type: 'submit', disabled: !additions.length }, t('pricing.batchConfirm')))))
+    }
+
+    const DRAFT_GROUP = Symbol('pricing draft group')
+    const DRAFT_SLOT = Symbol('pricing draft slot')
+    const PRICING_FALLBACK_GROUP = `loaded:${MODEL_UNROUTED}`
+
+    function pricingDraftOf(rules, currency, allocateSlot) {
+      const { rules: draft, synthetic } = ensureGlobalDefault(normalizePricingRules(copyRules(rules)), currency)
+      if (synthetic) draft.at(-1).price = Object.fromEntries(PRICE_KEYS.map((key) => [key, '']))
+      return { draft: draft.map((rule) => ({ ...rule, [DRAFT_GROUP]: `loaded:${rule.model}`, [DRAFT_SLOT]: allocateSlot() })), synthetic }
+    }
+
+    function pricingDraftGroups(rules) {
+      const groups = new Map()
+      rules.forEach((rule, index) => {
+        const id = rule[DRAFT_GROUP]
+        if (!groups.has(id)) groups.set(id, { id, model: rule.model, slots: [] })
+        groups.get(id).slots.push({ rule, index, id: rule[DRAFT_SLOT] })
+      })
+      return [...groups.values()].sort((a, b) => Number(a.id === PRICING_FALLBACK_GROUP) - Number(b.id === PRICING_FALLBACK_GROUP))
+    }
+
+    // 匹配器读取 Date 的日历分量；快照按宿主墙钟匹配，不受浏览器夏令时影响。
+    class PricingWallDate extends Date {
+      getFullYear() { return this.getUTCFullYear() }
+      getMonth() { return this.getUTCMonth() }
+      getDate() { return this.getUTCDate() }
+      getDay() { return this.getUTCDay() }
+      getHours() { return this.getUTCHours() }
+      getMinutes() { return this.getUTCMinutes() }
+    }
+
+    function PricingEditor({ t = defaultT, showTitle = true, publishedRules, observed = EMPTY_PRICING_ROWS, open = true, timeZone }) {
+      const [tab, setTab] = useState(PRICING_TABS[0])
+      const [snapshot, setSnapshot] = useState('')
+      const [clockOpen, setClockOpen] = useState(false)
+      const [now, setNow] = useState(Date.now)
+      const [selectedModel, setSelectedModel] = useState(null)
+      const [query, setQuery] = useState('')
       const [phase, setPhase] = useState(null)
+      const [failure, setFailure] = useState(null)
+      const [loadAttempt, setLoadAttempt] = useState(0)
+      const boardId = React.useId()
+      const boardRef = useRef(null)
+      const pendingModelFocus = useRef(null)
+      useLayoutEffect(() => {
+        if (tab !== 'models' || pendingModelFocus.current === null) return
+        const model = pendingModelFocus.current
+        pendingModelFocus.current = null
+        const target = Array.from(boardRef.current?.querySelectorAll('[data-ud-price-model]') ?? []).find((button) => button.dataset.udPriceModel === model)
+        target?.focus()
+      }, [tab, selectedModel])
+      const tabId = (name) => `${boardId}-tab-${name}`
+      const panelId = (name) => `${boardId}-panel-${name}`
+      const chooseTab = (name, focus = false) => {
+        if (!snapshot) setNow(Date.now())
+        setTab(name)
+        if (focus) boardRef.current?.ownerDocument.getElementById(tabId(name))?.focus()
+      }
+      const onTabKey = (event, index) => {
+        const last = PRICING_TABS.length - 1
+        const offsets = { ArrowLeft: -1, ArrowRight: 1 }
+        const target = event.key === 'Home' ? 0 : event.key === 'End' ? last
+          : offsets[event.key] ? (index + offsets[event.key] + PRICING_TABS.length) % PRICING_TABS.length : -1
+        if (target < 0) return
+        event.preventDefault()
+        chooseTab(PRICING_TABS[target], true)
+      }
+      useEffect(() => {
+        if (!open || snapshot) return undefined
+        let timer
+        const refresh = () => {
+          clearTimeout(timer)
+          if (document.visibilityState === 'hidden') return
+          const value = Date.now()
+          setNow(value)
+          timer = setTimeout(refresh, MS_PER_MINUTE - value % MS_PER_MINUTE)
+        }
+        refresh()
+        document.addEventListener?.('visibilitychange', refresh)
+        return () => {
+          clearTimeout(timer)
+          document.removeEventListener?.('visibilitychange', refresh)
+        }
+      }, [open, snapshot])
       const [currency, setCurrency] = useState(CURRENCIES[0])
       const [rules, setRules] = useState(null)
+      const [loadedRules, setLoadedRules] = useState(null)
+      const [batchSource, setBatchSource] = useState(null)
       const [errors, setErrors] = useState(() => new Map())
       const [saveError, setSaveError] = useState('')
       const [saving, setSaving] = useState(false)
       const [saved, setSaved] = useState(false)
       const savedTimerRef = useRef(null)
       const draftVersionRef = useRef(0)
-      const editRules = (updater) => {
+      const nextSlotRef = useRef(0)
+      const allocateSlot = useCallback(() => `slot:${nextSlotRef.current++}`, [])
+      const editRules = useCallback((updater, structural = false) => {
         draftVersionRef.current += 1
         setRules(updater)
-      }
+        if (structural) setErrors((previous) => previous.size ? new Map() : previous)
+      }, [])
+      const draftGroups = useMemo(() => rules ? pricingDraftGroups(rules) : [], [rules])
+      const actions = useMemo(() => ({
+        batch: setBatchSource,
+        rename: (id, model, invalidProvider) => {
+          editRules((previous) => previous.map((rule) => {
+            if (rule[DRAFT_GROUP] !== id) return rule
+            const next = { ...rule, model }
+            if (invalidProvider === undefined) delete next.invalidProvider
+            else next.invalidProvider = invalidProvider
+            return next
+          }), true)
+        },
+        patch: (id, patch) => editRules((previous) => previous.map((rule) => rule[DRAFT_SLOT] === id ? { ...rule, ...patch } : rule), 'conditions' in patch),
+        remove: (id) => editRules((previous) => previous.filter((rule) => rule[DRAFT_SLOT] !== id), true),
+        removeGroup: (id) => editRules((previous) => previous.filter((rule) => rule[DRAFT_GROUP] !== id), true),
+        move: (from, to) => editRules((previous) => moveRuleTo(previous,
+          previous.findIndex((rule) => rule[DRAFT_SLOT] === from), previous.findIndex((rule) => rule[DRAFT_SLOT] === to)), true),
+        addSlot: (position, group, asDefault) => {
+          const slot = {
+            ...defaultPricingRule(currency, group.model), [DRAFT_GROUP]: group.id, [DRAFT_SLOT]: allocateSlot(),
+            ...(group.slots[0].rule.invalidProvider !== undefined ? { invalidProvider: group.slots[0].rule.invalidProvider } : {}),
+            conditions: asDefault ? [] : [defaultCondition(CONDITION_KIND_OPTIONS[0])],
+          }
+          editRules((previous) => insertRuleAt(previous, position, slot), true)
+        },
+      }), [allocateSlot, currency, editRules])
       const aliveRef = useRef(false)
       const syntheticGlobalRef = useRef(false)
       useEffect(() => {
@@ -5752,33 +6501,52 @@ ${HUD_CSS}
 
       useEffect(() => {
         let alive = true
-        fetchPricing().then((value) => {
+        fetchPricing(loadAttempt > 0).then((value) => {
           if (!alive) return
           if (!value) {
+            setFailure(pricingFailure ?? 'transport')
             setPhase(PRICING_STATE_UNAVAILABLE)
             return
           }
-          // 打开即归一规则并补全局兜底槽;货币取首个非空,无非空回落首档
-          const loaded = normalizePricingRules(copyRules(value.rules))
-          const unified = aggregateCurrencyOf(loaded) || CURRENCIES[0]
-          const ensured = ensureGlobalDefault(loaded, unified)
-          syntheticGlobalRef.current = ensured.synthetic
+          setFailure(null)
+          setSaveError('')
+          const unified = aggregateCurrencyOf(value.rules) || CURRENCIES[0]
+          const { draft, synthetic } = pricingDraftOf(value.rules, unified, allocateSlot)
+          syntheticGlobalRef.current = synthetic
+          setLoadedRules(value.rules)
           setCurrency(unified)
-          setRules(applyCurrencyToRules(ensured.rules, unified))
+          setRules(applyCurrencyToRules(draft, unified))
           setPhase(PRICING_STATE_READY)
         })
         return () => { alive = false }
-      }, [])
+      }, [loadAttempt])
 
       useEffect(() => () => {
         if (savedTimerRef.current) clearTimeout(savedTimerRef.current)
       }, [])
 
       const save = async () => {
-        const draft = persistablePricingRules(rules, syntheticGlobalRef.current)
-        const found = validatePricingRules(draft)
+        const isEmptySynthetic = (rule) => syntheticGlobalRef.current && rule[DRAFT_GROUP] === PRICING_FALLBACK_GROUP
+          && isPricingFallback(rule) && PRICE_KEYS.every((key) => rule.price[key] === '')
+        const draft = rules.filter((rule) => !isEmptySynthetic(rule))
+        const found = new Map([...validatePricingRules(draft)].map(([path, error]) => {
+          const [index, ...suffix] = path.split('.')
+          return [[draft[Number(index)][DRAFT_SLOT], ...suffix].join('.'), error]
+        }))
+        const defaults = new Set()
+        for (const rule of draft) {
+          const slot = rule[DRAFT_SLOT]
+          if (rule.invalidProvider !== undefined) found.set(`${slot}.model`, 'pricing.providerSlash')
+          if (rule.conditions?.length) continue
+          if (defaults.has(rule.model)) found.set(`${slot}.model`, 'pricing.duplicateDefault')
+          defaults.add(rule.model)
+        }
+        if (draft.length && !draft.some(isPricingFallback)) {
+          found.set('fallback', 'pricing.fallbackRequired')
+        }
         setErrors(found)
         setSaved(false)
+        setSaveError('')
         if (found.size > 0) return
         const draftVersion = draftVersionRef.current
         setSaving(true)
@@ -5792,7 +6560,7 @@ ${HUD_CSS}
         if (!aliveRef.current) return
         setSaving(false)
         if (!result.ok || !validPricing(result.value)) {
-          setSaveError(result.message || '价格响应无效')
+          setSaveError(result.message || t('pricing.invalidResponse'))
           return
         }
         // 保存期间用户继续编辑时不回写服务器规则,避免覆盖在飞输入;
@@ -5805,32 +6573,51 @@ ${HUD_CSS}
           return
         }
         // 空表仍保留可见的未配置全局槽。
-        const savedRules = normalizePricingRules(copyRules(result.value.rules))
-        const unified = aggregateCurrencyOf(savedRules) || currency
-        const ensured = ensureGlobalDefault(savedRules, unified)
-        syntheticGlobalRef.current = ensured.synthetic
+        const unified = aggregateCurrencyOf(result.value.rules) || currency
+        const { draft: nextDraft, synthetic } = pricingDraftOf(result.value.rules, unified, allocateSlot)
+        syntheticGlobalRef.current = synthetic
+        setLoadedRules(result.value.rules)
         setErrors(new Map())
         setCurrency(unified)
-        setRules(applyCurrencyToRules(ensured.rules, unified))
+        setRules(applyCurrencyToRules(nextDraft, unified))
         setSaved(true)
         if (savedTimerRef.current) clearTimeout(savedTimerRef.current)
         savedTimerRef.current = setTimeout(() => setSaved(false), PRICING_SAVED_NOTICE_MS)
       }
 
-      if (phase === PRICING_STATE_UNAVAILABLE) {
-        return h('div', { className: 'ud-pref-group' },
-          showTitle ? h('span', { className: 'ud-pref-title' }, t('pricing')) : null,
-          h('div', { className: 'ud-empty' }, t('pricingUnavailable')))
-      }
-      if (phase !== PRICING_STATE_READY) return null
-
-      return h('div', { className: 'ud-pref-group' },
-        h('div', { className: 'ud-pref-row' },
+      const currentRules = publishedRules ?? loadedRules ?? EMPTY_PRICING_ROWS
+      const clockValue = formatDateTimeInput(new Date(now), timeZone)
+      const moment = new PricingWallDate(`${snapshot || clockValue}Z`)
+      const analysis = useMemo(() => open && tab !== 'edit' ? pricingSnapshotOf(currentRules, observed, moment) : null, [open, tab === 'edit', currentRules, observed, moment.getTime()])
+      const status = phase === PRICING_STATE_UNAVAILABLE ? 'pricingUnavailable' : phase !== PRICING_STATE_READY ? 'pricing.loading' : null
+      const controls = h('div', { className: 'ud-pricing-toolbar' },
+        h('div', { className: 'ud-group ud-pricing-tabs', role: 'tablist', 'aria-label': t('pricing.views') },
+          PRICING_TABS.map((name, index) => h('button', {
+            key: name, id: tabId(name), type: 'button', role: 'tab', tabIndex: tab === name ? 0 : -1,
+            'aria-controls': panelId(name), 'aria-selected': tab === name,
+            className: cx('ud-seg-item', tab === name && 'ud-seg-item--on'),
+            onClick: () => chooseTab(name), onKeyDown: (event) => onTabKey(event, index),
+          }, t(`pricing.${name}`)))),
+        tab === 'edit' ? null : h('button', {
+          type: 'button', className: 'ud-btn', 'aria-expanded': clockOpen, 'aria-controls': `${boardId}-clock`,
+          onClick: () => { if (!snapshot) setNow(Date.now()); setClockOpen(!clockOpen) },
+        }, snapshot ? t('pricing.snapshot') : t('pricing.now')))
+      const clock = h('div', { className: 'ud-pricing-clock', id: `${boardId}-clock`, hidden: !clockOpen || tab === 'edit' },
+        h('label', { className: 'ud-field' },
+          h('span', { className: 'ud-field-label' }, t('pricing.localSnapshot', { zone: timeZone || t('pricing.localZone') })),
+          h('input', {
+            type: 'datetime-local', className: 'ud-input', value: snapshot || clockValue,
+            onChange: (event) => { if (!event.target.value) setNow(Date.now()); setSnapshot(event.target.value) },
+          })),
+        h('button', { type: 'button', className: 'ud-btn', onClick: () => { setSnapshot(''); setNow(Date.now()) } }, t('pricing.backNow')))
+      const editPanel = !status && tab === 'edit' ? h('div', { className: 'ud-pricing-stack' },
+        h('div', { className: 'ud-pricing-toolrow' },
+          h('div', { className: 'ud-pref-row' },
           h('div', { className: 'ud-pref-text' },
             showTitle ? h('span', { className: 'ud-pref-title' }, t('pricing')) : null,
-            saved ? h('span', { className: 'ud-pref-desc' }, t('saved')) : null),
+            h('span', { className: 'ud-pref-desc' }, t('pricingUnit'))),
           h('div', { className: 'ud-pricing-actions' },
-            h('span', { className: 'ud-unit-note' }, t('pricingUnit')),
+            saved ? h('span', { className: 'ud-pref-desc' }, t('saved')) : null,
             h('div', { className: 'ud-group', role: 'group', 'aria-label': t('pricingCurrency') },
               CURRENCIES.map((symbol) => h('button', {
                 key: symbol, type: 'button',
@@ -5841,47 +6628,114 @@ ${HUD_CSS}
                   editRules((prev) => applyCurrencyToRules(prev, symbol))
                 },
               }, symbol))),
-            h('button', { className: 'ud-btn', type: 'button', disabled: saving, onClick: save }, t('save')))),
-        saveError ? h('div', { className: 'ud-error' }, saveError) : null,
-        h('span', { className: 'ud-rule-cond' }, t('ruleOrderHint')),
-        displayGroupsOf(rules).map((group) => h(PricingModelGroup, {
-          // key 锚定首槽位平面索引:改名重聚合不重建组件,输入焦点不丢
-          key: String(group.slots[0].index),
-          group,
-          currency,
-          errors,
-          t,
-          onModelChange: (model) => editRules((prev) => renameRulesAt(prev, group.slots.map((slot) => slot.index), model)),
-          onGroupRemove: () => editRules((prev) => removeRulesAt(prev, group.slots.map((slot) => slot.index))),
-          onSlotPatch: (index, part) => editRules((prev) => patchItemAt(prev, index, part)),
-          onSlotRemove: (index) => editRules((prev) => prev.filter((_, i) => i !== index)),
-          onSlotMove: (fromIndex, toIndex) => editRules((prev) => moveRuleTo(prev, fromIndex, toIndex)),
-          onSlotAdd: (position, model, asDefault) => editRules((prev) => insertRuleAt(prev, position, {
-            ...defaultPricingRule(currency, model),
-            // 默认价槽无条件;附加规则至少带一条条件,防止删光后变成隐藏默认价
-            conditions: asDefault ? [] : [defaultCondition(CONDITION_KIND_OPTIONS[0])],
-          })),
-        })),
+            h('button', { className: 'ud-btn ud-btn--primary', type: 'button', disabled: saving, onClick: save }, t('save')))),
+        saveError || errors.size ? h('div', { className: 'ud-error', role: 'alert' }, saveError || t(errors.get('fallback') ?? 'pricing.validationSummary')) : null,
+        h('div', { className: 'ud-pricing-line' },
+          h(HintText, { className: 'ud-pricing-help', text: t('pricing.help'), tag: 'span' }, t('pricing.helpLabel')),
+          currentRules.length > 0 && rules.some((rule) => !isPricingFallback(rule) || !syntheticGlobalRef.current)
+            ? h(DeleteArmedButton, {
+              labelKey: 'pricing.disable', confirmKey: 'pricing.confirmDisable', showLabel: true, tone: 'danger', t,
+              onConfirm: () => {
+                const { draft, synthetic } = pricingDraftOf([], currency, allocateSlot)
+                syntheticGlobalRef.current = synthetic
+                setErrors(new Map())
+                setSaveError('')
+                setSaved(false)
+                editRules(() => draft)
+              },
+            }) : null),
+        ),
+        batchSource ? h(PricingBatch, {
+          source: batchSource, rules, observed, moment, t, onClose: () => setBatchSource(null),
+          onConfirm: (additions) => {
+            const newRules = additions.map((candidate) => {
+              const id = allocateSlot()
+              return { ...candidate, [DRAFT_GROUP]: id, [DRAFT_SLOT]: id }
+            })
+            editRules((prev) => {
+              const existing = new Set(prev.map((rule) => rule.model))
+              return [...prev, ...newRules.filter((candidate) => !existing.has(candidate.model))]
+            }, true)
+            setBatchSource(null)
+          },
+        }) : null,
+        draftGroups.map((group) => h(PricingModelGroup, { key: group.id, group, currency, errors, t, actions })),
         h('button', {
           className: 'ud-rule-add', type: 'button',
-          onClick: () => editRules((prev) => [...prev, defaultPricingRule(currency)]),
-        }, t('addGroup')))
+          onClick: () => {
+            const id = allocateSlot()
+            editRules((prev) => [...prev, { ...defaultPricingRule(currency), [DRAFT_GROUP]: id, [DRAFT_SLOT]: id }], true)
+          },
+        }, t('addGroup'))) : null
+      const views = {
+        edit: editPanel,
+        models: analysis ? h(PricingModels, {
+          analysis, rules: currentRules, moment, query,
+          onQuery: setQuery, selectedModel, onSelect: setSelectedModel, onEdit: () => chooseTab('edit', true), t,
+        }) : null,
+        rules: analysis ? h(PricingRules, {
+          analysis, rules: currentRules, t, onEdit: () => chooseTab('edit', true),
+          onJump: (model) => {
+            pendingModelFocus.current = model
+            setQuery(model)
+            setSelectedModel(model)
+            chooseTab('models')
+          },
+        }) : null,
+      }
+      // 存量规则无法渲染时,重试只会重复失败:另给清空出口,走空表(等价未配置)自救。
+      // 请求失败态不给该出口——那时原表可能完好,误清即不可恢复
+      const resetPricing = async () => {
+        setPhase(null)
+        setSaveError('')
+        const result = await requestPost(ENDPOINTS.pricing, { rules: [] })
+        if (!aliveRef.current) return
+        if (!result.ok || !validPricing(result.value)) {
+          setSaveError(result.message || t('pricing.invalidResponse'))
+          setFailure('transport')
+          setPhase(PRICING_STATE_UNAVAILABLE)
+          return
+        }
+        // 直接用写回的空表进入可用态,不再二次取价
+        const unified = aggregateCurrencyOf(result.value.rules) || CURRENCIES[0]
+        const { draft, synthetic } = pricingDraftOf(result.value.rules, unified, allocateSlot)
+        syntheticGlobalRef.current = synthetic
+        setFailure(null)
+        setLoadedRules(result.value.rules)
+        setCurrency(unified)
+        setRules(applyCurrencyToRules(draft, unified))
+        setErrors(new Map())
+        setPhase(PRICING_STATE_READY)
+        applyPricingValue(result.value, true)
+        hudRefresh({ force: true }).catch(() => {})
+      }
+      return h('div', { className: 'ud-pricing-board', ref: boardRef }, controls, clock,
+        PRICING_TABS.map((name) => h('div', {
+          key: name, id: panelId(name), role: 'tabpanel', 'aria-labelledby': tabId(name), tabIndex: 0, hidden: tab !== name,
+        }, tab !== name ? null : status ? h('div', { className: 'ud-empty' },
+          h('p', { role: 'status' }, t(status)),
+          phase === PRICING_STATE_UNAVAILABLE ? h('div', { className: 'ud-pricing-line' },
+            h('button', {
+              className: 'ud-btn', type: 'button', onClick: () => { setPhase(null); setLoadAttempt((attempt) => attempt + 1) },
+            }, t('pricing.retry')),
+            failure === 'invalid' ? h(DeleteArmedButton, {
+              labelKey: 'pricing.reset', confirmKey: 'pricing.confirmReset', showLabel: true, tone: 'danger', t, onConfirm: resetPricing,
+            }) : null) : null,
+          saveError ? h('p', { className: 'ud-error', role: 'alert' }, saveError) : null) : views[name])))
     }
 
     // 定价规则折叠区:编辑器保持挂载以保留草稿,折叠只隐藏 body
-    function PricingSection({ rules = null, t = defaultT }) {
+    function PricingSection({ rules = null, observed, timeZone, t = defaultT }) {
       const [open, setOpen] = useState(false)
-      const groups = Array.isArray(rules) ? displayGroupsOf(rules) : null
-      const summary = groups === null
-        ? undefined
-        : groups.length > 0 ? t('pricingRuleCount', { n: groups.length }) : t('pricingNotConfigured')
+      const summary = !Array.isArray(rules) ? undefined
+        : rules.length > 0 ? t('pricingRuleCount', { n: rules.length }) : t('pricingNotConfigured')
       return h(SectionFold, {
         title: t('pricing'),
         description: t('pricingSectionDesc'),
         summary,
         open,
         onToggle: () => setOpen((value) => !value),
-      }, h(PricingEditor, { t, showTitle: false }))
+      }, h(PricingEditor, { t, showTitle: false, open, publishedRules: rules, observed, timeZone }))
     }
 
     // 扫描异常日志入口:仅箭头标识,明细在展开的日志块中展示;
@@ -6315,6 +7169,9 @@ ${HUD_CSS}
       const emptyVisible = !error && (pointActive ? pointView && isEmptyRange(pointView) : stats && isEmptyRange(stats))
 
       return h('div', { className: 'ud-panel' },
+        h('header', { className: 'ud-section-page-head' },
+          h('h2', { className: 'ud-section-page-title' }, t('nav')),
+          h('p', { className: 'ud-section-page-desc' }, t('sectionDesc'))),
         h('div', { className: 'ud-toolbar' },
           h('div', { className: 'ud-toolbar-main' },
             h('div', { className: 'ud-group', role: 'group', 'aria-label': t('viewGroup') },
@@ -6427,7 +7284,7 @@ ${HUD_CSS}
         cardsStats?.to ? h('div', { className: 'ud-foot' }, `${t('asOf')} ${slotLabelFor(view)(cardsStats.to)}`) : null,
         h('div', { className: 'ud-settings-stack' },
           h(StatsLineOptions, { key: 'prefs', t }),
-          h(PricingSection, { key: 'pricing', t, rules: pricingRules }),
+          h(PricingSection, { key: 'pricing', t, rules: pricingRules, observed: cardsStats?.models, timeZone: serverTimeZone }),
           // 成本控制四卡:用量摘要 / 成本护栏 / 异常哨兵 / 省钱沙盘(沙盘用得少,排在最后)
           h(HudSummarySection, { key: 'hud', t }),
           h(GuardSection, { key: 'guard', t }),

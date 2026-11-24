@@ -1,20 +1,22 @@
-// 定价纯函数:规则匹配与四桶计价,零宿主依赖、零 IO、无全局状态。
-// 本地时区取 Date 本地分量,timestamp 接受 Date 或 epoch 毫秒;匹配只读遍历入参规则。
+// 定价规则匹配与四桶计价,零宿主依赖、零 IO。
+// 本地时区取 Date 本地分量,timestamp 接受 Date 或 epoch 毫秒;匹配不改写入参。
 
 export const UNIT_PER_MILLION = 'perMillion'
 export const CURRENCIES = ['¥', '$']
 export const CONDITION_KINDS = ['dailyWindow', 'weekdays', 'monthDays', 'dateRange']
 export const TOKENS_PER_MILLION = 1000 * 1000
-// 全通配模型键:编辑器恒提供该兜底组,归一时恒排最后
+// 全通配模型键,用于声明全局兜底。
 export const GLOBAL_DEFAULT_MODEL = '*/*'
 
 const MODEL_WILDCARD = '*'
 const SEGMENT_SEPARATOR = '/'
 // 请求侧无斜杠时的 vendor 段缺省值,与存储行 provider 口径同源
 export const PROVIDER_UNSET = 'default'
-// 档位权重:vendor 段通配 1 档、model 段通配 2 档,和越小越优先(模型名精确档恒优于供应商精确档)
-const VENDOR_WILDCARD_TIER = 1
-const MODEL_WILDCARD_TIER = 2
+const SEGMENT_EXACT = 0
+const SEGMENT_PREFIX = 1
+const SEGMENT_SUFFIX = 2
+const SEGMENT_INFIX = 3
+const SEGMENT_ANY = 4
 const MINUTES_PER_HOUR = 60
 const DAY_PART_WIDTH = 2
 const ISO_DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/
@@ -74,95 +76,143 @@ const CONDITION_MATCHERS = {
 
 // 单条件判定;未知 kind、形状残缺或非法 Date 一律不成立
 export const conditionMatches = (condition, date) => {
-  const matcher = condition && CONDITION_MATCHERS[condition.kind]
-  if (!matcher || !(date instanceof Date) || Number.isNaN(date.getTime())) return false
-  return matcher(condition, date)
+  if (!condition || typeof condition.kind !== 'string' || !Object.hasOwn(CONDITION_MATCHERS, condition.kind)
+    || !(date instanceof Date) || Number.isNaN(date.getTime())) return false
+  return CONDITION_MATCHERS[condition.kind](condition, date)
 }
 
-// 形状残缺规则跳过:缺 model/price、unit 非 perMillion、conditions 非数组(含缺失)
+// 跳过形状残缺的规则,旧规则缺 conditions 或为 null 时视为无条件。
 const isRuleShaped = (rule) =>
   !!rule && typeof rule === 'object' && typeof rule.model === 'string'
   && (rule.unit === undefined || rule.unit === UNIT_PER_MILLION)
   && !!rule.price && typeof rule.price === 'object' && !Array.isArray(rule.price)
   && (rule.conditions === undefined || rule.conditions === null || Array.isArray(rule.conditions))
 
-// 规则表归一:同模型至多一条无条件默认价(保留首条,与 matchPrice 同档取首条一致),
-// 条件规则升到默认价前;全通配组恒最后,防全局兜底抢在具体模型规则前。
-// 纯函数且保留命中规则引用;非法条目原样跳过,不在这里补默认价(默认价由编辑器呈现)。
+// 只去除同模型后续无条件规则,保留其余原序,避免归一改变不同模式间的平局结果。
 export const normalizePricingRules = (rules) => {
   if (!Array.isArray(rules)) return []
-  const groups = new Map()
-  for (const rule of rules) {
-    if (!rule || typeof rule !== 'object') continue
-    const model = typeof rule.model === 'string' ? rule.model : ''
-    if (!groups.has(model)) groups.set(model, [])
-    groups.get(model).push(rule)
-  }
-  const regular = []
-  const global = []
-  for (const [model, group] of groups) {
-    const fallback = group.find((rule) => (rule.conditions ?? []).length === 0)
-    const conditional = group.filter((rule) => (rule.conditions ?? []).length !== 0)
-    const ordered = fallback ? [...conditional, fallback] : conditional
-    if (model === GLOBAL_DEFAULT_MODEL) global.push(...ordered)
-    else regular.push(...ordered)
-  }
-  return [...regular, ...global]
+  const seen = new Set()
+  return rules.filter((rule) => {
+    if (!rule || typeof rule !== 'object') return false
+    if (rule.conditions != null && (!Array.isArray(rule.conditions) || rule.conditions.length !== 0)) return true
+    const model = rule.model
+    if (seen.has(model)) return false
+    seen.add(model)
+    return true
+  })
 }
 
-// 规则模型键必须两段式:首个 / 前 vendor 段、后模型段(允许含 /),首位斜杠或无斜杠均非法
+// 规则以首个斜杠分段,其后的斜杠属于型号。
 export const splitRuleSegments = (pattern) => {
+  if (typeof pattern !== 'string') return null
   const slash = pattern.indexOf(SEGMENT_SEPARATOR)
   return slash > 0 ? [pattern.slice(0, slash), pattern.slice(slash + SEGMENT_SEPARATOR.length)] : null
 }
 
-// 段须非空且不含空白:含空白的模型键永不匹配真实请求
-const SEGMENT_PATTERN = /^\S+$/
-
-export const isTwoSegmentModel = (pattern) => {
-  const segments = splitRuleSegments(pattern)
-  return segments !== null && segments.every((segment) => SEGMENT_PATTERN.test(segment))
+const compilePricingSegment = (segment) => {
+  if (segment === '' || /\s/.test(segment)) return null
+  const star = segment.indexOf(MODEL_WILDCARD)
+  if (star < 0) return { kind: SEGMENT_EXACT, head: segment, tail: '', literalLength: segment.length }
+  if (star !== segment.lastIndexOf(MODEL_WILDCARD)) return null
+  const head = segment.slice(0, star)
+  const tail = segment.slice(star + MODEL_WILDCARD.length)
+  const kind = head ? (tail ? SEGMENT_INFIX : SEGMENT_PREFIX) : (tail ? SEGMENT_SUFFIX : SEGMENT_ANY)
+  return { kind, head, tail, literalLength: head.length + tail.length }
 }
 
-// 请求侧模型键按同构规则分段,无 / 或首位斜杠时 vendor 段缺省归 default(与存储行口径一致)
+const compilePricingModel = (pattern) => {
+  const segments = splitRuleSegments(pattern)
+  if (!segments) return null
+  const provider = compilePricingSegment(segments[0])
+  const model = compilePricingSegment(segments[1])
+  return provider && model ? { provider, model } : null
+}
+
+export const isTwoSegmentModel = (pattern) => compilePricingModel(pattern) !== null
+
+// 请求侧无斜杠或首位斜杠时沿用缺省供应商。
 export const splitRequestSegments = (model) => splitRuleSegments(model) ?? [PROVIDER_UNSET, model]
 
-// 段级比对:规则段为通配或与请求段相等;两段全过才成立,通配段按各自档位计权
-const matchTier = (ruleSegments, requestSegments) => {
-  const [ruleVendor, ruleModel] = ruleSegments
-  const [requestVendor, requestModel] = requestSegments
-  if (ruleVendor !== MODEL_WILDCARD && ruleVendor !== requestVendor) return null
-  if (ruleModel !== MODEL_WILDCARD && ruleModel !== requestModel) return null
-  return (ruleVendor === MODEL_WILDCARD ? VENDOR_WILDCARD_TIER : 0)
-    + (ruleModel === MODEL_WILDCARD ? MODEL_WILDCARD_TIER : 0)
+// 只缓存规则的模式编译结果,条目随规则引用回收,改写 model 时重新编译。
+const pricingPatternCache = new WeakMap()
+const compiledPricingModel = (rule) => {
+  const source = rule.model
+  const cached = pricingPatternCache.get(rule)
+  if (cached?.source === source) return cached.pattern
+  const pattern = compilePricingModel(source)
+  pricingPatternCache.set(rule, { source, pattern })
+  return pattern
 }
+
+const pricingSegmentMatches = (segment, value) => {
+  if (segment.kind === SEGMENT_EXACT) return value === segment.head
+  if (segment.kind === SEGMENT_ANY) return true
+  return value.length >= segment.literalLength && value.startsWith(segment.head) && value.endsWith(segment.tail)
+}
+
+const comparePricingSegments = (a, b) => {
+  if (a.kind === SEGMENT_EXACT || b.kind === SEGMENT_EXACT) return a.kind - b.kind
+  return b.literalLength - a.literalLength || a.kind - b.kind
+}
+
+const comparePricingPriority = (a, aCount, b, bCount) =>
+  comparePricingSegments(a.provider, b.provider) || comparePricingSegments(a.model, b.model) || bCount - aCount
 
 const toLocalDate = (timestamp) => {
   const date = timestamp instanceof Date ? timestamp : new Date(timestamp)
   return Number.isNaN(date.getTime()) ? null : date
 }
 
-// 匹配链:全名 > 模型名(vendor 通配)> 供应商(model 通配)> '*/*' 全通;
-// 档位最小者胜,同档按数组序取首个;高档条件不满足自然落低档;无命中为 null(调用方计 unpriced)
-export const matchPrice = (rules, model, timestamp) => {
+const pricingConditionsMatch = (conditions, date) => {
+  for (let index = 0; index < conditions.length; index += 1) {
+    if (!conditionMatches(conditions[index], date)) return false
+  }
+  return true
+}
+
+// 热路径单遍择优;解释路径复用相同的匹配和比较,另收集所有候选。
+const selectPricingRule = (rules, model, timestamp, candidates) => {
+  if (!Array.isArray(rules) || rules.length === 0 || typeof model !== 'string') return null
   const date = toLocalDate(timestamp)
-  if (!Array.isArray(rules) || !date || typeof model !== 'string') return null
-  const requestSegments = splitRequestSegments(model)
-  let bestTier = Infinity
-  let bestPrice = null
+  if (!date) return null
+  const [requestProvider, requestModel] = splitRequestSegments(model)
+  let winner = null
+  let bestPattern = null
+  let bestCount = 0
   for (const rule of rules) {
     if (!isRuleShaped(rule)) continue
-    const ruleSegments = splitRuleSegments(rule.model)
-    if (!ruleSegments) continue
-    const tier = matchTier(ruleSegments, requestSegments)
-    if (tier === null || tier >= bestTier) continue
-    const conditions = Array.isArray(rule.conditions) ? rule.conditions : []
-    if (!conditions.every((condition) => conditionMatches(condition, date))) continue
-    bestTier = tier
-    bestPrice = rule.price
+    const pattern = compiledPricingModel(rule)
+    if (!pattern || !pricingSegmentMatches(pattern.provider, requestProvider)
+      || !pricingSegmentMatches(pattern.model, requestModel)) continue
+    const conditions = rule.conditions
+    const conditionCount = conditions?.length ?? 0
+    // 只取胜者时,无法超越当前胜者的规则不再评估条件。
+    const isBetter = bestPattern === null || comparePricingPriority(pattern, conditionCount, bestPattern, bestCount) < 0
+    if (!isBetter && !candidates) continue
+    if (conditionCount > 0 && !pricingConditionsMatch(conditions, date)) continue
+    if (candidates) candidates.push({ rule, pattern, conditionCount })
+    if (isBetter) {
+      bestPattern = pattern
+      bestCount = conditionCount
+      winner = rule
+    }
   }
-  return bestPrice
+  return winner
 }
+
+export const resolvePricingRule = (rules, model, timestamp) => {
+  const ranked = []
+  const winner = selectPricingRule(rules, model, timestamp, ranked)
+  const compare = (a, b) => comparePricingPriority(a.pattern, a.conditionCount, b.pattern, b.conditionCount)
+  // 稳定排序保留同优先级原序,冲突仅含与首条实质并列的规则。
+  ranked.sort(compare)
+  const candidates = ranked.map(({ rule }) => rule)
+  const firstLower = ranked.findIndex((entry) => compare(entry, ranked[0]) !== 0)
+  const topCount = firstLower === -1 ? ranked.length : firstLower
+  return { winner, candidates, conflictRules: topCount > 1 ? candidates.slice(0, topCount) : [] }
+}
+
+export const matchPrice = (rules, model, timestamp) => selectPricingRule(rules, model, timestamp)?.price ?? null
 
 const BUCKET_PRICE_KEYS = [
   { tokens: 'inputTokens', price: 'input' },

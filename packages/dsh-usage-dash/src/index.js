@@ -137,7 +137,7 @@ export function apply(ctx, config) {
   const store = sharedStore(ctx.storageDomain)
   const collector = new UsageCollector(ctx, store)
   // 定价能力门面:规则表落 usage_pricing 域,读同步取域内快照,写串行自增
-  // revision;域打开失败即降级(routes 侧 GET 空值、POST 拒 503)
+  // revision;域打开失败时定价读写均返回不可用
   const pricingStore = sharedPricingStore(ctx.storageDomain)
   const pricing = {
     // 派生自域状态:ready 之前与降级态均为 false,不依赖微任务注册顺序

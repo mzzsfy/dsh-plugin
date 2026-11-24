@@ -22,6 +22,8 @@ const RULE = {
   conditions: [],
 }
 
+const CONFIGURED_RULES = [RULE, { ...RULE, model: '*/*', price: { ...RULE.price, input: 5 } }]
+
 // sharedStore/sharedPricingStore 单例按 storageDomain 缓存:每例独立 facility
 // 防串扰;表为内存 Map,断言直接读行,不落盘
 const tableHandle = (rows) => ({
@@ -212,16 +214,16 @@ test('0.1.7 形态:定价规则读写落在 usage_pricing 域,profile 配置节�
   assert.deepEqual(readParsed.value.rules, [])
   assert.equal(rc.facility.opened.includes('usage_pricing'), true, '定价域必须打开')
   // When POST 合法规则
-  const saved = await invokeJson(rc.routes, PATH_PRICING, { payload: { rules: [RULE] } })
+  const saved = await invokeJson(rc.routes, PATH_PRICING, { payload: { rules: CONFIGURED_RULES } })
   // Then 写进定价域,revision 自增,配置节与 configEditor 都不参与
   const savedParsed = JSON.parse(saved.body)
   assert.equal(saved.statusCode, 200)
   assert.equal(savedParsed.ok, true)
   assert.equal(rc.editCalls.length, 0, '定价写入不再经 configEditor')
   const row = rc.facility.rows('usage_pricing', 'rules').get('current')
-  assert.deepEqual(row.rules, [RULE])
+  assert.deepEqual(row.rules, CONFIGURED_RULES)
   assert.equal(row.revision, 1)
-  assert.deepEqual(savedParsed.value.rules, [RULE])
+  assert.deepEqual(savedParsed.value.rules, CONFIGURED_RULES)
   assert.equal(savedParsed.value.revision, 1)
   assert.equal(rc.configStore.minuteRetentionDays, 7, '其它设置不动')
   assert.equal(Object.hasOwn(rc.configStore, 'pricing'), false, '配置节不得写入定价')
@@ -240,14 +242,14 @@ test('0.1.7 形态:GET/POST 归一重复 */* 与同模型多条无条件', async
   })
   apply(rc.ctx, rc.configRef)
   rc.activateSettings()
-  // Then GET 把精确模型放前,*/* 只保留首条并放最后
+  // Then GET 只保留首条 */*，其余规则保留提交顺序
   const read = JSON.parse((await invoke(rc.routes, PATH_PRICING, { method: 'GET' })).body)
-  assert.deepEqual(read.value.rules.map((item) => [item.model, item.price.input]), [['p/m', 3], ['*/*', 1]])
+  assert.deepEqual(read.value.rules.map((item) => [item.model, item.price.input]), [['*/*', 1], ['p/m', 3]])
   // When 再写一组重复规则:提交序首条 9 胜出,POST 回读同口径
   const saved = JSON.parse((await invokeJson(rc.routes, PATH_PRICING, {
     payload: { rules: [globalTwo, globalOne, exact] },
   })).body)
-  assert.deepEqual(saved.value.rules.map((item) => [item.model, item.price.input]), [['p/m', 3], ['*/*', 9]])
+  assert.deepEqual(saved.value.rules.map((item) => [item.model, item.price.input]), [['*/*', 9], ['p/m', 3]])
 })
 
 test('0.1.7 形态:configEditor 缺席不影响定价写入(规则表已脱离配置槽位)', async () => {
@@ -256,12 +258,12 @@ test('0.1.7 形态:configEditor 缺席不影响定价写入(规则表已脱离�
   apply(rc.ctx, rc.configRef)
   rc.activateSettings()
   // When POST 写规则
-  const saved = await invokeJson(rc.routes, PATH_PRICING, { payload: { rules: [RULE] } })
+  const saved = await invokeJson(rc.routes, PATH_PRICING, { payload: { rules: CONFIGURED_RULES } })
   // Then 仍写进定价域,不再依赖 profile 编辑能力
   const savedParsed = JSON.parse(saved.body)
   assert.equal(saved.statusCode, 200)
   assert.equal(savedParsed.ok, true)
-  assert.deepEqual(rc.facility.rows('usage_pricing', 'rules').get('current').rules, [RULE])
+  assert.deepEqual(rc.facility.rows('usage_pricing', 'rules').get('current').rules, CONFIGURED_RULES)
   assert.equal(rc.editCalls.length, 0)
 })
 
@@ -311,12 +313,12 @@ test('legacy 形态:settings 激活即门面生效,定价读写走 usage_pricing
   assert.equal(read.statusCode, 200)
   assert.deepEqual(JSON.parse(read.body).value.rules, [])
   // POST 合法规则落定价域,命名空间不再承载 pricing
-  const saved = await invokeJson(routes, PATH_PRICING, { payload: { rules: [RULE] } })
+  const saved = await invokeJson(routes, PATH_PRICING, { payload: { rules: CONFIGURED_RULES } })
   const savedParsed = JSON.parse(saved.body)
   assert.equal(savedParsed.ok, true)
-  assert.deepEqual(facility.rows('usage_pricing', 'rules').get('current').rules, [RULE])
+  assert.deepEqual(facility.rows('usage_pricing', 'rules').get('current').rules, CONFIGURED_RULES)
   assert.equal(store.pricing, undefined)
-  assert.deepEqual(savedParsed.value.rules, [RULE])
+  assert.deepEqual(savedParsed.value.rules, CONFIGURED_RULES)
   assert.equal(savedParsed.value.revision, 1)
 })
 
@@ -367,7 +369,7 @@ test('迁移:定价域已有规则时不用旧配置覆盖(只重试删键)', as
   assert.equal(rc.facility.rows('usage_pricing', 'rules').get('current').revision, 3)
 })
 
-test('降级:定价域打开失败时 GET 空表、POST 503,采集与面板照常', async () => {
+test('降级:定价域打开失败时 GET 和 POST 均为 503', async () => {
   const rc = makeRc17({ configStore: {} })
   rc.ctx.storageDomain = {
     async open(spec) {
@@ -378,8 +380,8 @@ test('降级:定价域打开失败时 GET 空表、POST 503,采集与面板照�
   apply(rc.ctx, rc.configRef)
   rc.activateSettings()
   const read = await invoke(rc.routes, PATH_PRICING, { method: 'GET' })
-  assert.equal(read.statusCode, 200)
-  assert.deepEqual(JSON.parse(read.body).value, { revision: 0, rules: [] })
+  assert.equal(read.statusCode, 503)
+  assert.match(JSON.parse(read.body).error.message, /pricing unavailable/)
   const saved = await invokeJson(rc.routes, PATH_PRICING, { payload: { rules: [RULE] } })
   const savedParsed = JSON.parse(saved.body)
   assert.equal(saved.statusCode, 503)

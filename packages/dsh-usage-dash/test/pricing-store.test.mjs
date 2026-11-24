@@ -65,7 +65,7 @@ test('打开即读:存量行进内存快照,读入按归一顺序整理', async 
   await store.readyPromise()
   assert.equal(store.degradation, undefined)
   assert.equal(store.revision(), 4)
-  assert.deepEqual(store.rules().map((rule) => [rule.model, rule.price.input]), [['p/m', 3], ['*/*', 1]])
+  assert.deepEqual(store.rules().map((rule) => [rule.model, rule.price.input]), [['*/*', 1], ['p/m', 3]])
   assert.equal(store.hasRecord(), true)
 })
 
@@ -76,10 +76,10 @@ test('replace:整表替换落盘,revision 自增,回读为归一后的规则', a
   const globalOne = { ...RULE, model: '*/*', price: { ...RULE.price, input: 1 } }
   const exact = { ...RULE, model: 'p/m', price: { ...RULE.price, input: 3 } }
   const saved = await store.replace([globalOne, exact])
-  assert.deepEqual(saved.map((rule) => rule.model), ['p/m', '*/*'])
+  assert.deepEqual(saved.map((rule) => rule.model), ['*/*', 'p/m'])
   const row = facility.rows('usage_pricing.rules').get('current')
   assert.ok(row.revision > 0, '首次写入 revision 为正数')
-  assert.deepEqual(row.rules.map((rule) => rule.model), ['p/m', '*/*'])
+  assert.deepEqual(row.rules.map((rule) => rule.model), ['*/*', 'p/m'])
   const firstRevision = row.revision
   await store.replace([exact])
   assert.equal(store.revision(), firstRevision + 1)
