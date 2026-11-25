@@ -4169,7 +4169,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-pricing-fieldset{display:grid;gap:8px;min-width:0;padding-top:12px;border-top:.5px solid var(--ud-card-border)}
 .ud-pricing-fieldset h4{margin:0;font-size:14px;line-height:22px;font-weight:600}
 .ud-rule-conds{display:grid;gap:8px;min-width:0}
-.ud-cond{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px;background:var(--dsw-alias-bg-layer-2);border-radius:var(--dsw-radius-sm)}
+.ud-cond{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:4px 0}
+.ud-cond+.ud-cond{border-top:.5px solid var(--ud-card-border);padding-top:12px}
 /* specificity 须高于 .ud-input 的 width:100%,否则类型下拉撑满整行把字段区挤到下一行 */
 .ud-cond .ud-cond-kind{width:auto;min-width:88px;flex:0 0 auto}
 .ud-cond-fields{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:1;min-width:0}
@@ -4197,9 +4198,11 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-pricing-search .ud-pricing-clock-toggle{margin-block-end:4px}
 .ud-pricing-board .ud-pricing-clock-toggle{display:inline-grid;place-items:center;flex:none;width:28px;height:28px;padding:0;color:var(--dsw-alias-label-secondary)}
 .ud-pricing-clock-toggle svg{width:16px;height:16px}
-.ud-pricing-board .ud-pricing-clock-toggle:is([aria-expanded=true],.ud-pricing-clock-toggle--active){color:var(--dsw-alias-brand-primary);border-color:var(--dsw-alias-brand-primary);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent)}
-.ud-pricing-tabs .ud-seg-item{height:30px}
-.ud-pricing-clock{padding:12px;background:var(--dsw-alias-bg-layer-2);border-radius:var(--dsw-radius-md);align-items:end}
+.ud-pricing-board .ud-pricing-clock-toggle:is([aria-expanded=true],.ud-pricing-clock-toggle--active){color:var(--dsw-alias-brand-primary);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent)}
+.ud-pricing-tabs{width:100%;gap:16px;padding:0;border-bottom:.5px solid var(--ud-card-border);border-radius:0;background:transparent}
+.ud-pricing-tabs .ud-seg-item{height:32px;padding:0 6px;border-bottom:2px solid transparent;border-radius:0;font-size:14px}
+.ud-pricing-tabs .ud-seg-item--on{border-bottom-color:var(--dsw-alias-brand-primary);background:transparent}
+.ud-pricing-clock{padding:0 0 12px;border-bottom:.5px solid var(--ud-card-border);align-items:end}
 .ud-pricing-clock .ud-field{flex:1 1 168px}
 .ud-pricing-clock .ud-input{max-width:100%}
 .ud-pricing-board :is(button,input,select,textarea,summary,[tabindex]):focus-visible,.ud-pricing-dialog :is(button,input,select,textarea,summary,[tabindex]):focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
@@ -4209,16 +4212,23 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-pricing-board{container:ud-pricing / inline-size}
 .ud-pricing-toolrow{display:flex;align-items:center;justify-content:space-between;gap:8px 12px;flex-wrap:wrap}
 .ud-pricing-actions{margin-inline-start:auto}
+.ud-pricing-actions>.ud-group,.ud-pricing-weekdays{padding:2px;border-radius:var(--dsw-radius-sm)}
 .ud-pricing-actions>.ud-group{flex:none}
-.ud-pricing-rules{display:grid;gap:12px;min-width:0}
-.ud-pricing-group,.ud-pricing-panel,.ud-pricing-summary,.ud-pricing-empty{border:.5px solid var(--ud-card-border);border-radius:var(--dsw-radius-md);background:var(--ud-card);min-width:0}
-.ud-pricing-group-head{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--dsw-alias-bg-layer-2);border-radius:var(--dsw-radius-md) var(--dsw-radius-md) 0 0;border-bottom:.5px solid var(--ud-card-border)}
+.ud-pricing-rules,.ud-pricing-platforms,.ud-pricing-panel,.ud-pricing-summary,.ud-pricing-empty{border:.5px solid var(--ud-card-border);border-radius:var(--dsw-radius-md);background:var(--ud-card);min-width:0}
+.ud-pricing-rules,.ud-pricing-platforms{padding:0 12px}
+.ud-pricing-group+.ud-pricing-group,.ud-pricing-provider+.ud-pricing-provider{border-top:.5px solid var(--ud-card-border)}
+.ud-pricing-group-head{display:flex;align-items:center;gap:8px;padding:8px 8px 4px}
 .ud-pricing-group-title{margin:0;font-size:14px;line-height:22px;font-weight:600}
-.ud-pricing-group-count{font-variant-numeric:tabular-nums}
-.ud-pricing-rows{padding:0 12px;min-width:0}
+.ud-pricing-group-count{font-size:12px;color:var(--ud-text-sub);font-variant-numeric:tabular-nums}
+.ud-pricing-rows{min-width:0}
+.ud-pricing-rule,.ud-pricing-model{position:relative;min-width:0}
 .ud-pricing-rule+.ud-pricing-rule{border-top:.5px solid var(--ud-card-border)}
 .ud-pricing-rule-bar{display:flex;align-items:center;gap:4px 8px;flex-wrap:wrap;padding:4px 0}
-.ud-pricing-rule--open .ud-pricing-rule-head,.ud-pricing-model .ud-pricing-row[aria-expanded=true]{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent)}
+.ud-pricing-rule--open::before,.ud-pricing-model:has(>.ud-pricing-row[aria-expanded=true])::before{
+  content:"";position:absolute;inset-block:8px;inset-inline-start:0;width:2px;border-radius:2px;background:var(--dsw-alias-brand-primary);pointer-events:none
+}
+.ud-pricing-model:has(>.ud-pricing-row[aria-expanded=true])::before{inset-block-end:auto;height:24px}
+.ud-pricing-rule--open .ud-pricing-rule-model,.ud-pricing-row[aria-expanded=true] .ud-pricing-rule-model{font-weight:600}
 .ud-pricing-empty{display:flex;flex-direction:column;align-items:center;gap:8px;padding:24px 12px;text-align:center}
 .ud-pricing-empty-text{margin:0;font-size:14px;line-height:22px;color:var(--dsw-alias-label-secondary)}
 .ud-pricing-panel{padding:8px 12px}
@@ -4248,33 +4258,33 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-pricing-board h3,.ud-pricing-dialog h3{font-size:14px;line-height:22px}
 .ud-pricing-board code,.ud-pricing-dialog code{font-family:var(--ds-font-family-code);overflow-wrap:anywhere;min-width:0}
 .ud-pricing-summary,.ud-pricing-prices{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:0}
-.ud-pricing-summary{gap:0}
-.ud-pricing-summary>div{padding:10px 12px;border-inline-start:.5px solid var(--ud-card-border)}
-.ud-pricing-summary>div:first-child{border-inline-start:0}
+.ud-pricing-summary{grid-template-columns:minmax(0,1.5fr) repeat(3,minmax(0,1fr));align-items:center;gap:8px;padding:10px 12px}
 .ud-pricing-summary dt,.ud-pricing-prices dt,.ud-pricing-note{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}
 .ud-pricing-summary dd,.ud-pricing-prices dd{margin:0;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
-.ud-pricing-summary dd{font-size:18px;font-weight:600;line-height:24px}
+.ud-pricing-summary dd{font-size:14px;font-weight:500;line-height:22px}
+.ud-pricing-summary>div:first-child dd{font-size:20px;font-weight:600;line-height:24px}
 .ud-pricing-row[aria-expanded=true] .ud-pricing-rule-caret{transform:rotate(90deg)}
 .ud-pricing-model + .ud-pricing-model{border-top:.5px solid var(--ud-card-border)}
 .ud-pricing-row{width:100%}
+.ud-pricing-provider{padding-block:4px}
 .ud-pricing-provider>.ud-pricing-row{font-weight:600}
-.ud-pricing-provider>.ud-pricing-row code{flex:1}
-.ud-pricing-provider .ud-pricing-row[aria-expanded=true]+div{border-top:.5px solid var(--ud-card-border)}
-.ud-pricing-tree-row--winner{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent)}
-.ud-pricing-chip{display:inline-flex;align-items:center;height:18px;font-weight:500;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;padding:0 8px;font-size:11px;line-height:18px;white-space:nowrap}
-.ud-pricing-chip--button{border:0;cursor:pointer;color:var(--dsw-alias-label-secondary);padding:0 8px;font-size:11px;line-height:18px;font-family:inherit}
+.ud-pricing-provider>.ud-pricing-row code{flex:1;font-family:inherit}
+.ud-pricing-provider>.ud-pricing-row[aria-expanded=true]+div{border-top:.5px solid var(--ud-card-border)}
+.ud-pricing-chip{display:inline-flex;align-items:center;height:20px;font-weight:500;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:var(--dsw-radius-sm);padding:0 6px;font-size:11px;line-height:18px;white-space:nowrap}
+.ud-pricing-chip--button{height:24px;border:0;cursor:pointer;font:inherit;font-size:12px;line-height:18px}
 .ud-pricing-chip--button:not(:disabled):hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .ud-pricing-chip--button:disabled{opacity:.5;cursor:not-allowed}
 .ud-pricing-warn{color:var(--dsw-alias-state-warn-primary)}
 .ud-pricing-tree{border-inline-start:2px solid var(--ud-card-border);padding-inline-start:8px;margin:8px 0 8px 8px}
 .ud-pricing-tree ul,.ud-pricing-rule-detail ul,.ud-pricing-dialog-list{list-style:none;margin:0;padding:0;display:grid;gap:6px}
-.ud-pricing-tree-row{display:grid;gap:6px;padding:8px;border-radius:var(--dsw-radius-sm)}
-.ud-pricing-rule-detail{display:grid;gap:6px;margin:6px 0 0}
-.ud-pricing-prices dt{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
-.ud-pricing-prices dd{font-size:13px;line-height:20px}
+.ud-pricing-tree-row{display:grid;gap:6px;padding:8px 0}
+.ud-pricing-tree-row+.ud-pricing-tree-row{border-top:.5px solid var(--dsw-alias-border-l2)}
+.ud-pricing-tree-row--winner code{font-weight:600}
+.ud-pricing-rule-detail{display:grid;gap:6px;padding:4px 8px 12px}
+.ud-pricing-prices dd{font-size:13px;font-weight:500;line-height:20px}
 .ud-pricing-dialog{box-sizing:border-box;width:min(480px,calc(100vw - 24px));max-height:calc(100dvh - 24px);overflow:auto;padding:16px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);box-shadow:var(--dsw-shadow-lv3);font-size:14px;line-height:22px}
 .ud-pricing-dialog[open],.ud-pricing-dialog form{display:grid;gap:12px}
-.ud-pricing-dialog::backdrop{background:color-mix(in srgb,var(--dsw-alias-label-primary) 45%,transparent)}
+.ud-pricing-dialog::backdrop{background:var(--dsw-alias-bg-mask-1)}
 .ud-pricing-dialog-list li{padding:8px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-1)}
 .ud-pricing-dialog button[aria-pressed=true]{border-color:var(--dsw-alias-brand-primary)}
 .ud-pricing-confirm{justify-content:flex-end}
@@ -4283,8 +4293,6 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-pricing-help{width:fit-content;color:var(--dsw-alias-label-secondary);text-decoration:underline dotted;cursor:help;font-size:12px}
 @container ud-pricing (max-width:440px){
   .ud-price-grid,.ud-pricing-summary,.ud-pricing-prices{grid-template-columns:repeat(2,minmax(0,1fr))}
-  .ud-pricing-summary>div:nth-child(odd){border-inline-start:0}
-  .ud-pricing-summary>div:nth-child(n+3){border-top:.5px solid var(--ud-card-border)}
   .ud-cond{display:grid;grid-template-columns:minmax(0,1fr) auto}
   .ud-cond-kind{justify-self:start}
   .ud-cond-fields,.ud-cond>.ud-field-error{grid-column:1/-1}
@@ -6152,14 +6160,14 @@ ${HUD_CSS}
           h('button', { className: 'ud-btn ud-btn--primary', type: 'button', onClick: onEdit }, t('pricing.configure'))) : null,
         groups.length === 0 ? h('div', { className: 'ud-pricing-empty' },
           h('p', { className: 'ud-pricing-empty-text' }, t(rows.length ? 'pricing.noSearchResults' : 'pricing.noObserved'))) : null,
-        groups.map(([provider, items], index) => {
+        groups.length ? h('div', { className: 'ud-pricing-platforms' }, groups.map(([provider, items], index) => {
           const open = exactObserved || (providerOverrides.get(provider) ?? index < (search ? PRICING_SEARCH_AUTO_GROUPS : 1))
           const detailsId = `${listId}-provider-${encodeURIComponent(provider)}`
           const lastPage = Math.ceil(items.length / PRICING_MODELS_PER_PAGE) - 1
           const page = Math.min(providerPages.get(provider) ?? 0, lastPage)
           const start = page * PRICING_MODELS_PER_PAGE
           const paginate = (next) => setProviderPages((previous) => new Map(previous).set(provider, next))
-          return h('section', { key: provider, className: 'ud-pricing-panel ud-pricing-provider' },
+          return h('section', { key: provider, className: 'ud-pricing-provider' },
             h('button', {
               className: 'ud-pricing-row', type: 'button', 'aria-expanded': open, 'aria-controls': detailsId,
               onClick: () => setProviderOverrides((previous) => new Map(previous).set(provider, !open)),
@@ -6173,7 +6181,7 @@ ${HUD_CSS}
               h('button', { type: 'button', className: 'ud-btn', disabled: page === 0, onClick: () => paginate(page - 1) }, t('pricing.previousModels')),
               h('span', { className: 'ud-pricing-note' }, `${page + 1}/${lastPage + 1}`),
               h('button', { type: 'button', className: 'ud-btn', disabled: page === lastPage, onClick: () => paginate(page + 1) }, t('pricing.nextModels'))) : null))
-        }))
+        })) : null)
     }
 
     function PricingDialog({ title, onClose, children }) {
@@ -6267,7 +6275,7 @@ ${HUD_CSS}
           return h('section', { key: String(hasStar), className: 'ud-pricing-group' },
             h('div', { className: 'ud-pricing-group-head' },
               h('h3', { className: 'ud-pricing-group-title' }, t(hasStar ? 'pricing.withStar' : 'pricing.withoutStar')),
-              h('span', { className: 'ud-pricing-group-count ud-pricing-chip' }, String(group.length))),
+              h('span', { className: 'ud-pricing-group-count' }, String(group.length))),
             h('div', { className: 'ud-pricing-rows' }, group.map(({ rule, index }) => {
               const stats = statsByKey.get(ruleStatsKey(rule)) ?? { billing: [], taken: [], conflict: false }
               const key = rule[DRAFT_SLOT]
