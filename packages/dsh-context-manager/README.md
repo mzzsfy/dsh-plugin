@@ -29,7 +29,7 @@
 
 - 注入形态同 fork(官方复制按钮模式):克隆官方按钮类,尺寸/hover/悬停显隐原生;显隐由 inbox 投影行集驱动——行在(未应用)注入,行不在(已应用/已撤回)即时摘除,投影订阅驱动重扫
 - 气泡三形态全覆盖(顺序对齐,渲染文本不参与匹配):发送会话内插话气泡为 `data-pending-steering` + `data-submission-echo` 双标记(宿主 pendingInputs 以本地 submission 替换投影行渲染),切会话回来/刷新(本地 state 清空)为纯 `data-pending-steering` 单标记,已入转录后为 durable steering 气泡(`data-chat-flow-kind="steering"`,按 node-key messageId 匹配)——pending 形态一律按文档序与投影序一一配对,无行排尾(Host 未确认)由行存在性检查天然不注入
-- 图标在场即暗示可撤:点击与投影更新之间的竞态窗口由「行不在降级提示 / remove 失败提示」兜底;含附件的插话点击明确提示不支持
+- 图标在场即暗示可撤:点击与投影更新之间的竞态窗口由「行不在降级提示 / remove 失败提示」兜底;含附件插话同样可撤——文本回填草稿,图片经会话绑定面 `readAttachment` 读字节、文件经 `/api/context/read-attachment` 由 host 附件服务读原始字节,重建为浏览器 `File` 后经 `conversation.createDrafts` 注册并挂回输入框(单个附件失败不阻断撤回,提示需重新添加;旧宿主缺附件通道时仅回填文本)
 - 匹配:durable 气泡 `data-chat-node-key` 的 `input-message` 后缀与 `next-step` 投影行 id 同源(官方两侧同用 `String(event.data.id)`),点击时实时重读防节点复用后过期
 
 ### 对话分叉(fork,重写式)
@@ -87,6 +87,7 @@
 | `/api/context/history-enabled` | GET/POST | 历史浮层启停 |
 | `/api/context/history-button-enabled` | GET/POST | 输入框历史按钮启停 |
 | `/api/context/steer-recall-enabled` | GET/POST | 插话撤回启停 |
+| `/api/context/read-attachment` | POST | 插话撤回附件恢复:按 durable 文件引用流式读原始字节(`{kind:'file',attachment}`,响应 `application/octet-stream`);声明 `bytes` 超 64MiB 拒绝 |
 | `/api/context/fork-enabled` | GET/POST | 对话分叉启停 |
 | `/api/context/fork-auto-resend-enabled` | GET/POST | 分叉后自动重发启停 |
 | `/api/context/copy-sid-enabled` | GET/POST | 标题栏复制 sessionId 启停 |

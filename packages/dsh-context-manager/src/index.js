@@ -85,7 +85,13 @@ export const MESSAGES = {
   unknownSession: '会话不存在',
   badJsonBody: '请求体不是合法 JSON',
   systemError: '操作失败(系统级错误,详见服务端日志)',
+  attachmentUnavailable: '附件服务不可用',
+  attachmentInvalid: '附件请求不合法',
+  attachmentTooLarge: '附件过大,无法恢复',
 }
+
+// 撤回附件读回上限:浏览器 File 必须持有完整字节,超限拒绝比拖垮页面好
+const ATTACHMENT_READ_MAX_BYTES = 64 * 1024 * 1024
 
 const SETTINGS_SCHEMA = schemastery.object({
   historyEnabled: schemastery.boolean().default(true)
@@ -913,6 +919,69 @@ export function apply(ctx, config) {
           await persistToggle(ctx, { steerRecallEnabled: Boolean(body && body.enabled) })
           sendJson(res, 200, { enabled: readSettings(ctx, config).steerRecallEnabled })
         } catch (error) {
+          respondError(ctx, res, error)
+        }
+      },
+    },
+    {
+      // 插话撤回附件恢复:宿主 client 面只提供图片字节读取(SessionFace.readAttachment),
+      // 文件附件没有读取通道;由 host 侧附件服务按 durable ref 流式回传原始字节。
+      // 不声明进主 inject:旧宿主缺 attachments 时路由返回不可用,插件其余功能照常
+      path: '/api/context/read-attachment',
+      handler: async (req, res) => {
+        try {
+          if (!rejectMethod(req, res, 'POST')) return
+          const body = await readJsonBody(req)
+          if (!body || body.kind !== 'file' || !body.attachment || typeof body.attachment !== 'object') {
+            sendJson(res, 400, { error: MESSAGES.attachmentInvalid })
+            return
+          }
+          if (typeof body.attachment.bytes === 'number' && body.attachment.bytes > ATTACHMENT_READ_MAX_BYTES) {
+            sendJson(res, 400, { error: MESSAGES.attachmentTooLarge })
+            return
+          }
+          const attachments = ctx.get('attachments')
+          if (!attachments || typeof attachments.readFileStream !== 'function') {
+            sendJson(res, 400, { error: MESSAGES.attachmentUnavailable })
+            return
+          }
+          const controller = new AbortController()
+          const abort = () => { if (!res.writableEnded) controller.abort() }
+          if (typeof res.once === 'function') res.once('close', abort)
+          try {
+            let headersSent = false
+            let total = 0
+            for await (const chunk of attachments.readFileStream(body.attachment, controller.signal)) {
+              const buffer = Buffer.from(chunk)
+              total += buffer.length
+              if (total > ATTACHMENT_READ_MAX_BYTES) throw new Error(MESSAGES.attachmentTooLarge)
+              if (!headersSent) {
+                res.writeHead(200, { 'content-type': 'application/octet-stream' })
+                headersSent = true
+              }
+              if (!res.write(buffer)) {
+                if (res.destroyed || res.writableEnded) return
+                await new Promise((resolve) => {
+                  const finish = () => {
+                    if (typeof res.off === 'function') {
+                      res.off('drain', finish)
+                      res.off('close', finish)
+                    }
+                    resolve()
+                  }
+                  res.once('drain', finish)
+                  res.once('close', finish)
+                })
+                if (res.destroyed || res.writableEnded) return
+              }
+            }
+            if (!headersSent) res.writeHead(200, { 'content-type': 'application/octet-stream' })
+            res.end()
+          } finally {
+            if (typeof res.off === 'function') res.off('close', abort)
+          }
+        } catch (error) {
+          if (res.headersSent) { res.destroy(error); return }
           respondError(ctx, res, error)
         }
       },

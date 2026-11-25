@@ -61,6 +61,7 @@ function makeCtx({
   settingsService: settingsServiceOverride,
   liveSessions,
   listSessionsError,
+  attachments,
 }) {
   const routes = []
   const pendingInjects = []
@@ -116,7 +117,7 @@ function makeCtx({
     fiber: { entry: { options: { id: 'context-manager', name: '@mzzsfy/dsh-context-manager' } } },
     get: (name) => {
       if (name === 'configEditor') return configEditor
-      return { agents, sessionPersistence, settings: settingsService }[name]
+      return { agents, sessionPersistence, settings: settingsService, attachments }[name]
     },
     logger: { warns: [], warn(message) { this.warns.push(message) }, infos: [], info(message) { this.infos.push(message) } },
   }
@@ -153,9 +154,21 @@ function makeCtx({
 }
 
 function response() {
-  const state = { status: undefined, body: undefined }
-  state.writeHead = (status) => { state.status = status }
-  state.end = (text) => { state.body = JSON.parse(text) }
+  const state = { status: undefined, body: undefined, chunks: [], destroyed: false, headers: {} }
+  state.writeHead = (status, headers) => { state.status = status; state.headers = headers || {} }
+  state.write = (chunk) => { state.chunks.push(Buffer.from(chunk)); return true }
+  state.once = () => {}
+  state.off = () => {}
+  state.end = (text) => {
+    if (typeof text === 'string' && text !== '') {
+      state.body = JSON.parse(text)
+      return
+    }
+    if (text !== undefined) state.chunks.push(Buffer.from(text))
+    state.binary = Buffer.concat(state.chunks)
+  }
+  state.destroy = () => { state.destroyed = true }
+  Object.defineProperty(state, 'headersSent', { get: () => state.status !== undefined })
   return state
 }
 
@@ -1498,13 +1511,13 @@ test('常用提示词:自定义顺序下新收藏仍插最前,既有相对顺序
 
 // ── 路由层横切守卫:方法白名单 / JSON 体 / 系统级错误收敛 / 非字符串 text ──
 
-test('横切守卫:12 条路由方法白名单,白名单外一律 405', skipMissingDeps, async () => {
+test('横切守卫:13 条路由方法白名单,白名单外一律 405', skipMissingDeps, async () => {
   await withHistoryCacheDir(async () => {
     const { handlers } = makeCtx({ headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
     const getOnly = '/api/context/inputs'
-    const postOnly = ['/api/context/prompts/toggle', '/api/context/prompts/rename', '/api/context/prompts/reorder', '/api/context/git-clone']
+    const postOnly = ['/api/context/prompts/toggle', '/api/context/prompts/rename', '/api/context/prompts/reorder', '/api/context/git-clone', '/api/context/read-attachment']
     const dualMethods = ['/api/context/history-enabled', '/api/context/history-button-enabled', '/api/context/steer-recall-enabled', '/api/context/fork-enabled', '/api/context/fork-auto-resend-enabled', '/api/context/copy-sid-enabled', '/api/context/clone-enabled']
-    assert.equal(1 + postOnly.length + dualMethods.length, 12, '路由总数须与实现一致')
+    assert.equal(1 + postOnly.length + dualMethods.length, 13, '路由总数须与实现一致')
     // GET-only 路由:POST 拒绝
     const inputsPost = response()
     await handlers.get(getOnly)(request('s1'), inputsPost)
@@ -1529,11 +1542,105 @@ test('横切守卫:12 条路由方法白名单,白名单外一律 405', skipMiss
   })
 })
 
-test('横切守卫:11 条 POST 路由的非法 JSON 请求体统一 400(badJsonBody)', skipMissingDeps, async () => {
+// ── 插话撤回附件恢复:文件字节读回 ──
+
+test('read-attachment:按 durable 文件引用流式读原始字节,二进制回传', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const reads = []
+    const attachments = {
+      readFileStream: async function* (ref) {
+        reads.push(ref)
+        yield Buffer.from('abc')
+        yield Buffer.from('de')
+      },
+    }
+    const { handlers } = makeCtx({ headers: [], agents: new Map(), attachments })
+    const attachment = { attachmentId: 'f1', name: 'a.txt', bytes: 5 }
+    const res = await postJson(handlers, '/api/context/read-attachment', { kind: 'file', attachment })
+    assert.equal(res.status, 200)
+    assert.equal(res.headers['content-type'], 'application/octet-stream')
+    assert.equal(res.binary.toString(), 'abcde')
+    assert.deepEqual(reads, [attachment])
+  })
+})
+
+test('read-attachment:回传遇到背压且 close 已发生、不再补发事件时 handler 退出', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const attachments = {
+      readFileStream: async function* () {
+        yield Buffer.from('abc')
+      },
+    }
+    const { handlers } = makeCtx({ headers: [], agents: new Map(), attachments })
+    const req = new EventEmitter()
+    req.method = 'POST'
+    req.url = '/api/context/read-attachment'
+    req.headers = { 'content-type': 'application/json' }
+    const res = new EventEmitter()
+    res.destroyed = true
+    res.writableEnded = false
+    res.headers = {}
+    res.writeHead = (status, headers) => { res.status = status; res.headers = headers }
+    res.write = () => false
+    res.end = () => { throw new Error('客户端已断开,不应 end') }
+    res.off = res.removeListener
+    const done = handlers.get('/api/context/read-attachment')(req, res)
+    req.emit('data', Buffer.from(JSON.stringify({ kind: 'file', attachment: { attachmentId: 'f1', name: 'a.txt', bytes: 3 } })))
+    req.emit('end')
+    const timeout = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('handler 未退出')), 200)
+      timer.unref?.()
+    })
+    await Promise.race([done, timeout])
+    assert.equal(res.status, 200)
+  })
+})
+
+test('read-attachment:附件服务缺失回 400(旧宿主降级不拖垮插件)', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const { handlers } = makeCtx({ headers: [], agents: new Map() })
+    const res = await postJson(handlers, '/api/context/read-attachment', { kind: 'file', attachment: { attachmentId: 'f1' } })
+    assert.equal(res.status, 400)
+    assert.equal(res.body.error, MESSAGES.attachmentUnavailable)
+  })
+})
+
+test('read-attachment:非 file 类型或附件缺失回 400 附件请求不合法', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const attachments = { readFileStream: async function* () { yield Buffer.from('x') } }
+    const { handlers } = makeCtx({ headers: [], agents: new Map(), attachments })
+    const image = await postJson(handlers, '/api/context/read-attachment', { kind: 'image', attachment: { attachmentId: 'a1' } })
+    assert.equal(image.status, 400)
+    assert.equal(image.body.error, MESSAGES.attachmentInvalid)
+    const missing = await postJson(handlers, '/api/context/read-attachment', { kind: 'file' })
+    assert.equal(missing.status, 400)
+    assert.equal(missing.body.error, MESSAGES.attachmentInvalid)
+  })
+})
+
+test('read-attachment:声明字节超上限回 400,不打开读取流', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    let opened = false
+    const attachments = {
+      readFileStream: async function* () {
+        opened = true
+        yield Buffer.from('x')
+      },
+    }
+    const { handlers } = makeCtx({ headers: [], agents: new Map(), attachments })
+    const attachment = { attachmentId: 'f1', name: 'big.bin', bytes: 64 * 1024 * 1024 + 1 }
+    const res = await postJson(handlers, '/api/context/read-attachment', { kind: 'file', attachment })
+    assert.equal(res.status, 400)
+    assert.equal(res.body.error, MESSAGES.attachmentTooLarge)
+    assert.equal(opened, false)
+  })
+})
+
+test('横切守卫:12 条 POST 路由的非法 JSON 请求体统一 400(badJsonBody)', skipMissingDeps, async () => {
   await withHistoryCacheDir(async () => {
     const { handlers } = makeCtx({ headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
-    const postPaths = ['/api/context/prompts/toggle', '/api/context/prompts/rename', '/api/context/prompts/reorder', '/api/context/history-enabled', '/api/context/history-button-enabled', '/api/context/steer-recall-enabled', '/api/context/fork-enabled', '/api/context/fork-auto-resend-enabled', '/api/context/copy-sid-enabled', '/api/context/clone-enabled', '/api/context/git-clone']
-    assert.equal(postPaths.length, 11, 'POST 路由数须与实现一致')
+    const postPaths = ['/api/context/prompts/toggle', '/api/context/prompts/rename', '/api/context/prompts/reorder', '/api/context/history-enabled', '/api/context/history-button-enabled', '/api/context/steer-recall-enabled', '/api/context/fork-enabled', '/api/context/fork-auto-resend-enabled', '/api/context/copy-sid-enabled', '/api/context/clone-enabled', '/api/context/git-clone', '/api/context/read-attachment']
+    assert.equal(postPaths.length, 12, 'POST 路由数须与实现一致')
     for (const routePath of postPaths) {
       const res = await postRaw(handlers, routePath, '{oops')
       assert.equal(res.status, 400, routePath + ' 非法 JSON 应回 400')

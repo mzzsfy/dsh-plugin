@@ -273,11 +273,14 @@ const FORK_AUTO_RESEND_URL = '/api/context/fork-auto-resend-enabled'
 const COPY_SID_ENABLED_URL = '/api/context/copy-sid-enabled'
 const CLONE_ENABLED_URL = '/api/context/clone-enabled'
 const CLONE_API_URL = '/api/context/git-clone'
+const READ_ATTACHMENT_URL = '/api/context/read-attachment'
 
 // 请求默认超时:host 被批量解压等同步任务阻塞时路由会迟滞数秒,
 // 无超时则浮层停在「正在读取…」假死;超时按错误抛出,由调用方兜底,
 // 轮询链继续,host 恢复后自动跟上
 const API_TIMEOUT_MS = 8 * 1000
+// 附件字节读取按文件大小放宽:大文件上传/读取本身耗时,默认 8s 会误杀
+const ATTACHMENT_READ_TIMEOUT_MS = 60 * 1000
 
 async function api(url, options) {
   const controller = new AbortController()
@@ -293,6 +296,36 @@ async function api(url, options) {
     return payload
   } catch (error) {
     if (error && error.name === 'AbortError') throw new Error('响应超时(' + Math.round(API_TIMEOUT_MS / 1000) + 's),宿主繁忙中')
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+// 文件附件字节:二进制响应整块读入(浏览器 File 必须有完整 bytes),不走 JSON/base64
+async function readFileAttachment(attachment) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), ATTACHMENT_READ_TIMEOUT_MS)
+  try {
+    const response = await fetch(READ_ATTACHMENT_URL, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind: 'file', attachment }),
+      signal: controller.signal,
+    })
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}))
+      throw new Error(payload && payload.error ? payload.error : 'HTTP ' + response.status)
+    }
+    const bytes = await response.arrayBuffer()
+    if (typeof attachment.bytes === 'number' && bytes.byteLength !== attachment.bytes) {
+      throw new Error('附件字节数不一致')
+    }
+    return new File([bytes], attachment.name || 'file', { type: 'application/octet-stream' })
+  } catch (error) {
+    if (error && error.name === 'AbortError') {
+      throw new Error('响应超时(' + Math.round(ATTACHMENT_READ_TIMEOUT_MS / 1000) + 's),宿主繁忙中')
+    }
     throw error
   } finally {
     clearTimeout(timer)
@@ -1228,8 +1261,8 @@ function HistoryDock({ session, inputActions }) {
 }
 
 // 插话撤回投影:未应用插话驻留会话 inbox 的 next-step 队列(dsh 0.2.0 语义,经
-// 会话绑定面 inbox 投影读取);仅 user 来源且有 id 的插话可撤回,含非文本块的
-// 插话 text 置空(不可撤回)
+// 会话绑定面 inbox 投影读取);仅 user 来源且有 id 的插话可撤回。文本块拼为草稿,
+// 图片/文件块登记为待恢复附件(点击时经 restoreSteerAttachments 重建为输入框草稿)
 function steerRowsOfInbox(messages) {
   const rows = Array.isArray(messages) ? messages : []
   return rows
@@ -1237,13 +1270,30 @@ function steerRowsOfInbox(messages) {
     .map(steerRowOfMessage)
 }
 
+// 附件块白名单:只认宿主消息块里的图片/文件引用,其余非文本块(工具、推理等)
+// 不属于用户可恢复附件,忽略即可,不能因此拒绝撤回
+function steerAttachmentsOfBlocks(blocks) {
+  const attachments = []
+  for (const block of blocks) {
+    if (!block) continue
+    if (block.type === 'image' && block.attachment) attachments.push({ kind: 'image', attachment: block.attachment })
+    if (block.type === 'file' && block.attachment) attachments.push({ kind: 'file', attachment: block.attachment })
+  }
+  return attachments
+}
+
 function steerRowOfMessage(item) {
   const blocks = Array.isArray(item.content) ? item.content : []
-  const textBlocks = blocks.filter((block) => block && block.type === 'text' && typeof block.text === 'string')
-  const text = blocks.length > 0 && textBlocks.length === blocks.length
-    ? textBlocks.map((block) => block.text).join('')
-    : null
-  return { id: item.id, text, preview: text === null ? null : text.slice(0, STEER_PREVIEW_MAX) }
+  const text = blocks
+    .filter((block) => block && block.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text)
+    .join('')
+  return {
+    id: item.id,
+    text,
+    preview: text.slice(0, STEER_PREVIEW_MAX),
+    attachments: steerAttachmentsOfBlocks(blocks),
+  }
 }
 
 // 撤回失败文案:queue-item-not-found = 消息已被 step 边界 claim(应用),无法撤回;
@@ -1254,8 +1304,47 @@ function withdrawFailureText(result) {
   return '撤回失败: ' + ((error && error.message) || '未知错误')
 }
 
+// 附件恢复:把队列行里的 durable 附件引用重新注册为输入框草稿附件。图片字节走
+// 会话绑定面 readAttachment,文件字节走 host 读附件路由;两者都还原为浏览器 File,
+// 交给 conversation.createDrafts 注册并由 inputActions.addAttachments 挂到输入框。
+// 单个附件失败不阻断其余附件,返回失败清单供调用方提示(撤回本体已成功)
+async function restoreSteerAttachments(attachments, actions) {
+  if (typeof actions.readAttachmentFile !== 'function' || typeof actions.createDrafts !== 'function') {
+    return { failed: attachments.slice() }
+  }
+  // 并行读取:单个附件超时(60s)不叠加;allSettled 保持单附件失败隔离
+  const settled = await Promise.allSettled(
+    attachments.map((item) => Promise.resolve().then(() => actions.readAttachmentFile(item))),
+  )
+  const files = []
+  const failed = []
+  settled.forEach((result, index) => {
+    if (result.status === 'fulfilled' && result.value) {
+      files.push(result.value)
+      return
+    }
+    failed.push(attachments[index])
+    if (result.status === 'rejected') console.warn('[context-manager] 附件读取失败', result.reason)
+  })
+  if (files.length === 0) return { failed }
+  let drafts
+  try {
+    drafts = actions.createDrafts(files)
+    const added = actions.addAttachments(drafts.map((draft) => draft.id))
+    if (added === false) {
+      if (typeof actions.releaseDrafts === 'function') actions.releaseDrafts(drafts)
+      return { failed: attachments.slice() }
+    }
+  } catch (error) {
+    if (drafts && typeof actions.releaseDrafts === 'function') actions.releaseDrafts(drafts)
+    return { failed: attachments.slice() }
+  }
+  return { failed }
+}
+
 // 撤回动作:先宿主移除(inbox next-step 摘除,未应用即消失),成功才回填草稿,
-// 顺序保证「移除失败绝不覆盖输入框」;actions 注入便于测试与组件解耦
+// 顺序保证「移除失败绝不覆盖输入框」;附件在草稿回填后恢复,恢复失败只提示,
+// 不把已成功的撤回判为失败。actions 注入便于测试与组件解耦
 async function withdrawSteer(row, actions) {
   let result
   try {
@@ -1268,15 +1357,47 @@ async function withdrawSteer(row, actions) {
     actions.notify(withdrawFailureText(result), { kind: 'error' })
     return false
   }
-  try {
-    actions.setDraft(row.text)
-  } catch (error) {
-    // 摘除已成功,草稿回填失败(会话切换等竞态)时文本必须可达:通知兜底展示原文
-    actions.notify('草稿回填失败,原文: ' + row.text, { kind: 'error' })
-    return false
+  if (row.text !== '') {
+    try {
+      actions.setDraft(row.text)
+    } catch (error) {
+      // 摘除已成功,草稿回填失败(会话切换等竞态)时文本必须可达:通知兜底展示原文
+      actions.notify('草稿回填失败,原文: ' + row.text, { kind: 'error' })
+      return false
+    }
+  }
+  const attachments = Array.isArray(row.attachments) ? row.attachments : []
+  let restore = null
+  if (attachments.length > 0) {
+    try {
+      restore = typeof actions.restoreAttachments === 'function'
+        ? await actions.restoreAttachments(attachments)
+        : { failed: attachments.slice() }
+    } catch (error) {
+      restore = { failed: attachments.slice() }
+    }
+  }
+  if (restore && restore.failed.length > 0) {
+    const prefix = row.text === '' ? '已撤回;' : '已撤回,文本已回填;'
+    actions.notify(prefix + restore.failed.length + ' 个附件恢复失败,请重新添加', { kind: 'error' })
+    return true
   }
   actions.notify('已撤回到输入框')
   return true
+}
+
+// 图片附件缺省文件名:按介质类型给后缀,避免 File 名为空时输入框显示空白
+const IMAGE_FILE_EXTENSIONS = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+}
+
+function steerAttachmentFileName(attachment) {
+  if (attachment && typeof attachment.name === 'string' && attachment.name !== '') return attachment.name
+  const extension = (attachment && IMAGE_FILE_EXTENSIONS[attachment.mediaType]) || 'png'
+  return 'image.' + extension
 }
 
 // 撤回图标 svg(undo 弯箭头):DOM 形态(注入按钮走 DOM 路径,与 forkSvg 同构),
@@ -1531,7 +1652,7 @@ function turnEndsSignature(map) {
 // 与 fork 注入同机制。显隐由 inbox 投影行集驱动(行在=未应用):scan 时行在注入、
 // 行不在摘除,投影订阅驱动重扫,应用后按钮即时消失;点击与投影更新之间的竞态窗口
 // 由「行不在降级提示 / remove 失败提示」兜底(旧'行消失即摘按钮'的实时性由订阅保证)。
-function SteerRecallDock({ useSession, inputActions, updateQueue, inboxFace }) {
+function SteerRecallDock({ useSession, inputActions, updateQueue, inboxFace, createDrafts, releaseDrafts, readAttachmentFile }) {
   const queueMutable = useSession((state) => state.subagent === null || state.subagent.address.mode === 'continuable')
   // 启停开关(设置页):挂载拉取一次,停用即移除已注入按钮并不再注入;失败按启用兜底
   const [enabled, setEnabled] = useState(true)
@@ -1544,7 +1665,9 @@ function SteerRecallDock({ useSession, inputActions, updateQueue, inboxFace }) {
   // 后旧 face 的快照不得继续服务新 DOM,与 ForkDock 的 ref 同步纪律同构)
   const depsRef = useRef(null)
   const enabledRef = useRef(true)
-  depsRef.current = { queueMutable, inputActions, updateQueue, inboxFace }
+  depsRef.current = {
+    queueMutable, inputActions, updateQueue, inboxFace, createDrafts, releaseDrafts, readAttachmentFile,
+  }
   enabledRef.current = enabled
   useEffect(() => {
     function removeAll() {
@@ -1603,12 +1726,18 @@ function SteerRecallDock({ useSession, inputActions, updateQueue, inboxFace }) {
             toast('插话已被应用,无法撤回', { kind: 'error' })
             return
           }
-          if (currentRow.text === null) {
-            toast('含附件的插话不支持撤回', { kind: 'error' })
-            return
-          }
           button.disabled = true
-          void withdrawSteer(currentRow, { updateQueue: current.updateQueue, setDraft: current.inputActions.setDraft, notify: toast })
+          void withdrawSteer(currentRow, {
+            updateQueue: current.updateQueue,
+            setDraft: current.inputActions.setDraft,
+            notify: toast,
+            restoreAttachments: (attachments) => restoreSteerAttachments(attachments, {
+              readAttachmentFile: current.readAttachmentFile,
+              createDrafts: current.createDrafts,
+              addAttachments: current.inputActions.addAttachments,
+              releaseDrafts: current.releaseDrafts,
+            }),
+          })
             .finally(() => { button.disabled = false })
         })
         button.appendChild(steerRecallSvg())
@@ -1961,7 +2090,7 @@ function ForkDock({ session, forkSession, cancelSession, turnEnds, refreshRef })
 // 裁剪,JS 定位复杂度不成比例);文案与功能行为同源维护,由源码契约测试锁定
 const HISTORY_SWITCH_TITLE = '在输入框按 Alt+↑ 唤起历史输入浮层,浏览并回填历史输入;浮层内 ←/→ 切换范围,点击顶栏范围标签展开选择(常用 / 当前会话 / 本工作区 / 全部工作区),顶部搜索框过滤条目,行悬停星标可收藏常用提示词。停用后快捷键与浮层整体关闭,刷新页面生效。'
 const HISTORY_BUTTON_SWITCH_TITLE = '输入框下方工具排显示历史输入按钮,点击打开浮层,再点关闭,与 Alt+↑ 等效;停用仅隐藏按钮,快捷键与浮层不受影响;刷新页面生效。'
-const STEER_SWITCH_TITLE = '未应用插话气泡的操作排显示撤回图标(与复制按钮同排),点击撤回并把原文填回输入框(覆盖输入框现有草稿);图标覆盖插话的 pending 阶段(刚发出、尚未进入对话流)与 durable 阶段(已进入对话流未应用),被应用后随队列投影摘除;点击瞬间恰好被应用的仅提示不可撤回;含附件的插话不支持撤回;停用即移除已注入图标,刷新页面生效。'
+const STEER_SWITCH_TITLE = '未应用插话气泡的操作排显示撤回图标(与复制按钮同排),点击撤回并把原文填回输入框(覆盖输入框现有草稿);图标覆盖插话的 pending 阶段(刚发出、尚未进入对话流)与 durable 阶段(已进入对话流未应用),被应用后随队列投影摘除;点击瞬间恰好被应用的仅提示不可撤回;含附件的插话同样可撤,文本回填输入框、图片与文件附件重建为草稿附件,单个附件恢复失败不阻断撤回并提示重新添加;停用即移除已注入图标,刷新页面生效。'
 const FORK_SWITCH_TITLE = '消息气泡操作排显示分叉按钮,点击分叉出新会话到该轮之前(该轮不带入子会话),该轮的用户输入自动回填子会话输入框供编辑重发,子会话自动打开且标题尾号递增;进行中的轮(回复尚未完成)同样可分叉,分叉后自动停止本会话该轮未完成的回复;首轮(无更早上下文可继承,新建会话即为同义操作)与无文本输入的轮(纯图等,无从重发)不注入;停用即不再注入,刷新页面生效。'
 const FORK_AUTO_RESEND_SWITCH_TITLE = '分叉成功后自动把该轮原输入发送到子会话立即开跑(重生成语义,相当于原输入重跑一遍);关闭时分叉仅把原输入回填子会话输入框,由你编辑后再手动发送。'
 const COPY_SID_SWITCH_TITLE = '会话标题栏显示复制 sessionId 按钮,平时隐藏,鼠标移到标题栏任意位置时显示,点击复制当前会话 id 到剪贴板(便于粘贴给他人排查或脚本引用);关闭后按钮整体不渲染,刷新页面生效。'
@@ -2734,11 +2863,50 @@ function ContextPanel() {
                   const updateQueue = session && session.updateQueue
                   if (typeof updateQueue !== 'function') return {}
                   const projections = session.projections
+                  // 附件恢复通道(可选):conversation 服务缺失或旧宿主无 createDrafts
+                  // 时只回填文本;readAttachment 仅新宿主有,缺失按该附件恢复失败处理
+                  let conversation
+                  try {
+                    const scope = typeof sessions.scope === 'function' ? sessions.scope(sessionId) : undefined
+                    conversation = scope && typeof scope.get === 'function' ? scope.get('conversation') : undefined
+                  } catch (error) {
+                    conversation = undefined
+                  }
+                  const createDrafts = conversation && typeof conversation.createDrafts === 'function'
+                    ? (files) => conversation.createDrafts(
+                      sessionId,
+                      files,
+                      Boolean(session.getSnapshot && session.getSnapshot().subagent === null),
+                    )
+                    : null
+                  const releaseDrafts = conversation && typeof conversation.releaseDraftAttachments === 'function'
+                    ? (drafts) => conversation.releaseDraftAttachments(drafts)
+                    : null
+                  const readAttachmentFile = (item) => {
+                    const attachment = item && item.attachment
+                    if (!attachment) return Promise.reject(new Error('附件引用缺失'))
+                    if (item.kind === 'image') {
+                      if (typeof session.readAttachment !== 'function') {
+                        return Promise.reject(new Error('图片附件读取通道不可用'))
+                      }
+                      return Promise.resolve(session.readAttachment(attachment)).then((result) => {
+                        if (!result || !result.ok || !result.value || !result.value.data) {
+                          const reason = result && result.error && result.error.message
+                          throw new Error(reason || '图片附件读取失败')
+                        }
+                        return new File([result.value.data], steerAttachmentFileName(attachment), { type: attachment.mediaType })
+                      })
+                    }
+                    return readFileAttachment(attachment)
+                  }
                   return {
                     updateQueue: (itemId, action) => session.updateQueue(itemId, action),
                     inboxFace: projections && typeof projections.faceOf === 'function'
                       ? projections.faceOf(INBOX_STEER_KEY)
                       : undefined,
+                    createDrafts,
+                    releaseDrafts,
+                    readAttachmentFile,
                   }
                 },
               },
