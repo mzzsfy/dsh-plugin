@@ -459,7 +459,8 @@ test('Given 首次加载得到畸形定价 When 展开规则 Then 显示不可�
 test('Given 定价已配置 When 用户确认停用 Then 显式保存空规则表', t => withFixture(t, async f => {
   const editor = f.editor()
   f.resolve(f.gets[0], price(1)); await f.settle()
-  const control = nodes(editor.tree).find(node => node.props.labelKey === 'pricing.disable')
+  const rules = nodes(editor.tree).find(node => node.type?.name === 'PricingRules')
+  const control = nodes(rules?.props.footer).find(node => node.props.labelKey === 'pricing.disable')
   assert.ok(control)
   control.props.onConfirm(); await f.settle()
   assert.equal(f.saves.length, 0)

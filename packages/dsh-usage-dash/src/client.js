@@ -1002,6 +1002,7 @@ const MESSAGES_ZH = {
   'pricing.close': '关闭',
   'pricing.fallbackRequired': '填写无条件的全局默认价（*/*）后再保存。',
   'pricing.disable': '停用定价',
+  'pricing.disableHint': '停用将清空全部规则，定价不再生效',
   'pricing.confirmDisable': '确认清空定价草稿',
   'pricing.invalidResponse': '保存失败，定价响应无效。',
   'pricing.validationSummary': '请检查标出的定价字段。',
@@ -1342,6 +1343,7 @@ const MESSAGES_EN = {
   'pricing.close': 'Close',
   'pricing.fallbackRequired': 'Enter an unconditional global fallback (*/*) before saving.',
   'pricing.disable': 'Disable pricing',
+  'pricing.disableHint': 'Disabling will clear all rules and turn pricing off',
   'pricing.confirmDisable': 'Confirm clearing pricing draft',
   'pricing.invalidResponse': 'Save failed because the pricing response was invalid.',
   'pricing.validationSummary': 'Review the highlighted pricing fields.',
@@ -4196,14 +4198,16 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-pricing-toolbar,.ud-pricing-line,.ud-pricing-clock{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
 .ud-pricing-search{display:flex;gap:8px;align-items:end;min-width:0}
 .ud-pricing-search .ud-field{flex:1}
-.ud-pricing-search .ud-pricing-clock-toggle{margin-block-end:4px}
+.ud-pricing-search .ud-pricing-clock-group{margin-block-end:4px}
 .ud-pricing-search-input{position:relative;display:flex;align-items:center;min-width:0}
 .ud-pricing-search-input>svg{position:absolute;inset-inline-start:10px;color:var(--dsw-alias-label-secondary);pointer-events:none}
 .ud-pricing-search-input .ud-input{padding-inline-start:32px}
-.ud-pricing-board .ud-pricing-clock-toggle{position:relative;display:inline-grid;place-items:center;flex:none;width:28px;height:28px;padding:0;color:var(--dsw-alias-label-secondary)}
-.ud-pricing-clock-toggle svg{width:16px;height:16px}
-.ud-pricing-board .ud-pricing-clock-toggle:is([aria-expanded=true],.ud-pricing-clock-toggle--active){color:var(--dsw-alias-brand-primary);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent)}
-.ud-pricing-clock-toggle--active::after{content:"";position:absolute;inset:4px 4px auto auto;width:5px;height:5px;border-radius:50%;background:var(--dsw-alias-state-business-primary)}
+.ud-pricing-clock-group{flex:none}
+.ud-pricing-toolbar>.ud-pricing-clock-group{margin-inline-start:auto}
+.ud-pricing-board .ud-pricing-clock-toggle{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;background:transparent;color:var(--dsw-alias-label-secondary);border-radius:var(--dsw-radius-sm)}
+.ud-pricing-clock-toggle svg{width:15px;height:15px}
+.ud-pricing-board .ud-pricing-clock-toggle:is([aria-expanded=true],.ud-pricing-clock-toggle--active){color:var(--dsw-alias-label-primary);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 10%,transparent)}
+
 .ud-pricing-toolbar>.ud-group{border-radius:var(--dsw-radius-sm)}
 .ud-pricing-toolbar .ud-seg-item{height:30px}
 .ud-pricing-create{display:inline-flex;align-items:center;gap:6px}
@@ -4219,23 +4223,32 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-pricing-actions{margin-inline-start:auto}
 .ud-pricing-actions>.ud-group,.ud-pricing-weekdays{padding:2px;border-radius:var(--dsw-radius-sm)}
 .ud-pricing-actions>.ud-group{flex:none}
-.ud-pricing-rules,.ud-pricing-platforms{display:grid;gap:12px;min-width:0}
+.ud-pricing-platforms{display:grid;gap:12px;min-width:0}
 .ud-pricing-empty{border:.5px solid var(--ud-card-border);border-radius:var(--dsw-radius-md);background:var(--ud-card);min-width:0}
-.ud-pricing-group{padding:4px 12px}
-.ud-pricing-group-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 16px;border-bottom:.5px solid var(--ud-card-border)}
+.ud-pricing-rules{min-width:0;--ud-rule-blue:var(--dsw-alias-state-business-primary);--ud-rule-gutter:calc(60px + var(--ud-rule-index));border-width:1px;border-color:color-mix(in srgb,var(--ud-rule-blue) 18%,var(--ud-card-border));background:var(--ud-card)}
+.ud-pricing-group{--ud-rule-mark:var(--ud-rule-blue);padding:0 12px 8px}
+.ud-pricing-group--wild{--ud-rule-mark:color-mix(in srgb,var(--ud-rule-blue) 65%,var(--ud-card))}
+.ud-pricing-group+.ud-pricing-group{border-top:.5px solid color-mix(in srgb,var(--ud-rule-blue) 10%,var(--ud-card-border))}
+.ud-pricing-group-head{display:flex;align-items:center;flex-wrap:wrap;gap:4px 12px;padding:14px 8px 4px}
+.ud-pricing-group-head .ud-fold-summary{color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums}
 .ud-pricing-rule,.ud-pricing-model{min-width:0}
 .ud-pricing-rule+.ud-pricing-rule,.ud-pricing-model+.ud-pricing-model{border-top:.5px solid var(--ud-card-border)}
-.ud-pricing-rule-bar{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:0 8px;padding-inline-end:4px}
-.ud-pricing-rule--open{background:color-mix(in srgb,var(--dsw-alias-bg-module-platform) 60%,transparent);border-radius:var(--dsw-radius-sm)}
+.ud-pricing-rules .ud-pricing-rule+.ud-pricing-rule{border-top-color:color-mix(in srgb,var(--ud-rule-blue) 6%,var(--ud-card-border))}
+.ud-pricing-rule-bar{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:0 4px;padding-inline-end:4px}
+.ud-pricing-rule--open .ud-pricing-rule-caret{color:var(--dsw-alias-label-secondary)}
 .ud-pricing-row[aria-expanded=true]{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent);border-radius:var(--dsw-radius-sm)}
 .ud-pricing-empty{display:flex;flex-direction:column;align-items:center;gap:8px;padding:24px 12px;text-align:center}
 .ud-pricing-empty-text{margin:0;font-size:14px;line-height:22px;color:var(--dsw-alias-label-secondary)}
 .ud-pricing-rule-head,.ud-pricing-row{width:100%;min-width:0;min-height:46px;padding:6px 8px;border:0;background:transparent;color:inherit;font:inherit;text-align:start;cursor:pointer;border-radius:var(--dsw-radius-sm)}
 .ud-pricing-rule-head:hover,.ud-pricing-row:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.ud-pricing-rules .ud-pricing-rule-head:hover{background:color-mix(in srgb,var(--ud-rule-blue) 5%,transparent)}
 .ud-pricing-board .ud-pricing-rule-head:focus-visible{outline-offset:-2px}
 .ud-pricing-rule-no{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;font-variant-numeric:tabular-nums}
 .ud-pricing-row-name{line-height:22px;min-width:0;overflow-wrap:anywhere}
-.ud-pricing-row-name>.ud-pricing-rule-no{margin-inline-end:8px}
+.ud-pricing-rule-head{display:grid;grid-template-columns:14px 8px var(--ud-rule-index) minmax(0,1fr);column-gap:6px;align-content:center;align-items:baseline}
+.ud-pricing-rule-head .ud-pricing-rule-caret{align-self:start;margin-block-start:4px}
+.ud-pricing-rule-swatch{width:8px;height:8px;border-radius:3px;flex:none;align-self:start;margin-block-start:7px;background:var(--ud-rule-mark)}
+.ud-pricing-rule-head .ud-pricing-rule-no{white-space:nowrap}
 .ud-pricing-row-name>.ud-pricing-note,.ud-pricing-row-name>.ud-pricing-chip{margin-inline-start:8px}
 .ud-pricing-board .ud-model-name{white-space:normal;overflow-wrap:anywhere;line-height:22px}
 .ud-pricing-board .ud-model-provider{white-space:normal;line-height:18px;color:var(--dsw-alias-label-secondary)}
@@ -4249,7 +4262,13 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-btn--danger-text.ud-delete-armed,.ud-btn--danger-text.ud-delete-armed:hover{background:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-bg-base)}
 .ud-pricing-rule-tags{display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin-inline-start:auto}
 .ud-pricing-rule-tags .ud-pricing-icon{color:var(--dsw-alias-label-secondary)}
-.ud-pricing-danger-zone{justify-content:flex-end}
+.ud-pricing-danger-zone{justify-content:space-between;gap:12px;padding:8px 12px 8px 20px;border-top:.5px solid var(--ud-card-border)}
+.ud-pricing-danger-hint{min-width:0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}
+.ud-pricing-danger-zone .ud-btn--danger-text{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 10px;margin-inline-start:auto;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:500}
+.ud-pricing-danger-zone .ud-btn--danger-text::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--dsw-alias-state-error-primary);flex:none}
+.ud-pricing-danger-zone .ud-btn--danger-text:not(:disabled):not(.ud-delete-armed):hover{background:var(--dsw-alias-interactive-bg-hover-danger);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 24%,var(--dsw-alias-border-l2));color:var(--dsw-alias-label-primary)}
+.ud-pricing-danger-zone .ud-btn--danger-text.ud-delete-armed,.ud-pricing-danger-zone .ud-btn--danger-text.ud-delete-armed:hover{background:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-bg-base)}
+.ud-pricing-danger-zone .ud-btn--danger-text.ud-delete-armed::before{display:none}
 .ud-pricing-form-head{display:grid;gap:8px;min-width:0}
 .ud-pricing-form-head .ud-btn--text{color:var(--dsw-alias-label-secondary)}
 .ud-pricing-board .ud-pricing-form-head h3{font-size:16px;line-height:24px;font-weight:600}
@@ -4271,8 +4290,13 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-pricing-provider .ud-fold-title{overflow-wrap:anywhere}
 .ud-pricing-pages{justify-content:flex-end;padding-block-start:8px}
 .ud-pricing-chip{display:inline-flex;align-items:center;height:20px;font-weight:500;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:var(--dsw-radius-sm);padding:0 6px;font-size:11px;line-height:18px;white-space:nowrap}
-.ud-pricing-chip--button{height:24px;border:0;cursor:pointer;font:inherit;font-size:12px;line-height:18px}
-.ud-pricing-chip--button:not(:disabled):hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.ud-pricing-chip--button{display:inline-flex;align-items:center;gap:4px;min-height:28px;height:auto;padding:0 4px;border:1px solid transparent;border-radius:var(--dsw-radius-sm);background:transparent;cursor:pointer;font:inherit;font-size:12px;line-height:18px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.ud-pricing-chip-dot{width:5px;height:5px;border-radius:50%;flex:none;background:var(--dsw-alias-label-tertiary)}
+.ud-pricing-chip--billing{color:var(--dsw-alias-label-primary);font-weight:600}
+.ud-pricing-chip--billing .ud-pricing-chip-dot{background:var(--ud-rule-blue)}
+.ud-pricing-chip--taken .ud-pricing-chip-dot{background:var(--dsw-alias-state-warn-primary)}
+.ud-pricing-chip--button:not(:disabled):hover{background:color-mix(in srgb,var(--ud-rule-blue) 8%,transparent);border-color:color-mix(in srgb,var(--ud-rule-blue) 30%,transparent);color:var(--dsw-alias-label-primary)}
+.ud-pricing-chip--taken:not(:disabled):hover{background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 8%,transparent);border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 30%,transparent)}
 .ud-pricing-chip--button:disabled{opacity:.5;cursor:not-allowed}
 .ud-pricing-warn{color:var(--dsw-alias-state-warn-primary)}
 .ud-pricing-tree{border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);padding:8px 12px;margin:4px 0}
@@ -4281,11 +4305,13 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-pricing-tree-row+.ud-pricing-tree-row{border-top:.5px solid var(--dsw-alias-border-l2);padding-top:8px}
 .ud-pricing-tree-title{font-size:14px;overflow-wrap:anywhere}
 .ud-pricing-tree-row--winner .ud-pricing-tree-title{font-weight:600}
-.ud-pricing-rule-detail{display:grid;gap:6px;padding:4px 12px 12px}
-.ud-pricing-rule-unit{font-size:12px;line-height:18px;font-weight:600;color:var(--dsw-alias-label-secondary)}
-.ud-pricing-rule-meta{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 12px;padding-top:8px;border-top:.5px solid var(--ud-card-border)}
+.ud-pricing-rule-detail{display:grid;gap:8px;padding:0 4px 12px calc(var(--ud-rule-gutter) - 12px)}
+.ud-pricing-rule-rate{display:grid;gap:8px;padding:12px;border:1px solid color-mix(in srgb,var(--ud-rule-blue) 16%,transparent);border-radius:var(--dsw-radius-sm);background:color-mix(in srgb,var(--ud-rule-blue) 4%,var(--ud-card))}
+.ud-pricing-rule-unit{display:flex;align-items:center;gap:6px;font-size:12px;line-height:18px;font-weight:600;color:var(--dsw-alias-label-secondary)}
+.ud-pricing-rule-unit::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--ud-rule-mark);flex:none}
+.ud-pricing-rule-meta{display:grid;gap:4px;padding-inline:12px}
 .ud-pricing-rule-meta ul{display:flex;flex-wrap:wrap;gap:4px 12px;list-style:none;margin:0;padding:0}
-.ud-pricing-rule-detail .ud-pricing-prices dd{font-size:16px;line-height:22px;font-weight:600}
+.ud-pricing-rule-rate .ud-pricing-prices dd{font-size:20px;line-height:28px;font-weight:600}
 .ud-pricing-prices dd{font-size:13px;font-weight:500;line-height:20px}
 .ud-pricing-dialog{box-sizing:border-box;width:min(480px,calc(100vw - 24px));max-height:calc(100dvh - 24px);overflow:auto;padding:16px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);box-shadow:var(--dsw-shadow-lv3);font-size:14px;line-height:22px}
 .ud-pricing-dialog[open],.ud-pricing-dialog form{display:grid;gap:12px}
@@ -6258,8 +6284,9 @@ ${HUD_CSS}
         ? formatCost(stats.billing.reduce((sum, row) => sum + row.cost, 0), rule.currency) : TOOLTIP_MISSING
       const tokens = formatTokens(stats.billing.reduce((sum, row) => sum + (row.usage.tokens ?? 0), 0))
       return h('div', { className: 'ud-pricing-rule-detail' },
-        h('p', { className: 'ud-pricing-rule-unit' }, t('pricingUnit')),
-        h(PricingPriceReadout, { rule, t }),
+        h('div', { className: 'ud-pricing-rule-rate' },
+          h('p', { className: 'ud-pricing-rule-unit' }, t('pricingUnit')),
+          h(PricingPriceReadout, { rule, t })),
         h('div', { className: 'ud-pricing-rule-meta ud-pricing-note' },
           h('p', null, t('pricing.ruleEstimate', { cost, tokens })),
           takeover.size ? h('ul', null, [...takeover].map(([winner, n]) => {
@@ -6268,7 +6295,7 @@ ${HUD_CSS}
           })) : null))
     }
 
-    function PricingRules({ analysis, rules, onEditRule, onJump, t }) {
+    function PricingRules({ analysis, rules, onEditRule, onJump, t, footer }) {
       const [detail, setDetail] = useState(null)
       const [expanded, setExpanded] = useState(() => new Set())
       const listId = React.useId()
@@ -6277,18 +6304,21 @@ ${HUD_CSS}
         .sort((a, b) => a.segments[0].localeCompare(b.segments[0], 'en') || a.segments[1].localeCompare(b.segments[1], 'en') || a.index - b.index), [rules])
       const statsByKey = useMemo(() => new Map([...analysis.ruleStats].map(([rule, stats]) => [ruleStatsKey(rule), stats])), [analysis])
       const badge = (rule, kind, n, stats) => n > 0 ? h('button', {
-        type: 'button', className: 'ud-pricing-chip ud-pricing-chip--button', 'aria-haspopup': 'dialog',
+        type: 'button', className: cx('ud-pricing-chip ud-pricing-chip--button', `ud-pricing-chip--${kind}`),
+        'aria-haspopup': 'dialog',
         onClick: (event) => { event?.stopPropagation(); setDetail({ rule, kind, stats }) },
-      }, t(`pricing.${kind}`, { n })) : null
-      return h('div', { className: 'ud-pricing-rules' },
+      }, h('span', { className: 'ud-pricing-chip-dot', 'aria-hidden': 'true' }), t(`pricing.${kind}`, { n })) : null
+      return h(React.Fragment, null, h('div', {
+        className: 'ud-fold ud-pricing-rules', style: { '--ud-rule-index': `${String(rules.length).length + 1}ch` },
+      },
         labels.map((hasStar) => {
           const group = items.filter(({ rule }) => rule.model.includes(MODEL_WILDCARD) === hasStar)
           if (!group.length) return null
-          return h('section', { key: String(hasStar), className: 'ud-fold' },
+          return h('section', { key: String(hasStar), className: cx('ud-pricing-group', hasStar && 'ud-pricing-group--wild') },
             h('div', { className: 'ud-pricing-group-head' },
               h('h3', { className: 'ud-fold-title' }, t(hasStar ? 'pricing.withStar' : 'pricing.withoutStar')),
               h('span', { className: 'ud-fold-summary' }, t('pricingRuleCount', { n: group.length }))),
-            h('div', { className: 'ud-pricing-group' }, group.map(({ rule, index }) => {
+            group.map(({ rule, index }) => {
               const stats = statsByKey.get(ruleStatsKey(rule)) ?? { billing: [], taken: [], conflict: false }
               const key = rule[DRAFT_SLOT]
               const detailId = `${listId}-${key}`
@@ -6306,9 +6336,10 @@ ${HUD_CSS}
                     'aria-controls': detailId, onClick: toggle,
                   },
                     h('span', { className: 'ud-pricing-rule-caret', 'aria-hidden': 'true' }, h(Icon, { paths: ICONS.chevron })),
+                    h('i', { className: 'ud-pricing-rule-swatch', 'aria-hidden': 'true' }),
+                    h('span', { className: 'ud-pricing-rule-no' }, `#${index + 1}`),
                     h('span', { className: 'ud-model-id' },
                       h('span', { className: 'ud-pricing-row-name' },
-                        h('span', { className: 'ud-pricing-rule-no' }, `#${index + 1}`),
                         h('span', { className: 'ud-model-name' }, h('span', { className: 'ud-pricing-rule-model' }, rule.model)),
                         isPricingFallback(rule) ? h('span', { className: 'ud-pricing-note' }, t('pricing.globalFallback')) : null,
                         stats.conflict ? h('span', { className: 'ud-pricing-chip ud-pricing-warn' }, t('pricing.conflict')) : null),
@@ -6322,8 +6353,8 @@ ${HUD_CSS}
                       title: t('pricing.editRule'), onClick: () => onEditRule(index),
                     }, h(Icon, { paths: ICONS.edit })))),
                 h('div', { id: detailId, hidden: !open }, open ? h(PricingRuleDetails, { rule, stats, rules, t }) : null))
-            })))
-        }),
+            }))
+        }), footer),
         detail ? h(PricingRuleModels, { detail, analysis, rules, t, onClose: () => setDetail(null), onJump }) : null)
     }
 
@@ -6650,14 +6681,13 @@ ${HUD_CSS}
       const activeRule = activeRuleIndex >= 0 ? rules[activeRuleIndex] : null
       const analysis = useMemo(() => open ? pricingSnapshotOf(currentRules, observed, moment) : null, [open, currentRules, observed, moment.getTime()])
       const status = phase === PRICING_STATE_UNAVAILABLE ? 'pricingUnavailable' : phase !== PRICING_STATE_READY ? 'pricing.loading' : null
-      const controls = h('div', { className: 'ud-pricing-toolbar' },
-        h('div', { className: 'ud-group ud-pricing-tabs', role: 'tablist', 'aria-label': t('pricing.views') },
-          PRICING_TABS.map((entry, index) => h('button', {
-            key: entry.id, id: tabId(entry.id), type: 'button', role: 'tab', tabIndex: tab === entry.id ? 0 : -1,
-            'aria-controls': panelId(entry.id), 'aria-selected': tab === entry.id,
-            className: cx('ud-seg-item', tab === entry.id && 'ud-seg-item--on'),
-            onClick: () => chooseTab(entry.id), onKeyDown: (event) => onTabKey(event, index),
-          }, t(entry.labelKey)))))
+      const tabList = h('div', { className: 'ud-group ud-pricing-tabs', role: 'tablist', 'aria-label': t('pricing.views') },
+        PRICING_TABS.map((entry, index) => h('button', {
+          key: entry.id, id: tabId(entry.id), type: 'button', role: 'tab', tabIndex: tab === entry.id ? 0 : -1,
+          'aria-controls': panelId(entry.id), 'aria-selected': tab === entry.id,
+          className: cx('ud-seg-item', tab === entry.id && 'ud-seg-item--on'),
+          onClick: () => chooseTab(entry.id), onKeyDown: (event) => onTabKey(event, index),
+        }, t(entry.labelKey))))
       const clock = h('div', { className: 'ud-pricing-clock', id: `${boardId}-clock`, hidden: !clockOpen },
         h('label', { className: 'ud-field' },
           h('span', { className: 'ud-field-label' }, t('pricing.localSnapshot', { zone: timeZone || t('pricing.localZone') })),
@@ -6667,12 +6697,13 @@ ${HUD_CSS}
           })),
         h('button', { type: 'button', className: 'ud-btn', onClick: () => { setSnapshot(''); setNow(Date.now()) } }, t('pricing.backNow')))
       const clockLabel = snapshot ? `${t('pricing.snapshot')} · ${snapshot.replace('T', ' ')}` : t('pricing.localSnapshot', { zone: timeZone || t('pricing.localZone') })
-      const clockToggle = h('button', {
-        type: 'button', className: cx('ud-btn ud-pricing-clock-toggle', snapshot && 'ud-pricing-clock-toggle--active'),
-        'aria-label': clockLabel, title: clockLabel,
-        'aria-expanded': clockOpen, 'aria-controls': `${boardId}-clock`,
-        onClick: () => { if (!snapshot) setNow(Date.now()); setClockOpen(!clockOpen) },
-      }, h(Icon, { paths: ICONS.clock }))
+      const clockToggle = h('div', { className: 'ud-group ud-pricing-clock-group' },
+        h('button', {
+          type: 'button', className: cx('ud-seg-item ud-pricing-clock-toggle', snapshot && 'ud-pricing-clock-toggle--active'),
+          'aria-label': clockLabel, title: clockLabel,
+          'aria-expanded': clockOpen, 'aria-controls': `${boardId}-clock`,
+          onClick: () => { if (!snapshot) setNow(Date.now()); setClockOpen(!clockOpen) },
+        }, h(Icon, { paths: ICONS.clock })))
       const currencyPicker = h('div', { className: 'ud-group', role: 'group', 'aria-label': t('pricingCurrency') },
         CURRENCIES.map((symbol) => h('button', {
           key: symbol, type: 'button',
@@ -6684,8 +6715,19 @@ ${HUD_CSS}
           },
         }, symbol)))
       const saveButton = h('button', { className: 'ud-btn ud-btn--primary', type: 'button', disabled: saving, onClick: save }, t('save'))
+      const createButton = h('button', { type: 'button', className: 'ud-btn ud-pricing-create', onClick: openCreateRule },
+        h(Icon, { paths: ICONS.plus }), t('pricing.createRule'))
+      const controls = h('div', { className: 'ud-pricing-toolbar' },
+        tabList,
+        tab === 'rules' && !ruleEditor && !status ? createButton : null,
+        tab === 'rules' && !ruleEditor && !status
+          ? h('div', { className: 'ud-pricing-actions' },
+            saved ? h('span', { className: 'ud-pref-desc', role: 'status' }, t('saved')) : null,
+            clockToggle, currencyPicker, saveButton)
+          : null)
       const clearAll = currentRules.length > 0 && rules?.some((rule) => !isPricingFallback(rule) || !syntheticGlobalRef.current)
         ? h('div', { className: 'ud-pricing-line ud-pricing-danger-zone' },
+          h('span', { className: 'ud-pricing-danger-hint' }, t('pricing.disableHint')),
           h(DeleteArmedButton, {
             labelKey: 'pricing.disable', confirmKey: 'pricing.confirmDisable', showLabel: true, tone: 'danger', t,
             onConfirm: () => {
@@ -6698,13 +6740,6 @@ ${HUD_CSS}
             },
           })) : null
       const listPanel = h('div', { className: 'ud-pricing-stack' },
-        h('div', { className: 'ud-pricing-toolrow' },
-          h('button', { type: 'button', className: 'ud-btn ud-pricing-create', onClick: openCreateRule },
-            h(Icon, { paths: ICONS.plus }), t('pricing.createRule')),
-          h('div', { className: 'ud-pricing-actions' },
-            saved ? h('span', { className: 'ud-pref-desc', role: 'status' }, t('saved')) : null,
-            currencyPicker, saveButton, clockToggle)),
-        clock,
         saveError || errors.size ? h('div', { className: 'ud-error', role: 'alert' }, saveError || t(errors.get('fallback') ?? 'pricing.validationSummary')) : null,
         h(PricingRules, {
           analysis, rules: rules ?? [], t, onEditRule: openEditRule,
@@ -6714,8 +6749,8 @@ ${HUD_CSS}
             setSelectedModel(model)
             chooseTab('models')
           },
-        }),
-        clearAll)
+          footer: clearAll,
+        }))
       const editorPanel = !status && activeRule ? h(PricingRuleForm, {
         rule: activeRule, index: activeRuleIndex, creating: Boolean(ruleEditor.creating),
         locked: isPricingFallback(ruleEditor.baseline), currency, errors, t, saving, saveError, actions, clockToggle, clock,
@@ -6769,6 +6804,7 @@ ${HUD_CSS}
         hudRefresh({ force: true }).catch(() => {})
       }
       return h('div', { className: 'ud-pricing-board', ref: boardRef }, controls,
+        tab === 'rules' && !ruleEditor ? clock : null,
         PRICING_TABS.map((entry) => h('div', {
           key: entry.id, id: panelId(entry.id), role: 'tabpanel', 'aria-labelledby': tabId(entry.id), tabIndex: 0, hidden: tab !== entry.id,
         }, tab !== entry.id ? null : status ? h('div', { className: 'ud-empty' },
