@@ -965,9 +965,6 @@ const MESSAGES_ZH = {
   'pricing.backNow': '回到此刻',
   'pricing.search': '搜索平台或型号',
   'pricing.searchPlaceholder': '也可输入完整的 平台/型号 试算',
-  'pricing.estimated': '快照估算花费',
-  'pricing.priced': '已定价组合',
-  'pricing.fallback': '默认价计费',
   'pricing.noObserved': '当前统计范围内暂无已观察到的模型。',
   'pricing.noSearchResults': '暂无匹配的已观察模型。',
   'pricing.previousModels': '上一页型号',
@@ -1307,9 +1304,6 @@ const MESSAGES_EN = {
   'pricing.backNow': 'Back to now',
   'pricing.search': 'Find a provider or model',
   'pricing.searchPlaceholder': 'Enter a full provider/model to test its price',
-  'pricing.estimated': 'Snapshot cost estimate',
-  'pricing.priced': 'Priced combinations',
-  'pricing.fallback': 'Fallback billing',
   'pricing.noObserved': 'No models were observed in this usage range.',
   'pricing.noSearchResults': 'No observed models match the search.',
   'pricing.previousModels': 'Previous models',
@@ -3993,17 +3987,18 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 --ud-chart-1:var(--dsw-alias-state-business-primary);--ud-chart-2:var(--dsw-alias-state-success-primary);--ud-chart-3:var(--dsw-alias-state-warn-primary);--ud-chart-4:hsl(262 84% 65%);--ud-chart-5:hsl(329 85% 55%);--ud-chart-other:var(--dsw-alias-label-tertiary);
 --ud-heat-0:color-mix(in srgb, var(--dsw-alias-label-tertiary) 12%, transparent);--ud-heat-1:color-mix(in srgb, var(--dsw-alias-state-business-primary) 18%, transparent);--ud-heat-2:color-mix(in srgb, var(--dsw-alias-state-business-primary) 36%, transparent);--ud-heat-3:color-mix(in srgb, var(--dsw-alias-state-business-primary) 54%, transparent);--ud-heat-4:color-mix(in srgb, var(--dsw-alias-state-business-primary) 74%, transparent);--ud-heat-5:var(--dsw-alias-state-business-primary);--ud-trend-line:var(--dsw-alias-state-business-primary);--ud-trend-speed:var(--dsw-alias-state-success-primary);--ud-trend-ttft:var(--dsw-alias-state-warn-primary);
 --ud-bg-overlay:var(--dsw-alias-bg-layer-2);--ud-border:var(--dsw-alias-border-l2);--ud-border-strong:var(--dsw-alias-border-l3);--ud-text:var(--dsw-alias-label-primary);--ud-text-sub:var(--dsw-alias-label-secondary);--ud-text-dim:var(--dsw-alias-label-tertiary);--ud-accent:var(--dsw-alias-state-business-primary);--ud-hover-bg:var(--dsw-alias-interactive-bg-hover);--ud-shadow-lv3:var(--dsw-shadow-lv3);--ud-radius-md:var(--dsw-radius-md);--ud-radius-sm:var(--dsw-radius-sm);--ud-card:var(--dsw-alias-bg-layer-1);--ud-card-border:var(--dsw-alias-border-l2)}
-.ud-section-page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;min-width:0}
-.ud-section-page-title{margin:0;font-size:18px;line-height:26px;font-weight:600;color:var(--dsw-alias-label-primary)}
-.ud-workspace-picker{display:inline-flex;align-items:center;gap:6px;flex:none;min-width:0;height:30px;padding:0 8px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary)}
+
+.ud-workspace-picker{display:inline-flex;align-items:center;gap:4px;flex:none;min-width:0;height:28px;padding:0 6px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary)}
 .ud-workspace-icon{display:inline-flex;flex:none}
-.ud-workspace-select{appearance:none;border:0;background:transparent;color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px;max-width:150px;min-width:0;padding:0 14px 0 0;cursor:pointer;text-overflow:ellipsis}
+.ud-workspace-select{appearance:none;border:0;background:transparent;color:var(--dsw-alias-label-primary);font-size:12px;line-height:18px;max-width:110px;min-width:0;padding:0 12px 0 0;cursor:pointer;text-overflow:ellipsis}
 .ud-workspace-select:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
 .ud-workspace-picker::after{content:"";flex:none;width:5px;height:5px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(45deg);margin-inline-start:-12px;pointer-events:none}
-.ud-toolbar{display:flex;align-items:flex-start;gap:12px}
-.ud-toolbar-main{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:1 1 auto;min-width:0}
+.ud-toolbar{display:flex;align-items:center;gap:8px}
+.ud-toolbar-main{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:1 1 auto;min-width:0}
 .ud-group{display:flex;align-items:center;gap:2px;padding:3px;border:0;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-module-platform)}
 .ud-seg-item{border:none;background:transparent;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;padding:0 12px;height:28px;border-radius:var(--dsw-radius-sm);cursor:pointer;white-space:nowrap;transition:background .15s,color .15s}
+.ud-toolbar .ud-group{padding:2px}
+.ud-toolbar .ud-seg-item{height:26px;padding:0 9px;font-size:12px;line-height:18px}
 .ud-seg-item:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .ud-seg-item--on{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent);color:var(--dsw-alias-brand-primary);font-weight:600}
 .ud-custom-range{display:flex;align-items:center;gap:6px}
@@ -4012,8 +4007,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-btn{border:1px solid var(--ud-border-strong);background:transparent;color:var(--dsw-alias-label-secondary);border-radius:var(--dsw-radius-sm);padding:0 14px;height:32px;font-size:14px;line-height:1;cursor:pointer;transition:background .15s,color .15s}
 .ud-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .ud-btn:disabled{opacity:.5;cursor:not-allowed}
-.ud-toolbar-side{display:flex;align-items:center;gap:8px;flex:none;margin-left:auto;align-self:stretch}
+.ud-toolbar-side{display:flex;align-items:center;gap:4px;flex:none;margin-left:auto;align-self:stretch}
 .ud-toolbar-side .ud-btn--text{display:inline-flex;align-items:center;height:100%}
+.ud-toolbar-side .ud-workspace-select{max-width:100px}
 .ud-icon-btn{padding:0 12px}
 .ud-icon{display:inline-flex;align-items:center;justify-content:center}
 .ud-btn--text{border:none;background:transparent;color:var(--dsw-alias-label-tertiary);padding:2px 4px}
@@ -4209,6 +4205,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-pricing-search-input{position:relative;display:flex;align-items:center;min-width:0}
 .ud-pricing-search-input>svg{position:absolute;inset-inline-start:10px;color:var(--dsw-alias-label-secondary);pointer-events:none}
 .ud-pricing-search-input .ud-input{padding-inline-start:32px}
+.ud-pricing-search-input .ud-input::-webkit-calendar-picker-indicator{display:none}
 .ud-pricing-clock-group{flex:none}
 .ud-pricing-toolbar>.ud-pricing-clock-group{margin-inline-start:auto}
 .ud-pricing-board .ud-pricing-clock-toggle{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;background:transparent;color:var(--dsw-alias-label-secondary);border-radius:var(--dsw-radius-sm)}
@@ -4284,11 +4281,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-pricing-board h3,.ud-pricing-board p,.ud-pricing-dialog h3,.ud-pricing-dialog p{margin:0}
 .ud-pricing-board h3,.ud-pricing-dialog h3{font-size:14px;line-height:22px}
 .ud-pricing-board code,.ud-pricing-dialog code{font-family:var(--ds-font-family-code);overflow-wrap:anywhere;min-width:0}
-.ud-pricing-summary,.ud-pricing-prices{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:0}
-.ud-pricing-summary .ud-card{gap:4px;padding:10px 12px}
-.ud-pricing-summary .ud-card-icon{flex:none}
-.ud-pricing-summary .ud-card-label{overflow-wrap:anywhere}
-.ud-pricing-summary .ud-card-value{text-overflow:ellipsis}
+.ud-pricing-prices{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:0}
 .ud-pricing-prices dt,.ud-pricing-note{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}
 .ud-pricing-prices dd{margin:0;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
 .ud-pricing-row[aria-expanded=true] .ud-pricing-rule-caret{transform:rotate(90deg)}
@@ -4330,7 +4323,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-btn--primary:not(:disabled):hover{border-color:var(--dsw-alias-button-primary-hover);background:var(--dsw-alias-button-primary-hover);color:var(--dsw-alias-bg-base)}
 .ud-pricing-help{width:fit-content;color:var(--dsw-alias-label-secondary);text-decoration:underline dotted;cursor:help;font-size:12px}
 @container ud-pricing (max-width:440px){
-  .ud-price-grid,.ud-pricing-summary,.ud-pricing-prices{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ud-price-grid,.ud-pricing-prices{grid-template-columns:repeat(2,minmax(0,1fr))}
   .ud-cond{display:grid;grid-template-columns:minmax(0,1fr) auto}
   .ud-cond-kind{justify-self:start}
   .ud-cond-fields,.ud-cond>.ud-field-error{grid-column:1/-1}
@@ -6072,6 +6065,10 @@ ${HUD_CSS}
     const EMPTY_PRICING_ROWS = []
     const PRICING_PRICE_LABELS = { input: 'priceInput', output: 'priceOutput', cacheRead: 'priceCacheRead', cacheWrite: 'priceCacheWrite' }
     const isPricingFallback = (rule) => rule.model === MODEL_UNROUTED && !rule.conditions?.length
+    // 与规则视图同一套标记色:普通规则用主色,含通配符的规则用浅一档
+    const pricingRuleMark = (rule) => rule.model.includes(MODEL_WILDCARD)
+      ? 'color-mix(in srgb,var(--dsw-alias-state-business-primary) 65%,var(--ud-card))'
+      : 'var(--dsw-alias-state-business-primary)'
     const pricingRuleNumber = (rules, rule) => `#${rules.findIndex(item => item === rule || ruleStatsKey(item) === ruleStatsKey(rule)) + 1}`
 
     function pricingSnapshotOf(rules, observed, moment) {
@@ -6129,7 +6126,7 @@ ${HUD_CSS}
     const PRICING_MODELS_PER_PAGE = 20
     const PRICING_SEARCH_SUGGESTIONS = 40
 
-    function PricingModels({ analysis, rules, moment, query, onQuery, selectedModel, onSelect, onEdit, clockToggle, clock, modelColors, t }) {
+    function PricingModels({ analysis, rules, moment, query, onQuery, selectedModel, onSelect, onEdit, clockToggle, clock, t }) {
       const listId = React.useId()
       const [providerOverrides, setProviderOverrides] = useState(() => new Map())
       const [providerPages, setProviderPages] = useState(() => new Map())
@@ -6152,19 +6149,15 @@ ${HUD_CSS}
       const probe = isTwoSegmentModel(probeKey) && !probeKey.includes(MODEL_WILDCARD) && !exactObserved
         ? { model: probeKey, ...resolvePricingRule(rules, probeKey, moment) } : null
       const priced = rows.filter((row) => row.winner)
-      const amountsAvailable = rows.length > 0 && rows.every((row) => row.cost !== null)
-      const totals = [
-        ['pricing.estimated', ICONS.coins, amountsAvailable ? formatCost(rows.reduce((sum, row) => sum + row.cost, 0), aggregateCurrencyOf(rules)) : TOOLTIP_MISSING],
-        ['pricing.priced', ICONS.model, `${priced.length}/${rows.length}`],
-        ['pricing.fallback', ICONS.rate, String(priced.filter((row) => isPricingFallback(row.winner)).length)],
-        ['pricing.rules', ICONS.rules, String(rules.length)],
-      ]
       const modelToggle = (row, label, detailId) => h('button', {
         type: 'button', className: 'ud-model-row ud-pricing-row', 'aria-controls': detailId, 'aria-expanded': selectedModel === row.model,
         'data-ud-price-model': row.model,
         onClick: () => onSelect(selectedModel === row.model ? null : row.model),
       },
-        h('i', { className: 'ud-model-swatch', 'aria-hidden': true, style: { background: modelColors.get(row.model) ?? 'var(--ud-chart-other)' } }),
+        h('i', {
+          className: 'ud-model-swatch', 'aria-hidden': true,
+          style: { background: row.winner ? pricingRuleMark(row.winner) : 'var(--ud-chart-other)' },
+        }),
         h('span', { className: 'ud-model-id' },
           h('span', { className: 'ud-model-name' }, label),
           row.winner && isPricingFallback(row.winner) ? h('span', { className: 'ud-model-provider' }, t('pricing.globalFallback')) : null),
@@ -6197,9 +6190,6 @@ ${HUD_CSS}
         probe ? h('div', { className: 'ud-card' },
           h('div', { className: 'ud-card-label' }, t('pricing.probe')),
           modelToggle(probe, probe.model, `${listId}-probe`), modelDetails(probe, `${listId}-probe`)) : null,
-        rows.length ? h('div', { className: 'ud-pricing-summary' }, totals.map(([key, icon, value]) => h(Card, {
-          key, icon, label: t(key),
-        }, h('div', { title: value }, h(FitText, null, value))))) : null,
         rows.length > priced.length ? h('p', { className: 'ud-pricing-warn' }, t('pricing.unpricedCount', { n: rows.length - priced.length })) : null,
         !rules.length ? h('div', { className: 'ud-pricing-empty' },
           h('p', { className: 'ud-pricing-empty-text' }, t('pricingNotConfigured')),
@@ -6473,7 +6463,7 @@ ${HUD_CSS}
             h('button', { type: 'button', className: 'ud-btn ud-btn--primary', disabled: saving, onClick: onSave }, t('save')))))
     }
 
-    function PricingEditor({ t = defaultT, publishedRules, observed = EMPTY_PRICING_ROWS, open = true, timeZone, modelColors }) {
+    function PricingEditor({ t = defaultT, publishedRules, observed = EMPTY_PRICING_ROWS, open = true, timeZone }) {
       const [tab, setTab] = useState(PRICING_TABS[0].id)
       const [snapshot, setSnapshot] = useState('')
       const [clockOpen, setClockOpen] = useState(false)
@@ -6779,7 +6769,7 @@ ${HUD_CSS}
       const views = {
         models: analysis ? h(PricingModels, {
           analysis, rules: currentRules, moment, query,
-          onQuery: setQuery, selectedModel, onSelect: setSelectedModel, clockToggle, clock, modelColors, t,
+          onQuery: setQuery, selectedModel, onSelect: setSelectedModel, clockToggle, clock, t,
           onEdit: () => { if (!activeRule) openCreateRule(); chooseTab('rules', true) },
         }) : null,
         rules: analysis ? h(React.Fragment, null, editorPanel ?? listPanel, batchPanel) : null,
@@ -6826,18 +6816,47 @@ ${HUD_CSS}
           saveError ? h('p', { className: 'ud-error', role: 'alert' }, saveError) : null) : views[entry.id])))
     }
 
+    // 规则中能落到具体型号的条目;通配符不是真实型号,只在规则视图展示
+    function pricingRuleModels(rules) {
+      if (!Array.isArray(rules)) return []
+      const seen = new Set()
+      const rows = []
+      for (const rule of rules) {
+        const model = rule?.model
+        if (typeof model !== 'string' || model === MODEL_UNROUTED || model === OTHER_MODEL
+          || model.includes(MODEL_WILDCARD) || !isTwoSegmentModel(model) || seen.has(model)) continue
+        seen.add(model)
+        rows.push({ model })
+      }
+      return rows
+    }
+
+    // 模型视图要覆盖「已配置」和「已观察」两类来源:规则先配好、尚无用量时也要能看价
+    function pricingModelRows(observed, rules) {
+      const rows = Array.isArray(observed) ? [...observed] : []
+      const seen = new Set(rows.map((row) => row.model))
+      for (const row of pricingRuleModels(rules)) {
+        if (!seen.has(row.model)) {
+          seen.add(row.model)
+          rows.push(row)
+        }
+      }
+      return rows
+    }
+
     // 定价规则折叠区:编辑器保持挂载以保留草稿,折叠只隐藏 body
-    function PricingSection({ rules = null, observed, timeZone, modelColors, t = defaultT }) {
+    function PricingSection({ rules = null, observed, timeZone, t = defaultT }) {
       const [open, setOpen] = useState(false)
       const summary = !Array.isArray(rules) ? undefined
         : rules.length > 0 ? t('pricingRuleCount', { n: rules.length }) : t('pricingNotConfigured')
+      const effectiveObserved = pricingModelRows(observed, rules)
       return h(SectionFold, {
         title: t('pricing'),
         description: t('pricingSectionDesc'),
         summary,
         open,
         onToggle: () => setOpen((value) => !value),
-      }, h(PricingEditor, { t, open, publishedRules: rules, observed, timeZone, modelColors }))
+      }, h(PricingEditor, { t, open, publishedRules: rules, observed: effectiveObserved, timeZone }))
     }
 
     // 扫描异常日志入口:仅箭头标识,明细在展开的日志块中展示;
@@ -7276,7 +7295,6 @@ ${HUD_CSS}
       const usageModels = usageModelsOf(view, grouped, pointView)
       // 模型配色取当期窗口模型排名,防跨窗口取色错位
       const colorFor = useMemo(() => colorForModel(cardsStats ? cardsStats.models : []), [cardsStats])
-      const modelColors = useMemo(() => new Map((usageModels ?? []).map(({ model }) => [model, colorFor(model)])), [usageModels, colorFor])
       const maxSlots = pointActive ? maxSlotsFor(view, rawPreset) : DAY_MAX_SLOTS
       const trimmedSlots = trendSource ? trimSlots(trendSource.slots, maxSlots) : null
       const { costReady, money, chartSlots } = moneyViewOf(trimmedSlots, costView)
@@ -7288,28 +7306,27 @@ ${HUD_CSS}
       const loadingVisible = pointActive ? pointStatus === 'loading' && !pointView : loading && !stats
       const emptyVisible = !error && (pointActive ? pointView && isEmptyRange(pointView) : stats && isEmptyRange(stats))
 
+      const workspacePicker = workspaces.length > 0
+        ? h('label', { className: 'ud-workspace-picker', title: t('workspaceFilter') },
+          h('span', { className: 'ud-workspace-icon' }, h(Icon, { paths: ICONS.workspace })),
+          h('select', {
+            className: 'ud-workspace-select',
+            'aria-label': t('workspaceFilter'),
+            value: workspaceId,
+            onChange: (event) => {
+              setWorkspaceId(event.target.value)
+              setStats(null)
+              setPointStats(null)
+            },
+          },
+          h('option', { value: '' }, t('allWorkspaces')),
+          workspaces.map((workspace) => h('option', {
+            key: workspace.id, value: workspace.id,
+            title: workspace.path || workspace.title,
+          }, workspace.title || workspace.path || workspace.id))))
+        : null
+
       return h('div', { className: 'ud-panel' },
-        h('header', { className: 'ud-section-page-head' },
-          h('h2', { className: 'ud-section-page-title' }, t('nav')),
-          workspaces.length > 0
-            ? h('label', { className: 'ud-workspace-picker', title: t('workspaceFilter') },
-              h('span', { className: 'ud-workspace-icon' }, h(Icon, { paths: ICONS.workspace })),
-              h('select', {
-                className: 'ud-workspace-select',
-                'aria-label': t('workspaceFilter'),
-                value: workspaceId,
-                onChange: (event) => {
-                  setWorkspaceId(event.target.value)
-                  setStats(null)
-                  setPointStats(null)
-                },
-              },
-              h('option', { value: '' }, t('allWorkspaces')),
-              workspaces.map((workspace) => h('option', {
-                key: workspace.id, value: workspace.id,
-                title: workspace.path || workspace.title,
-              }, workspace.title || workspace.path || workspace.id))))
-            : null),
         h('div', { className: 'ud-toolbar' },
           h('div', { className: 'ud-toolbar-main' },
             h('div', { className: 'ud-group', role: 'group', 'aria-label': t('viewGroup') },
@@ -7375,6 +7392,7 @@ ${HUD_CSS}
                         }))
                     : null)),
           h('div', { className: 'ud-toolbar-side' },
+            workspacePicker,
             h(AnomalyChip, { open: detailsOpen, news: hasAnomalyNews(status), onToggle: () => setDetailsOpen((v) => !v), t }),
             h('button', {
               className: 'ud-btn ud-btn--text ud-icon-btn', 'aria-label': t('refresh'), title: t('refresh'),
@@ -7422,7 +7440,7 @@ ${HUD_CSS}
         cardsStats?.to ? h('div', { className: 'ud-foot' }, `${t('asOf')} ${slotLabelFor(view)(cardsStats.to)}`) : null,
         h('div', { className: 'ud-settings-stack' },
           h(StatsLineOptions, { key: 'prefs', t }),
-          h(PricingSection, { key: 'pricing', t, rules: pricingRules, observed: cardsStats?.models, timeZone: serverTimeZone, modelColors }),
+          h(PricingSection, { key: 'pricing', t, rules: pricingRules, observed: cardsStats?.models, timeZone: serverTimeZone }),
           // 成本控制四卡:用量摘要 / 成本护栏 / 异常哨兵 / 省钱沙盘(沙盘用得少,排在最后)
           h(HudSummarySection, { key: 'hud', t }),
           h(GuardSection, { key: 'guard', t }),

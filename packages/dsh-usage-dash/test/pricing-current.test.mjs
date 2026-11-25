@@ -183,6 +183,33 @@ const enterPattern = async (f, editor, provider, model) => {
   changeInput(modelPattern(editor), model); await f.settle()
 }
 
+test('Given 有具体型号规则但无观察行 When 渲染定价折叠区 Then 用规则型号填充模型视图', t => withFixture(t, async f => {
+  const panel = f.panel()
+  f.resolve(f.gets[0], { revision: 1, rules: [{ ...rule(5), model: 'p/m' }] }); await f.settle()
+  const section = byComponent(panel, 'PricingSection')
+  const fold = f.mount(section.type, section.props)
+  assert.deepEqual(byComponent(fold, 'PricingEditor').props.observed, [{ model: 'p/m' }])
+}, { observed: [] }))
+
+test('Given 模型视图有定价行 When 渲染 Then 色块沿用规则视图标记色', t => withFixture(t, async f => {
+  const editor = f.editor('模型视图')
+  f.resolve(f.gets[0], { revision: 1, rules: [{ ...rule(5), model: 'p/m' }] }); await f.settle()
+  const view = mountView(f, byComponent(editor, 'PricingModels')).tree
+  const swatch = nodes(view).find(node => node.props.className === 'ud-model-swatch')
+  assert.equal(swatch.props.style.background, 'var(--dsw-alias-state-business-primary)')
+}, { observed: [{ model: 'p/m' }] }))
+
+test('Given 已有观察行且规则另有具体型号 When 渲染定价折叠区 Then 合并配置型号', t => withFixture(t, async f => {
+  const panel = f.panel()
+  f.resolve(f.gets[0], { revision: 1, rules: [rule(5), { ...rule(6), model: 'Alpha/sonnet-4.5' }] }); await f.settle()
+  const section = byComponent(panel, 'PricingSection')
+  const fold = f.mount(section.type, section.props)
+  assert.deepEqual(
+    byComponent(fold, 'PricingEditor').props.observed.map((row) => row.model),
+    ['p/m', 'q/other', 'Alpha/sonnet-4.5'],
+  )
+}, { observed: observedPricingModels }))
+
 test('Given 聚合返回观察行 When 渲染定价折叠区 Then 将完整观察行透传', t => withFixture(t, async f => {
   const panel = f.panel()
   f.resolve(f.gets[0], price(1)); await f.settle()
@@ -197,12 +224,11 @@ test('Given 已观察组合有分时费率 When 改快照与试探未知型号 T
   f.resolve(f.gets[0], { revision: 1, rules: [rule(1), conditional] }); await f.settle()
   const view = () => mountView(f, byComponent(editor, 'PricingModels')).tree
   assert.match(text(view()), /#2 · 输入 ¥5/)
-  assert.match(text(view()), /¥6\.00/)
   nodes(view()).find(node => node.type === 'button' && node.props['aria-controls']?.endsWith('-clock')).props.onClick(); await f.settle()
   const clock = nodes(view()).find(node => node.props.type === 'datetime-local')
   clock.props.onChange({ target: { value: '2026-11-24T20:00' } }); await f.settle()
   assert.doesNotMatch(text(view()), /#2 · 输入/)
-  assert.match(text(view()), /¥2\.00/)
+  assert.match(text(view()), /#1 · 输入 ¥1/)
   const search = nodes(view()).find(node => node.props.type === 'search')
   search.props.onChange({ target: { value: 'unknown/model' } }); await f.settle()
   const result = view()
