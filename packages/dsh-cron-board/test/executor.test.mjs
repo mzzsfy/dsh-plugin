@@ -182,6 +182,21 @@ test('executor:会话任务 outcome.model 写入运行记录', async (t) => {
   assert.equal(store.runs.get(runId).model, 'p1/m1(high)')
 })
 
+test('dispatch:cron 触发携带命中计划行时写入运行记录,manual 不写', async (t) => {
+  // Given 执行链与任务
+  const { store, executor } = await makeExecutor(t)
+  const job = await store.jobs.create({ ...JOB_BASE, id: 'j-attr' })
+  // When cron 触发传入命中的两条表达式
+  const [cronId] = await executor.dispatch(job, 'cron', { schedules: ['* * * * *', '*/2 * * * *'] })
+  // Then 预占记录带 schedules 原文
+  const cronRow = store.runs.get(cronId)
+  assert.deepEqual(cronRow.schedules, ['* * * * *', '*/2 * * * *'])
+  // When 手动触发不传归因
+  const [manualId] = await executor.dispatch(job, 'manual')
+  // Then 手动记录不带该字段(不产生空数组噪声)
+  assert.equal(store.runs.get(manualId).schedules, undefined)
+})
+
 test('executor:runner 拒绝时补写 fail 终态', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'cron-board-exec-'))
   t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))

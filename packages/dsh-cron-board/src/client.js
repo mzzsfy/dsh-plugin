@@ -1584,6 +1584,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
                 h('span', { className: 'cb-dot' + (meta.tone === 'run' ? ' cb-dot--pulse' : ''), style: { '--cb-status': STATUS_TONE_COLOR[meta.tone] } }),
                 h('span', { className: 'cb-meta' }, meta.label),
                 h('span', { className: 'cb-badge' }, TRIGGER_META[run.trigger] ? TRIGGER_META[run.trigger].label : run.trigger),
+                // 归因:该次 cron 触发命中的计划行摘要(服务端派生;手动触发没有)
+                run.scheduleSummary ? h('span', { className: 'cb-meta cb-run-schedule', title: Array.isArray(run.schedules) ? run.schedules.join('\n') : '' }, run.scheduleSummary) : null,
                 h('span', { className: 'cb-meta' }, formatDateTime(run.createdAt, displayTzOffset)),
                 typeof run.durationMs === 'number' ? h('span', { className: 'cb-meta' }, formatDuration(run.durationMs)) : null,
                 run.model ? h('span', { className: 'cb-badge' }, run.model) : null,

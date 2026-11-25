@@ -703,7 +703,11 @@ export function createApi({ store, logger, executor, scheduler, periodic, report
       segments: ['runs'],
       handler: async ({ res, url }) => {
         const jobId = url.searchParams.get('jobId')
-        const rows = store.runs.list(jobId).slice().reverse()
+        // 归因摘要由服务端按命中的计划行派生,客户端直接展示;旧记录无 schedules 即为空
+        const rows = store.runs.list(jobId).slice().reverse().map((run) => ({
+          ...run,
+          scheduleSummary: Array.isArray(run.schedules) && run.schedules.length > 0 ? summarizeSchedules(run.schedules.join('\n')) : null,
+        }))
         sendJson(res, 200, { items: rows, ...storageWarning(store) })
       },
     },

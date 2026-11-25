@@ -73,6 +73,31 @@ export function nextRunsOfSchedules(schedule, count, from = new Date()) {
   return [...merged].sort((a, b) => a - b).slice(0, count)
 }
 
+// DST 跃变窗口:不存在的墙钟时刻最多被顺延到几小时内(常见 1h,历史时区有 2h)
+const DST_MAPPED_LOOKBACK_MS = 3 * 60 * 60 * 1000
+// 窗口内逐触发点探测的上限:只要把 at 之前的触发点枚举完即停,不会无限枚举
+const DST_MAPPED_MAX_PROBES = 64
+
+// 单个触发点是否落在该表达式的触发时刻:普通点取「at-1s 的下一次」;
+// DST 春跳的不存在时刻被 croner 顺延(如 02:30→03:30),回看跃变窗口枚举起因
+function isLineTrigger(line, at) {
+  if (nextRunAtOf(line, new Date(at - 1000)) === at) return true
+  let cursor = at - DST_MAPPED_LOOKBACK_MS
+  for (let probe = 0; probe < DST_MAPPED_MAX_PROBES; probe++) {
+    const next = nextRunAtOf(line, new Date(cursor))
+    if (next === null || next > at) return false
+    if (next === at) return true
+    cursor = next
+  }
+  return false
+}
+
+// 逐表达式归因:返回 at 时刻命中的表达式行(原文,按书写顺序;同刻可多条)。
+// 只在调度/恢复路径调用,探测成本上界为计划行数 × DST 窗口
+export function triggeredSchedules(schedule, at) {
+  return splitSchedules(schedule).filter((line) => isLineTrigger(line, at))
+}
+
 // 计划合法性:至少一条;条数有上限;逐条校验后缀与表达式(报因带该行原文)
 export function assertValidSchedule(schedule) {
   const lines = splitSchedules(schedule)

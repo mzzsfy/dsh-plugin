@@ -2,14 +2,10 @@
 // 经执行链闸门入队,收尾由执行链负责。misfire 语义:错过触发点超过一个
 // tick 周期即视为停机期间错过,不补跑,记 skipped 并推进(轻量取舍,设计 §4.1)。
 
-import { nextRunAtOf, nextRunAtOfSchedules, splitSchedules } from './cron.mjs'
+import { nextRunAtOfSchedules, triggeredSchedules } from './cron.mjs'
 
 const SKIPPED_MISFIRE_MESSAGE = '停机期间错过'
 const INTERRUPTED_MESSAGE = 'dsh 重启中断'
-// DST 跃变窗口:不存在的墙钟时刻最多被顺延到几小时内(常见 1h,历史时区有 2h)
-const DST_MAPPED_LOOKBACK_MS = 3 * 60 * 60 * 1000
-// 窗口内逐触发点探测的上限:只要把 at 之前的触发点枚举完即停,不会无限枚举
-const DST_MAPPED_MAX_PROBES = 64
 
 export function createScheduler({ store, executor, readTickMs, onChange, logSystem, now = () => Date.now() }) {
   // 重入闸门:上一 tick 未完成(store 写链排队/慢盘)时跳过本轮,防同一触发点双触发;
@@ -22,26 +18,7 @@ export function createScheduler({ store, executor, readTickMs, onChange, logSyst
   // 防残留值到点误执行;合法触发点与空值(无未来触发点)不动,保留宽限执行与 misfire 语义。
   // 逐条探测只在 recover 自愈路径发生,条数上界即计划行数上限,不进入 tick 热路径
   function isLegalTrigger(schedule, at) {
-    return splitSchedules(schedule).some((line) => isLegalLineTrigger(line, at))
-  }
-
-  function isLegalLineTrigger(schedule, at) {
-    if (nextRunAtOf(schedule, new Date(at - 1000)) === at) return true
-    return isMappedDstTrigger(schedule, at)
-  }
-
-  // DST 春跳:不存在的墙钟时刻被 croner 顺延(如 02:30→03:30),而「从 at-1s 求下一次」
-  // 会跳过这个映射点(直接给次日),合法触发点被误判成残留值。回看跃变窗口枚举真实触发点,
-  // 只在上述判定失败时兜底,不改变普通触发点/高频表达式的判定成本
-  function isMappedDstTrigger(schedule, at) {
-    let cursor = at - DST_MAPPED_LOOKBACK_MS
-    for (let probe = 0; probe < DST_MAPPED_MAX_PROBES; probe++) {
-      const next = nextRunAtOf(schedule, new Date(cursor))
-      if (next === null || next > at) return false
-      if (next === at) return true
-      cursor = next
-    }
-    return false
+    return triggeredSchedules(schedule, at).length > 0
   }
 
   // 重启恢复:孤儿运行收尾 + 触发点残留自愈
@@ -64,14 +41,14 @@ export function createScheduler({ store, executor, readTickMs, onChange, logSyst
     }
   }
 
-  async function reportDispatchFailure(job, error) {
+  async function reportDispatchFailure(job, error, schedules) {
     const detail = error && error.message ? error.message : String(error)
     logSystem?.('[cron-board] cron 调度失败 job=' + job.id + ' 错误=' + detail)
     // 调度失败不能静默消耗触发点:补一条 cron fail 记录,保留可观测证据;
     // 已进入停止流程时不再补记:tick 正在被 dispose 收敛,失败是停止本身造成的
     if (disposed || !store.jobs.get(job.id)) return
     try {
-      await store.runs.create({ jobId: job.id, trigger: 'cron', status: 'fail', message: '调度失败: ' + detail })
+      await store.runs.create({ jobId: job.id, trigger: 'cron', status: 'fail', message: '调度失败: ' + detail, schedules })
     } catch (recordError) {
       const recordDetail = recordError && recordError.message ? recordError.message : String(recordError)
       logSystem?.('[cron-board] 调度失败记录写入失败 job=' + job.id + ' 错误=' + recordDetail)
@@ -96,6 +73,8 @@ export function createScheduler({ store, executor, readTickMs, onChange, logSyst
           // misfire 判定须在推进前读取到期值(update 会原地改写任务对象)
           const dueAt = job.nextRunAt
           const misfired = nowMs - dueAt > graceMs
+          // 归因在推进前算:命中该触发点的表达式行(同刻可多条),随运行记录落库
+          const schedules = triggeredSchedules(job.schedule, dueAt)
           // 先推进再执行:执行慢或并发堵不引发重复触发;
           // 多条表达式取各自下一次触发中的最早值,同刻多条表达式合并为一次运行
           const nextAt = nextRunAtOfSchedules(job.schedule, new Date(nowMs))
@@ -107,14 +86,14 @@ export function createScheduler({ store, executor, readTickMs, onChange, logSyst
           const fresh = store.jobs.get(job.id)
           if (!fresh || !fresh.enabled) continue
           if (misfired) {
-            await store.runs.create({ jobId: job.id, trigger: 'cron', status: 'skipped', message: SKIPPED_MISFIRE_MESSAGE })
+            await store.runs.create({ jobId: job.id, trigger: 'cron', status: 'skipped', message: SKIPPED_MISFIRE_MESSAGE, schedules })
             continue
           }
           try {
-            await executor.dispatch(fresh, 'cron')
+            await executor.dispatch(fresh, 'cron', { schedules })
           } catch (error) {
             if (disposed) break
-            await reportDispatchFailure(fresh, error)
+            await reportDispatchFailure(fresh, error, schedules)
           }
         }
         // 有到期任务即有状态变更(nextRunAt 推进 / skipped 记录 / 运行入队),发布总线

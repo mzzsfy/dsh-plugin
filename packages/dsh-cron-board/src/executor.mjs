@@ -228,7 +228,7 @@ export function createExecutor({ store, logger, runner, sessionRunner, maxExpans
 
   return {
     // 预占记录并按闸门调度执行;返回 runIds 同步可得(执行在后台按许可推进)
-    async dispatch(job, trigger) {
+    async dispatch(job, trigger, meta = {}) {
       // 停止态拒绝新执行:拒绝须发生在预占记录之前,不留 queued 孤儿
       if (stopped) throw conflictError('执行链已停止(插件卸载中),拒绝新运行')
       // 删除窗口/任务已被删除:调度快照可能是旧的,任何预占与日志目录创建都必须被拒绝
@@ -243,7 +243,9 @@ export function createExecutor({ store, logger, runner, sessionRunner, maxExpans
         for (let i = 0; i < combinations.length; i++) {
           // 每轮预占前重查:上一轮 create/update 的 await 之间可能已完成 DELETE 与持久化删除
           assertClaimable(job.id)
-          const record = await store.runs.create({ jobId: job.id, trigger, status: 'queued', logFile: joinLog(job.id) })
+          // 归因随预占记录落库:cron 触发带上命中的表达式行,manual 不写(空数组也不写)
+          const attribution = Array.isArray(meta.schedules) && meta.schedules.length > 0 ? { schedules: meta.schedules } : {}
+          const record = await store.runs.create({ jobId: job.id, trigger, status: 'queued', logFile: joinLog(job.id), ...attribution })
           // 先登记再补写:create 成功后的任何失败都必须能回滚这条已落库记录
           records.push(record)
           await store.runs.update(record.runId, { logFile: joinLog(job.id, record.runId) })

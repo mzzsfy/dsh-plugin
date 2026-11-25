@@ -867,7 +867,7 @@ test('runs 路由:无参数查全量,带 jobId 查单任务', async (t) => {  //
   const { store, api } = await makeApi(t)
   const j1 = await store.jobs.create({ name: 'j1', kind: 'shell', command: 'x', schedule: '* * * * *', enabled: true, timeoutMs: 1000 })
   const j2 = await store.jobs.create({ name: 'j2', kind: 'shell', command: 'x', schedule: '* * * * *', enabled: true, timeoutMs: 1000 })
-  await store.runs.create({ jobId: j1.id, trigger: 'cron', status: 'success' })
+  await store.runs.create({ jobId: j1.id, trigger: 'cron', status: 'success', schedules: ['0 9 * * *T+8', '30 8 * * 1-5T+0'] })
   await store.runs.create({ jobId: j2.id, trigger: 'manual', status: 'success' })
   // When 无参数查全量
   const all = await call(api, 'GET', '/api/cron-board/runs')
@@ -880,6 +880,10 @@ test('runs 路由:无参数查全量,带 jobId 查单任务', async (t) => {  //
   // Then 仅该任务记录
   assert.equal(mine.payload.items.length, 1)
   assert.equal(mine.payload.items[0].jobId, j1.id)
+  // Then 命中计划行原文与合并摘要一起返回,手动触发摘要为空
+  assert.deepEqual(mine.payload.items[0].schedules, ['0 9 * * *T+8', '30 8 * * 1-5T+0'])
+  assert.equal(mine.payload.items[0].scheduleSummary, '每天 09:00(UTC+8) · 工作日 08:30(UTC+0)')
+  assert.equal(all.payload.items[0].scheduleSummary, null)
 })
 
 test('jobs 路由:PATCH 只认显式字段,他处变更不被旧快照回滚', async (t) => {

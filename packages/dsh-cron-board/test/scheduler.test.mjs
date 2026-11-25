@@ -398,6 +398,67 @@ test('scheduler:多表达式计划同刻合并为一次运行,推进取合并后
   runner.releaseAll()
 })
 
+test('scheduler:多表达式同刻命中时运行记录标注命中的计划行', async (t) => {
+  const { store, runner, scheduler, advance, now } = await makeScheduler(t)
+  // Given 每分钟与每两分钟两条表达式,到期点取偶数分钟(两条同刻命中)
+  const dueAt = Math.ceil((now() + 1000) / 60000) * 60000
+  const evenDue = dueAt % 120000 === 0 ? dueAt : dueAt + 60000
+  const job = await store.jobs.create({
+    name: '归因', kind: 'shell', command: 'echo hi', schedule: '* * * * *\n*/2 * * * *',
+    enabled: true, timeoutMs: 1000, nextRunAt: evenDue,
+  })
+  advance(evenDue - now() + 100)
+  // When tick
+  await scheduler.tick()
+  // Then 记录按书写顺序列出命中的两条表达式
+  const rows = store.runs.list(job.id)
+  assert.equal(rows.length, 1)
+  assert.deepEqual(rows[0].schedules, ['* * * * *', '*/2 * * * *'])
+  runner.releaseAll()
+})
+
+test('scheduler:misfire skipped 记录同样标注命中的计划行', async (t) => {
+  const { store, scheduler, advance, now } = await makeScheduler(t)
+  // Given 同一组同刻表达式,到期点已超出宽限(停机期间错过)
+  const dueAt = Math.ceil((now() + 1000) / 60000) * 60000
+  const evenDue = dueAt % 120000 === 0 ? dueAt : dueAt + 60000
+  const job = await store.jobs.create({
+    name: '错过归因', kind: 'shell', command: 'echo hi', schedule: '* * * * *\n*/2 * * * *',
+    enabled: true, timeoutMs: 1000, nextRunAt: evenDue,
+  })
+  advance(evenDue - now() + 2 * TICK_MS)
+  // When tick
+  await scheduler.tick()
+  // Then skipped 记录带命中的表达式,便于区分是哪个计划被错过
+  const rows = store.runs.list(job.id)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].status, 'skipped')
+  assert.deepEqual(rows[0].schedules, ['* * * * *', '*/2 * * * *'])
+})
+
+test('scheduler:dispatch 失败记录同样带命中的计划行', async (t) => {
+  const logs = []
+  const { store, scheduler, executor, advance, now } = await makeScheduler(t, { logSystem: (line) => logs.push(line) })
+  // Given 到期任务与必定抛错的执行链
+  const dueAt = Math.ceil((now() + 1000) / 60000) * 60000
+  const evenDue = dueAt % 120000 === 0 ? dueAt : dueAt + 60000
+  const job = await store.jobs.create({
+    name: '失败归因', kind: 'shell', command: 'echo hi', schedule: '* * * * *\n*/2 * * * *',
+    enabled: true, timeoutMs: 1000, nextRunAt: evenDue,
+  })
+  const rawDispatch = executor.dispatch.bind(executor)
+  executor.dispatch = async () => { throw new Error('执行链拒绝新运行') }
+  advance(evenDue - now() + 100)
+  // When tick
+  await scheduler.tick()
+  executor.dispatch = rawDispatch
+  // Then fail 记录保留归因,调度失败也能定位计划行
+  const rows = store.runs.list(job.id)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].status, 'fail')
+  assert.deepEqual(rows[0].schedules, ['* * * * *', '*/2 * * * *'])
+})
+
 test('scheduler:recover 保留属于任一表达式的残留触发点', async (t) => {
   const { store, scheduler } = await makeScheduler(t)
   // Given 计划两条,nextRunAt 落在较晚的「工作日 9:55」的固定历史触发点上(已过去):

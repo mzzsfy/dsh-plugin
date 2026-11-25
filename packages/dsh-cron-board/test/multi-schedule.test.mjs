@@ -15,6 +15,7 @@ import {
   normalizeSchedule,
   splitSchedules,
   summarizeSchedules,
+  triggeredSchedules,
 } from '../src/cron.mjs'
 
 // 固定起点:2026-09-17T12:00:00Z(北京 20:00),之后的触发点跨日,断言无歧义
@@ -89,6 +90,25 @@ test('多计划:校验逐条报因——空计划 / 超上限 / 任一条非法'
   assert.doesNotThrow(() => assertValidSchedule('0 9 * * *\n30 8 * * 1-5T+8'))
 })
 
+test('多计划:逐表达式归因——触发点命中哪几条就归哪几条', () => {
+  // Given 两条表达式同一 UTC 时刻(UTC+0 的 09:00 与 UTC-8 的 01:00)加一条不同刻
+  const at = Date.UTC(2026, 8, 17, 9, 0, 0)
+  // Then 同刻命中两条,按书写顺序返回原文
+  assert.deepEqual(
+    triggeredSchedules('0 9 * * *T+0\n0 1 * * *T-8\n0 10 * * *T+0', at),
+    ['0 9 * * *T+0', '0 1 * * *T-8'],
+  )
+  // Then 非触发点不归因(触发点后 30 秒)
+  assert.deepEqual(triggeredSchedules('0 9 * * *T+0', at + 30 * 1000), [])
+  // Then 重复行去重后只归一次
+  assert.deepEqual(
+    triggeredSchedules('0 9 * * *T+0\n0 9 * * *T+0', at),
+    ['0 9 * * *T+0'],
+  )
+  // Then 空计划不产生归因
+  assert.deepEqual(triggeredSchedules('', at), [])
+})
+
 test('多计划:client 装配接线——计划行列表 / 添加时间 / 逐行摘要', () => {
   const client = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
   // Then 计划文本拆分与构建器状态数组派生走同一组纯函数
@@ -103,4 +123,6 @@ test('多计划:client 装配接线——计划行列表 / 添加时间 / 逐行
   assert.match(client, /schedulePreviewItem\(preview, activeState \? buildSchedule\(activeState\) : ''\)/)
   // Then 日志展示共用计划级时区(混合时区回退宿主默认)
   assert.match(client, /schedulesTzOffset\(selectedJob \? selectedJob\.schedule : null\)/)
+  // Then 运行行展示归因摘要(服务端按命中的计划行算好,客户端不重算)
+  assert.match(client, /run\.scheduleSummary/)
 })
