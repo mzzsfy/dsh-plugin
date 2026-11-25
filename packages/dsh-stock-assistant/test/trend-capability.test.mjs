@@ -207,7 +207,7 @@ test('没有分时路由也没有支持分时的源时, 报错指明分时来源
   } finally { await app.close() }
 })
 
-test('分时不进 K 线缓存: 两次分时都打来源, 日 K 第二次命中缓存', async () => {
+test('分时复用同分钟的真线，日 K 普通请求缓存而强刷仍回源', async () => {
   const { calls, providers } = adapters()
   const storage = memoryStorage()
   const control = initialControl()
@@ -217,14 +217,16 @@ test('分时不进 K 线缓存: 两次分时都打来源, 日 K 第二次命中�
   // 同一额度组两次请求要隔开一秒(预算按秒防连打), 缓存命中不触源所以不需要等待
   let now = 1000
   const app = await createApplication({ storageDomain: storage, providers, env: {}, now: () => now })
-  const request = async period => { now += 1000; return app.kline({ securityId: 'XHKG:equity:02513', period, limit: 250 }) }
+  const request = async (period, force) => { now += 1000; return app.kline({ securityId: 'XHKG:equity:02513', period, limit: 250, force }) }
   try {
     await request('trend')
     await request('trend')
-    assert.equal(calls.trend, 2, '分时每次真取, 不落缓存')
+    assert.equal(calls.trend, 1, '分时同一分钟复用')
     await request('1d')
     await request('1d')
     assert.equal(calls.kline, 1, '日 K 正常走缓存')
+    await request('1d', '1')
+    assert.equal(calls.kline, 2, '日 K 强刷跳过缓存')
   } finally { await app.close() }
 })
 

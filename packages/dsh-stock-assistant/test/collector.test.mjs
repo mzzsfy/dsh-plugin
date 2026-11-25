@@ -201,7 +201,8 @@ test('拍点随报价写入, 移除/重置/销毁时同步清理', async () => {
   const config = control(), calls = []
   const ticks = { push: (...args) => calls.push(['push', ...args]), delete: id => calls.push(['delete', id]), clear: () => calls.push(['clear']) }
   const quoteAt = '2026-11-16T02:00:30Z'
-  const c = createCollector({ getControl: () => config, router: createRouter(() => config), registry: { get: () => ({ descriptor: { maxQuoteBatch: 20 } }) }, ticks, active: () => false, executor: { run: async () => ({ items: [{ securityId: security.id, last: '10.00', previousClose: '9.00', quoteAt, receivedAt: 1, providerInstanceId: 'a', delayKind: 'unknown', delaySeconds: null }] }) } })
+  const now = () => Date.parse(quoteAt)
+  const c = createCollector({ getControl: () => config, router: createRouter(() => config), registry: { get: () => ({ descriptor: { maxQuoteBatch: 20 } }) }, ticks, now, calendarState: () => ({ state: 'trading' }), active: () => false, executor: { run: async () => ({ items: [{ securityId: security.id, last: '10.00', previousClose: '9.00', quoteAt, timestampKind: 'trade', receivedAt: now(), providerInstanceId: 'a', delayKind: 'unknown', delaySeconds: null }] }) } })
   await c.refresh()
   assert.deepEqual(calls[0], ['push', security.id, security.exchange, Math.floor(Date.parse(quoteAt) / 1000), '10.00'], '拍点用报价自带的时刻')
   c.prune(security.id)

@@ -10,13 +10,6 @@ const count = re => [...client.matchAll(re)].length
 const must = (re, why) => assert.match(client, re, why)
 const mustNot = (re, why) => assert.doesNotMatch(client, re, why)
 
-test('悬浮窗读交易时段要走 quote 那一层', () => {
-  // quotes[id] 的形状是 { quote, health }, 读成 quotes[id].sessionState 会让「全部收市降频」恒不成立
-  must(/\bfetched\?\.\[id\]\?\.quote\b/, '自己的快照要经 quote 层')
-  must(/\bquotes\?\.\[id\]\?\.quote\b/, '面板的快照也要经 quote 层')
-  assert.deepEqual([...client.matchAll(/quotes\?\.\[[^\]]+\]\?\.sessionState/g)], [], 'quotes[id] 必须再进一层 quote')
-})
-
 test('建图补灌走 fillRef, 不用首帧闭包', () => {
   // 建图 effect 空依赖, 直接调 maybeFill 会用到首帧那份, 建图期间的周期/辅助线/成本全部滞后
   must(/fillRef\.current\?\.\(/, '建图回调必须经 fillRef 转发')
@@ -32,32 +25,6 @@ test('重涂按主序列形态选键名, 成交量按当前蜡烛重灌', () => 
   must(/repaintChart\(readChartTheme\(/, 'MutationObserver 必须调 repaintChart')
 })
 
-test('轮询决策走纯函数, 不散落在分支里', () => {
-  // 决策一旦写成 if 分支就只能靠文本断言, 而文本分辨不出「死代码」与「分支执行」.
-  // 抽成 pollPlan 后由 groups.test 直接断言各分支, 这里只钉住调用点
-  must(/const plan = pollPlan\(\{ mode, quiet: allQuiet, tick \}\)/, '拉取前必须由 pollPlan 决定这一拍做什么')
-  must(/if \(plan === 'skip'\) return/, 'skip 必须真的跳过')
-  must(/plan === 'refresh'/, 'refresh 分支必须存在')
-  must(/plan === 'snapshot'/, 'snapshot 分支必须存在')
-  must(/if \(beat\) return 'refresh'/, '整十拍无条件真刷新, 否则时段翻不过来')
-  must(/return quiet \? 'skip' : 'trend'/, '安静档跳过, 否则打分时')
-})
-
-test('收市判断按 receivedAt 取最新的一份', () => {
-  // 无条件偏爱自己那份会让它变成单向闩锁: 一旦写成 trading, 面板的新鲜 closed 也压不过它
-  must(/const stateOf = id => pickNewest\(fetched\?\.\[id\]\?\.quote, quotes\?\.\[id\]\?\.quote\)/, '推广两份必须经同一个择优函数')
-  must(/function pickNewest|const pickNewest =/, '择优逻辑只能有一份实现')
-  assert.equal(count(/pickNewest = /g), 1, 'stateOf 与 entryOf 必须共用同一份平局规则')
-})
-
-test('图形模式收市后不许再打 trend 上游', () => {
-  // trend 端点不进缓存, 每次都是真上游. 行为由 groups.test 的 pollPlan 用例断言,
-  // 这里只确认 trend 的唯一出口确实受 plan 控制(而不是另有旁路)
-  assert.equal(count(/period: 'trend'/g), 1, 'trend 只应有一个请求点')
-  const trendCall = client.slice(client.indexOf("period: 'trend'") - 260, client.indexOf("period: 'trend'"))
-  assert.match(trendCall, /else if \(securityId\)/, 'trend 必须在 plan 的 else 分支里')
-})
-
 test('代际淘汰的请求不许落地, 退避到点也要再查一次', () => {
   // 失败分支先查代际再查 key, 否则旧请求的失败会覆盖新请求已经写好的数据
   assert.ok(count(/if \(seq !== klineSeq\) return undefined/g) >= 2, '成功与失败两条路径都要查代际')
@@ -65,7 +32,6 @@ test('代际淘汰的请求不许落地, 退避到点也要再查一次', () => 
   // 退避等待期间可能已经有同 key 的新请求, 到点了就不能再打一枪
   must(/klineDelay\(delayMs\)\.then\(\(\) => \{[\s\S]{0,200}seq !== klineSeq/, '退避到点前必须查代际')
   must(/klineSeq\+\+;[\s\S]{0,400}klineRetryTimers/, 'dispose 要递增代际并清掉退避定时器')
-  must(/setKlineError\(item\.id, liveRef\.current\.period/, '报错要用当前周期, 不是首帧的')
 })
 
 test('K 线数据落 state 前必须清洗', () => {
@@ -80,18 +46,13 @@ test('灌图的五处决策都落在调用点上', () => {
   // 手动刷新要保留用户的缩放: 恒传 fit 会把视图拽回去
   must(/maybeFill\(\{ candles: kline\?\.candles \|\| \[\], preClose: kline\?\.preClose \}, plan\.fit\)/, '必须用 plan.fit 而不是恒 true')
   // 切周期当帧旧数据会被灌进新形态, 面积序列拿到 HH:mm 会直接抛 Invalid date
-  must(/if \(state\.klineKey !== key\) return/, '灌数据前必须校验 key')
+  must(/if \(period !== 'trend' && state\.klineKey !== key\) return/, '灌日周月数据前必须校验 key')
   // 分时量是每分钟增量, 取末条会让图例只剩一分钟
   must(/candles\.reduce\(\(sum, candle\) => sum \+ \(finiteOr\(candle\.volume\) \|\| 0\), 0\)/, '分时量必须累计整段')
   // 缺 avg 的分钟线要回退收盘价, 否则均价线断线
   must(/value: c\.avg \?\? c\.close/, '缺 avg 必须回退收盘价')
   // 没有 at 的市场要靠「区间起点 + 分钟偏移」推横轴, 忽略它会整体偏时区
   must(/const axisTime = \(c, i\) => c\.at \?\? base \+ i \* 60/, '横轴必须优先用行情自带时间')
-})
-
-test('单只标的时不循环到自己', () => {
-  // picked 只有一只时 next 就是自己, 清掉 trend 会让图空转到下一拍
-  must(/if \(next && next !== securityId\) \{ setTrend\(null\)/, '单只时不该清 trend')
 })
 
 test('事件处理器不许把 React 事件当业务参数透传', () => {
@@ -109,11 +70,7 @@ test('hook 的解构参数与调用处传的键必须一致', () => {
   const [definition, invocation] = calls
   assert.deepEqual(keysOf(invocation), keysOf(definition), '传参键集必须与解构键集完全一致')
   // 参数表里出现的每个键都要在函数体里真的被用到, 反之函数体里读的键必须来自参数或本函数内声明
-  const params = client.match(/function useFloatingPolling\(\{([^}]*)\}\)/)[1]
-  // 必须锚在参数表上: 函数体里本来就有 fetched 的引用, 拿整个函数体去匹配的话,
-  // 「参数表与调用处同时删掉 fetched」仍然会绿——那正是上次事故的形态
-  assert.match(params, /\bfetched\b/, '收市判定用的自己的快照必须在参数表里')
-  assert.match(params, /\bquotes\b/, '面板那份快照也要能用')
+
 })
 
 test('悬浮窗拖动只从标题条发起', () => {

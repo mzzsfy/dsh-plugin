@@ -1,6 +1,27 @@
 import { StockError, fail } from './market-model.mjs'
 // 每实例上游请求环形日志容量: 概览"最近请求"展示面
 const REQUEST_LOG_LIMIT = 20
+const DEFAULT_RETRY_AFTER_MS = 60 * 1000
+// 上游给的等待时间不能无限冻结某个证券: 超过一小时按一小时算
+const MAX_RETRY_AFTER_MS = 60 * 60 * 1000
+function retryDelay(value, now) {
+  if (!value) return DEFAULT_RETRY_AFTER_MS
+  const seconds = Number(value)
+  const delay = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - now()
+  return Number.isFinite(delay) ? Math.min(MAX_RETRY_AFTER_MS, Math.max(1000, delay)) : DEFAULT_RETRY_AFTER_MS
+}
+async function untilAbort(work, signal) {
+  let abort
+  try {
+    return await Promise.race([work, new Promise((_, reject) => {
+      abort = () => reject(signal.reason instanceof StockError ? signal.reason : new StockError('CANCELLED', '请求已取消', 503))
+      signal.addEventListener('abort', abort, { once: true })
+      if (signal.aborted) abort()
+    })])
+  } finally {
+    signal.removeEventListener('abort', abort)
+  }
+}
 export function createExecutor({ registry, budget, env = process.env, resolveCredential = async ref => env[ref], fetch: fetchImpl = globalThis.fetch, proxyFetch = null, now = Date.now, timers = globalThis, usSymbols = new Map(), proxyFactory = null, tickPeriodMs = () => 0, tickCapabilities = ['quotes', 'kline', 'trend'] }) {
   const queues = new Map(), controllers = new Set(), starts = new Map()
   const requestLogs = new Map(), proxies = new Map()
@@ -94,9 +115,9 @@ export function createExecutor({ registry, budget, env = process.env, resolveCre
           let used = false
           // 凭据每次操作解析一次, 不跨操作缓存: 存储层改了密钥, 下一次请求就生效, 不必重启插件。
           // 解析在超时计时之前完成——读本地存储不该占用上游的 8 秒预算。
-          const secret = instance.credentialRef === null ? undefined : await resolveCredential(instance.credentialRef)
+          const secret = instance.credentialRef === null ? undefined : await untilAbort(resolveCredential(instance.credentialRef), controller.signal)
           if (instance.credentialRef !== null && !secret) fail('AUTH', '未配置凭据', 422)
-          const proxyUrl = await proxyUrlOf(instance)
+          const proxyUrl = await untilAbort(proxyUrlOf(instance), controller.signal)
           // 超时计时覆盖整个能力调用;分页适配器每次网络活动重置计时,空闲超过窗口才判超时。
           const armTimeout = () => { timers.clearTimeout(timeout); timeout = timers.setTimeout(() => controller.abort(new StockError('TIMEOUT', '来源请求超时', 504, { retryable: true })), 8 * 1000) }
           armTimeout()
@@ -111,17 +132,18 @@ export function createExecutor({ registry, budget, env = process.env, resolveCre
               budget.reserve(instance, capability, request.securities?.length || 1, !!options.periodic, !!options.probe); used = true; starts.set(instance.quotaGroup, now())
               const dispatcher = dispatcherFor(proxyUrl)
               const response = await (dispatcher ? proxyFetch : fetchImpl)(args[0], { ...(args[1] || {}), ...(dispatcher ? { dispatcher } : {}) })
+              const retryAfter = capability === 'trend' && (response.status === 429 || response.status === 503) ? response.headers?.get('retry-after') : null
+              if (capability === 'trend' && (response.status === 429 || (response.status === 503 && retryAfter))) {
+                const retryAfterMs = retryDelay(retryAfter, now)
+                response.body?.cancel().catch(() => {})
+                fail('RATE_LIMIT', '来源请求额度受限', 429, { retryable: true, retryAfterMs })
+              }
               armTimeout()
               return response
             } }
           // 免凭据实例(credentialRef=null)解析结果恒为空, 上述守卫不触发。
           const work = Promise.resolve(adapter[method]({ ...request, providerInstanceId: instance.id, capability }, ctx))
-          const result = await new Promise((resolve, reject) => {
-            const aborted = () => reject(controller.signal.reason instanceof StockError ? controller.signal.reason : new StockError('CANCELLED', '请求已取消', 503))
-            controller.signal.addEventListener('abort', aborted, { once: true })
-            work.then(resolve, reject).finally(() => controller.signal.removeEventListener('abort', aborted))
-            if (controller.signal.aborted) aborted()
-          })
+          const result = await untilAbort(work, controller.signal)
           if (!used) budget.reserve(instance, capability, request.securities?.length || 1, !!options.periodic, !!options.probe)
           record(instance.id, `${options.probe ? 'probe' : capability} ${instance.adapterId}`, 'ok', startedAt, !!options.probe)
           return result
@@ -130,7 +152,8 @@ export function createExecutor({ registry, budget, env = process.env, resolveCre
           // 原因文案由适配器给出: 界面照着念, 不必猜是网络坏了还是被要求过人机验证
           record(instance.id, `${options.probe ? 'probe' : capability} ${instance.adapterId}`, code, startedAt, !!options.probe, e?.message ?? null)
           if (controller.signal.aborted && controller.signal.reason?.code === 'TIMEOUT') throw controller.signal.reason
-          if (e.code === 'RATE_LIMIT' && !options.probe) budget.block?.(instance, e.retryAfterMs || 60 * 1000)
+          // 分时的冷却由分时窗口承接, 不再冻结额度组: 否则同组备源与报价都会被一次限流挡住
+          if (e.code === 'RATE_LIMIT' && !options.probe && capability !== 'trend') budget.block?.(instance, Math.min(e.retryAfterMs || DEFAULT_RETRY_AFTER_MS, DEFAULT_RETRY_AFTER_MS))
           if (e instanceof StockError) throw e
           throw new StockError('NETWORK', '数据源请求失败', 502, { retryable: true })
         } finally {

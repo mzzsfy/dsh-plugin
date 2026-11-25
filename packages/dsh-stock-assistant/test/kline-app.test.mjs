@@ -4,6 +4,7 @@ import { createApplication } from '../src/application.mjs'
 import { tencent } from '../src/providers/tencent.mjs'
 import { sina } from '../src/providers/sina.mjs'
 import { eastmoney } from '../src/providers/eastmoney.mjs'
+import { initialControl } from '../src/schemas.mjs'
 import { memoryStorage } from './helpers.mjs'
 
 // 测试双实例: em-default(东财)+tx-fallback(腾讯), 路由 XHKG kline 主东财备腾讯 failover=network
@@ -105,19 +106,18 @@ test('kline 参数校验 400', async () => {
   assert.ok(ok.candles.length >= 0)
 })
 
-test('trend 不写缓存每次触源', async () => {
-  const fx = fetchFixture()
-  const app = await setup(fx.fetch)
-  // 分时是独立能力: 要有自己的路由才请求得出去
+test('东财当日分时经应用缓存后不再次触源', async t => {
+  const fx = fetchFixture(), storage = memoryStorage()
   const routesTrend = [{ id: 'xhkg-trend', capability: 'trend', market: 'XHKG', instrument: 'equity', primaryInstanceId: 'em-default', fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true }]
-  const check = await app.providerCheck({ providers, routes: routesTrend, capabilities: ['trend'] })
-  await app.configuration({ operationId: '00000000-0000-4000-8000-000000000002', expectedRevision: 1, payload: { providers, routes: routesTrend }, checkIds: [check.checkId] })
-  const before = fx.calls.length
-  await app.kline({ securityId: 'XHKG:equity:00700', period: 'trend' })
-  const afterOnce = fx.calls.length
-  await app.kline({ securityId: 'XHKG:equity:00700', period: 'trend' })
-  assert.ok(fx.calls.length > afterOnce, 'trend 二次请求应再次触源(不缓存)')
-  assert.ok(afterOnce > before)
+  storage.maps.control.set('root', { ...initialControl(), providers, routes: routesTrend })
+  const app = await createApplication({ storageDomain: storage, providers: [tencent, eastmoney], fetch: fx.fetch, now: () => Date.parse('2026-10-30T07:00:00Z') })
+  t.after(() => app.close())
+  const input = { securityId: 'XHKG:equity:00700', period: 'trend' }
+  const first = await app.kline(input)
+  assert.equal(first.source, 'em-default')
+  assert.equal(first.sessionDate, '2026-10-30')
+  assert.deepEqual(await app.kline(input), first)
+  assert.equal(fx.calls.length, 1)
 })
 
 test('snapshot 含 klineReady 与 vendorAvailable', async () => {

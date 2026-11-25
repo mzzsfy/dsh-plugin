@@ -131,13 +131,13 @@ test('端到端: 分时请求走 application 时也受同一节拍约束', async
   control.preferences = { refreshSeconds: 15, colorMode: 'red-up', floatRefreshSeconds: 10 }
   storage.maps.control.set('root', control)
   const app = await createApplication({ storageDomain: storage, providers: [fake], env: {}, now: clock.now, timers: clock })
-  const request = () => app.kline({ securityId: 'XSHG:equity:600519', period: 'trend', limit: 250 })
+  const request = (limit = 250) => app.kline({ securityId: 'XSHG:equity:600519', period: 'trend', limit })
   try {
     const first = request()
     await clock.advance(0); await first
     assert.equal(calls.length, 1)
     await clock.advance(6000)
-    const late = request()
+    const late = request(500)
     await clock.advance(2500)
     assert.equal(calls.length, 1, '拍的后半段还没到下一拍')
     await clock.advance(1000)

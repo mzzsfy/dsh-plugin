@@ -8,11 +8,26 @@ window.__ModuleLoader__.load({
     const MAX_FALLBACKS = 3
     // K线结果的归属键: 拉取、校验、灌图三处必须用同一个拼法, 否则校验形同虚设
     function klineKeyOf(securityId, period) { return `${securityId}|${period}` }
+    const KLINE_HISTORY_LIMIT = 1000, KLINE_INITIAL_BARS = 120, TREND_LIMIT = 250
     // 灌图计划: 空壳只清屏且不记 key(空数据上 fitContent 是 no-op, 记了就再也不会铺满);
     // 首次看到某个 key 才重置视口, 同一 key 下刷新保留用户缩放
     function klineShipPlan(shippedKey, key, hasData) {
       if (!hasData) return { fit: false, next: shippedKey }
       return { fit: shippedKey !== key, next: key }
+    }
+    // 首屏只铺最近一段, 更早的历史靠向右拖出来; 分时不限, 全天一根不少
+    function klineViewportOf({ total, period, bars = KLINE_INITIAL_BARS }) {
+      return period === 'trend' || total <= bars ? null : { from: total - bars, to: total - 1 }
+    }
+    function applyKlineViewport(scale, { total, period }) {
+      const view = klineViewportOf({ total, period })
+      if (view) scale.setVisibleLogicalRange(view)
+      else scale.fitContent()
+      return view
+    }
+    // 右边界由最新一根封住: 否则拖动能滚进一片没有数据的未来; 最新一根贴边, 不留空白右距
+    function chartOptions(theme, LWC = window.LightweightCharts) {
+      return { layout: { background: { color: theme.background }, textColor: theme.textColor }, crosshair: { mode: LWC.CrosshairMode.Normal }, timeScale: { timeVisible: false, borderColor: theme.gridLine, rightOffset: 0, fixRightEdge: true }, rightPriceScale: { borderColor: theme.gridLine }, grid: { vertLines: { color: theme.gridLine }, horzLines: { color: theme.gridLine } }, autoSize: true }
     }
     // 分组 tab 的保留键: 标签名来自用户输入且只校验长度, 用不可见前缀保证不会与真实标签撞键
     const ALL_TAB_KEY = '\u0000all', REST_TAB_KEY = '\u0000rest', TAG_PREFIX = 'tag:', WATCHLIST_PANEL_ID = 'ssb-watchlist-panel'
@@ -202,12 +217,22 @@ window.__ModuleLoader__.load({
           return result.data
         } finally { clearTimeout(timeout); requests.delete(controller); signal?.removeEventListener('abort', abort) }
       }
-      const refresher = tools.createSnapshotRefresh(async () => {
+      let snapshotFlight
+      function loadPageSnapshot() {
         const gen = generation
-        try { const data = await api('/snapshot'); if (gen === generation) applySnapshot(data) }
-        // 数据面错误独立记账: 下一次快照成功即自愈, 不与用户操作的错误横幅互相清除
-        catch (e) { if (!disposed && gen === generation && !e.cancelled) patch({ dataError: e.message }) }
-      })
+        if (snapshotFlight?.gen === gen) return snapshotFlight.pending
+        const pending = api('/snapshot').then(data => {
+          if (gen === generation) applySnapshot(data)
+        }).catch(error => {
+          // 快照的读取错误与用户操作的错误横幅分别记账。
+          if (!disposed && gen === generation && !error.cancelled) patch({ dataError: error.message })
+        }).finally(() => {
+          if (snapshotFlight?.pending === pending) snapshotFlight = null
+        })
+        snapshotFlight = { gen, pending }
+        return pending
+      }
+      const refresher = tools.createSnapshotRefresh(loadPageSnapshot)
       // 采集只跟随真正可见的内容: 详情抽屉(可能从浏览/搜索打开)要采集; 设置弹窗压住列表时停止;
       // 浏览/搜索主视图停止, 不能只看 view.view(list 在设置页仍不变)
       function wanted() {
@@ -292,9 +317,157 @@ window.__ModuleLoader__.load({
         const delayTimer = setTimeout(() => { klineRetryTimers.delete(delayTimer); resolve() }, ms)
         klineRetryTimers.set(delayTimer, resolve)
       })
+      const trends = new Map()
+      function trendRouteEpoch(securityId) {
+        const [market, instrument] = (securityId || '').split(':')
+        const route = state.data?.control?.routes?.find(r => r.capability === 'trend' && r.market === market && r.instrument === instrument)
+        return state.data?.routeSelections?.[route?.id]?.routeEpoch
+      }
+      function trendContext(securityId) { return JSON.stringify([state.data?.serverEpoch, state.data?.routingRevision, trendRouteEpoch(securityId)]) }
+      function getTrend(securityId) {
+        const entry = trends.get(securityId)
+        return entry?.context === trendContext(securityId) ? entry.view : undefined
+      }
+      function trendDelay(securityId) { return Math.max(0, (trends.get(securityId)?.nextAt ?? 0) - Date.now()) }
+      function updateTrendQuote(securityId, timezone, quoteEntry) {
+        const entry = trends.get(securityId), real = entry?.real, quote = quoteEntry?.quote
+        if (!real?.sessionDate || entry.context !== trendContext(securityId)) return
+        // 报价的 routeEpoch 属于行情路由, 分时的 routeEpoch 属于分时路由: 不是同一维度, 不能直接比较
+        if (quoteEntry?.health !== 'ok' || quote?.securityId !== securityId || quote.routingRevision !== real.routingRevision || quote.timestampKind !== 'trade' || quote.sessionState !== 'trading') return
+        const now = Date.now(), at = timestampOf(quote.quoteAt), receivedAt = timestampOf(quote.receivedAt), close = finiteOr(quote.last)
+        if (!(close > 0 && Number.isFinite(close)) || at == null || receivedAt == null || at > receivedAt || receivedAt > now || now - at >= MINUTE_MS || now - receivedAt >= MINUTE_MS) return
+        const timeZone = timezone || 'Asia/Shanghai'
+        const day = new Intl.DateTimeFormat('en-CA', { timeZone })
+        if (day.format(now) !== real.sessionDate || day.format(at) !== real.sessionDate) return
+        const realAt = timestampOf(real.candles.at(-1)?.at)
+        if (realAt == null || at <= realAt || at <= (entry.lastQuoteAt ?? 0)) return
+        if (!addTrendPoint(entry, at, close)) return
+        entry.lastQuoteAt = at
+        entry.view = { ...entry.view, candles: displayTrendCandles(entry) }
+        patch({})
+      }
+      function addTrendPoint(entry, at, close) {
+        const minute = trendMinute(at)
+        const held = entry.tail.get(minute)
+        if (held && held.at >= at / 1000) return false
+        entry.tail.set(minute, trendPricePoint(at, close))
+        return true
+      }
+      function displayTrendCandles(entry) {
+        const candles = entry.real.candles.slice()
+        const last = candles.at(-1)
+        for (const [minute, point] of [...entry.tail].sort(([a], [b]) => a - b)) {
+          if (last && minute === trendMinute(timestampOf(last.at))) candles[candles.length - 1] = { ...last, at: point.at, close: point.close }
+          else candles.push(point)
+        }
+        return candles
+      }
+      function loadTrend(securityId) {
+        if (!securityId || disposed || !state.data || doc.visibilityState === 'hidden') return Promise.resolve(getTrend(securityId))
+        const entry = trends.get(securityId) || { nextAt: 0, view: null }
+        const context = trendContext(securityId), gen = generation
+        if (entry.context !== context) {
+          entry.real = null
+          entry.view = null
+          // 换源/换代就是新的窗口: 不让上一轮的等待把第一次取数挡在门外
+          entry.nextAt = 0
+          entry.context = context
+          // 旧上下文在飞的请求作废: 它的结果和收尾都不能写回新上下文
+          entry.pending = null
+          entry.pendingToken = null
+        } else if (entry.pending) return entry.pending
+        if (trendDelay(securityId)) return Promise.resolve(getTrend(securityId))
+        const { serverEpoch, routingRevision } = state.data
+        const sameGeneration = () => !disposed && gen === generation && serverEpoch === state.data?.serverEpoch && routingRevision === state.data?.routingRevision
+        const token = Symbol()
+        const isCurrent = () => sameGeneration() && entry.pendingToken === token
+        entry.view = entry.view ? { ...entry.view, loading: !entry.view.candles?.length } : { loading: true }
+        trends.set(securityId, entry)
+        entry.pendingToken = token
+        entry.pending = api(`/kline?${new URLSearchParams({ securityId, period: 'trend', limit: String(TREND_LIMIT) })}`)
+          .then(async result => {
+            if (!isCurrent() || result.serverEpoch !== serverEpoch || result.routingRevision !== routingRevision) return
+            const currentEpoch = trendRouteEpoch(securityId)
+            // 同轮故障切换可能先返回分时，再发布新路由快照。
+            if (currentEpoch != null && result.routeEpoch > currentEpoch) {
+              const alreadyReading = snapshotFlight?.gen === gen
+              await loadPageSnapshot()
+              if (alreadyReading && sameGeneration() && trendRouteEpoch(securityId) < result.routeEpoch) await loadPageSnapshot()
+            }
+            // 等待快照期间可能已经换源并启动了新请求: 旧请求不得再碰 entry
+            if (!isCurrent()) return
+            const confirmedEpoch = trendRouteEpoch(securityId)
+            if (confirmedEpoch != null && result.routeEpoch !== confirmedEpoch) {
+              if (isCurrent()) throw new Error('行情来源已变化，请等待校准')
+              return
+            }
+            const confirmedContext = trendContext(securityId)
+            if (entry.context !== confirmedContext) {
+              entry.context = confirmedContext
+              entry.real = null
+              entry.view = null
+            }
+            const appended = result.offline?.appended || 0
+            const candles = sanitizeCandles(appended ? result.candles.slice(0, -appended) : result.candles)
+            const previous = entry.real, lastAt = timestampOf(candles.at(-1)?.at)
+            const previousAt = timestampOf(previous?.candles.at(-1)?.at)
+            if (previous?.candles.length && (!candles.length || !result.sessionDate || result.sessionDate < previous.sessionDate || (lastAt != null && previousAt != null && lastAt < previousAt))) {
+              entry.view = { ...entry.view, loading: false, error: result.offline?.reason || '分时未返回更新数据', errorCode: '' }
+              return
+            }
+            if (!previous || previous.sessionDate !== result.sessionDate) {
+              entry.tail = new Map()
+              entry.lastQuoteAt = null
+            }
+            if (!previous?.candles.length || !result.offline || previous.sessionDate !== result.sessionDate || lastAt > previousAt) {
+              const last = candles.at(-1), previousLast = previous?.candles.at(-1)
+              const coversLast = last && (!previousLast || ['at', 'open', 'high', 'low', 'close', 'volume', 'avg'].some(key => last[key] !== previousLast[key]))
+              entry.real = { ...result, candles }
+              for (const minute of entry.tail.keys()) {
+                if (minute < trendMinute(lastAt) || (coversLast && minute === trendMinute(lastAt))) entry.tail.delete(minute)
+              }
+            }
+            if (appended && entry.real.candles.length && lastAt != null) {
+              for (const point of result.candles.slice(-appended)) {
+                const at = timestampOf(point.at), close = finiteOr(point.close)
+                if (at == null || trendMinute(at) <= trendMinute(lastAt) || !Number.isFinite(close) || close <= 0) continue
+                addTrendPoint(entry, at, close)
+              }
+            }
+            const display = displayTrendCandles(entry)
+            const offline = result.offline ? { ...result.offline, appended: display.length - entry.real.candles.length } : undefined
+            entry.view = { ...entry.real, candles: display, offline, loading: false, error: offline?.reason || '', errorCode: '' }
+          }).catch(error => {
+            if (!isCurrent()) return
+            entry.nextAt = Math.max(entry.nextAt, Date.now() + (error.retryAfterMs || 0))
+            entry.view = { ...entry.view, loading: false, error: error.message || '分时不可用', errorCode: error.code || '' }
+          }).finally(() => {
+            if (entry.pendingToken === token) {
+              entry.pending = null
+              // 从整轮结束起算下一次校准: 与服务端共享窗口同一口径, 网络慢不会把回源挤到两分钟
+              entry.nextAt = Math.max(entry.nextAt || 0, Date.now() + MINUTE_MS)
+            }
+            if (entry.pendingToken === token && gen !== generation && entry.view?.loading) entry.view = entry.real ? { ...entry.view, loading: false } : null
+            if (!disposed) patch({})
+          }).then(() => getTrend(securityId))
+        patch({})
+        return entry.pending
+      }
+      // 错误态的重试是用户明确要求再来一次: 清掉显示错误并立刻取数, 不受本地上一次窗口拦截;
+      // 服务端共享窗口仍在, 真到退避期会以限流文案回来, 不会真的打穿上游
+      function retryTrend(securityId) {
+        const entry = trends.get(securityId)
+        if (entry) {
+          entry.nextAt = 0
+          if (entry.view?.error) entry.view = { ...entry.view, error: '', errorCode: '' }
+          patch({})
+        }
+        return loadTrend(securityId)
+      }
       return {
         getSnapshot: () => state,
         subscribe(fn) { subscribers.add(fn); return () => subscribers.delete(fn) },
+        loadTrend, getTrend, trendDelay, trendContext, updateTrendQuote, retryTrend,
         updateView, api, action, applySnapshot,
         // 横幅只能由产生它的动作重试或用户关闭清除, 数据面刷新不得代用户做这个决定
         clearError() { patch({ error: '', errorCode: '', errorKey: '' }) },
@@ -452,6 +625,7 @@ window.__ModuleLoader__.load({
         // kline 数据流: 详情视图触发;force=true 走 ?force=1 让服务端跳缓存读;结果入 state 供 KlineView 汇合灌入。
         // 复用同一份 state 前要看它有多旧: 只比 securityId|period 会让开着的页面拿昨天的分时当实时。
         loadKline(securityId, period, force = false) {
+          if (period === 'trend') return loadTrend(securityId)
           const key = klineKeyOf(securityId, period)
           const sameKey = state.klineKey === key, held = sameKey ? state.kline : null
           const maxAge = KLINE_MAX_AGE[period] ?? 0
@@ -463,7 +637,7 @@ window.__ModuleLoader__.load({
           const attempt = (delayMs = 0, retried = false) => klineDelay(delayMs).then(() => {
             // 退避期间可能已经来了同 key 的新请求, 等到点了就别再打这一枪
             if (seq !== klineSeq) return undefined
-            return api(`/kline?${new URLSearchParams({ securityId, period, limit: String(250), ...(force ? { force: '1' } : {}) })}`, 'GET')
+            return api(`/kline?${new URLSearchParams({ securityId, period, limit: String(KLINE_HISTORY_LIMIT), ...(force ? { force: '1' } : {}) })}`, 'GET')
           }).then(result => {
             // 等待期间换了标的/周期, 或已有更新的同 key 请求: 丢弃这轮结果, 否则旧数据会盖掉新数据
             if (state.klineKey !== key || seq !== klineSeq) return result
@@ -484,7 +658,10 @@ window.__ModuleLoader__.load({
           return attempt()
         },
         // key 不匹配说明是上标的一轮结果, 交给当前轮的 effect 灌
-        getKlineResult(securityId, period) { return state.klineKey === klineKeyOf(securityId, period) && state.kline?.candles ? state.kline : null },
+        getKlineResult(securityId, period) {
+          if (period === 'trend') return getTrend(securityId)
+          return state.klineKey === klineKeyOf(securityId, period) && state.kline?.candles ? state.kline : null
+        },
         dispose() {
           if (disposed) return
           try { bus.publish({ type: 'watch-demand', pageId, generation: ++demandGeneration, active: false }) } catch {}
@@ -574,18 +751,50 @@ window.__ModuleLoader__.load({
       const at = timestampOf(candle?.at)
       return at == null ? '' : new Date(at).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hourCycle: 'h23' })
     }
-    // 分时纵轴: 1 倍时容纳数据与昨收, 放大后以数据区间为中心——用含昨收的中点会在
-    // 一字板/涨停横盘这类贴边行情把整条曲线挤出窗, 拆开后数据始终绕中心
-    function sparkRangeOf({ values, preClose, zoom = 1 }) {
-      if (!values.length) return { low: 0, high: 1, zoom: 1 }
+    // 分时时间窗: 只维护可见区间, 纵轴随可见数据重算; 指针锚定缩放与拖动都走这些纯函数
+    const SPARK_MIN_BARS = 8, SPARK_DRAG_THRESHOLD = 3, SPARK_RANGE_PAD = 0.02
+    function sparkWindowOf({ total, start = 0, span = 0 }) {
+      const count = Math.max(0, Math.trunc(Number(total)) || 0)
+      if (!count) return { start: 0, span: 0, end: -1 }
+      const width = Math.min(count, Math.max(1, Math.trunc(Number(span)) || count))
+      const left = Math.min(Math.max(0, Math.trunc(Number(start)) || 0), count - width)
+      return { start: left, span: width, end: left + width - 1 }
+    }
+    // span=0 是“全天”的哨兵: 全天不物化成当前根数, 否则新分钟到达后会被当成固定宽度而丢掉第一根
+    function sparkNormalizeOf({ total, start, span }) {
+      const frame = sparkWindowOf({ total, start, span })
+      return frame.span >= total ? { start: 0, span: 0 } : { start: frame.start, span: frame.span }
+    }
+    function sparkZoomOf({ total, start, span, anchor, factor = 1 }) {
+      const view = sparkWindowOf({ total, start, span })
+      if (!view.span) return view
+      const rate = Number(factor) || 1
+      const floor = Math.max(1, Math.min(SPARK_MIN_BARS, view.span))
+      const width = Math.min(total, Math.max(floor, Math.round(view.span * rate)))
+      if (width === view.span) return view
+      const point = Math.min(view.end, Math.max(view.start, Math.round(Number(anchor)) || view.start))
+      const ratio = view.span <= 1 ? 0 : (point - view.start) / (view.span - 1)
+      return sparkWindowOf({ total, start: Math.round(point - ratio * (width - 1)), span: width })
+    }
+    function sparkPanOf({ total, start, span, delta }) {
+      return sparkWindowOf({ total, start: (Number(start) || 0) + (Number(delta) || 0), span })
+    }
+    // 新分钟到达: 全天继续全天, 停在历史就不动, 贴住尾部才滚动跟随
+    function sparkFollowOf({ before, total, start, span }) {
+      const old = sparkWindowOf({ total: before, start, span })
+      if (!before || old.span >= before) return { start: 0, span: 0 }
+      if (old.end < before - 1) return sparkNormalizeOf({ total, start: old.start, span: old.span })
+      return sparkNormalizeOf({ total, start: total - old.span, span: old.span })
+    }
+    // 分时纵轴: 可见区间与昨收一起决定窗口; 一字板/涨停横盘时用数据量级给一个最小跨度, 避免退化成一条线
+    function sparkRangeOf({ values, preClose }) {
+      if (!values.length) return { low: 0, high: 1 }
       const base = finiteOr(preClose)
       const low = Math.min(...values), high = Math.max(...values)
-      const factor = Math.max(1, Math.min(12, Number(zoom) || 1))
-      const all = factor <= 1 && Number.isFinite(base) ? [Math.min(low, base), Math.max(high, base)] : [low, high]
-      // 十字线/一字板: 数据跨度为 0 时给一个极小窗口, 否则缩放后范围退化成一条线
+      const all = Number.isFinite(base) ? [Math.min(low, base), Math.max(high, base)] : [low, high]
       const span = Math.max(all[1] - all[0], Math.max(Math.abs(all[1]), 1) * 0.002)
-      const center = (all[0] + all[1]) / 2, half = span / 2 / factor
-      return { low: center - half, high: center + half, zoom: factor }
+      const center = (all[0] + all[1]) / 2, half = span / 2 + span * SPARK_RANGE_PAD
+      return { low: center - half, high: center + half }
     }
     // 右侧刻度: 间隔取 0.02/0.05/0.1/0.2/0.5/1/2/5/10/50/100/200/500 的整档, 落点按可视最高最低算
     const SPARK_TICK_STEPS = [0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 50, 100, 200, 500]
@@ -736,7 +945,11 @@ window.__ModuleLoader__.load({
     }
     const MARKET_LABEL = { XSHG: '沪', XSHE: '深', XHKG: '港', XNAS: '美', XNYS: '美', XJPX: '日', XKRX: '韩', XLON: '英' }
     // 客户端 K线数据保鲜期, 与服务端 kline-cache 同量级: 分时是实时数据, 日K盘中会动, 周月K一天一换
-    const KLINE_MAX_AGE = { trend: 60 * 1000, '1d': 60 * 60 * 1000, '1w': 24 * 60 * 60 * 1000, '1M': 24 * 60 * 60 * 1000 }
+    const MINUTE_MS = 60 * 1000
+    const trendMinute = stamp => Math.floor(stamp / MINUTE_MS)
+    const trendClock = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hourCycle: 'h23', hour: '2-digit', minute: '2-digit' })
+    const trendPricePoint = (at, close) => ({ at: at / 1000, time: trendClock.format(at), close, quotePoint: true })
+    const KLINE_MAX_AGE = { '1d': 60 * MINUTE_MS, '1w': 24 * 60 * MINUTE_MS, '1M': 24 * 60 * MINUTE_MS }
     function Button({ children, onClick, primary, danger, className = '', ...props }) { return h('button', { type: 'button', className: `ssb-button${primary ? ' ssb-primary' : ''}${danger ? ' ssb-danger' : ''} ${className}`, onClick, ...props }, children) }
     function Toggle({ label, checked, onChange, disabled = false }) {
       return h('label', { className: 'ssb-switch' }, h('input', { type: 'checkbox', checked, disabled, onChange: e => onChange(e.target.checked) }), h('span', { className: 'ssb-switch__track' }, h('span', { className: 'ssb-switch__thumb' })), h('span', null, label))
@@ -1110,7 +1323,9 @@ window.__ModuleLoader__.load({
       const period = state.klinePeriod || '1d'
       // 切标的/周期的当帧 state.kline 还是上一轮的, 只有 key 对上才算这一轮的数据;
       // 否则图例会拼出上一只的涨跌并带上残缺的"最近 ()"
-      const kline = state.klineKey === klineKeyOf(item.id, period) ? state.kline || {} : {}
+      const [chartError, setChartError] = React.useState(null)
+      const data = period === 'trend' ? runtime.getTrend(item.id) : state.klineKey === klineKeyOf(item.id, period) ? state.kline : null
+      const kline = chartError ? { ...data, ...chartError } : data || {}
       const holder = React.useRef(null), chartRef = React.useRef(null), mainRef = React.useRef(null), indicatorRef = React.useRef({}), volRef = React.useRef(null), avgRef = React.useRef(null), shippedKeyRef = React.useRef(null)
       // 数据链与建图链谁先到不确定: 图还没建好时先把结果存下来, 建完再补灌, 否则先到的数据会被丢掉
       const pendingRef = React.useRef(null)
@@ -1128,6 +1343,16 @@ window.__ModuleLoader__.load({
       const [crosshair, setCrosshair] = React.useState(null)
       // 建图失败(vendor 超时/未就绪)后点重试: 递增它让建图 effect 重跑, 否则数据重拉成功也只剩空白图座
       const [chartAttempt, setChartAttempt] = React.useState(0)
+      // 建图失败属于上一只/上一周期: 切走就清错误; 期间没建出图就重新触发建图, 否则新图永远空白。
+      // 首帧 key 已对齐, 不能因此多建一次图
+      const chartKeyRef = React.useRef(`${item.id}|${period}`)
+      React.useEffect(() => {
+        const key = `${item.id}|${period}`
+        if (chartKeyRef.current === key) return
+        chartKeyRef.current = key
+        setChartError(null)
+        if (!chartRef.current) setChartAttempt(n => n + 1)
+      }, [item.id, period])
       function drawMarks(series, palette, list) {
         if (!series) return
         for (const line of markLinesRef.current) { try { series.removePriceLine(line) } catch { } }
@@ -1173,13 +1398,10 @@ window.__ModuleLoader__.load({
         const axisTime = (c, i) => c.at ?? base + i * 60
         const points = result.candles.map((c, i) => ({ time: axisTime(c, i), value: c.close }))
         mainRef.current.setData(points)
-        avgRef.current.setData(result.candles.map((c, i) => ({ time: axisTime(c, i), value: c.avg ?? c.close })))
+        avgRef.current.setData(result.candles.flatMap((c, i) => c.quotePoint ? [] : [{ time: axisTime(c, i), value: c.avg ?? c.close }]))
       }
       // 分时用 Area、K线用 Candlestick, 同一 chart 上换形态就是删旧 series 建新 series;
       // 时间轴允许 Unix 秒与业务日期混用, 所以不必重建整个实例。
-      function chartOptions(theme) {
-        return { layout: { background: { color: theme.background }, textColor: theme.textColor }, crosshair: { mode: window.LightweightCharts.CrosshairMode.Normal }, timeScale: { timeVisible: false, borderColor: theme.gridLine }, rightPriceScale: { borderColor: theme.gridLine }, grid: { vertLines: { color: theme.gridLine }, horzLines: { color: theme.gridLine } }, autoSize: true }
-      }
       const wantTrend = period === 'trend'
       const [guides, setGuides] = usePref(GUIDE_KEY, GUIDE_DEFAULT)
       // 图例: 报价要素一行、指标值一行, 数值全部集中在这里, 图面只留曲线本身
@@ -1201,7 +1423,7 @@ window.__ModuleLoader__.load({
         const pct = Number.isFinite(base) && base && Number.isFinite(finiteOr(last.close)) ? (finiteOr(last.close) - base) / base * 100 : null
         const tone = toneClass(pct)
         const quote = wantTrend
-          ? [['最新', price(last.close)], ['均价', price(last.avg ?? last.close)], ['昨收', price(kline?.preClose)]]
+          ? [['最新', price(last.close)], ['均价', price(last.avg ?? (last.quotePoint ? null : last.close))], ['昨收', price(kline?.preClose)]]
           : [['开', price(last.open)], ['高', price(last.high)], ['低', price(last.low)], ['收', price(last.close)]]
         // 分时的 volume 是每分钟增量(实测末条远小于当日总量), 要累加; 日K 最后一根本身就是当日总量。
         // 一根有效量都没有时留 null 而不是 0, 否则图例会写出一个并不存在的"0"
@@ -1324,7 +1546,10 @@ window.__ModuleLoader__.load({
         drawLine(highLineRef, guides.highLow && highs.length ? { price: Math.max(...highs), color: palette.textColor, lineStyle: 1, lineWidth: 1, title: '区间高' } : null)
         drawLine(lowLineRef, guides.highLow && lows.length ? { price: Math.min(...lows), color: palette.textColor, lineStyle: 1, lineWidth: 1, title: '区间低' } : null)
         // 换周期后时间范围完全不同, 不重置视口会停在上一周期的区间上; 手动刷新保留缩放
-        if (fit) chartRef.current.timeScale().fitContent()
+        if (fit) {
+          const scale = chartRef.current.timeScale()
+          applyKlineViewport(scale, { total: result.candles.length, period })
+        }
       }
       // 建图 effect 是空依赖的, 它拿到的是首帧那份 maybeFill; 转发一次, 让它永远调用最新渲染的版本,
       // 否则建图那几百毫秒里切的周期/开关的辅助线/改的成本都会用旧值
@@ -1367,7 +1592,8 @@ window.__ModuleLoader__.load({
           const early = pendingRef.current
           pendingRef.current = null
           fillRef.current?.(early || runtime.getKlineResult(item.id, period))
-        }).catch(e => runtime.setKlineError(item.id, liveRef.current.period, e.message, e.code))        // 宿主换主题/切涨跌配色都是给 root 加类或在 body 上打标记, 观察这里重涂。
+        }).catch(error => { if (!dead) setChartError({ error: error.message, errorCode: error.code }) })
+        // 宿主换主题/切涨跌配色都是给 root 加类或在 body 上打标记, 观察这里重涂。
         // 这个 effect 空依赖, 所以主题与数据都从 liveRef 现取; 主序列是蜡烛还是面积由已建序列判断,
         // 用 wantTrend 会读到首帧的值。分时面积序列的键名与蜡烛完全不同, 只按蜡烛键重涂等于没涂
         mo = new MutationObserver(() => repaintChart(readChartTheme(holder.current?.closest('.ssb-root') || document.documentElement, liveRef.current.colorMode)))
@@ -1401,7 +1627,9 @@ window.__ModuleLoader__.load({
       }
       // effect B: 只在标的/周期变化时发起加载; 灌图由下面的数据 effect 统一负责,
       // 否则手动刷新(↻)只改 state 不进图表, 出现图例已更新而蜡烛还是旧的
+      useTrendPolling({ enabled: wantTrend, runtime, securityId: item.id, context: wantTrend ? runtime.trendContext(item.id) : null })
       React.useEffect(() => {
+        if (wantTrend) return
         let dead = false
         runtime.loadKline(item.id, period).catch(e => { if (!dead) runtime.setKlineError(item.id, period, e.message, e.code) })
         return () => { dead = true }
@@ -1411,7 +1639,7 @@ window.__ModuleLoader__.load({
       // Candlestick, vendor 对非法日期字符串是抛错而不是忽略; 空数组同样要灌, 否则换只后旧图残留。
       React.useEffect(() => {
         const key = klineKeyOf(item.id, period)
-        if (state.klineKey !== key) return
+        if (period !== 'trend' && state.klineKey !== key) return
         const plan = klineShipPlan(shippedKeyRef.current, key, !!kline?.candles?.length)
         shippedKeyRef.current = plan.next
         maybeFill({ candles: kline?.candles || [], preClose: kline?.preClose }, plan.fit)
@@ -1447,11 +1675,11 @@ window.__ModuleLoader__.load({
           legend.series.length ? h('div', { className: 'ssb-legend-row' },
             ...legend.series.map(([label, value, tone]) => h('span', { key: label, className: `ssb-legend-item${tone || ''}` }, h('span', { className: 'ssb-legend-label' }, label), Number(value).toFixed(item.priceScale ?? 2)))) : null) : null,
         kline.loading ? h('div', { className: 'ssb-kline-skeleton', role: 'status' }, '加载K线…') : null,
-        kline.error ? h(KlineError, { message: kline.error, busyOneClick: !!state.busy.configuration, onRetry: () => { if (!chartRef.current) setChartAttempt(n => n + 1); quiet(() => runtime.loadKline(item.id, period, true))() }, guide: kline.errorCode === 'NO_ROUTE' ? { label: '一键开启', onClick: () => quiet(async () => { await runtime.oneClickKline(); await runtime.loadKline(item.id, period, true) })() } : kline.errorCode === 'UNSUPPORTED_CAPABILITY' ? { label: '去设置换源', onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) } : null }) : null,
+        kline.error ? h(KlineError, { message: kline.error, busyOneClick: !!state.busy.configuration, onRetry: () => { setChartError(null); if (!chartRef.current) setChartAttempt(n => n + 1); quiet(() => period === 'trend' ? runtime.retryTrend(item.id) : runtime.loadKline(item.id, period, true))() }, guide: kline.errorCode === 'NO_ROUTE' ? { label: '一键开启', onClick: () => quiet(async () => { await runtime.oneClickKline(); await runtime.loadKline(item.id, period, true) })() } : kline.errorCode === 'UNSUPPORTED_CAPABILITY' ? { label: '去设置换源', onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) } : null }) : null,
         !kline.loading && !kline.error && kline.candles && !kline.candles.length ? h('div', { className: 'ssb-empty' }, h('p', null, '暂无K线数据（停牌或已退市）')) : null,
         state.data.vendorAvailable === false ? h('div', { className: 'ssb-banner' }, '图表组件不可用，已降级为数字详情。') : null,
         // 出错时隐藏画布: 图表实例挂在同一个 DOM 节点上, 卸载会丢实例, 只做可见性切换
-        h('div', { className: 'ssb-kline-chart', style: kline.error ? { display: 'none' } : undefined },
+        h('div', { className: 'ssb-kline-chart', style: kline.error && (period !== 'trend' || chartError || !kline.candles?.length) ? { display: 'none' } : undefined },
           h('div', { ref: holder, className: 'ssb-kline-holder' }),
           crosshair ? h('div', { className: 'ssb-kline-tip', style: crosshairTipStyle({ point: crosshair.point, width: holder.current?.clientWidth || 0, height: holder.current?.clientHeight || 340 }) },
             h('div', { className: 'ssb-kline-tip-time' }, crosshair.time),
@@ -1646,59 +1874,58 @@ window.__ModuleLoader__.load({
       return [value, next => { writePref(key, { ...readPref(key, fallback), ...next }) }]
     }
     // ---- FloatingTicker: 悬浮盯盘, portal 到 body 常驻, 不随面板切换卸载 ----
-    // 悬浮窗自己的数据流: 列表模式批量拉勾选标的的报价, 图形模式只拉当前这只的分时
-    function useFloatingPolling({ open, mode, securityId, picked, items, live, floatSeconds, quotes, fetched, revision, setFetched, setTrend, setError }) {
-      // quotes 的每条是 { quote, health }, 交易时段在 quote 里
-      // 时段取最新的一份: 自己拉的和面板的都可能旧, 不能无条件让自己的压过面板的。
-      // 时间戳相同取自己那份——自己那份刚由这一拍的刷新拿到, 而面板可能在本次渲染前就已冻结
-      const stateOf = id => pickNewest(fetched?.[id]?.quote, quotes?.[id]?.quote)?.sessionState
-      // 轮询只关心选中了哪些标的，不因显示顺序变化而重启
-      const requestIds = [...picked].sort()
-      const pickedKey = requestIds.join(','), stateKey = requestIds.map(stateOf).join(',')
+    function useFloatingPolling({ runtime, open, picked, items, live, floatSeconds, allQuiet, epoch, revision, retryTick, setFetched, setError }) {
+      const pickedKey = [...picked].sort().join(',')
+      const lastAttempt = React.useRef(-Infinity)
       React.useEffect(() => {
         if (!open || !picked.length || live === false) return
-        let dead = false
+        // 勾选或路由版本变化就是新的一轮观测: 从立即取数开始, 不继承上一轮的等待档与错误
+        lastAttempt.current = -Infinity
         setError('')
-        // 间隔跟随设置页的刷新间隔; 全部收市后降到一分钟一拍
-        // 间隔由 floatPollDelay 统一算, 这里只判断要不要降频
-        // 午休与休市都不产生新数据, 一并归入安静档: 只认 closed 的话, 午休那一个半小时
-        // 图形模式还在按交易频率打分时
-        // 名字不能叫 quiet: 模块里已有一个 quiet() 帮助函数用来包住点击处理
-        const allQuiet = picked.every(id => QUIET_STATES.has(stateOf(id)))
-        // 页面不可见时不拉: 后台标签页继续轮询只会白耗来源额度
-        let tick = 0
-        const pull = () => {
-          if (document.visibilityState !== 'visible') return
-          tick += 1
-          const plan = pollPlan({ mode, quiet: allQuiet, tick })
-          if (plan === 'skip') return
-          const refresh = () => fetch(`${BASE}/refresh`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ operationId: crypto.randomUUID(), expectedRevision: revision ?? 0, securities: picked.map(id => ({ id, exchange: items[id].exchange, code: items[id].code })) }),
-          })
-            .then(response => response.json())
-            .then(payload => { if (dead) return; if (payload.ok) { setFetched(payload.data.quotes || {}); setError('') } else setError(payload.error?.message || '行情不可用') })
-            .catch(() => { if (!dead) setError('行情不可用') })
-          if (plan === 'refresh') refresh()
-          else if (plan === 'snapshot') {
-            // 只读快照: 省额度用, 但它不重算交易时段, 单靠它醒不过来
-            fetch(`${BASE}/snapshot`)
-              .then(response => response.json())
-              .then(payload => { if (dead) return; if (payload.ok) setFetched(payload.data.quotes || {}); setError(payload.ok ? '' : payload.error?.message || '行情不可用') })
-              .catch(() => { if (!dead) setError('行情不可用') })
-          } else if (securityId) {
-            fetch(`${BASE}/kline?${new URLSearchParams({ securityId, period: 'trend', limit: '250' })}`)
-              .then(response => response.json())
-              // 悬停读数是按 close 逐个对齐的, 必须先清洗: 坏一根就会让读数与光标错位
-              .then(payload => { if (dead) return; if (payload.ok) { setTrend({ securityId, data: { ...payload.data, candles: sanitizeCandles(payload.data?.candles) } }); setError('') } else setError(payload.error?.message || '行情不可用') })
-              .catch(() => { if (!dead) setError('行情不可用') })
-          }
+        const controller = new AbortController()
+        const securities = picked.map(id => ({ id, exchange: items[id].exchange, code: items[id].code }))
+        const delay = floatPollDelay(floatSeconds, allQuiet)
+        let pending = false
+        const current = () => {
+          const data = runtime.getSnapshot().data
+          return !controller.signal.aborted && data?.serverEpoch === epoch && data?.routingRevision === revision
+        }
+        const pull = async () => {
+          if (document.visibilityState !== 'visible' || pending || Date.now() - lastAttempt.current < delay) return
+          lastAttempt.current = Date.now()
+          pending = true
+          try {
+            const data = await runtime.api('/refresh', 'POST', { automatic: true, expectedRoutingRevision: revision, securities }, controller.signal)
+            if (current() && data.serverEpoch === epoch && data.routingRevision === revision) {
+              setFetched({ epoch, revision, quotes: data.quotes })
+              setError(securities.map(({ id }) => data.quotes?.[id]?.lastError?.message).find(Boolean) || '')
+            }
+          } catch (error) {
+            if (current() && !error.cancelled) setError(error.message || '行情不可用')
+          } finally { pending = false }
         }
         pull()
-        // 休市时不设交易节奏的定时器, 但仍留一拍低频检查, 复盘后自动恢复
-        const timer = setInterval(pull, floatPollDelay(floatSeconds, allQuiet))
-        return () => { dead = true; clearInterval(timer) }
-      }, [open, mode, securityId, pickedKey, live, floatSeconds, stateKey])
+        const timer = setInterval(pull, delay)
+        return () => { controller.abort(); clearInterval(timer) }
+      }, [runtime, open, pickedKey, live, floatSeconds, allQuiet, epoch, revision, retryTick])
+    }
+    function useTrendPolling({ enabled, runtime, securityId, context, trading = false }) {
+      React.useEffect(() => {
+        if (!enabled || !securityId) return
+        let timer, stopped = false, turn = 0
+        const pull = async () => {
+          const seq = ++turn
+          clearTimeout(timer)
+          if (document.visibilityState !== 'visible') return
+          const trend = await runtime.loadTrend(securityId)
+          if (stopped || seq !== turn || document.visibilityState !== 'visible') return
+          const delay = runtime.trendDelay(securityId)
+          if (trading || (!trend && delay)) timer = setTimeout(pull, delay || MINUTE_MS)
+        }
+        pull()
+        document.addEventListener('visibilitychange', pull)
+        return () => { stopped = true; clearTimeout(timer); document.removeEventListener('visibilitychange', pull) }
+      }, [enabled, runtime, securityId, context, trading])
     }
     // 拖动: 按住非控件区域移动, 松手时把落点写回偏好
     function useFloatingDrag(onDrop) {
@@ -1751,24 +1978,8 @@ window.__ModuleLoader__.load({
     // 只盯着那个标记会整次漏掉换肤。取实际色值当签名, 才算判断了「主题真的变了」。
     // background 也在签名里: 画布底色就铺的是它, canvas 不透明, 漏掉它等于背景永远不换
     const themeSignature = t => [t.background, t.textColor, t.gridLine, t.crosshair, t.up, t.down, t.volumeUp, t.volumeDown, t.cost, t.target, t.EMA, t.BBI, ...t.MA, ...t.BOLL].join('|')
-    // 轮询决策。三件事必须同时成立: 收市后不再打上游、又不能永远停在那儿、还不能每分钟真刷一次。
-    // trend 端点不进缓存, 收市后必须彻底停掉; 而 /snapshot 只读缓存不重算交易时段,
-    // 单靠它永远发现不了开市, 所以每隔几拍要用真刷新把状态翻回来
-    const POLL_EVERY = 10
     // 午休与收盘都不产生新数据, 归同一个安静档
     const QUIET_STATES = new Set(['closed', 'break'])
-    const pollPlan = ({ mode, quiet, tick }) => {
-      const beat = tick % POLL_EVERY === 0
-      if (mode === 'list') return quiet && !beat ? 'snapshot' : 'refresh'
-      // 整十拍必须真刷新一次, 且不能只在已知安静时才刷: 时段只能由刷新结果更新,
-      // 而面板不活跃时它的报价会冻结在 trading —— 那样 quiet 永远翻不过来, 图形模式就
-      // 会一直按交易频率打 trend(该端点不进缓存, 每拍都是真上游)
-      // 刚切进来先把图画出来: 否则要等一个刷新周期, 图形模式会空白十几秒
-      if (tick === 1) return 'trend'
-      if (beat) return 'refresh'
-      return quiet ? 'skip' : 'trend'
-    }
-    // 全部收市后只读快照: 只为发现迟到的复盘, 不必每分钟真打一次上游
     const FLOAT_KEY = 'ssb-floating'
     // ids 为空时退回自选前几只, 否则第一次打开会是一张空窗
     // ids 为 null 表示"从没勾过"(退回默认前五只), 空数组表示"明确一只都不盯", 两者不能混
@@ -1787,37 +1998,58 @@ window.__ModuleLoader__.load({
     const bellIcon = filled => h('svg', { viewBox: '0 0 16 16', width: 16, height: 16, fill: filled ? 'currentColor' : 'none', stroke: 'currentColor', strokeWidth: 1.6, 'aria-hidden': true, style: { display: 'block' } },
       h('path', { d: 'M8 2.2a4 4 0 0 0-4 4v3.1l-1 2.2h10l-1-2.2V6.2a4 4 0 0 0-4-4z', strokeLinejoin: 'round' }),
       h('path', { d: 'M6.5 13.2a1.5 1.5 0 0 0 3 0', fill: 'none', strokeLinecap: 'round' }))
+    const SPARK_WHEEL_RATE = 0.002, SPARK_WHEEL_LINE = 16, SPARK_WIDTH = 264, SPARK_HEIGHT = 88, SPARK_AXIS = 40
     // 分时曲线自绘: 只要一条折线加填充, 不值得为它再挂一个图表实例
     function Sparkline({ candles, preClose, marks, scale }) {
       const values = (candles || []).map(c => finiteOr(c.close)).filter(Number.isFinite)
       const [hover, setHover] = React.useState(null)
-      const [zoom, setZoom] = React.useState(1)
+      const [view, setView] = React.useState({ start: 0, span: 0 })
       const wrapRef = React.useRef(null)
-      // 滚轮缩放纵向范围: React 的 onWheel 走 passive 监听, 只有挂原生监听才拦得住页面滚动。
-      // 依赖点数而不是空依赖: 首帧没有数据时容器还没挂上, 只挂一次会永远拿不到元素
+      const dragRef = React.useRef(null)
+      const total = values.length
+      const width = SPARK_WIDTH, height = SPARK_HEIGHT, plotWidth = width - SPARK_AXIS
+      // 滚轮以指针为锚缩放时间窗: React 的 onWheel 走 passive 监听, 只有挂原生监听才拦得住页面滚动。
+      // 按像素 delta 连续缩放, 触控板的小步滚动不会被放大成整档跳变
       React.useEffect(() => {
         const element = wrapRef.current
         if (!element) return
         const onWheel = event => {
           event.preventDefault()
-          // Shift+滚轮只给横向 delta: 不是缩放手势, 也不能被当成缩小
-          if (!event.deltaY) return
-          setZoom(value => Math.max(1, Math.min(12, value * (event.deltaY < 0 ? 1.2 : 1 / 1.2))))
+          const delta = event.deltaY * (event.deltaMode === 1 ? SPARK_WHEEL_LINE : event.deltaMode === 2 ? height : 1)
+          if (!delta) return
+          const rect = element.getBoundingClientRect()
+          if (!rect.width) return
+          const plotRatio = Math.min(1, Math.max(0, ((event.clientX - rect.left) / rect.width) / (plotWidth / width)))
+          setView(current => {
+            const frame = sparkWindowOf({ total, start: current.start, span: current.span })
+            const anchor = frame.start + plotRatio * (frame.span - 1)
+            const next = sparkZoomOf({ total, start: frame.start, span: frame.span, anchor, factor: Math.exp(delta * SPARK_WHEEL_RATE) })
+            return sparkNormalizeOf({ total, start: next.start, span: next.span })
+          })
         }
         element.addEventListener('wheel', onWheel, { passive: false })
         return () => element.removeEventListener('wheel', onWheel)
-      }, [values.length])
+      }, [total, plotWidth, width, height])
+      // 新的分钟到达时, 全天继续全天, 看历史不动, 贴住尾部才跟随
+      const previousTotal = React.useRef(total)
+      React.useEffect(() => {
+        const before = previousTotal.current
+        previousTotal.current = total
+        if (before === total) return
+        setView(current => sparkFollowOf({ before, total, start: current.start, span: current.span }))
+      }, [total])
       if (!values.length) return null
-      const width = 264, height = 88, axisWidth = 40
-      const plotWidth = width - axisWidth
+      const frame = sparkWindowOf({ total, start: view.start, span: view.span })
+      const visible = values.slice(frame.start, frame.end + 1)
       const base = finiteOr(preClose)
-      // 纵轴只由价格与昨收决定: 标记不参与缩放, 否则成本价离得远时整条分时会被压成一条线
-      const range = sparkRangeOf({ values, preClose, zoom })
-      const low = range.low, high = range.high, span = high - low || 1
-      const yOf = value => height - ((value - low) / span) * height
-      const xOf = index => (index / Math.max(1, values.length - 1)) * plotWidth
-      const line = values.map((value, index) => `${index ? 'L' : 'M'}${xOf(index).toFixed(1)},${yOf(value).toFixed(1)}`).join('')
-      const picked = hover == null ? null : candles?.[hover]
+      // 纵轴只由可见价格决定; 全天视图额外纳入昨收, 缩放后昨收不挤压可见段
+      const range = sparkRangeOf({ values: visible, preClose: frame.span === total ? preClose : null })
+      const low = range.low, high = range.high, priceSpan = high - low || 1
+      const yOf = value => height - ((value - low) / priceSpan) * height
+      const xOf = index => frame.span <= 1 ? plotWidth / 2 : ((index - frame.start) / (frame.span - 1)) * plotWidth
+      const line = visible.map((value, offset) => `${offset ? 'L' : 'M'}${xOf(frame.start + offset).toFixed(1)},${yOf(value).toFixed(1)}`).join('')
+      const hovered = hover != null && hover >= frame.start && hover <= frame.end ? hover : null
+      const picked = hovered == null ? null : candles?.[hovered]
       const price = picked ? finiteOr(picked.close) : NaN
       const pct = Number.isFinite(price) && Number.isFinite(base) && base ? (price - base) / base * 100 : null
       // 标记线常驻, 但只画落在可视区间里的: 超范围的标记不显示, 也不改缩放
@@ -1826,31 +2058,58 @@ window.__ModuleLoader__.load({
       // 标签精度由步长推: 步长 0.1 却按两位显示会把 10.1 与 10.15 印成同一串
       const tickStep = ticks.length > 1 ? Math.abs(ticks[1] - ticks[0]) : 1
       const tickDigits = Math.min(4, tickStep >= 1 ? 0 : Math.ceil(-Math.log10(tickStep)))
-      const move = event => {
+      const hoverAt = event => {
         const rect = event.currentTarget.getBoundingClientRect()
-        if (!rect.width) return
+        if (!rect.width) return null
         const ratio = (event.clientX - rect.left) / rect.width
         // 指针落在右侧刻度区时不算读数: 那里没有曲线
-        if (ratio > plotWidth / width) { setHover(null); return }
-        setHover(sparkIndexAt(ratio * width / plotWidth, values.length))
+        if (ratio > plotWidth / width) return null
+        return frame.start + sparkIndexAt(ratio * width / plotWidth, frame.span)
       }
-      return h('div', { ref: wrapRef, className: 'ssb-float-spark-wrap', onPointerMove: move, onPointerLeave: () => setHover(null) },
+      const down = event => {
+        if (event.button !== 0) return
+        dragRef.current = { x: event.clientX, start: frame.start, span: frame.span, moved: false }
+        event.currentTarget.setPointerCapture?.(event.pointerId)
+      }
+      const move = event => {
+        const drag = dragRef.current
+        if (drag && !(event.buttons & 1)) { dragRef.current = null; return }
+        if (drag) {
+          const dx = event.clientX - drag.x
+          if (Math.abs(dx) >= SPARK_DRAG_THRESHOLD) drag.moved = true
+          if (drag.moved) {
+            const delta = Math.round((-dx / Math.max(1, plotWidth)) * drag.span)
+            const next = sparkPanOf({ total, start: drag.start, span: drag.span, delta })
+            setView(sparkNormalizeOf({ total, start: next.start, span: next.span }))
+            setHover(null)
+            return
+          }
+        }
+        setHover(hoverAt(event))
+      }
+      const up = event => {
+        if (!dragRef.current) return
+        dragRef.current = null
+        if (event.currentTarget.hasPointerCapture?.(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+      }
+      const reset = () => { setView({ start: 0, span: 0 }); setHover(null) }
+      return h('div', { ref: wrapRef, className: 'ssb-float-spark-wrap', title: '滚轮缩放时间，拖动平移，双击复位', 'data-window-start': frame.start, 'data-window-span': frame.span, onPointerDown: down, onPointerMove: move, onPointerUp: up, onPointerCancel: up, onLostPointerCapture: () => { dragRef.current = null }, onPointerLeave: () => setHover(null), onDoubleClick: reset },
         h('svg', { className: 'ssb-float-spark', viewBox: `0 0 ${width} ${height}`, preserveAspectRatio: 'none', role: 'img', 'aria-label': '分时走势' },
           Number.isFinite(base) ? h('line', { className: 'ssb-float-base', x1: 0, x2: plotWidth, y1: yOf(base), y2: yOf(base) }) : null,
           ...lines.map(entry => h('line', { key: entry.mark.id, className: `ssb-float-markline ssb-float-markline-${entry.mark.kind}`, x1: 0, x2: plotWidth, y1: entry.y, y2: entry.y })),
           h('path', { className: 'ssb-float-area', d: `${line}L${plotWidth},${height}L0,${height}Z` }),
           h('path', { className: 'ssb-float-line', d: line }),
-          hover == null ? null : h('line', { className: 'ssb-float-cursor', x1: xOf(hover), x2: xOf(hover), y1: 0, y2: height }),
-          hover == null || !Number.isFinite(price) ? null : h('circle', { className: 'ssb-float-dot', cx: xOf(hover), cy: yOf(price), r: 2.5 })),
+          hovered == null ? null : h('line', { className: 'ssb-float-cursor', x1: xOf(hovered), x2: xOf(hovered), y1: 0, y2: height }),
+          hovered == null || !Number.isFinite(price) ? null : h('circle', { className: 'ssb-float-dot', cx: xOf(hovered), cy: yOf(price), r: 2.5 })),
         h('div', { className: 'ssb-float-axis', 'aria-hidden': true },
           ...ticks.flatMap(tick => {
-            const top = `${Math.min(96, Math.max(4, ((high - tick) / span) * 100))}%`
+            const top = `${Math.min(96, Math.max(4, ((high - tick) / priceSpan) * 100))}%`
             return [
               h('span', { key: `tick-${tick}`, className: 'ssb-float-tick', style: { top } }),
               h('span', { key: `value-${tick}`, className: 'ssb-float-tick-value', style: { top } }, priceTextOf(tick, tickDigits)),
             ]
           })),
-        hover == null || !picked ? null : h('div', { className: 'ssb-float-hover' },
+        hovered == null || !picked ? null : h('div', { className: 'ssb-float-hover' },
           h('span', null, candleTimeText(picked)),
           h('strong', { className: `ssb-number${toneClass(pct)}` }, Number.isFinite(price) ? priceTextOf(price, scale) : '—'),
           h('span', { className: toneClass(pct).trim() }, pct == null ? '' : `${signed(pct.toFixed(2))}%`)))
@@ -1889,7 +2148,8 @@ window.__ModuleLoader__.load({
         ...(picked.length ? picked.map(id => {
           const item = items[id], quote = entryOf(id)?.quote, change = quote?.changePct
           // 盈亏是单只票的深度读数, 只归图形模式: 列表要保持一只票一行, 不换行塞第二行
-          return h('button', { key: id, type: 'button', className: `ssb-float-row${id === securityId ? ' ssb-float-row-on' : ''}`, onClick: () => onPick(id), onPointerEnter: event => onTip(id, event), onPointerLeave: onLeave },
+          const selected = id === securityId
+          return h('button', { key: id, type: 'button', className: `ssb-float-row${selected ? ' ssb-float-row-on' : ''}`, 'aria-pressed': selected, onClick: () => onPick(id), onPointerEnter: event => onTip(id, event), onPointerLeave: onLeave },
             h('span', { className: 'ssb-float-row-name' }, item.alias || item.officialName),
             h('span', { className: 'ssb-float-code' }, item.code),
             h('span', { className: `ssb-float-row-price ssb-number${toneClass(change)}` }, priceTextOf(quote?.last, item.priceScale)),
@@ -1914,10 +2174,8 @@ window.__ModuleLoader__.load({
           h('span', { className: 'ssb-float-price' }, Number.isFinite(last) ? priceTextOf(last, current.priceScale) : '—'),
           h('span', { className: 'ssb-float-pct' }, pct == null ? '—' : `${signed(pct.toFixed(2))}%`),
           pl ? h('span', { className: `ssb-float-pl ssb-number${toneClass(pl.pct) || ' ssb-muted'}`, title: `成本 ${priceTextOf(pl.base, current.priceScale)} · 每股 ${plAmountOf(pl, current.priceScale)}` }, `盈亏 ${plTextOf(pl)}`) : null),
-        // 有兜底数据就画兜底线: 此时"连接失败"已经不成立, 再报错等于把可用的图盖掉
-        !error || offline
-          ? h('div', { className: `ssb-float-chart${toneClass(pct)}` }, h(Sparkline, { key: securityId, candles, preClose, marks: current.marks, scale: current.priceScale }))
-          : h('p', { className: 'ssb-float-error' }, error),
+        !error || candles?.length ? h('div', { className: `ssb-float-chart${toneClass(pct)}` }, h(Sparkline, { key: securityId, candles, preClose, marks: current.marks, scale: current.priceScale })) : null,
+        error ? h('p', { className: 'ssb-float-error', role: 'status' }, error) : null,
         offline ? h('p', { className: 'ssb-float-offline' }, offlineText(offline)) : null,
         // 标记价常驻一行: 图里画得出的是范围内的横线, 范围外的用这行交代, 不必悬停才知道
         (current.marks || []).length ? h('div', { className: 'ssb-float-marks' }, ...(current.marks || []).map(mark => h('span', { key: mark.id, className: mark.kind === 'cost' ? 'ssb-legend-cost' : 'ssb-legend-target' }, `${mark.kind === 'cost' ? '成本' : '卖价'} ${priceTextOf(mark.price, current.priceScale)}`))) : null)
@@ -1936,9 +2194,10 @@ window.__ModuleLoader__.load({
     function FloatingTicker({ runtime }) {
       const state = React.useSyncExternalStore(runtime.subscribe, runtime.getSnapshot, runtime.getSnapshot)
       const [floating, setFloating] = usePref(FLOAT_KEY, FLOAT_DEFAULT)
-      const [fetched, setFetched] = React.useState({})
-      const [trend, setTrend] = React.useState(null)
-      const [error, setError] = React.useState('')
+      const [fetched, setFetched] = React.useState(null)
+      const [quoteError, setQuoteError] = React.useState('')
+      const [retryTick, setRetryTick] = React.useState(0)
+      const epoch = state.data?.serverEpoch, revision = state.data?.routingRevision
       const [picker, setPicker] = React.useState(false)
       const items = state.data?.control?.watchlist?.items || {}
       const order = (state.data?.control?.watchlist?.order || []).filter(id => items[id]).sort((a, b) => pinnedFirst(items, a, b))
@@ -1959,16 +2218,25 @@ window.__ModuleLoader__.load({
       const drag = useFloatingDrag(update)
       // 悬浮窗节奏取自独立偏好, 列表间隔不再参与
       const floatRefresh = floatIntervalOf(state.data?.control?.preferences?.floatRefreshSeconds)
-      useFloatingPolling({ open, mode, securityId: mode === 'kline' ? securityId : null, picked, items, live: floating.live, floatSeconds: floatRefresh, quotes: state.data?.quotes, fetched, revision: state.data?.control?.revision, setFetched, setTrend, setError })
-      // 面板已经刷过的报价先拿来渲染, 悬浮窗自己的 refresh 结果回来后再按 receivedAt 择优:
-      // 否则首次打开要干等一轮上游请求, 列表是空的
+      // 本地报价只在产生它的宿主和路由代际内参与择优。
+      const ownQuotes = fetched && fetched.epoch === epoch && fetched.revision === revision ? fetched.quotes : null
       const entryOf = id => {
-        const panel = state.data?.quotes?.[id], own = fetched[id]
+        const panel = state.data?.quotes?.[id], own = ownQuotes?.[id]
         if (!panel) return own
         if (!own) return panel
         return pickNewest(own.quote, panel.quote) === own.quote ? own : panel
       }
       const quoteOf = id => entryOf(id)?.quote
+      const allQuiet = picked.every(id => QUIET_STATES.has(quoteOf(id)?.sessionState))
+      useFloatingPolling({ runtime, open, picked, items, live: floating.live, floatSeconds: floatRefresh, allQuiet, epoch, revision, retryTick, setFetched, setError: setQuoteError })
+      const trading = TRADING_STATES.includes(quoteOf(securityId)?.sessionState) || !quoteOf(securityId)?.sessionState
+      const showTrend = open && mode === 'kline' && !picker && floating.live !== false
+      useTrendPolling({ enabled: showTrend, runtime, securityId, context: showTrend ? runtime.trendContext(securityId) : null, trading })
+      const trendData = mode === 'kline' && securityId ? runtime.getTrend(securityId) : null
+      const trendQuote = entryOf(securityId), timezone = items[securityId]?.timezone
+      React.useEffect(() => {
+        if (showTrend && document.visibilityState === 'visible') runtime.updateTrendQuote(securityId, timezone, trendQuote)
+      }, [runtime, showTrend, securityId, timezone, trendQuote, trendData])
       // 标记价提醒的开关与瞬时高亮都是本组件的常驻状态: 必须在提前 return 之前声明
       const [alert, setAlert] = usePref(ALERT_PREF_KEY, ALERT_PREF_DEFAULT)
       const prefError = usePrefError()
@@ -2016,13 +2284,11 @@ window.__ModuleLoader__.load({
       const step = delta => {
         const at = picked.indexOf(securityId)
         const next = picked[(at + delta + picked.length) % picked.length]
-        // 只有一只时 next 就是自己, 清掉 trend 反而让图空一转到下一拍才回来
-        if (next && next !== securityId) { setTrend(null); update({ securityId: next }) }
+        if (next && next !== securityId) update({ securityId: next })
       }
       const current = items[securityId]
-      // 分时数据必须和标的绑在一起: 切标的时新请求还没回来, 直接用旧数据会把上一只的价格当成这一只
-      const trendData = trend?.securityId === securityId ? trend.data : null
       const candles = trendData?.candles
+      const error = trendData?.error || quoteError
       // 卡片上的更新时间: 停在旧价上而不显示时刻, 是"看着像实时"的唯一来源。
       // 列表取全部勾选里最旧的一份——有一只停更就有一只价格不能信; 图形模式认图上最后一根的时间
       const stampIds = mode === 'kline' && securityId ? [securityId] : picked
@@ -2052,13 +2318,20 @@ window.__ModuleLoader__.load({
         picker
           ? h(FloatPicker, { order, items, picked, onPicked: setPicked })
           : mode === 'list'
-            ? h(FloatList, { picked, items, securityId, entryOf, onPick: id => update({ mode: 'kline', securityId: id }), onTip: showRowTip, onLeave: () => setRowTip(null), onScroll: () => setRowTip(null) })
+            ? h(FloatList, { picked, items, securityId, entryOf, onPick: id => update(id === securityId ? { mode: 'kline', securityId: id } : { securityId: id }), onTip: showRowTip, onLeave: () => setRowTip(null), onScroll: () => setRowTip(null) })
             : !current ? h('p', { className: 'ssb-muted' }, '未选择标的') : h(FloatChart, { securityId, current, candles, preClose: base, error, last, pct, offline: trendData?.offline }),
         h(FloatFoot, {
           mode, securityId, picked, current, stamp, stale, alertOn, error, liveOn: floating.live !== false, refresh: floatRefresh,
           onBell: () => { const next = !alertOn; alertStates.current = {}; setAlert({ on: next }); if (next) requestAlertPermission() },
           onLive: () => {
             if (!picked.length) return
+            // 错误态下的按钮就是重试: 重新拉报价, 图形模式同时重校准分时
+            if (error) {
+              update({ live: true })
+              setRetryTick(n => n + 1)
+              if (mode === 'kline' && securityId && trendData?.error) runtime.retryTrend(securityId)
+              return
+            }
             const liveOn = floating.live !== false
             update({ live: !liveOn })
             tools.toast?.show(liveOn ? '已暂停自动刷新，价格不会自己更新' : '已恢复自动刷新')
@@ -2494,7 +2767,8 @@ window.__ModuleLoader__.load({
 .ssb-float-pl { margin-left:auto; font-size:11px; }
 .ssb-float-spark { width:100%; height:88px; display:block; }
 /* 分时悬停: 光标线、标记线与读出浮层 */
-.ssb-float-spark-wrap { position:relative; }
+.ssb-float-spark-wrap { position:relative; cursor:crosshair; user-select:none; touch-action:pan-y; }
+.ssb-float-spark-wrap:active { cursor:grabbing; }
 .ssb-float-markline { stroke:var(--ssb-text-dim); stroke-width:1; stroke-dasharray:2 3; vector-effect:non-scaling-stroke; opacity:.75; }
 .ssb-float-markline-cost { stroke:var(--ssb-chart-cost); }
 .ssb-float-markline-target { stroke:var(--ssb-chart-target); }
@@ -2539,7 +2813,7 @@ window.__ModuleLoader__.load({
 .ssb-picker-all { flex:0 0 auto; padding:1px 6px; font:inherit; font-size:11px; color:var(--ssb-accent); background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); cursor:pointer; }
 .ssb-picker-all:hover { border-color:var(--ssb-accent); }
 .ssb-float-row { display:flex; align-items:baseline; column-gap:8px; padding:4px 6px; font:inherit; text-align:left; color:inherit; background:transparent; border:0; border-radius:var(--ssb-radius-sm); cursor:pointer; }
-.ssb-float-row:hover { background:var(--dsw-alias-interactive-bg-hover); }
+.ssb-float-row:not(.ssb-float-row-on):hover { background:var(--dsw-alias-interactive-bg-hover); }
 .ssb-float-row-on { background:var(--ssb-accent-wash); }
 .ssb-float-row-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 /* 代码用小号淡字: 只说清"是哪只", 不跟名称抢注意力 */
@@ -2674,7 +2948,7 @@ window.__ModuleLoader__.load({
           return () => { for (const stop of disposers.reverse()) stop() }
         }, 'stock-assistant main panel')
       },
-      __testing: { createPageRuntime, StockPage, FloatingTicker, FloatHeader, FloatPicker, FloatList, FloatChart, FloatFoot, KlineView, Sparkline, Select, dropdownPlacement, dragOrder, quiet, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, subscribePref, LWC_LOAD_TIMEOUT_MS, klineKeyOf, klineShipPlan, finiteOr, formatAmount, toneClass, priceTextOf, tagTabs, resolveTab, costBaseOf, costPlOf, markPct, pollPlan, QUIET_STATES, POLL_EVERY, floatPollDelay, floatIntervalOf, FLOAT_INTERVALS, FLOAT_FALLBACK_SECONDS, timestampOf, floatFreshness, priceTimeOf, clockText, staleAfter, markAlertOf, markAlertText, deliverMarkAlert, sparkIndexAt, candleTimeText, quoteTipLines, crosshairTipLines, crosshairTimeText, timeKeyOf, crosshairTipStyle, rowTipPositionOf, sparkRangeOf, sparkTicksOf, seriesPaintPlan, sanitizeCandles, themeSignature, ensureLwc, routesForProviders, routesForAdapter, routesForAdapters, providerChangeDraft, settingsSavePayload, pruneDeniedTargets, selectEntries, offlineText, offlinePrefix, floatReadout },
+      __testing: { createPageRuntime, StockPage, FloatingTicker, FloatHeader, FloatPicker, FloatList, FloatChart, FloatFoot, KlineView, Sparkline, Select, dropdownPlacement, dragOrder, quiet, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, subscribePref, LWC_LOAD_TIMEOUT_MS, klineKeyOf, klineShipPlan, klineViewportOf, applyKlineViewport, chartOptions, KLINE_HISTORY_LIMIT, KLINE_INITIAL_BARS, finiteOr, formatAmount, toneClass, priceTextOf, tagTabs, resolveTab, costBaseOf, costPlOf, markPct, QUIET_STATES, floatPollDelay, floatIntervalOf, FLOAT_INTERVALS, FLOAT_FALLBACK_SECONDS, timestampOf, floatFreshness, priceTimeOf, clockText, staleAfter, markAlertOf, markAlertText, deliverMarkAlert, sparkIndexAt, candleTimeText, quoteTipLines, crosshairTipLines, crosshairTimeText, timeKeyOf, crosshairTipStyle, rowTipPositionOf, sparkRangeOf, sparkTicksOf, sparkWindowOf, sparkZoomOf, sparkPanOf, sparkNormalizeOf, sparkFollowOf, seriesPaintPlan, sanitizeCandles, themeSignature, ensureLwc, routesForProviders, routesForAdapter, routesForAdapters, providerChangeDraft, settingsSavePayload, pruneDeniedTargets, selectEntries, offlineText, offlinePrefix, floatReadout },
     }
   },
 })

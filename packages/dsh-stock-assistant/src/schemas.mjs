@@ -58,7 +58,7 @@ export const klineQuerySchema = z.strictObject({
   securityId: z.string().regex(/^[\w]+:equity:[\w.]{1,15}$/),
   period: z.enum(['trend', '1d', '1w', '1M']),
   limit: z.coerce.number().int().min(20).max(1000).default(250),
-  // 强制刷新:客户端详情页刷新走 ?force=1,服务端据此跳过缓存读;缺省按缓存
+  // 日、周、月 K 线可强制跳过缓存；分时仍遵守共享刷新窗口。
   force: z.enum(['0', '1']).optional(),
 })
 // 手动刷新的证券参数: 自选 id 字符串或客户端持有的完整身份(浏览/搜索 peek)。形状在这里定死,

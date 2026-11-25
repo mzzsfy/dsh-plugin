@@ -98,7 +98,7 @@ test('有通知插件时全权交给它, 没有才降级闪烁与系统通知', 
 const item = (id, name, code, marks) => ({ id, officialName: name, code, exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false, marks })
 const stock = item('XSHG:equity:600519', '贵州茅台', '600519', [{ id: 'm1', kind: 'target', price: 1400 }])
 const stateWith = quotes => ({ view: {}, busy: {}, data: { control: { revision: 1, watchlist: { order: [stock.id], items: { [stock.id]: stock } }, preferences: { refreshSeconds: 15, colorMode: 'red-up' } }, quotes } })
-const runtimeStub = state => ({ getSnapshot: () => state, subscribe: () => () => {}, openDetail() {} })
+const runtimeStub = state => ({ getSnapshot: () => state, subscribe: () => () => {}, trendContext: () => 'test', getTrend: () => null, openDetail() {} })
 const renderFloat = async (state, alertOn = false) => {
   const { plugin, store } = await loadClient()
   store.set('ssb-floating', JSON.stringify({ ids: [stock.id], live: true, open: true, mode: 'list' }))

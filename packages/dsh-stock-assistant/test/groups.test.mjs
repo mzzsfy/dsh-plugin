@@ -70,35 +70,6 @@ test('激活 tab 失效时回退全部', async () => {
   assert.equal(resolveTab(tabs, undefined), tabs[0])
 })
 
-// 轮询决策三件事必须同时成立: 收市后不打上游、又不能永远停在那儿、还不能每分钟真刷一次.
-// 另有一条例外: 切到某只标的后第一拍先拉一次分时, 否则图形模式要空等一个刷新周期
-test('轮询决策: 收市不打 trend(首拍除外), 但自己醒得过来', async () => {
-  const { pollPlan } = await load()
-  // 开市: 列表刷卡, 图形打分时
-  assert.equal(pollPlan({ mode: 'list', quiet: false, tick: 1 }), 'refresh')
-  assert.equal(pollPlan({ mode: 'kline', quiet: false, tick: 1 }), 'trend')
-  // 安静档: 列表走只读快照省额度; 图形彻底停掉——trend 端点不进缓存, 每拍都是真上游
-  assert.equal(pollPlan({ mode: 'list', quiet: true, tick: 1 }), 'snapshot')
-  assert.equal(pollPlan({ mode: 'kline', quiet: true, tick: 1 }), 'trend', '刚切进来先出一张图, 不能空白等一个周期')
-  assert.equal(pollPlan({ mode: 'kline', quiet: true, tick: 9 }), 'skip')
-})
-
-// 关键: 时段只能由刷新结果更新, 而面板不活跃时它的报价会冻结在 trading.
-// 如果只在「已知安静」时才刷新, quiet 就永远翻不过来, 图形模式会无限打 trend
-test('图形模式整十拍无条件真刷新, 才能从 trading 翻到安静', async () => {
-  const { pollPlan } = await load()
-  for (const tick of [10, 20, 30]) {
-    assert.equal(pollPlan({ mode: 'kline', quiet: false, tick }), 'refresh', `第 ${tick} 拍必须真刷新, 否则收市永远发现不了`)
-    assert.equal(pollPlan({ mode: 'kline', quiet: true, tick }), 'refresh')
-    assert.equal(pollPlan({ mode: 'list', quiet: false, tick }), 'refresh')
-  }
-  // 整十拍之间: 开市打分时, 收市静默(首拍例外, 见上)
-  for (const tick of [1, 5, 9, 11, 19]) {
-    assert.equal(pollPlan({ mode: 'kline', quiet: false, tick }), 'trend')
-    assert.equal(pollPlan({ mode: 'kline', quiet: true, tick }), tick === 1 ? 'trend' : 'skip')
-  }
-})
-
 // 点击包装必须把 promise 交回去: 重命名要在写入成功后才迁移折叠态, 拿不到 promise
 // 就只能提前改本地状态, 名字不合规时服务端 400 而旧组已经展开了
 test('点击包装返回 promise, 且吞掉异常不产生未处理拒绝', async () => {

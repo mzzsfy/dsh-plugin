@@ -22,6 +22,31 @@ async function loadClient() {
   return { plugin, store }
 }
 
+// 悬浮分时的时间窗: 滚轮以指针为锚, 拖动平移, 不越出当日首尾
+test('分时缩放以指针为锚并夹在当日范围内', async () => {
+  const { sparkWindowOf, sparkZoomOf, sparkPanOf, sparkNormalizeOf, sparkFollowOf } = (await loadClient()).plugin.__testing
+  const full = sparkWindowOf({ total: 241, start: 0, span: 0 })
+  assert.deepEqual({ ...full }, { start: 0, span: 241, end: 240 }, '未指定窗口时铺满全天')
+  // 指针在 75% 处上滚一档: 窗口收窄, 该点仍在窗口内且相对位置大致不变
+  const zoomed = sparkZoomOf({ total: 241, start: 0, span: 241, anchor: 180, factor: 1 / 2 })
+  assert.equal(zoomed.span, 121)
+  assert.ok(zoomed.start <= 180 && 180 <= zoomed.end)
+  assert.ok(Math.abs((180 - zoomed.start) / (zoomed.span - 1) - 180 / 240) < 0.02)
+  assert.equal(sparkZoomOf({ total: 241, start: 0, span: 241, anchor: 240, factor: 1 / 1000 }).span, 8, '最小窗口不碎成零根')
+  assert.equal(sparkZoomOf({ total: 241, start: 0, span: 20, anchor: 5, factor: 1000 }).span, 241, '放大不超过全天')
+  const panned = sparkPanOf({ start: 100, span: 50, total: 241, delta: -30 })
+  assert.equal(panned.start, 70)
+  assert.equal(sparkPanOf({ start: 10, span: 50, total: 241, delta: -30 }).start, 0, '左边界夹住')
+  assert.equal(sparkPanOf({ start: 180, span: 50, total: 241, delta: 30 }).start, 191, '右边界夹住')
+  assert.deepEqual({ ...sparkNormalizeOf({ total: 241, start: 0, span: 241 }) }, { start: 0, span: 0 }, '全天保存为哨兵而不是当前根数')
+  assert.deepEqual({ ...sparkFollowOf({ before: 241, total: 242, start: 0, span: 0 }) }, { start: 0, span: 0 }, '全天在新分钟到达后仍是全天')
+  assert.deepEqual({ ...sparkFollowOf({ before: 151, total: 152, start: 0, span: 151 }) }, { start: 0, span: 0 }, '物化过的全天窗口也要归回哨兵, 不能丢第一根')
+  assert.deepEqual({ ...sparkFollowOf({ before: 241, total: 242, start: 191, span: 50 }) }, { start: 192, span: 50 }, '贴尾窗口跟着最新一根走')
+  assert.deepEqual({ ...sparkFollowOf({ before: 241, total: 242, start: 0, span: 50 }) }, { start: 0, span: 50 }, '看历史时不被新分钟拽走')
+  assert.deepEqual({ ...sparkFollowOf({ before: 241, total: 30, start: 0, span: 50 }) }, { start: 0, span: 0 }, '总根数回退时归回全天, 不保留超出总数的窗口')
+  assert.deepEqual({ ...sparkFollowOf({ before: 241, total: 30, start: 200, span: 20 }) }, { start: 10, span: 20 }, '总根数回退但仍够窗口时, start 夹到有效范围')
+})
+
 test('分时悬停按水平位置取最近一根, 越界夹到两端', async () => {
   const { sparkIndexAt } = (await loadClient()).plugin.__testing
   assert.equal(sparkIndexAt(0, 241), 0)
@@ -105,15 +130,15 @@ test('涨跌配色与价格文本只有一处实现', async () => {
   assert.equal(priceTextOf('', 2), '—')
 })
 
-test('一字板或贴边行情放大后曲线仍在窗内', async () => {
+test('一字板或贴边行情纵轴仍容纳昨收且不把曲线挤出窗', async () => {
   const { sparkRangeOf } = (await loadClient()).plugin.__testing
-  const flat = sparkRangeOf({ values: [10.2, 10.2, 10.2, 10.2], preClose: 10, zoom: 1.2 })
-  assert.ok(flat.low < 10.2 && 10.2 < flat.high, '涨停横盘放大后不能把整条线挤出窗')
-  const edge = sparkRangeOf({ values: [9.95, 10, 10.05, 10.1], preClose: 10.2, zoom: 1.2 })
-  assert.ok(edge.low < 10 && edge.high > 10, '贴边序列放大后数据仍围绕窗口中心, 不会被整条挤出')
-  const one = sparkRangeOf({ values: [10.2, 10.2], preClose: 10, zoom: 1 })
-  assert.equal(one.low, 10, '1 倍仍容纳昨收')
-  assert.equal(one.high, 10.2)
+  const flat = sparkRangeOf({ values: [10.2, 10.2, 10.2, 10.2], preClose: 10 })
+  assert.ok(flat.low < 10.2 && 10.2 < flat.high, '横盘线要有厚度, 不能退化成一条边')
+  assert.ok(flat.low <= 10 && flat.high >= 10.2, '昨收仍要落在窗内')
+  const edge = sparkRangeOf({ values: [9.95, 10, 10.05, 10.1], preClose: 10.2 })
+  assert.ok(edge.low < 9.95 && edge.high > 10.2, '贴边昨收不能被挤出窗口')
+  const one = sparkRangeOf({ values: [10.2, 10.2], preClose: 10 })
+  assert.ok(one.low <= 10 && one.high >= 10.2, '1 倍仍容纳昨收')
   assert.equal(sparkRangeOf({ values: [], preClose: 10 }).high, 1, '空数据不抛')
 })
 

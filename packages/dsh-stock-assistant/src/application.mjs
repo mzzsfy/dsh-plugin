@@ -18,7 +18,7 @@ import { createCollector, deriveDelay } from './collector.mjs'
 import { createCatalog } from './catalog.mjs'
 import { createDemand } from './demand.mjs'
 import { createKlineCache } from './kline-cache.mjs'
-import { createTrendCache } from './trend-cache.mjs'
+import { createTrendCache, trendSessionDate } from './trend-cache.mjs'
 import { createTickStore } from './ticks.mjs'
 import { fail, parseSecurityId, MARKET_META, clockInZone } from './market-model.mjs'
 const WINDOW = 5 * 60 * 1000
@@ -77,7 +77,7 @@ export async function createApplication({ storageDomain, providers = [tushare, t
       if (wanted) {
         // 缓存新鲜时进入面板不重复打上游(限流主因); 过期才拉取, 定时器照常量节奏维持
         const freshFor = (getControl().preferences?.refreshSeconds ?? 15) * 1000
-        if (opening && !collector?.freshWithin(freshFor)) collector?.refresh().catch(() => {})
+        if (opening && !collector?.freshWithin(freshFor)) collector?.refresh(undefined, { automatic: true }).catch(() => {})
         collector?.reconcile()
       } else {
         // 后台预热只在面板空闲时做: 之前只写在 wanted 分支又要求 !demand.active(), 两个条件互斥,
@@ -165,21 +165,24 @@ export async function createApplication({ storageDomain, providers = [tushare, t
   }
   // K 线类请求的即时故障转移: 触发码 NETWORK/TIMEOUT/BAD_PAYLOAD 时顺着「环上下一格」试一次;
   // 只有当前选择自己的失败算一轮, 顺着链试备源是同一轮里的补救, 不额外计次
-  async function runWithFailover(capability, route, primary, fallbacks, request, signal) {
+  async function runWithFailover(capability, route, primary, fallbacks, request, signal, reportRound = error => router.recordRound(route.id, error)) {
     const chain = [primary, ...fallbacks]
     let lastError, unsupported
     for (const [index, cand] of chain.entries()) {
       try {
         const result = await executor.run(cand, capability, request, { signal })
         // 当前选择能出数就是最好的证据: 清掉它的失败计数与探测退避
-        if (index === 0) router.recordRound(route.id, null)
+        if (index === 0) reportRound(null)
         return result
       } catch (e) {
-        if (index === 0) router.recordRound(route.id, e)
+        if (signal?.aborted) throw e
+        if (index === 0) reportRound(e)
         // 备源不支持这个能力就继续试下一个; 用户该看到的是主源的真实错误, 不是备源的描述符差异
         if (e.code === 'UNSUPPORTED_CAPABILITY') { unsupported ??= e; continue }
         lastError = e
-        if (!TRANSIENT_CODES.includes(e.code) && e.code !== 'BAD_PAYLOAD') throw e
+        // 分时 429 只说明当前来源这一分钟没额度: 同轮换备源出数, 不能把整轮钉死在限流源上
+        const retryable = TRANSIENT_CODES.includes(e.code) || e.code === 'BAD_PAYLOAD' || (capability === 'trend' && e.code === 'RATE_LIMIT')
+        if (!retryable) throw e
       }
     }
     throw lastError ?? unsupported
@@ -232,8 +235,9 @@ export async function createApplication({ storageDomain, providers = [tushare, t
 
   // 分时离线兜底: 只续在当日真实分时后面。
   // 没有真实分时打底时, 几个报价点连成的线说明不了走势, 不如把上游错误如实抛出去
-  async function offlineTrend({ market, code, limit, securityId }, error) {
-    const cached = await trendCache.get({ market, code, limit })
+  async function offlineTrend(key, error) {
+    const { market, securityId } = key
+    const cached = await trendCache.get(key)
     if (!cached) return null
     const real = cached.payload.candles || []
     const lastAt = Number(real.at(-1)?.at)
@@ -246,6 +250,7 @@ export async function createApplication({ storageDomain, providers = [tushare, t
       ...(appended.length ? { complete: false } : {}),
       // 拍点只有收盘价: 开高低补齐成同一个值, 否则客户端按 OHLC 校验会把每根都丢掉, 图上仍然是空的
       candles: [...real, ...appended],
+      sessionDate: cached.sessionDate,
       offline: { kind: 'cache', cachedAt: cached.cachedAt, appended: appended.length, reason: error.message },
     }
   }
@@ -281,27 +286,64 @@ export async function createApplication({ storageDomain, providers = [tushare, t
       const config = state.get()
       // 分时与日/周/月是两种上游, 各走各的路由: K 线来源不供分时时, 分时不该跟着一起死
       const capability = period === 'trend' ? 'trend' : 'kline'
-      const { route, instance } = selectRoute(capability, exchange)
-      // 同轮补救只取环上的下一格: 走到末级时回到主源, 否则末级是死胡同
-      const next = router.nextInRing(route.id, instance.id)
-      const fallbacks = next ? config.providers.filter(p => p.id === next && p.enabled !== false && p.budget?.requestsPerMinute !== null) : []
-      // force=1 跳过缓存读(详情页手动刷新);分时每次真取, 缓存只在上游失败时用
-      if (capability === 'kline' && force !== '1') {
+      const { route, instance, routeEpoch } = selectRoute(capability, exchange)
+      // 同轮补救只取环上的下一格: 走到末级时回到主源, 否则末级是死胡同。
+      // 分时跳过停用/无预算成员, 与 recordRound 的切换口径一致; K 线维持原语义
+      const usable = provider => provider && provider.enabled !== false && provider.budget?.requestsPerMinute !== null
+      const next = capability === 'trend' ? router.nextInRing(route.id, instance.id, provider => !usable(provider)) : router.nextInRing(route.id, instance.id)
+      const fallbacks = next ? config.providers.filter(p => p.id === next && usable(p)) : []
+      const request = { securityId: sid, market: exchange, code, period, adjust: 'qfq', limit }
+      if (capability === 'trend') {
+        const keyOfSelection = (epoch, instanceId) => ({ market: exchange, code, limit, securityId: sid, routeKey: `${config.routingRevision}:${route.id}:${epoch}:${instanceId}` })
+        const key = keyOfSelection(routeEpoch, instance.id)
+        const assertRoute = epoch => {
+          if (config.routingRevision !== state.get().routingRevision || router.select('trend', exchange).routeEpoch !== epoch) fail('ROUTE_CONFLICT', '分时来源已变化，请重新刷新', 409)
+        }
+        const result = await trendCache.fetch(key, signal, async (sharedSignal, moveTo) => {
+          let epoch = routeEpoch, activeKey = key
+          const reportRound = error => {
+            assertRoute(epoch)
+            router.recordRound(route.id, error)
+            const current = router.select('trend', exchange)
+            if (current.routeEpoch !== epoch && fallbacks.some(spare => spare.id === current.instance.id)) {
+              epoch = current.routeEpoch
+              activeKey = keyOfSelection(epoch, current.instance.id)
+              moveTo(activeKey)
+            }
+          }
+          try {
+            const data = await runWithFailover(capability, route, instance, fallbacks, request, sharedSignal, reportRound)
+            assertRoute(epoch)
+            await trendCache.put(activeKey, data)
+            return { ...data, routeEpoch: epoch }
+          } catch (error) {
+            if (!sharedSignal.aborted) {
+              assertRoute(epoch)
+              error.routeEpoch = epoch
+            }
+            throw error
+          }
+        }).catch(async error => {
+          if (['CANCELLED', 'ROUTE_CONFLICT'].includes(error.code)) throw error
+          const epoch = error.routeEpoch ?? routeEpoch
+          assertRoute(epoch)
+          const current = router.select('trend', exchange)
+          const offline = await offlineTrend(keyOfSelection(epoch, current.instance.id), error)
+          if (!offline) throw error
+          return { ...offline, routeEpoch: epoch }
+        })
+        assertRoute(result.routeEpoch)
+        const sessionDate = result.offline ? result.sessionDate : trendSessionDate(exchange, result)
+        return { ...result, source: result.providerInstanceId, revision: config.revision, serverEpoch, routingRevision: config.routingRevision, sessionDate }
+      }
+      if (force !== '1') {
         for (const cand of [instance, ...fallbacks.filter(spare => spare.id !== instance.id)]) {
           const cached = await klineCache.get({ providerInstanceId: cand.id, market: exchange, period, code, limit }, config.routingRevision)
           if (cached) return { ...cached.payload, source: cand.id, revision: config.revision }
         }
       }
-      const result = await runWithFailover(capability, route, instance, fallbacks, { securityId: sid, market: exchange, code, period, adjust: 'qfq', limit }, signal).catch(async error => {
-        // 分时没有别的来源可退: 有当日真实分时就拿它兜底并续上之后的报价点, 没有就如实报错
-        if (capability !== 'trend') throw error
-        const offline = await offlineTrend({ market: exchange, code, limit, securityId: sid }, error)
-        if (!offline) throw error
-        return offline
-      })
-      if (capability === 'kline') await klineCache.put({ providerInstanceId: result.providerInstanceId, market: exchange, period, code, limit }, result, config.routingRevision)
-      // 成功一次就覆盖当日缓存: 离线时它就是"最后一个完整的分时"; 兜底结果与空结果由缓存自己挡掉
-      else await trendCache.put({ market: exchange, code, limit }, result)
+      const result = await runWithFailover(capability, route, instance, fallbacks, request, signal)
+      await klineCache.put({ providerInstanceId: result.providerInstanceId, market: exchange, period, code, limit }, result, config.routingRevision)
       return { ...result, source: result.providerInstanceId, revision: config.revision }
     },
     async browse(input) {
@@ -372,10 +414,10 @@ export async function createApplication({ storageDomain, providers = [tushare, t
         fail('INVALID_REFRESH', `刷新证券参数无效：${path} ${first.message}`, 400)
       }
       let quotes
-      try { quotes = await collector.refresh(submitted?.data, { signal }) } catch (e) {
+      try { quotes = await collector.refresh(submitted?.data, { signal, automatic: input.automatic === true }) } catch (e) {
         // peek 刷新失败时 collector 里还留着带 lastError 的条目(否则详情只剩"等待报价");
         // 常驻快照按自选过滤会顺手删掉它, 这里在快照构造前抓一份只随本次错误下发的报价。
-        const failed = collector.entries()
+        const failed = e.quotes ?? collector.entries()
         e.snapshot = { ...snapshot(), quotes: failed }
         throw e
       }
@@ -395,6 +437,6 @@ export async function createApplication({ storageDomain, providers = [tushare, t
       if (checked.status !== 'ready' || config.routingRevision !== state.get().routingRevision) fail('CHECK_REQUIRED', '主源未就绪或路由已变化', 422)
       router.switchPrimary(route.id, input.expectedRouteEpoch); return snapshot()
     },
-    async close() { stopped = true; recoveryLoop?.stop(); executor.dispose(); await recoveryLoop?.idle?.(); demand.dispose(); collector.dispose(); const cacheClosed = catalog.dispose(); await cacheClosed; await ensuring; await state.close() },
+    async close() { stopped = true; recoveryLoop?.stop(); trendCache.dispose(); executor.dispose(); await recoveryLoop?.idle?.(); demand.dispose(); collector.dispose(); const cacheClosed = catalog.dispose(); await cacheClosed; await ensuring; await state.close() },
   }
 }

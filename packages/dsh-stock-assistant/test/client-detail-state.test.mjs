@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
+import { klineQuerySchema } from '../src/schemas.mjs'
 
 async function load() {
   let plugin
@@ -24,6 +25,26 @@ test('灌图计划: 空壳不记 key, 首次进 key 才重置视口', async () =
   assert.deepEqual(planOf('B|1d', 'A|1d', true), { fit: true, next: 'A|1d' })
   // 同一 key 下数据刷新(手动↻): 保留用户缩放
   assert.deepEqual(planOf('A|1d', 'A|1d', true), { fit: false, next: 'A|1d' })
+})
+
+// K线首屏与右边界: 历史要够久, 但不能把用户留在一片未来空白里
+test('K线首屏只铺最近一段, 右边界由最新一根封住', async () => {
+  const { KLINE_INITIAL_BARS, KLINE_HISTORY_LIMIT, klineViewportOf, applyKlineViewport, chartOptions } = await load()
+  assert.equal(KLINE_HISTORY_LIMIT, 1000)
+  assert.equal(KLINE_INITIAL_BARS, 120)
+  const daily = klineViewportOf({ total: 1000, period: '1d' })
+  assert.deepEqual({ ...daily }, { from: 1000 - KLINE_INITIAL_BARS, to: 999 })
+  assert.equal(klineViewportOf({ total: 1000, period: 'trend' }), null, '分时仍铺满全天')
+  assert.equal(klineViewportOf({ total: 80, period: '1d' }), null, '不足一屏就全铺')
+  const calls = []
+  const scale = { fitContent: () => calls.push('fit'), setVisibleLogicalRange: view => calls.push({ ...view }) }
+  applyKlineViewport(scale, { total: 1000, period: '1d' })
+  applyKlineViewport(scale, { total: 1000, period: 'trend' })
+  assert.deepEqual(calls, [{ from: 880, to: 999 }, 'fit'], '首灌必须真正下发视口, 不能退回 fitContent')
+  const options = chartOptions({ background: '#fff', textColor: '#000', gridLine: '#eee' }, { CrosshairMode: { Normal: 0 } })
+  assert.equal(options.timeScale.fixRightEdge, true, '禁止滚到最新一根右侧')
+  assert.equal(options.timeScale.rightOffset, 0, '最新一根贴右边界')
+  assert.equal(klineQuerySchema.safeParse({ securityId: 'XSHG:equity:600519', period: '1d', limit: String(KLINE_HISTORY_LIMIT) }).success, true, '客户端上限不能超过服务端 schema')
 })
 
 // 拉取、校验、灌图必须共用同一个拼法, 否则校验永远对不上
@@ -116,6 +137,23 @@ test('openDetail 先切面板再进详情, 且不预载 K 线', async () => {
   assert.ok(calls.some(([, path]) => path.endsWith('/refresh')), 'openDetail 应请求报价快照')
   // K 线由 KlineView 的加载 effect 负责, openDetail 不重复发
   assert.equal(calls.filter(([, path]) => path.endsWith('/kline')).length, 0, 'openDetail 不应预载 K 线')
+  runtime.dispose()
+})
+
+test('K线请求一次取足历史, 不把用户卡在一年窗口', async () => {
+  const { createPageRuntime, KLINE_HISTORY_LIMIT } = await load()
+  const urls = []
+  const runtime = createPageRuntime({
+    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {} }, selectPanel() {} },
+    bus: { subscribe: () => () => {}, publish() {} },
+    tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) },
+    document: { addEventListener() {}, removeEventListener() {} },
+    fetch: async url => { urls.push(String(url)); return { ok: true, json: async () => ({ ok: true, data: { candles: [] } }) } },
+  })
+  await runtime.loadKline('XSHG:equity:600519', '1d')
+  const query = new URL(urls.find(url => url.includes('/kline')), 'http://fixture').searchParams
+  assert.equal(query.get('limit'), String(KLINE_HISTORY_LIMIT))
+  assert.equal(KLINE_HISTORY_LIMIT, 1000)
   runtime.dispose()
 })
 

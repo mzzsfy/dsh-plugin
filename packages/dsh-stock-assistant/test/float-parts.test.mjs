@@ -69,7 +69,7 @@ test('悬浮窗底部取独立偏好, 不借列表间隔', async () => {
   const api = await load()
   api.__store.set('ssb-floating', JSON.stringify({ open: true, live: true, mode: 'list', ids: order, securityId: null, x: null, y: null }))
   const control = { revision: 1, routingRevision: 0, watchlist: { order, items }, preferences: { refreshSeconds: 60, colorMode: 'red-up', floatRefreshSeconds: 3 } }
-  const runtime = { getSnapshot: () => ({ data: { control, quotes: {} }, view: {}, busy: {} }), subscribe: () => () => {}, updateView() {}, openDetail() {} }
+  const runtime = { getSnapshot: () => ({ data: { control, quotes: {} }, view: {}, busy: {} }), subscribe: () => () => {}, trendContext: () => 'test', getTrend: () => null, updateView() {}, openDetail() {} }
   const html = renderToStaticMarkup(React.createElement(api.FloatingTicker, { runtime }))
   assert.match(html, /行情每 3 秒自动刷新/, '底部取悬浮偏好')
   assert.ok(!html.includes('行情每 60 秒'), '列表间隔不参与')
@@ -80,7 +80,7 @@ test('自选手动顺序改变后，悬浮列表按新顺序显示已选标的',
   api.__store.set('ssb-floating', JSON.stringify({ open: true, mode: 'list', ids: [...order, 'removed'] }))
   const quotes = { [order[1]]: { quote: { changePct: '2' } }, [order[2]]: { quote: { changePct: '1' } } }
   const snapshot = { data: { control: { watchlist: { order: [order[2], order[1], order[0]], items }, preferences: {} }, quotes }, view: { sort: 'desc' } }
-  const runtime = { getSnapshot: () => snapshot, subscribe: () => () => {} }
+  const runtime = { getSnapshot: () => snapshot, subscribe: () => () => {}, trendContext: () => 'test', getTrend: () => null }
   const html = renderToStaticMarkup(React.createElement(api.FloatingTicker, { runtime })).split('</style>').at(-1)
   assert.deepEqual(Array.from(html.matchAll(/class="ssb-float-row-name">([^<]+)/g), match => match[1]), ['上证指数', '万科A', '贵州茅台'])
 })

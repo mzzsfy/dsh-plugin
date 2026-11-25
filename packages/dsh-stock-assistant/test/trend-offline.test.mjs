@@ -25,7 +25,7 @@ function fakeAdapter(clock, state) {
     async quotes(request) {
       return {
         providerInstanceId: 'em-one',
-        items: request.securities.map(s => ({ securityId: s.id, providerInstanceId: 'em-one', code: s.code, market: s.exchange, instrument: 'equity', last: state.price, previousClose: 10, open: 10, high: 10, low: 10, volume: 100, quoteAt: new Date(clock.now).toISOString(), delayKind: 'realtime', delaySeconds: 0 })),
+        items: request.securities.map(s => ({ securityId: s.id, providerInstanceId: 'em-one', code: s.code, market: s.exchange, instrument: 'equity', last: state.price, previousClose: 10, open: 10, high: 10, low: 10, volume: 100, quoteAt: state.noTradeTime ? null : new Date(clock.now).toISOString(), receivedAt: clock.now, timestampKind: 'trade', delayKind: 'realtime', delaySeconds: 0 })),
       }
     },
     async trend() {
@@ -51,8 +51,9 @@ async function setup({ watch = [] } = {}) {
 }
 // 每次调用都跨过一个节拍周期: 闸门等待用的是真实定时器, 假时钟不跟随, 落进拍的后半段会一直等
 const PAST_TICK = 10 * 1000
+const NEXT_TREND_WINDOW = 60 * 1000
 const trendOf = app => app.kline({ securityId: 'XSHG:equity:600519', period: 'trend', limit: 250 })
-const breakDown = (state, clock) => { state.trendFails = true; clock.now += PAST_TICK }
+const breakDown = (state, clock) => { state.trendFails = true; clock.now += NEXT_TREND_WINDOW }
 
 test('有真实分时打底时, 断开后把之后的报价点续在线尾', async () => {
   const { app, clock, state } = await setup({ watch: [MAOTAI] })
@@ -68,6 +69,10 @@ test('有真实分时打底时, 断开后把之后的报价点续在线尾', asy
     breakDown(state, clock)
     const offline = await trendOf(app)
     assert.equal(offline.offline.kind, 'cache')
+    assert.equal(offline.serverEpoch, live.serverEpoch)
+    assert.equal(offline.routingRevision, 0)
+    assert.equal(offline.routeEpoch, 0)
+    assert.equal(offline.sessionDate, '2026-11-16')
     assert.equal(offline.offline.appended, 2, '缓存之后的两拍都补上')
     assert.equal(offline.candles.length, 4, '真实两根 + 补两根')
     assert.deepEqual(offline.candles.slice(-2).map(candle => candle.close), [10.5, 10.8])
@@ -75,6 +80,45 @@ test('有真实分时打底时, 断开后把之后的报价点续在线尾', asy
     for (const candle of offline.candles.slice(-2)) assert.deepEqual([candle.open, candle.high, candle.low], [candle.close, candle.close, candle.close], '拍点只有收盘价, 开高低补成同值才过客户端的 OHLC 校验')
     assert.equal(offline.complete, false, '补过点就不是完整分时')
     assert.equal(offline.preClose, 10, '基线用缓存里的昨收')
+  } finally { await app.close() }
+})
+
+test('失败窗口内继续追加新报价点，不回源也不覆盖真实线', async () => {
+  const { app, clock, state } = await setup({ watch: [MAOTAI] })
+  try {
+    const live = await trendOf(app)
+    clock.now += 12 * 60 * 1000
+    state.price = 10.5
+    await app.refresh()
+    state.trendFails = true
+    clock.now += PAST_TICK
+    const offline = await trendOf(app)
+    assert.equal(offline.offline.appended, 1)
+    // 下一分钟有更新报价，但还没到失败窗口的截止时刻。
+    clock.now += 50 * 1000
+    state.price = 10.8
+    await app.refresh()
+    clock.now += 1000
+    state.trendFails = false
+    const replay = await trendOf(app)
+    assert.equal(replay.offline.appended, 2)
+    assert.deepEqual(replay.candles.slice(0, 2), live.candles)
+    assert.deepEqual(replay.candles.slice(-2).map(candle => candle.close), [10.5, 10.8])
+    assert.equal(replay.sessionDate, live.sessionDate)
+  } finally { await app.close() }
+})
+
+test('没有成交时间的报价不伪造分时补点', async () => {
+  const { app, clock, state } = await setup({ watch: [MAOTAI] })
+  try {
+    const live = await trendOf(app)
+    clock.now += 12 * 60 * 1000
+    state.noTradeTime = true
+    await app.refresh()
+    breakDown(state, clock)
+    const offline = await trendOf(app)
+    assert.equal(offline.offline.appended, 0)
+    assert.deepEqual(offline.candles, live.candles)
   } finally { await app.close() }
 })
 
@@ -146,7 +190,7 @@ test('续过点的线不写回缓存, 下次拿到的还是真实那一份', asy
     // 上游恢复但这次没有数据: 不覆盖缓存。再断开时前两根必须还是真实那两根
     state.trendFails = false
     state.empty = true
-    clock.now += PAST_TICK
+    clock.now += NEXT_TREND_WINDOW
     await trendOf(app)
     breakDown(state, clock)
     const again = await trendOf(app)
@@ -163,7 +207,7 @@ test('恢复到新的真实分时后, 缓存换成新的那一份', async () => 
     assert.equal((await trendOf(app)).offline.kind, 'cache')
     state.trendFails = false
     state.trendAt = TODAY_AT + 60
-    clock.now += PAST_TICK
+    clock.now += NEXT_TREND_WINDOW
     const recovered = await trendOf(app)
     assert.equal(recovered.offline, undefined)
     breakDown(state, clock)

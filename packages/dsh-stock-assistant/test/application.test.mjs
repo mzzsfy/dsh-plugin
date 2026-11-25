@@ -78,7 +78,7 @@ test('保存不做探针闸门: 未验证的目标照样能存, 校验只针对�
 })
 
 test('F02 进入面板时缓存新鲜则跳过重复拉取, 过期才刷新', async () => {
-  let clock = 1_000_000, quoteCalls = 0
+  let clock = Date.parse('2026-11-25T02:00:00Z'), quoteCalls = 0
   const adapter = { descriptor: { adapterId: 'fake', capabilities: ['quotes', 'catalog', 'calendar'], markets: ['XSHG', 'XSHE'], instruments: ['equity'], maxQuoteBatch: 20 },
     async probe(request) { return { status: 'ready', capability: request.capability } },
     async catalog() { return { items: [security], complete: true } },

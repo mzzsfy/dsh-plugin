@@ -19,6 +19,17 @@ test('请求执行器在超时后释放并发槽位，后续请求仍可执行',
   assert.deepEqual((await executor.run(provider('a', 'fake'), 'quotes', {})).items, ['ok'])
   executor.dispose()
 })
+test('分时来源限流不冻结同额度组的报价', async () => {
+  let calls = 0, now = 1000
+  const multi = { ...descriptor, capabilities: ['quotes', 'trend'] }
+  const registry = createRegistry([{ descriptor: multi, probe() {}, async trend(_req, ctx) { await ctx.fetch('http://fixture'); throw new StockError('RATE_LIMIT', 'limited', 429, { retryAfterMs: 60 * 60 * 1000 }) }, async quotes() { calls++; return { items: [] } } }])
+  const executor = createExecutor({ registry, budget: createBudget(() => now), env: { DSH_STOCK_TUSHARE_TOKEN: 'fake' }, now: () => now, fetch: async () => new Response('{}') })
+  await assert.rejects(executor.run(provider('a', 'fake'), 'trend', {}), e => e.code === 'RATE_LIMIT')
+  now += 1000
+  await executor.run(provider('a', 'fake'), 'quotes', {})
+  assert.equal(calls, 1, '分时冷却由分时窗口承接, 不拖住同组报价')
+  executor.dispose()
+})
 test('上游返回429后同额度组后续调用不触达网络', async () => {
   let calls = 0, now = 1000
   const registry = createRegistry([{ descriptor, probe() {}, async quotes(req, ctx) { await ctx.fetch('http://fixture'); throw new StockError('RATE_LIMIT', 'limited', 429, { retryAfterMs: 20000 }) } }])

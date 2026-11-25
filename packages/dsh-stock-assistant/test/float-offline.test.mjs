@@ -8,7 +8,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 // 离线兜底的界面:
 //   Given 分时请求失败但服务端给了当日缓存或报价拍点
 //   When 浮窗图形模式渲染
-//   Then 图上照画, 不显示"无法连接行情来源", 而是说清这条线是什么
+//   Then 保留折线并显示失败原因和缓存时间
 async function loadClient() {
   let plugin
   const source = await readFile(new URL('../src/client.js', import.meta.url), 'utf8')
@@ -32,10 +32,10 @@ test('离线提示说清缓存时刻与续了几个报价点', async () => {
   assert.match(offlineText({ kind: 'cache', cachedAt: Date.parse('2026-11-16T06:20:00Z'), appended: 37 }), /补 37 个报价点/)
 })
 
-test('有离线数据时不显示连接错误, 图照画', async () => {
+test('有离线数据时同时保图并显示连接失败原因', async () => {
   const { FloatChart } = await loadClient()
   const html = renderToStaticMarkup(React.createElement(FloatChart, { securityId: 'XSHG:equity:600519', current, candles, preClose: 10, error: '无法连接行情来源', last: 10.2, pct: 2, offline: { kind: 'cache', cachedAt: Date.parse('2026-11-16T06:20:00Z'), appended: 2 } }))
-  assert.doesNotMatch(html, /无法连接行情来源/, '有兜底数据就不该报连接失败')
+  assert.match(html, /无法连接行情来源/, '有兜底图时仍要提供具体失败原因')
   assert.match(html, /ssb-float-chart/, '图还在')
   assert.match(html, /补 2 个报价点/)
 })

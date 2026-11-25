@@ -378,6 +378,8 @@ test('自选拖动重排同步到悬浮盯盘，不额外请求行情', async ()
     const body = await response.json()
     body.data.control.watchlist = { order, items }
     body.data.control.preferences.floatRefreshSeconds = 30
+    body.data.serverEpoch = 1
+    body.data.routingRevision = 1
     await handler.fulfill({ response, json: body })
   })
   await page.route(`${base}refresh`, handler => {
@@ -386,7 +388,15 @@ test('自选拖动重排同步到悬浮盯盘，不额外请求行情', async ()
   })
   await page.route(`${base}kline?*`, handler => {
     trends.push(new URL(handler.request().url()).searchParams.get('securityId'))
-    return handler.fulfill({ json: { ok: true, data: { candles: [] } } })
+    const candles = Array.from({ length: 241 }, (_, index) => ({
+      at: 1_700_000_000 + index * 60,
+      open: 10 + index / 100,
+      high: 10.02 + index / 100,
+      low: 9.98 + index / 100,
+      close: 10 + index / 100,
+      volume: 100 + index,
+    }))
+    return handler.fulfill({ json: { ok: true, data: { candles, preClose: 10, routeEpoch: 0, serverEpoch: 1, routingRevision: 1 } } })
   })
   await page.route(`${base}watchlist`, handler => {
     const { action, payload, expectedRevision } = handler.request().postDataJSON()
@@ -409,7 +419,46 @@ test('自选拖动重排同步到悬浮盯盘，不额外请求行情', async ()
     await float.getByText('跟随自选页手动排序', { exact: true }).waitFor()
     assert.deepEqual(await float.locator('.ssb-float-picker label').allTextContents(), ['标的2', '标的1', '标的3'])
     await float.getByRole('button', { name: '完成选择' }).click()
-    await Promise.all([page.waitForResponse(`${base}kline?*`), float.getByRole('button', { name: '图', exact: true }).click()])
+    // 列表单选后仍可换选同组另一只，只有再次激活当前行才进入图。
+    const first = float.getByRole('button', { name: /标的1/ })
+    const second = float.getByRole('button', { name: /标的2/ })
+    const listMode = float.getByRole('button', { name: '列表', exact: true })
+    const selectedRow = float.locator('.ssb-float-row-on')
+    await first.click()
+    assert.equal(await listMode.getAttribute('aria-pressed'), 'true')
+    assert.equal(await first.getAttribute('aria-pressed'), 'true')
+    assert.equal(await second.getAttribute('aria-pressed'), 'false')
+    await second.click()
+    assert.equal(await selectedRow.count(), 1)
+    assert.match(await selectedRow.textContent(), /标的2/)
+    assert.equal(await listMode.getAttribute('aria-pressed'), 'true')
+    assert.deepEqual(trends, [], '列表换选不请求分时')
+    await Promise.all([page.waitForResponse(`${base}kline?*`), second.press('Enter')])
+    const spark = float.locator('.ssb-float-spark-wrap')
+    await spark.waitFor()
+    const before = await spark.locator('.ssb-float-line').getAttribute('d')
+    const box = await spark.boundingBox()
+    const plotRatio = 0.7 / (224 / 264)
+    const anchorBefore = Math.round(plotRatio * 240)
+    await page.mouse.move(box.x + box.width * 0.7, box.y + box.height / 2)
+    await page.mouse.wheel(0, -240)
+    await page.waitForTimeout(50)
+    const zoomed = await spark.locator('.ssb-float-line').getAttribute('d')
+    assert.notEqual(zoomed, before, '滚轮要改变时间窗')
+    assert.ok(zoomed.split('L').length < before.split('L').length, '上滚缩小时间窗')
+    const zoomStart = Number(await spark.getAttribute('data-window-start'))
+    const zoomSpan = Number(await spark.getAttribute('data-window-span'))
+    assert.ok(zoomSpan < 241)
+    assert.ok(Math.abs(zoomStart + Math.round(plotRatio * (zoomSpan - 1)) - anchorBefore) <= 1, '缩放锚点停在指针那一分钟')
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(box.x + box.width / 2 + 40, box.y + box.height / 2)
+    await page.mouse.up()
+    await page.waitForTimeout(50)
+    assert.ok(Number(await spark.getAttribute('data-window-start')) < zoomStart, '向右拖动查看更早历史')
+    await spark.dblclick()
+    await page.waitForFunction(() => document.querySelector('.ssb-float-spark-wrap')?.getAttribute('data-window-span') === '241')
+    assert.equal(await spark.locator('.ssb-float-line').getAttribute('d'), before, '双击恢复全天')
     await page.locator(`.ssb-row[data-security-id="${a}"]`).dragTo(page.locator(`.ssb-row[data-security-id="${b}"]`), { targetPosition: { x: 28, y: 5 } })
     await page.locator('.ssb-row').first().filter({ hasText: '标的1' }).waitFor()
     assert.equal(await float.locator('.ssb-float-name').textContent(), '标的2', '重排不切换正在看的分时图')
@@ -457,4 +506,77 @@ test('凭据保存失败时在实例卡内提示', async () => {
     await card.locator('[role="status"]', { hasText: '凭据校验失败' }).waitFor({ state: 'visible' })
     assert.equal(errors.length, 0)
   } finally { await page.unroute(route) }
+})
+
+test('悬浮图 3 秒档继续消费报价，首分钟内不重拉分时', async () => {
+  const tab = await context.newPage()
+  const path = '**/api/stock-assistant/'
+  const id = 'XSHG:equity:600519'
+  const epoch = 'fixture-minute'
+  const start = Date.parse('2026-11-25T01:53:05Z')
+  const quotes = [], trends = [], errors = [], network = []
+  const cdp = await context.newCDPSession(tab)
+  await cdp.send('Network.enable')
+  cdp.on('Network.requestWillBeSent', ({ request }) => {
+    const url = new URL(request.url)
+    if (url.pathname.startsWith('/api/stock-assistant/')) network.push({ path: url.pathname, method: request.method })
+  })
+  const item = { id, exchange: 'XSHG', code: '600519', officialName: '茅台', priceScale: 2, timezone: 'Asia/Shanghai' }
+  const snapshot = { serverEpoch: epoch, snapshotSeq: 1, routingRevision: 1, quotes: {}, control: { revision: 1, watchlist: { order: [id], items: { [id]: item } }, preferences: { refreshSeconds: 15, floatRefreshSeconds: 3 }, routes: [], providers: [] } }
+  const startSeconds = Math.floor(start / 1000)
+  const candle = (offset, time, price) => ({ time, at: startSeconds - offset, open: price, high: price, low: price, close: price })
+  tab.on('pageerror', e => errors.push(e.message))
+  try {
+    await tab.clock.install({ time: start - 1000 })
+    await tab.clock.pauseAt(start)
+    await tab.route(`${path}snapshot`, handler => handler.fulfill({ json: { ok: true, data: snapshot } }))
+    await tab.route(`${path}refresh`, async handler => {
+      const at = await tab.evaluate(() => Date.now())
+      quotes.push({ at, body: handler.request().postDataJSON() })
+      const last = quotes.length === 1 ? '10.30' : '10.40'
+      const quote = { securityId: id, routingRevision: 1, quoteAt: new Date(at).toISOString(), timestampKind: 'trade', receivedAt: at, sessionState: 'trading', last, previousClose: '10.00' }
+      return handler.fulfill({ json: { ok: true, data: { ...snapshot, quotes: { [id]: { health: 'ok', quote } } } } })
+    })
+    await tab.route(`${path}kline?*`, async handler => {
+      trends.push(await tab.evaluate(() => Date.now()))
+      const data = { securityId: id, serverEpoch: epoch, routingRevision: 1, sessionDate: '2026-11-25', preClose: 10, fetchedAt: start, complete: true, candles: [candle(125, '09:51', 10.1), candle(65, '09:52', 10.2)] }
+      return handler.fulfill({ json: { ok: true, data } })
+    })
+    await tab.addInitScript(sid => localStorage.setItem('ssb-floating', JSON.stringify({ open: true, ids: [sid], mode: 'kline', securityId: sid })), id)
+    await tab.goto(page.url())
+    const price = tab.locator('.ssb-float-price')
+    // 首屏先以真分时或报价出图；按时间推进，网络请求用响应屏障，避免虚拟时间和异步 fetch 串拍。
+    await tab.clock.runFor(2000)
+    await price.filter({ hasText: /10\.(20|30)/ }).waitFor({ timeout: 5000 })
+    const curve = tab.locator('.ssb-float-line')
+    await curve.waitFor({ timeout: 5000 })
+    const initialPath = await curve.getAttribute('d')
+    assert.equal(trends.length, 1)
+    // 先显式复位到全天, 再让报价追加第三根: 全天必须保持哨兵, 不能从第一根漂走
+    await tab.locator('.ssb-float-spark-wrap').dblclick()
+    for (let i = 0; i < 3; i++) {
+      const response = tab.waitForResponse(`${path}refresh`, { timeout: 5000 })
+      await tab.clock.runFor(3 * 1000)
+      await response
+    }
+    await price.filter({ hasText: '10.40' }).waitFor({ timeout: 5000 })
+    const quotedPath = await curve.getAttribute('d')
+    assert.equal(quotedPath.match(/L/g)?.length, 2, '两根真实分时加一根报价点，同分钟多次报价不增加点数')
+    assert.notEqual(quotedPath, initialPath, '报价必须实际改变分时折线')
+    const spark = tab.locator('.ssb-float-spark-wrap')
+    assert.equal(await spark.getAttribute('data-window-start'), '0', '全天不能随着新点丢掉第一根')
+    assert.equal(await spark.getAttribute('data-window-span'), '3', '全天窗口覆盖新增的第三根')
+    assert.equal(trends.length, 1, '报价节拍不能触发新分时')
+    assert.ok(quotes.every(({ body }) => body.automatic === true && body.expectedRoutingRevision === 1))
+    const next = tab.waitForResponse(`${path}kline?*`, { timeout: 5000 })
+    await tab.clock.fastForward(trends[0] + 61 * 1000 - await tab.evaluate(() => Date.now()))
+    await next
+    assert.equal(trends.length, 2)
+    assert.ok(trends[1] - trends[0] >= 60 * 1000)
+    assert.equal(network.filter(({ path, method }) => path.endsWith('/kline') && method === 'GET').length, 2)
+    assert.deepEqual(errors, [])
+  } finally {
+    await tab.evaluate(() => localStorage.removeItem('ssb-floating')).catch(() => {})
+    await tab.close()
+  }
 })

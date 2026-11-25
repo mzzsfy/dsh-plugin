@@ -34,21 +34,31 @@ test('P2-51 八市场周末休市且 nextAt 指向下周一开盘, 不再是未�
 })
 
 test('P2-52 各市场本地时段: 港股午休/开盘前/收盘后', () => {
-  assert.deepEqual(marketStateOf('XHKG', at('2026-11-06T04:00:00Z')), { state: 'break', nextAt: at('2026-11-06T05:00:00Z') })
-  assert.deepEqual(marketStateOf('XHKG', at('2026-11-06T00:30:00Z')), { state: 'preopen', nextAt: at('2026-11-06T01:30:00Z') })
+  assert.deepEqual(marketStateOf('XHKG', at('2026-11-06T04:00:00Z')), { state: 'break', nextAt: at('2026-11-06T05:00:00Z'), lastCloseDate: '2026-11-05' })
+  assert.deepEqual(marketStateOf('XHKG', at('2026-11-06T00:30:00Z')), { state: 'preopen', nextAt: at('2026-11-06T01:30:00Z'), lastCloseDate: '2026-11-05' })
   assert.equal(marketStateOf('XHKG', at('2026-11-06T08:30:00Z')).state, 'closed')
+  assert.equal(marketStateOf('XHKG', at('2026-11-06T08:30:00Z')).lastCloseDate, '2026-11-06')
   // 沪深集合竞价沿用原有语义
   assert.equal(marketStateOf('XSHG', at('2026-11-06T01:20:00Z')).state, 'auction')
+})
+
+test('P2-52 最近已收盘交易日: 盘前沿用上一交易日, 收盘后算今天', () => {
+  // 周六中午 -> 周五
+  assert.equal(marketStateOf('XSHG', at('2026-11-07T04:00:00Z')).lastCloseDate, '2026-11-06')
+  // 周一 08:00 盘前 -> 上周五
+  assert.equal(marketStateOf('XSHG', at('2026-11-09T00:00:00Z')).lastCloseDate, '2026-11-06')
+  // 周一 15:30 收盘后 -> 周一
+  assert.equal(marketStateOf('XSHG', at('2026-11-09T07:30:00Z')).lastCloseDate, '2026-11-09')
 })
 
 test('P2-52 交易日历分支按市场时区与 sessions 计算, 不再套 A 股 09:15', () => {
   const days = new Map([['2026-11-06', false], ['2026-11-09', true]])
   // 纽约 2026-11-06 10:00 EST 被日历判为休市 -> 下个交易日 09:30 EST
   const us = marketStateOf('XNAS', at('2026-11-06T15:00:00Z'), days)
-  assert.deepEqual(us, { state: 'closed', nextAt: at('2026-11-09T14:30:00Z') })
+  assert.deepEqual(us, { state: 'closed', nextAt: at('2026-11-09T14:30:00Z'), lastCloseDate: '2026-11-05' })
   // 伦敦日历休市 -> 下个交易日 08:00 GMT
   const london = marketStateOf('XLON', at('2026-11-06T09:00:00Z'), days)
-  assert.deepEqual(london, { state: 'closed', nextAt: at('2026-11-09T08:00:00Z') })
+  assert.deepEqual(london, { state: 'closed', nextAt: at('2026-11-09T08:00:00Z'), lastCloseDate: '2026-11-05' })
 })
 
 test('P2-52 八市场日历分支: 开市可交易, 休市顺延', () => {

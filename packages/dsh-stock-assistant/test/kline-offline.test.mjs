@@ -21,7 +21,7 @@ async function loadClient() {
 
 const item = { id: 'XSHG:equity:600519', exchange: 'XSHG', code: '600519', officialName: '贵州茅台', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false }
 const candle = (at, close) => ({ time: '10:10', at, open: close, close, high: close, low: close, volume: 1 })
-const runtime = { getKlineResult: () => null, loadKline: async () => ({}), oneClickKline() {}, setKlineError() {}, setKlinePeriod() {}, updateView() {} }
+const runtimeOf = trend => ({ getTrend: () => trend, trendContext: () => 'test' })
 
 test('详情页工具栏带离线提示', async () => {
   const { KlineView } = await loadClient()
@@ -30,7 +30,7 @@ test('详情页工具栏带离线提示', async () => {
     klineKey: 'XSHG:equity:600519|trend',
     kline: { candles: [candle(1794792600, 10.1), candle(1794792660, 10.2)], complete: false, offline: { kind: 'cache', cachedAt: Date.parse('2026-11-16T06:20:00Z'), appended: 2 } },
   }
-  const html = renderToStaticMarkup(React.createElement(KlineView, { runtime, state, item }))
+  const html = renderToStaticMarkup(React.createElement(KlineView, { runtime: runtimeOf(state.kline), state, item }))
   assert.match(html, /ssb-kline-meta/, '工具栏元信息在')
   assert.match(html, /离线：当日缓存/, '详情页也要显示离线提示')
   assert.match(html, /补 2 个报价点/)
@@ -39,6 +39,6 @@ test('详情页工具栏带离线提示', async () => {
 test('在线时详情页不显示离线提示', async () => {
   const { KlineView } = await loadClient()
   const state = { view: {}, busy: {}, klinePeriod: 'trend', data: { vendorAvailable: true }, klineKey: 'XSHG:equity:600519|trend', kline: { candles: [candle(1794792600, 10.1), candle(1794792660, 10.2)], complete: true } }
-  const html = renderToStaticMarkup(React.createElement(KlineView, { runtime, state, item }))
+  const html = renderToStaticMarkup(React.createElement(KlineView, { runtime: runtimeOf(state.kline), state, item }))
   assert.doesNotMatch(html, /离线/)
 })

@@ -149,7 +149,7 @@ test('C5 onload 后校验全局, 缺失时失败并可重建', async () => {
 // C5: 只重拉数据不会重建空白图座, 重试必须同时重跑建图 effect
 test('C5 建图失败后的重试会重跑建图 effect', async () => {
   const client = await readFile(new URL('../src/client.js', import.meta.url), 'utf8')
-  assert.match(client, /if \(!chartRef\.current\) setChartAttempt\(n => n \+ 1\)/, '重试按钮要递增建图计数')
+  assert.match(client, /setChartError\(null\); if \(!chartRef\.current\) setChartAttempt\(n => n \+ 1\)/, '重试按钮先清错误, 没有图实例时递增建图计数')
   assert.match(client, /\}, \[chartAttempt\]\)/, '建图 effect 依赖建图计数')
 })
 

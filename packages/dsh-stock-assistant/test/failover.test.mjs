@@ -244,7 +244,7 @@ test('备源也断网时不重复请求同一个来源', async () => {
   const app = await createApplication({ storageDomain: storage, providers: adapters, env: {}, now: () => now })
   try {
     // 连续三轮记满失败, 第四轮起路由器把当前选择定在备源; 备源此刻也断网
-    for (let i = 0; i < 3; i++) { await app.kline({ securityId: 'XHKG:equity:00700', period: 'trend', limit: 250 }).catch(() => {}); now += 1000 }
+    for (let i = 0; i < 3; i++) { await app.kline({ securityId: 'XHKG:equity:00700', period: 'trend', limit: 250 }).catch(() => {}); now += 60 * 1000 }
     const before = calls.tx
     await app.kline({ securityId: 'XHKG:equity:00700', period: 'trend', limit: 250 }).catch(() => {})
     assert.equal(calls.tx - before, 1, '备源在一次请求里只该被调用一次')

@@ -37,6 +37,17 @@ test('多个备用源沿环依次降级, 走到底回到主源', () => {
   assert.equal(router.nextInRing('sh', 'c'), 'a', '最后一格的下一格是主源')
 })
 
+test('nextInRing 可跳过停用或无预算的成员, 都不可用返回 null', () => {
+  const multi = { id: 'sh', capability: 'trend', market: 'XSHG', instrument: 'equity', primaryInstanceId: 'a', fallbackInstanceIds: ['b', 'c', 'd'], failoverMode: 'network' }
+  const cfg = { routes: [multi], providers: [{ id: 'a' }, { id: 'b', enabled: false }, { id: 'c', budget: { requestsPerMinute: null } }, { id: 'd', budget: { requestsPerMinute: 10 } }] }
+  const skip = provider => !provider || provider.enabled === false || provider.budget?.requestsPerMinute === null
+  const router = createRouter(() => cfg)
+  assert.equal(router.nextInRing('sh', 'a', skip), 'd', '跳过停用与无预算成员')
+  assert.equal(router.nextInRing('sh', 'a'), 'b', '不传 skip 仍是环上下一格')
+  const none = { ...multi, fallbackInstanceIds: ['b'] }
+  assert.equal(createRouter(() => ({ routes: [none], providers: cfg.providers })).nextInRing('sh', 'a', skip), null, '只剩不可用成员时没有下一格')
+})
+
 test('刚降级的来源不进回探名单, 冷却过后才点名', () => {
   let now = 0
   const multi = { id: 'sh', capability: 'quotes', market: 'XSHG', instrument: 'equity', primaryInstanceId: 'a', fallbackInstanceIds: ['b', 'c'], failoverMode: 'network' }

@@ -34,6 +34,13 @@ test('数据属于上一交易日就不算当日缓存', async () => {
   assert.equal(await cacheAt(table, MONDAY).get(key), null)
 })
 
+test('上游回传上一交易日结果时保留已有的当日真实分时', async () => {
+  const table = fakeTable(), cache = cacheAt(table, MONDAY)
+  await cache.put(key, { complete: true, candles: candles(MONDAY) })
+  await cache.put(key, { complete: true, candles: candles(MONDAY - 3 * 24 * 60 * 60 * 1000) })
+  assert.deepEqual((await cache.get(key))?.payload.candles, candles(MONDAY))
+})
+
 test('跨日视为没有缓存, 且顺手删掉旧记录', async () => {
   const table = fakeTable(), cache = cacheAt(table, MONDAY)
   await cache.put(key, { complete: true, candles: candles(MONDAY) })
@@ -62,4 +69,38 @@ test('存储层写失败不影响请求', async () => {
   const table = { get: async () => null, put: async () => { throw new Error('disk full') }, delete: async () => {} }
   const cache = cacheAt(table, MONDAY)
   await assert.doesNotReject(cache.put(key, { complete: true, candles: candles(MONDAY) }))
+})
+
+test('缓存不按路由代次拆分，换源后仍能读取当日真实分时', async () => {
+  const table = fakeTable(), cache = cacheAt(table, MONDAY)
+  await cache.put({ ...key, routeKey: '0:trend:0:em' }, { complete: true, candles: candles(MONDAY) })
+  assert.equal((await cache.get({ ...key, routeKey: '0:trend:1:backup' }))?.payload.candles.at(-1).close, 10.1)
+})
+
+test('换源迁移不会覆盖目标键上已有的在飞窗口', async () => {
+  const table = fakeTable(), cache = cacheAt(table, MONDAY)
+  const { promise: holdA, resolve: releaseA } = Promise.withResolvers()
+  const { promise: holdB, resolve: releaseB } = Promise.withResolvers()
+  const { promise: aStarted, resolve: aReady } = Promise.withResolvers()
+  const result = close => ({ complete: true, candles: candles(MONDAY).map(candle => ({ ...candle, close })) })
+  const first = cache.fetch({ ...key, routeKey: 'old' }, undefined, async (signal, moveTo) => { aReady(); await holdA; moveTo({ ...key, routeKey: 'new' }); return result(11) })
+  await aStarted
+  const second = cache.fetch({ ...key, routeKey: 'new' }, undefined, async () => { await holdB; return result(12) })
+  releaseA()
+  await first
+  releaseB()
+  await second
+  assert.equal((await cache.fetch({ ...key, routeKey: 'new' }, undefined, async () => result(13))).candles.at(-1).close, 12)
+})
+
+test('换源迁移也不会覆盖目标键上只有冷却的窗口', async () => {
+  const table = fakeTable(), cache = cacheAt(table, MONDAY)
+  const failed = cache.fetch({ ...key, routeKey: 'new' }, undefined, async () => { throw Object.assign(new Error('断网'), { code: 'NETWORK', status: 503 }) }).catch(error => error)
+  assert.equal((await failed).code, 'NETWORK')
+  const migrated = await cache.fetch({ ...key, routeKey: 'old' }, undefined, async (signal, moveTo) => {
+    moveTo({ ...key, routeKey: 'new' })
+    return { complete: true, candles: candles(MONDAY) }
+  })
+  assert.equal(migrated.candles.at(-1).close, 10.1)
+  await assert.rejects(cache.fetch({ ...key, routeKey: 'new' }), { code: 'NETWORK' })
 })

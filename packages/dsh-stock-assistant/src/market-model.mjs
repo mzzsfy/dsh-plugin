@@ -31,6 +31,26 @@ function zonedParts(timeZone, nowMs) {
 }
 // 市场本地日期: 日历记录、休市判断都按证券所属市场的自然日, 不能统一用北京时间
 export const marketDate = (exchange, nowMs) => MARKET_META[exchange] ? zonedParts(MARKET_META[exchange].timezone, nowMs).date : new Date(nowMs).toISOString().slice(0, 10)
+// 报价时刻是否已过该市场当日收盘: 只有收盘后的成交才算当日收盘价
+export const isAfterMarketClose = (exchange, ms) => {
+  const meta = MARKET_META[exchange]
+  return !!meta?.sessions?.length && zonedParts(meta.timezone, ms).minutes >= toMinutes(meta.sessions.at(-1)[1])
+}
+// 最近一个已收盘交易日的市场本地日期: 闭市报价只有属于这一天(或今天已收盘)才算最新收盘
+function lastCloseDateOf(meta, local, calendarDays) {
+  const close = toMinutes(meta.sessions.at(-1)[1])
+  const declared = calendarDays?.get(local.date)
+  const tradingDay = declared !== false && !(declared === undefined && WEEKEND.has(local.weekday))
+  if (tradingDay && local.minutes >= close) return local.date
+  for (let offset = 1; offset <= 60; offset++) {
+    const date = addDays(local.date, -offset)
+    const open = calendarDays?.get(date)
+    if (open === false) continue
+    if (open === undefined && isWeekend(date)) continue
+    return date
+  }
+  return local.date
+}
 // 某一时区的时钟文本: 分时横轴用来源时区(东财/腾讯统一按北京时间), 与在线返回的 time 同一基准
 export const clockInZone = (timeZone, unixSeconds) => {
   const minutes = zonedParts(timeZone, unixSeconds * 1000).minutes
@@ -90,22 +110,23 @@ export function marketStateOf(exchange, nowMs, calendarDays = null) {
   const meta = MARKET_META[exchange]
   if (!meta?.sessions?.length) return { state: 'unknown' }
   const local = zonedParts(meta.timezone, nowMs)
+  const lastCloseDate = lastCloseDateOf(meta, local, calendarDays)
   const dayOpen = calendarDays?.get(local.date)
-  if (dayOpen === false) return { state: 'closed', nextAt: nextOpenAt(meta, local.date, calendarDays) }
-  if (dayOpen === undefined && WEEKEND.has(local.weekday)) return { state: 'closed', nextAt: nextOpenAt(meta, local.date, calendarDays) }
+  if (dayOpen === false) return { state: 'closed', nextAt: nextOpenAt(meta, local.date, calendarDays), lastCloseDate }
+  if (dayOpen === undefined && WEEKEND.has(local.weekday)) return { state: 'closed', nextAt: nextOpenAt(meta, local.date, calendarDays), lastCloseDate }
   const minutes = local.minutes
   if (meta.auction) {
     const [auctionFrom, auctionTo] = meta.auction.map(toMinutes)
-    if (minutes < auctionFrom) return { state: 'preopen', nextAt: epochOf(meta.timezone, local.date, auctionFrom) }
-    if (minutes < auctionTo) return { state: 'auction' }
+    if (minutes < auctionFrom) return { state: 'preopen', nextAt: epochOf(meta.timezone, local.date, auctionFrom), lastCloseDate }
+    if (minutes < auctionTo) return { state: 'auction', lastCloseDate }
   }
   const bounds = meta.sessions.map(([from, to]) => [toMinutes(from), toMinutes(to)])
-  if (minutes < bounds[0][0]) return { state: 'preopen', nextAt: epochOf(meta.timezone, local.date, bounds[0][0]) }
-  if (bounds.some(([from, to]) => minutes >= from && minutes < to)) return { state: 'trading' }
+  if (minutes < bounds[0][0]) return { state: 'preopen', nextAt: epochOf(meta.timezone, local.date, bounds[0][0]), lastCloseDate }
+  if (bounds.some(([from, to]) => minutes >= from && minutes < to)) return { state: 'trading', lastCloseDate }
   // 午休只存在于两段之间: 只比前一段的收尾会把收盘后也算成午休
   const breakIndex = bounds.findIndex(([, to], index) => index < bounds.length - 1 && minutes >= to && minutes < bounds[index + 1][0])
-  if (breakIndex >= 0) return { state: 'break', nextAt: epochOf(meta.timezone, local.date, bounds[breakIndex + 1][0]) }
-  return { state: 'closed', nextAt: nextOpenAt(meta, local.date, calendarDays) }
+  if (breakIndex >= 0) return { state: 'break', nextAt: epochOf(meta.timezone, local.date, bounds[breakIndex + 1][0]), lastCloseDate }
+  return { state: 'closed', nextAt: nextOpenAt(meta, local.date, calendarDays), lastCloseDate }
 }
 // 兼容旧调用面: 只要阶段
 export function sessionStateOf(exchange, nowMs) {

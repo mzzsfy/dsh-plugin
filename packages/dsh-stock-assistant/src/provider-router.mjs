@@ -44,10 +44,16 @@ export function createRouter(getConfig, now = Date.now, changed = () => {}) {
       return { route, instance, routeEpoch: selected.routeEpoch }
     },
     // 环上的下一格: 降级与同轮补救共用, 走到最后一个时回到主源
-    nextInRing(id, instanceId) {
-      const ring = ringOf(find(id))
+    // skip 用于跳过派不了活的实例(停用或没填预算), 与 recordRound 的挑选口径一致
+    nextInRing(id, instanceId, skip = () => false) {
+      const route = find(id), ring = ringOf(route), config = getConfig()
       const index = ring.indexOf(instanceId)
-      return ring.length < 2 || index === -1 ? null : ring[(index + 1) % ring.length]
+      if (ring.length < 2 || index === -1) return null
+      for (let step = 1; step < ring.length; step++) {
+        const candidate = ring[(index + step) % ring.length]
+        if (!skip(config.providers.find(p => p.id === candidate))) return candidate
+      }
+      return null
     },
     // 可回探的上级: 从主源往下, 跳过还在歇着或退避中的实例
     recoveryCandidates(id) {
