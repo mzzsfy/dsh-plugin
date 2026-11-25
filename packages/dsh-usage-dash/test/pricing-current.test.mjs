@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { CLIENT_BODY, CLIENT_SOURCE } from './client-eval.mjs'
+import { CLIENT_SOURCE } from './client-eval.mjs'
 
 const flush = () => new Promise(resolve => setImmediate(resolve))
 const nodes = node => !node || typeof node !== 'object' ? [] : Array.isArray(node) ? node.flatMap(nodes) : [node, ...(node.children ?? []).flatMap(nodes)]
@@ -99,12 +99,9 @@ function fixture({ observed = [], timeZone, time = new Date(2026, 10, 24, 9, 0).
     return owner
   }
   const openEdit = (owner, model) => {
-    const rulesEl = nodes(owner.tree).find(node => node.type?.name === 'PricingRules')
-    const rendered = mount(rulesEl.type, { ...rulesEl.props, children: rulesEl.children })
-    const row = nodes(rendered.tree).find(node => {
-      const code = nodes(node).find(child => child.props?.className === 'ud-pricing-rule-model')
-      return String(node.props?.className ?? '').includes('ud-pricing-rule') && code && text(code) === model
-    })
+    const rendered = mountView({ mount }, byComponent(owner, 'PricingRules'))
+    const row = nodes(rendered.tree).find(node => node.type === 'article' && nodes(node).some(child =>
+      child.props.className === 'ud-pricing-rule-model' && text(child) === model))
     assert.ok(row, `规则行应存在: ${model}; got ${nodes(rendered.tree).filter(n => n.props?.className === 'ud-pricing-rule-model').map(n => text(n)).join(',')}`)
     const button = nodes(row).find(node => node.type === 'button' && text(node) === '编辑规则')
     assert.ok(button, `规则行应提供编辑规则入口: ${model}`)
@@ -116,9 +113,7 @@ function fixture({ observed = [], timeZone, time = new Date(2026, 10, 24, 9, 0).
   const resolve = (item, value) => item.resolve({ json: async () => ({ ok: true, value }) })
   const resolveError = (item, message) => item.resolve({ json: async () => ({ ok: false, error: { code: 'unavailable', message } }) })
   const save = owner => {
-    const form = nodes(owner.tree).find(node => node.type?.name === 'PricingRuleForm')
-    const tree = form ? form.type(form.props) : owner.tree
-    const button = nodes(tree).find(n => n.type === 'button' && text(n) === '保存')
+    const button = byText(owner, '保存')
     assert.ok(button, '已载入编辑器保存按钮'); return button.props.onClick()
   }
   return { panel, editor, openCreate, openEdit, stats, chip, settle, unmount, requests, gets, saves, resolve, resolveError, save, mount, nodes, text, timers,
@@ -134,9 +129,8 @@ const observedPricingModels = [
 
 const pricingTabs = owner => nodes(owner.tree).filter(node => node.props.role === 'tab')
 const byText = (owner, value) => {
-  const form = nodes(owner.tree).find(node => node.type?.name === 'PricingRuleForm')
-  const tree = form ? form.type(form.props) : owner.tree
-  return nodes(tree).find(node => node.type === 'button' && text(node) === value)
+  const form = byComponent(owner, 'PricingRuleForm')
+  return nodes(form ? expand(form) : owner.tree).find(node => node.type === 'button' && text(node) === value)
 }
 
 test('Given 面板已观察到模型 When 打开定价 Then 模型视图页签默认选中且可用方向键切换', t => withFixture(t, async f => {
@@ -167,6 +161,27 @@ const mountView = (fixture, component) => {
   assert.ok(component, '预期视图已渲染')
   return fixture.mount(component.type, { ...component.props, children: component.children })
 }
+const formTree = editor => expand(byComponent(editor, 'PricingRuleForm'))
+const ruleFields = editor => ({ tree: expand(byComponent({ tree: formTree(editor) }, 'PricingRuleFields')) })
+const conditionFields = editor => ({ tree: expand(byComponent(ruleFields(editor), 'PricingConditions')) })
+const priceGrid = editor => ({ tree: expand(byComponent(ruleFields(editor), 'PricingPriceGrid')) })
+const inputByLabel = (owner, label) => {
+  const field = nodes(owner.tree).find(node => node.type === 'label' && node.children.some(child => text(child) === label))
+  const input = nodes(field).find(node => node.type === 'input')
+  assert.ok(input, `应显示输入字段：${label}`)
+  return input
+}
+const providerPattern = editor => inputByLabel(ruleFields(editor), '平台模式')
+const modelPattern = editor => inputByLabel(ruleFields(editor), '型号模式')
+const priceInput = (editor, label = '输入') => inputByLabel(priceGrid(editor), label)
+const changeInput = (input, value) => {
+  assert.equal(Boolean(input.props.readOnly || input.props.disabled), false, '输入字段应可编辑')
+  input.props.onChange({ target: { value } })
+}
+const enterPattern = async (f, editor, provider, model) => {
+  changeInput(providerPattern(editor), provider); await f.settle()
+  changeInput(modelPattern(editor), model); await f.settle()
+}
 
 test('Given 聚合返回观察行 When 渲染定价折叠区 Then 将完整观察行透传', t => withFixture(t, async f => {
   const panel = f.panel()
@@ -183,15 +198,19 @@ test('Given 已观察组合有分时费率 When 改快照与试探未知型号 T
   const view = () => mountView(f, byComponent(editor, 'PricingModels')).tree
   assert.match(text(view()), /#2 · 输入 ¥5/)
   assert.match(text(view()), /¥6\.00/)
-  nodes(editor.tree).find(node => node.type === 'button' && node.props['aria-label'] === '此刻').props.onClick(); await f.settle()
-  const clock = nodes(editor.tree).find(node => node.props.type === 'datetime-local')
+  nodes(view()).find(node => node.type === 'button' && node.props['aria-controls']?.endsWith('-clock')).props.onClick(); await f.settle()
+  const clock = nodes(view()).find(node => node.props.type === 'datetime-local')
   clock.props.onChange({ target: { value: '2026-11-24T20:00' } }); await f.settle()
   assert.doesNotMatch(text(view()), /#2 · 输入/)
   assert.match(text(view()), /¥2\.00/)
   const search = nodes(view()).find(node => node.props.type === 'search')
   search.props.onChange({ target: { value: 'unknown/model' } }); await f.settle()
-  assert.match(text(view()), /未观察到的型号.*unknown\/model.*#1.*全局默认价/)
-  assert.deepEqual(nodes(view()).filter(node => node.type === 'option').map(node => node.props.value), [])
+  const result = view()
+  const probe = nodes(result).find(node => node.type === 'button' && node.props['data-ud-price-model'] === 'unknown/model')
+  assert.match(text(result), /未观察到的型号/)
+  assert.match(text(probe), /全局默认价/)
+  assert.match(text(probe), /#1 · 输入 ¥1/)
+  assert.deepEqual(nodes(result).filter(node => node.type === 'option').map(node => node.props.value), [])
   search.props.onChange({ target: { value: 'p/m' } }); await f.settle()
   assert.deepEqual(nodes(view()).filter(node => node.props['data-ud-price-model']).map(node => node.props['data-ud-price-model']), ['p/m'])
   assert.ok(nodes(view()).some(node => node.type?.name === 'PricingTree'))
@@ -366,10 +385,11 @@ test('P11 Given another editor has a draft, When save publishes, Then draft stay
   const a = f.editor(), b = f.editor()
   f.gets.forEach(item => f.resolve(item, price(1))); await f.settle()
   f.openEdit(b, '*/*'); await f.settle()
-  const group = () => editorGroups(b)[0]
-  renameGroup(group(), 'draft/model'); await f.settle()
+  changeInput(priceInput(b), '7'); await f.settle()
+  f.openEdit(a, '*/*'); await f.settle()
+  changeInput(priceInput(a), '2'); await f.settle()
   const pending = f.save(a); f.resolve(f.saves[0], price(2)); await pending; await f.settle()
-  assert.equal(group().props.group.model, 'draft/model')
+  assert.equal(priceInput(b).props.value, '7')
 }))
 
 // C2:保存在飞期间同一编辑器继续编辑,服务器返回不能覆盖新输入或冒充已保存
@@ -377,12 +397,14 @@ test('C2 Given save in flight When same editor edits Then server reply does not 
   const editor = f.editor()
   f.gets.forEach(item => f.resolve(item, price(1))); await f.settle()
   f.openEdit(editor, '*/*'); await f.settle()
-  const group = () => editorGroups(editor)[0]
+  changeInput(priceInput(editor), '2'); await f.settle()
   const pending = f.save(editor)
-  renameGroup(group(), 'draft/model'); await f.settle()
+  assert.equal(f.saves[0].body.rules[0].price.input, 2)
+  changeInput(priceInput(editor), '7'); await f.settle()
   f.resolve(f.saves[0], price(2)); await pending; await f.settle()
-  assert.match(text(mountView(f, byComponent(editor, 'PricingRules')).tree), /draft\/model/, '回包不得覆盖在飞改名')
-  assert.doesNotMatch(f.text(editor.tree), /已保存/)
+  assert.doesNotMatch(text(editor.tree), /已保存/)
+  if (!byComponent(editor, 'PricingRuleForm')) f.openEdit(editor, '*/*')
+  assert.equal(priceInput(editor).props.value, '7', '回包不得覆盖在飞改价')
 }))
 
 test('C2b Given save in flight When add a rule Then server reply does not remove it', t => withFixture(t, async f => {
@@ -390,11 +412,10 @@ test('C2b Given save in flight When add a rule Then server reply does not remove
   f.gets.forEach(item => f.resolve(item, price(1))); await f.settle()
   const pending = f.save(editor)
   f.openCreate(editor); await f.settle()
-  const group = () => editorGroups(editor)[0]
-  assert.ok(group(), '在飞新增应打开单规则视图')
+  assert.equal(byComponent(editor, 'PricingRuleForm')?.props.creating, true, '在飞新增应打开单规则表单')
   f.resolve(f.saves[0], price(2)); await pending; await f.settle()
-  assert.ok(group(), '保存回包不得抹掉在飞新增的规则')
-  assert.equal(group().props.group.model, '')
+  assert.equal(byComponent(editor, 'PricingRuleForm')?.props.creating, true, '保存回包不得抹掉在飞新增的规则')
+  assert.equal(modelPattern(editor).props.value, '')
   assert.doesNotMatch(f.text(editor.tree), /已保存/)
 }))
 
@@ -453,8 +474,8 @@ test('Given 浏览器开着定价 When 跨过宿主墙钟分钟边界 Then 此�
   f.resolve(f.gets[0], { revision: 1, rules: [rule(1), conditional] }); await f.settle()
   const view = () => mountView(f, byComponent(editor, 'PricingModels')).tree
   assert.match(text(view()), /#2 · 输入 ¥5/)
-  nodes(editor.tree).find(node => node.type === 'button' && node.props['aria-label'] === '此刻').props.onClick(); await f.settle()
-  const clock = () => nodes(editor.tree).find(node => node.props.type === 'datetime-local')
+  nodes(view()).find(node => node.type === 'button' && node.props['aria-controls']?.endsWith('-clock')).props.onClick(); await f.settle()
+  const clock = () => nodes(view()).find(node => node.props.type === 'datetime-local')
   assert.equal(clock().props.value, '2026-11-24T09:00')
   const next = [...f.timers.values()].find(timer => timer.ms === 1000)
   assert.ok(next, '精确调度到下一分钟')
@@ -470,18 +491,30 @@ test('Given 普通规则 When 将平台填成含斜杠的内容 Then 输入保�
   const exact = { ...rule(3), model: 'p/m' }
   f.resolve(f.gets[0], { revision: 1, rules: [rule(), exact] }); await f.settle()
   f.openEdit(editor, 'p/m'); await f.settle()
-  const fields = () => nodes(expand(groupOf(editor, 'p/m'))).filter(node => node.type === 'input')
-  fields()[0].props.onChange({ target: { value: 'p/x' } }); await f.settle()
-  assert.deepEqual(fields().map(node => node.props.value), ['p/x', 'm'])
-  assert.equal(fields()[0].props['aria-invalid'], true)
-  await f.save(editor); assert.equal(f.saves.length, 0)
-  fields()[1].props.onChange({ target: { value: 'x/m' } }); await f.settle()
-  const corrected = nodes(expand(groupOf(editor, 'p/x/m'))).filter(node => node.type === 'input')
-  assert.deepEqual(corrected.map(node => node.props.value), ['p', 'x/m'])
-  assert.equal(corrected[0].props['aria-invalid'], false)
+  changeInput(providerPattern(editor), 'p/x'); await f.settle()
+  assert.deepEqual([providerPattern(editor).props.value, modelPattern(editor).props.value], ['p/x', 'm'])
+  assert.equal(providerPattern(editor).props['aria-invalid'], true)
+  await f.save(editor); await f.settle()
+  assert.equal(f.saves.length, 0)
+  changeInput(modelPattern(editor), 'x/m'); await f.settle()
+  assert.deepEqual([providerPattern(editor).props.value, modelPattern(editor).props.value], ['p', 'x/m'])
+  assert.equal(providerPattern(editor).props['aria-invalid'], false)
   const pending = f.save(editor)
   const posted = f.saves[0].body.rules
   assert.ok(posted.some(item => item.model === 'p/x/m'))
+  f.resolve(f.saves[0], { revision: 2, rules: posted }); await pending
+}))
+
+test('Given 同型号有两条规则 When 修改一条的型号并保存 Then 另一条保持原型号', t => withFixture(t, async f => {
+  const editor = f.editor()
+  const original = { ...rule(3), model: 'p/m' }
+  const conditional = { ...rule(5), model: 'p/m', conditions: [{ kind: 'weekdays', days: [1] }] }
+  f.resolve(f.gets[0], { revision: 1, rules: [rule(), original, conditional] }); await f.settle()
+  f.openEdit(editor, 'p/m'); await f.settle()
+  changeInput(modelPattern(editor), 'other'); await f.settle()
+  const pending = f.save(editor)
+  const posted = f.saves[0].body.rules
+  assert.deepEqual(posted.map(item => item.model), ['*/*', 'p/other', 'p/m'])
   f.resolve(f.saves[0], { revision: 2, rules: posted }); await pending
 }))
 
@@ -490,13 +523,12 @@ test('Given 规则已有型号 When 新增规则中途输入相同范围与全�
   const exact = { ...rule(3), model: 'p/m' }
   f.resolve(f.gets[0], { revision: 1, rules: [rule(), exact] }); await f.settle()
   f.openCreate(editor); await f.settle()
-  const newGroup = () => editorGroups(editor)[0]
-  renameGroup(newGroup(), 'p/m'); await f.settle()
-  await f.save(editor); assert.equal(f.saves.length, 0, '与已有默认价同范围应拦截')
-  renameGroup(newGroup(), '*/*'); await f.settle()
-  const field = nodes(expand(newGroup())).find(node => node.type === 'input')
-  assert.equal(field.props.readOnly, false)
-  renameGroup(newGroup(), 'p/mo'); await f.settle()
+  await enterPattern(f, editor, 'p', 'm')
+  await f.save(editor); await f.settle()
+  assert.equal(f.saves.length, 0, '与已有默认价同范围应拦截')
+  await enterPattern(f, editor, '*', '*')
+  assert.deepEqual([providerPattern(editor).props.readOnly, modelPattern(editor).props.readOnly], [false, false])
+  await enterPattern(f, editor, 'p', 'mo')
   const pending = f.save(editor)
   assert.ok(f.saves[0].body.rules.some(item => item.model === 'p/mo'))
   f.resolve(f.saves[0], { revision: 2, rules: f.saves[0].body.rules }); await pending
@@ -518,7 +550,7 @@ test('Given 批量加入的型号已改名 When 再批量添加原型号 Then �
   assert.ok(f.saves[0].body.rules.some(item => item.model === 'p/m'))
   f.resolve(f.saves[0], { revision: 2, rules: f.saves[0].body.rules }); await first; await f.settle()
   f.openEdit(editor, 'p/m'); await f.settle()
-  renameGroup(groupOf(editor, 'p/m'), 'p/n'); await f.settle()
+  changeInput(modelPattern(editor), 'n'); await f.settle()
   const second = f.save(editor)
   assert.ok(f.saves[1].body.rules.some(item => item.model === 'p/n'))
   f.resolve(f.saves[1], { revision: 3, rules: f.saves[1].body.rules }); await second; await f.settle()
@@ -536,10 +568,17 @@ test('Given 同型号两条附加规则 When 移除第一条 Then 第二条保�
   const later = { ...rule(3), model: 'p/m', conditions: [{ kind: 'weekdays', days: [2] }] }
   f.resolve(f.gets[0], { revision: 1, rules: [rule(), earlier, later] }); await f.settle()
   f.openEdit(editor, 'p/m'); await f.settle()
-  const remove = byComponent({ tree: formTree(editor) }, 'DeleteArmedButton')
-  remove.props.onConfirm(); await f.settle()
+  const remove = mountView(f, byComponent({ tree: formTree(editor) }, 'DeleteArmedButton'))
+  byText(remove, '删除计费规则').props.onClick(); await f.settle()
+  byText(remove, '确认删除').props.onClick(); await f.settle()
   f.openEdit(editor, 'p/m'); await f.settle()
-  assert.equal(groupOf(editor, 'p/m').props.group.slots[0].rule.price.input, 3)
+  assert.equal(priceInput(editor).props.value, 3)
+  const activeDay = nodes(conditionFields(editor).tree).find(node => node.type === 'button' && node.props['aria-pressed'] === true)
+  assert.equal(text(activeDay), '二')
+  const pending = f.save(editor)
+  const posted = f.saves[0].body.rules
+  assert.deepEqual(posted.filter(item => item.model === 'p/m').map(item => [item.price.input, item.conditions]), [[3, [{ kind: 'weekdays', days: [2] }]]])
+  f.resolve(f.saves[0], { revision: 2, rules: posted }); await pending
 }))
 
 test('Given 月中号段 When 修改数字字段并保存 Then 请求仍使用现有 monthDays 协议和数字端点', t => withFixture(t, async f => {
@@ -547,9 +586,7 @@ test('Given 月中号段 When 修改数字字段并保存 Then 请求仍使用�
   const monthly = { ...rule(3), model: 'p/m', conditions: [{ kind: 'monthDays', from: 1, to: 31 }] }
   f.resolve(f.gets[0], { revision: 1, rules: [rule(), monthly] }); await f.settle()
   f.openEdit(editor, 'p/m'); await f.settle()
-  const card = () => expand(byComponent({ tree: expand(groupOf(editor, 'p/m')) }, 'PricingExtraRuleCard'))
-  nodes(card()).find(node => node.type === 'input' && node.props.max === 31 && node.props.value === 1)
-    .props.onChange({ target: { value: '26' } })
+  changeInput(inputByLabel(conditionFields(editor), '从'), '26')
   await f.settle()
   const pending = f.save(editor)
   const posted = f.saves[0].body.rules
@@ -572,11 +609,7 @@ test('Given 空安装 When 显式填写四个零价 Then 保存真实零价而�
   f.resolve(f.gets[0], { revision: 1, rules: [] }); await f.settle()
   f.openEdit(editor, '*/*'); await f.settle()
   for (const label of ['输入', '输出', '缓存读', '缓存写']) {
-    const grid = expand(byComponent({ tree: expand(groupOf(editor, '*/*')) }, 'PricingPriceGrid'))
-    const field = nodes(grid).find(node => node.type === 'label' && text(node).startsWith(label))
-    assert.ok(field, label)
-    nodes(field).find(node => node.type === 'input').props.onChange({ target: { value: '0' } })
-    await f.settle()
+    changeInput(priceInput(editor, label), '0'); await f.settle()
   }
   const pending = f.save(editor)
   const posted = f.saves[0].body.rules
@@ -629,26 +662,6 @@ test('Given 清空请求失败 When 确认重置 Then 提示错误并留在不�
   assert.match(text(editor.tree), /定价规则不可用/)
 }))
 
-// 组卡 memo 判等:依赖草稿规则对象不可变,逐槽比 rule 引用覆盖字段变化
-const groupPropsEqual = new Function(`${CLIENT_BODY}\nreturn pricingGroupPropsEqual`)()
-
-test('Given 组卡 memo 判等 When 依赖变化 Then 只在必要时重渲染', () => {
-  const rule = { model: 'a/b', price: { input: 1 }, conditions: [] }
-  const base = {
-    currency: '¥', errors: new Map(), t: () => '', actions: {},
-    group: { id: 'g', model: 'a/b', slots: [{ rule, index: 0, id: 's0' }] },
-  }
-  const withGroup = (group) => ({ ...base, group })
-  assert.equal(groupPropsEqual(base, { ...base }), true, '同引用不重渲染')
-  assert.equal(groupPropsEqual(base, { ...base, currency: '$' }), false)
-  assert.equal(groupPropsEqual(base, { ...base, errors: new Map() }), false)
-  assert.equal(groupPropsEqual(base, { ...base, t: () => '' }), false)
-  assert.equal(groupPropsEqual(base, { ...base, actions: {} }), false)
-  assert.equal(groupPropsEqual(base, withGroup({ ...base.group, slots: [{ rule: { ...rule }, index: 0, id: 's0' }] })), false, '规则新对象即内容变化')
-  assert.equal(groupPropsEqual(base, withGroup({ ...base.group, slots: [{ rule, index: 1, id: 's0' }] })), false, '编号位移需重渲染')
-  assert.equal(groupPropsEqual(base, withGroup({ ...base.group, slots: [{ rule, index: 0, id: 's0' }, { rule: { ...rule }, index: 1, id: 's1' }] })), false, '增删槽位')
-})
-
 const EDITOR_RULE = {
   model: 'a/b',
   unit: 'perMillion',
@@ -656,48 +669,36 @@ const EDITOR_RULE = {
   price: { input: 2, output: 0, cacheRead: 0, cacheWrite: 0 },
   conditions: [{ kind: 'weekdays', days: [1] }],
 }
-const editorGroups = editor => {
-  const form = nodes(editor.tree).find(node => node.type?.name === 'PricingRuleForm')
-  const tree = form ? form.type(form.props) : editor.tree
-  return nodes(tree).filter(node => node.type?.name === 'PricingModelGroup')
-}
-const formTree = editor => {
-  const form = nodes(editor.tree).find(node => node.type?.name === 'PricingRuleForm')
-  return form ? form.type(form.props) : editor.tree
-}
-const groupOf = (editor, model) => editorGroups(editor).find(node => node.props.group.model === model)
-const renameGroup = (group, model) => group.props.actions.rename(group.props.group.id, model)
-
 test('P13 Given 无 */* 规则 When 编辑器加载 Then 列表末尾显示合成全局默认价且不可删除', t => withFixture(t, async f => {
   const editor = f.editor()
   f.resolve(f.gets[0], { revision: 1, rules: [EDITOR_RULE] }); await f.settle()
-  assert.match(text(mountView(f, byComponent(editor, 'PricingRules')).tree), /全局默认价/)
+  const list = mountView(f, byComponent(editor, 'PricingRules'))
+  const rows = nodes(list.tree).filter(node => node.type === 'article')
+  assert.match(text(rows.at(-1)), /\*\/\*全局默认价/)
   f.openEdit(editor, '*/*'); await f.settle()
-  const global = groupOf(editor, '*/*')
-  assert.ok(global, '缺少合成 */* 组')
-  assert.equal(global.props.group.slots.length, 1)
-  assert.deepEqual(global.props.group.slots[0].rule.conditions, [])
-  const rendered = global.type(global.props)
-  const patterns = nodes(rendered).filter(node => node.type === 'input' && node.props.value === '*')
-  assert.deepEqual(patterns.map((input) => input.props.readOnly), [true, true])
-  assert.deepEqual(global.props.group.slots[0].rule.price, { input: '', output: '', cacheRead: '', cacheWrite: '' })
-  assert.equal(nodes(rendered).filter(node => node.type?.name === 'DeleteArmedButton').length, 0, '组卡不含删除规则,删除只在表单底部')
+  assert.deepEqual([providerPattern(editor), modelPattern(editor)].map(input => [input.props.value, input.props.readOnly]), [['*', true], ['*', true]])
+  assert.deepEqual(['输入', '输出', '缓存读', '缓存写'].map(label => priceInput(editor, label).props.value), ['', '', '', ''])
+  assert.equal(byComponent(ruleFields(editor), 'PricingConditions'), undefined)
+  const form = { tree: formTree(editor) }
+  assert.ok(byText(form, '保存'), '应在实际编辑表单内检查删除入口')
+  assert.equal(byComponent(form, 'DeleteArmedButton'), undefined, '全局默认价表单不应渲染删除控件')
+  assert.equal(byText(form, '删除计费规则'), undefined)
 }))
 
-test('P14 Given 空表合成 */* 槽未填价 When 保存 Then 发送空表且保存后仍可见', t => withFixture(t, async f => {
+test('P14 Given 空表合成 */* 规则未填价 When 保存 Then 发送空表且保存后仍可见', t => withFixture(t, async f => {
   const editor = f.editor()
   f.resolve(f.gets[0], { revision: 1, rules: [] }); await f.settle()
   const pending = f.save(editor)
   assert.deepEqual(f.saves[0].body.rules, [])
   f.resolve(f.saves[0], { revision: 2, rules: [] }); await pending; await f.settle()
-  assert.match(text(mountView(f, byComponent(editor, 'PricingRules')).tree), /全局默认价/, '保存后合成槽应继续可见')
+  assert.match(text(mountView(f, byComponent(editor, 'PricingRules')).tree), /全局默认价/, '保存后合成规则应继续可见')
 }))
 
-test('P15 Given 无默认价的模型组 When 新增一条无条件规则 Then 该规则成为默认价', t => withFixture(t, async f => {
+test('P15 Given 某型号只有条件规则 When 新增一条无条件规则 Then 该规则成为默认价', t => withFixture(t, async f => {
   const editor = f.editor()
   f.resolve(f.gets[0], { revision: 1, rules: [rule(), EDITOR_RULE] }); await f.settle()
   f.openCreate(editor); await f.settle()
-  renameGroup(editorGroups(editor)[0], 'a/b'); await f.settle()
+  await enterPattern(f, editor, 'a', 'b')
   const pending = f.save(editor)
   assert.ok(f.saves.length, '应发起保存')
   const rules = f.saves[0].body.rules
@@ -707,15 +708,52 @@ test('P15 Given 无默认价的模型组 When 新增一条无条件规则 Then �
   f.resolve(f.saves[0], { revision: 2, rules }); await pending
 }))
 
-test('P16 Given 附加规则仅一条条件 When 渲染 Then 删除条件按钮隐藏', t => withFixture(t, async f => {
+test('Given 新增规则 When 添加条件并保存 Then 发布有条件的规则', t => withFixture(t, async f => {
   const editor = f.editor()
-  f.resolve(f.gets[0], { revision: 1, rules: [EDITOR_RULE] }); await f.settle()
+  f.resolve(f.gets[0], price(1)); await f.settle()
+  f.openCreate(editor); await f.settle()
+  await enterPattern(f, editor, 'p', 'm')
+  const add = byText(conditionFields(editor), '+ 添加条件')
+  assert.ok(add, '新增规则需要提供添加条件入口')
+  add.props.onClick(); await f.settle()
+  const pending = f.save(editor)
+  const posted = f.saves[0].body.rules
+  assert.deepEqual(posted.find(item => item.model === 'p/m').conditions, [{ kind: 'dailyWindow', from: '00:00', to: '23:59' }])
+  f.resolve(f.saves[0], { revision: 2, rules: posted }); await pending
+}))
+
+test('Given 普通存量规则的条件为 null When 打开表单并追加条件 Then 能保存该条件', t => withFixture(t, async f => {
+  const editor = f.editor()
+  f.resolve(f.gets[0], { revision: 1, rules: [rule(), { ...EDITOR_RULE, conditions: null }] }); await f.settle()
   f.openEdit(editor, 'a/b'); await f.settle()
-  const group = groupOf(editor, 'a/b')
-  const rendered = group.type(group.props)
-  const card = nodes(rendered).find(node => node.type?.name === 'PricingExtraRuleCard')
-  assert.ok(card, '组内应有附加规则卡')
-  const cardTree = card.type(card.props)
-  assert.equal(nodes(cardTree).filter(node => node.type === 'button'
-    && node.props['aria-label'] === '删除条件').length, 0)
+  byText(conditionFields(editor), '+ 添加条件').props.onClick(); await f.settle()
+  const pending = f.save(editor)
+  const posted = f.saves[0].body.rules
+  assert.deepEqual(posted.find(item => item.model === 'a/b').conditions, [{ kind: 'dailyWindow', from: '00:00', to: '23:59' }])
+  f.resolve(f.saves[0], { revision: 2, rules: posted }); await pending
+}))
+
+test('Given 同型号已有无条件价 When 移除较前规则的条件 Then 正在编辑的表单显示冲突', t => withFixture(t, async f => {
+  const editor = f.editor()
+  f.resolve(f.gets[0], { revision: 1, rules: [rule(), EDITOR_RULE, { ...EDITOR_RULE, conditions: [] }] }); await f.settle()
+  f.openEdit(editor, 'a/b'); await f.settle()
+  nodes(conditionFields(editor).tree).find(node => node.props['aria-label'] === '删除条件').props.onClick(); await f.settle()
+  await f.save(editor); await f.settle()
+  assert.equal(f.saves.length, 0)
+  assert.match(text(ruleFields(editor).tree), /同一范围只能有一条无条件规则/)
+}))
+
+test('Given 普通规则仅有一个条件 When 删除该条件并保存 Then 发布无条件的规则', t => withFixture(t, async f => {
+  const editor = f.editor()
+  f.resolve(f.gets[0], { revision: 1, rules: [rule(), EDITOR_RULE] }); await f.settle()
+  f.openEdit(editor, 'a/b'); await f.settle()
+  const remove = nodes(conditionFields(editor).tree).find(node => node.type === 'button' && node.props['aria-label'] === '删除条件')
+  assert.ok(remove, '单个条件应可删除')
+  remove.props.onClick(); await f.settle()
+  assert.match(text(conditionFields(editor).tree), /无条件/)
+  assert.ok(byText(conditionFields(editor), '+ 添加条件'))
+  const pending = f.save(editor)
+  const posted = f.saves[0].body.rules
+  assert.deepEqual(posted.find(item => item.model === 'a/b').conditions, [])
+  f.resolve(f.saves[0], { revision: 2, rules: posted }); await pending
 }))
