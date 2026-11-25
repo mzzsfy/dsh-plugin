@@ -121,6 +121,7 @@ const {
   hourSlotLabel,
   minuteSlotLabel,
   usageModelsOf,
+  workspaceUsageRows,
   validatePricingRules,
 } = core
 
@@ -593,6 +594,42 @@ test('usageModelsOf 天视图用预折叠分组,时/分视图折叠点窗口模�
   // 空窗口契约:返回空数组渲染空环(与天视图空数据行为一致),非 null 隐藏
   assert.deepEqual(usageModelsOf('minute', null, { models: [] }), [])
   assert.equal(usageModelsOf('minute', null, null), null)
+})
+
+test('workspaceUsageRows 已删除工作区显示删除标签而不是裸 id', () => {
+  const workspaces = [{ id: 'ws-gone', deleted: true }]
+  const rows = workspaceUsageRows(
+    [{ workspaceId: 'ws-gone', tokens: 10, requests: 1, turns: 0, activeDays: 1, models: [] }],
+    workspaces,
+    '',
+    '未知工作区',
+    '已删除工作区',
+  )
+  assert.equal(rows[0].name, '已删除工作区 ws-gone')
+})
+
+test('workspaceUsageRows 工作区并集、零用量过滤、模型拆分与未知归属', () => {
+  // Given 注册表含零用量工作区、聚合含模型拆分/未知工作区 When 生成行 Then 去掉零用量、按 token 排序、名称与活跃天数取对
+  const workspaces = [
+    { id: 'ws-a', title: 'Alpha', path: '/a' },
+    { id: 'ws-b', path: '/b' },
+    { id: 'ws-zero', title: 'Zero' },
+  ]
+  const byWorkspace = [
+    { workspaceId: 'ws-a', tokens: 100, requests: 3, turns: 1, activeDays: 2, models: [{ model: 'm1', tokens: 80, requests: 2, turns: 1, activeDays: 1 }, { model: 'm2', tokens: 20, requests: 1, turns: 0, activeDays: 1 }] },
+    { workspaceId: 'ws-b', tokens: 40, requests: 1, turns: 0, activeDays: 1, models: [{ model: 'm1', tokens: 40, requests: 1, turns: 0, activeDays: 1 }] },
+    { workspaceId: '(workspace-unknown)', tokens: 10, requests: 1, turns: 0, activeDays: 1, models: [] },
+  ]
+  const all = workspaceUsageRows(byWorkspace, workspaces, '', '未知工作区')
+  assert.deepEqual(all.map((row) => [row.id, row.name, row.tokens]), [
+    ['ws-a', 'Alpha', 100],
+    ['ws-b', '/b', 40],
+    ['(workspace-unknown)', '未知工作区', 10],
+  ])
+  const m1 = workspaceUsageRows(byWorkspace, workspaces, 'm1', '未知工作区')
+  assert.deepEqual(m1.map((row) => [row.id, row.tokens, row.activeDays]), [['ws-a', 80, 1], ['ws-b', 40, 1]])
+  assert.deepEqual(workspaceUsageRows(byWorkspace, workspaces, 'm2', '未知工作区').map((row) => [row.id, row.tokens]), [['ws-a', 20]])
+  assert.deepEqual(workspaceUsageRows([], [], '', '未知工作区'), [])
 })
 
 test('niceTicks 产生 1/2/5 序列且零上限为空', () => {

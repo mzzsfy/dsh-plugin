@@ -526,6 +526,12 @@ test('Given budget 为数组 When POST Then 400', async () => {
   assert.equal(replaced, 0)
 })
 
+test('工作区用量块挂在用量摘要正文内', () => {
+  const body = functionBodyOf(CLIENT_SOURCE, 'HudSummaryBody')
+  assert.match(body, /WorkspaceUsagePanel/, '用量摘要缺少工作区用量块')
+  assert.match(body, /embedded:\s*true/, '工作区用量块必须按嵌入式样式渲染')
+})
+
 test('哨兵关态折叠头也给「已关闭」', () => {
   const body = functionBodyOf(CLIENT_SOURCE, 'SentinelSection')
   // 三张成本卡的折叠头要一致:关着就说关着,不能留空白

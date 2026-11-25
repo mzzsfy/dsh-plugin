@@ -5,7 +5,7 @@
 import schemastery from '@deepseek-ai/schemastery'
 
 import { BUDGET_ACTIONS, DEFAULT_WARN_RATIO, normalizeBudgetConfig } from './budget.js'
-import { UsageCollector } from './collector.js'
+import { UsageCollector, workspaceIdForSession, workspacePathKey } from './collector.js'
 import {
   CYCLE_DEFAULT,
   CYCLE_KINDS,
@@ -138,12 +138,18 @@ export function apply(ctx, config) {
   const collector = new UsageCollector(ctx, store)
   // 工作区归属按会话查宿主注册表;缓存窗口只吸收连续事件查询,成员变化后自动刷新
   const WORKSPACE_CACHE_MS = 5000
-  let workspaceCache = { at: 0, bySession: new Map(), list: [] }
+  let workspaceCache = { at: 0, bySession: new Map(), byPath: new Map(), list: [] }
   const workspaceSnapshot = () => {
     const now = Date.now()
     if (now - workspaceCache.at < WORKSPACE_CACHE_MS) return workspaceCache
     const registry = ctx.get?.('workspaceRegistry')
-    const workspaces = typeof registry?.list === 'function' ? registry.list() : []
+    let workspaces = []
+    try {
+      workspaces = typeof registry?.list === 'function' ? registry.list() : []
+    } catch {
+      // 注册表未就绪/条目损坏时保留上一份 good cache,不让事件监听器一起失败
+      return workspaceCache
+    }
     const list = workspaces.map((workspace) => ({
       id: workspace.id,
       title: workspace.title,
@@ -151,13 +157,26 @@ export function apply(ctx, config) {
       sessionCount: (workspace.sessionIds ?? []).length,
     }))
     const bySession = new Map()
+    const byPath = new Map()
     for (const workspace of workspaces) {
+      byPath.set(workspacePathKey(workspace.path), workspace.id)
       for (const sessionId of workspace.sessionIds ?? []) bySession.set(sessionId, workspace.id)
     }
-    workspaceCache = { at: now, bySession, list }
+    workspaceCache = { at: now, bySession, byPath, list }
     return workspaceCache
   }
-  collector.workspaceOf = (sessionId) => workspaceSnapshot().bySession.get(sessionId) ?? WORKSPACE_UNKNOWN
+  collector.workspaceOf = (sessionId, header, headers) => {
+    const snapshot = workspaceSnapshot()
+    return workspaceIdForSession(sessionId, {
+      bySession: snapshot.bySession,
+      byPath: snapshot.byPath,
+      headerOf: (id) => id === sessionId && header !== undefined
+        ? header
+        : headers?.get(id) ?? ctx.sessions?.get?.(id)?.header,
+    })
+  }
+  // 新会话(含子 agent)创建后立即失效缓存,首批用量不必等 5s 窗口
+  ctx.on?.('session/created', () => { workspaceCache.at = 0 })
 
   // 定价能力门面:规则表落 usage_pricing 域,读同步取域内快照,写串行自增
   // revision;域打开失败时定价读写均返回不可用

@@ -7,6 +7,7 @@ import { Readable } from 'node:stream'
 
 import { MAX_HOUR_SLOTS, MAX_HOUR_SPAN_DAYS, MAX_MINUTE_SPAN_DAYS, MAX_RANGE_SPAN_DAYS, registerUsageRoutes } from '../src/routes.js'
 import { DEFAULT_MINUTE_RETENTION_DAYS, hourKey, minuteKey } from '../src/store.js'
+import { syntheticWorkspaceId } from '../src/workspace-id.js'
 import { CLIENT_BODY } from './client-eval.mjs'
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -80,10 +81,13 @@ function makeWebServer() {
   }
 }
 
-function makeStore({ rows = [], sessionRows = [], fail, failSessionRows, backupAvailable = false } = {}) {
+function makeStore({ rows = [], sessionRows = [], fail, failSessionRows, backupAvailable = false, legacyRows = 0 } = {}) {
   const calls = { rangeRows: 0, sessionRangeRows: [] }
   return {
     calls,
+    dataStatus() {
+      return { legacyRows }
+    },
     backupInfo() {
       return { available: backupAvailable }
     },
@@ -452,6 +456,14 @@ test('range 合法请求回 UsageStatsRange 信封', async () => {
     { from: parsed.value.from, to: parsed.value.to, tokens: parsed.value.tokens, daily: parsed.value.daily.map((slot) => slot.day) },
     { from: '2026-02-01', to: '2026-02-02', tokens: 8, daily: ['2026-02-01', '2026-02-02'] },
   )
+  assert.deepEqual(parsed.value.byWorkspace, [{
+    workspaceId: '(workspace-unknown)',
+    tokens: 8,
+    requests: 1,
+    turns: 0,
+    activeDays: 2,
+    models: [{ model: 'deepseek-chat', tokens: 8, requests: 1, turns: 0, activeDays: 2 }],
+  }])
   assert.equal(store.calls.rangeRows, 1)
 })
 
@@ -486,6 +498,31 @@ test('workspaces 返回宿主工作区列表', async () => {
   assert.deepEqual(parsed.value.workspaces, workspaces)
 })
 
+test('workspaces 追加主会话过门槛的合成目录与已删除工作区', async () => {
+  const synthetic = syntheticWorkspaceId('/work/repo')
+  const small = syntheticWorkspaceId('/work/small')
+  const store = {
+    async sessionWorkspaceCounts() {
+      return new Map([[synthetic, 4], [small, 3], ['ws-deleted', 1]])
+    },
+    async workspaceIds() {
+      return [synthetic, small, 'ws-deleted', 'ws-a', '(workspace-unknown)']
+    },
+  }
+  const { routes } = mount({
+    store,
+    workspaces: () => [{ id: 'ws-a', title: 'Alpha', path: '/a', sessionCount: 1 }],
+  })
+  const res = await invoke(routes, PATH_WORKSPACES, { method: 'GET' })
+  const list = JSON.parse(res.body).value.workspaces
+  assert.deepEqual(list.map((item) => [item.id, item.synthetic === true, item.deleted === true]), [
+    ['ws-a', false, false],
+    [synthetic, true, false],
+    ['ws-deleted', false, true],
+  ])
+  assert.equal(list[1].title, 'repo')
+})
+
 test('status 回采集快照并附带回退点元信息与宿主时区', async () => {
   const collector = makeCollector({
     stateOverrides: { running: true, total: 5, done: 2, scannedSessions: 7, lastSessionId: 's1', error: 'boom', recordFailures: 1 },
@@ -496,7 +533,18 @@ test('status 回采集快照并附带回退点元信息与宿主时区', async (
   assert.equal(res.statusCode, 200)
   assert.equal(parsed.ok, true)
   // 面板用该 IANA 时区生成日/时/分范围,与宿主桶键日历对齐
-  assert.deepEqual(parsed.value, { ...collector.status(), backup: { available: false }, timeZone: 'UTC' })
+  assert.deepEqual(parsed.value, {
+    ...collector.status(), backup: { available: false }, legacyRows: 0, needsRebuild: false, timeZone: 'UTC',
+  })
+})
+
+test('status 发现旧版行键时提示重建', async () => {
+  const { routes } = mount({ store: makeStore({ legacyRows: 3 }) })
+  const res = await invokeJson(routes, PATH_STATUS)
+  const parsed = JSON.parse(res.body)
+  assert.equal(res.statusCode, 200)
+  assert.equal(parsed.value.legacyRows, 3)
+  assert.equal(parsed.value.needsRebuild, true)
 })
 
 test('minutes 超出保留窗口标注 coveredFrom/coveredTo', async () => {

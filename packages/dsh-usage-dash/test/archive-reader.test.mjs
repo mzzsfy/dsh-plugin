@@ -59,8 +59,8 @@ test('handle 代:list 归一 snapshot 为 {id,derived},signal 包裹透传,畸�
     const signal = new AbortController().signal
     const reader = createArchiveReader(persistence)
     assert.deepEqual(await reader.list(signal), [
-      { id: 'a', derived: false },
-      { id: 'child', derived: true },
+      { id: 'a', header: { id: 'a' }, derived: false },
+      { id: 'child', header: { id: 'child', origin: 'subagent', delegationDepth: 1 }, derived: true },
     ])
     assert.deepEqual(seen, [{ signal }])
   })
@@ -198,7 +198,7 @@ test('handle 代:read 成功后 close 失败被吞掉,读取结果照常返回',
   const reader = createArchiveReader(persistence)
   const result = await reader.readLog('s1')
   assert.equal(closed, 1)
-  assert.deepEqual(result, { inheritedEventCount: 0, events, derived: false })
+  assert.deepEqual(result, { header: undefined, inheritedEventCount: 0, events, derived: false })
 })
 
 test('handle 代:abort 中断分页循环,当前页已读数据保留', async () => {
@@ -254,9 +254,9 @@ test('inspect 代:list 归一 header 数组为 {id,derived},signal 直传,畸形
     const signal = new AbortController().signal
     const reader = createArchiveReader(persistence)
     assert.deepEqual(await reader.list(signal), [
-      { id: 'a', derived: false },
-      { id: 'child', derived: false },
-      { id: 'grandchild', derived: true },
+      { id: 'a', header: { id: 'a', createdAt: 1 }, derived: false },
+      { id: 'child', header: { id: 'child', parentSession: 'a', delegationDepth: 0 }, derived: false },
+      { id: 'grandchild', header: { id: 'grandchild', parentSession: 'child', delegationDepth: 1 }, derived: true },
     ])
     assert.deepEqual(seen, [signal])
   })
@@ -275,7 +275,7 @@ test('inspect 代:readLog 经 inspect 整读,signal 直传,meta 透出派生标�
   const reader = createArchiveReader(persistence)
   assert.deepEqual(
     await reader.readLog('s1', signal),
-    { inheritedEventCount: 2, events, derived: true },
+    { header: { id: 's1', origin: 'subagent' }, inheritedEventCount: 2, events, derived: true },
   )
   assert.deepEqual(seen, [['s1', signal]])
 })

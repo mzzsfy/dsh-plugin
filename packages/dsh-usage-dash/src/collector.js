@@ -8,8 +8,62 @@
 import { createArchiveReader } from './archive-reader.js'
 import { isDerivedSessionHeader } from './session-kind.js'
 import { WORKSPACE_UNKNOWN } from './store.js'
+import {
+  isSyntheticWorkspaceId,
+  syntheticWorkspaceId,
+  syntheticWorkspacePath,
+  syntheticWorkspaceTitle,
+  workspacePathKey,
+} from './workspace-id.js'
+
+export {
+  isSyntheticWorkspaceId,
+  syntheticWorkspaceId,
+  syntheticWorkspacePath,
+  syntheticWorkspaceTitle,
+  workspacePathKey,
+}
 
 const UNKNOWN_SESSION_ID = '(unknown-session)'
+
+// 路径归属:先精确命中;未命中时取最长的已注册父目录,避免 /repo 吞掉
+// /repo-other,也避免外层工作区抢走嵌套工作区。路径键已统一分隔符与大小写。
+export function workspaceIdForPath(cwd, byPath) {
+  const key = workspacePathKey(cwd)
+  if (key === '') return undefined
+  let matched
+  let matchedLength = -1
+  for (const [base, workspaceId] of byPath ?? []) {
+    if (base === '' || base.length <= matchedLength) continue
+    if (key === base || key.startsWith(`${base}/`)) {
+      matched = workspaceId
+      matchedLength = base.length
+    }
+  }
+  return matched
+}
+
+// 工作区归属:优先用会话自身的注册结果;宿主不再枚举的旧档/孤儿会话虽不在
+// sessionIds 里,header.cwd 仍能命中已注册工作区本身或其父目录,按路径兜底。
+// 仍未命中的主会话按目录生成只读统计分组,派生会话不能单独建组,继续沿
+// parentSession 回溯,覆盖子 agent 注册缓存尚未收录的首批用量。
+export function workspaceIdForSession(sessionId, { bySession, headerOf, byPath } = {}) {
+  const visited = new Set()
+  let current = sessionId
+  while (typeof current === 'string' && current !== '' && !visited.has(current)) {
+    visited.add(current)
+    const direct = bySession?.get?.(current)
+    if (direct !== undefined) return direct
+    const header = headerOf?.(current)
+    const byCwd = workspaceIdForPath(header?.cwd, byPath)
+    if (byCwd !== undefined) return byCwd
+    if (!isDerivedSessionHeader(header)) return syntheticWorkspaceId(header?.cwd) ?? WORKSPACE_UNKNOWN
+    if (header.parentSession === undefined) break
+    current = header.parentSession
+  }
+  return WORKSPACE_UNKNOWN
+}
+
 const SEQ_UNKNOWN = -1
 const DEFAULT_BACKFILL_CONCURRENCY = 4
 const MARK_BATCH = 32
@@ -409,7 +463,7 @@ export class UsageCollector {
       if (!sample) return
       // turn 标记落合成行不归因;其余样本先取本调用 source,再取会话路由
       if (!sample.turn) sample.model = fromSource ?? this.routeFor(sid)
-      const workspaceId = this.workspaceOf(sid)
+      const workspaceId = this.workspaceOf(sid, session?.header)
       void this.store.record(sample, { live: true, workspaceId }).catch((error) => {
         this.pushLog('record', error?.message ?? String(error))
       })
@@ -555,6 +609,9 @@ export class UsageCollector {
         this.#state.error = error instanceof Error ? error.message : String(error)
         throw error
       })
+      const headersById = new Map(
+        headers.filter((item) => item.header !== undefined).map((item) => [item.id, item.header]),
+      )
       const seen = await this.store.seenSessions()
       const liveSeq = await this.store.liveSequences()
       const targets = headers.filter((header) => !seen.has(header.id))
@@ -599,10 +656,11 @@ export class UsageCollector {
           }
           // 每会话全新 fold:(turn,step) 键按会话隔离,并发重放不共享
           const fold = new UsageFold()
-          const workspaceId = this.workspaceOf(header.id)
           let route = ''
           try {
             const inspection = await reader.readLog(header.id, signal)
+            // 列表透出的 header 覆盖历史多级子会话,readLog.header 优先校正当前会话
+            const workspaceId = this.workspaceOf(header.id, inspection.header ?? headersById.get(header.id), headersById)
             // 回扫已成功读完第一个会话:半写孤儿行可以安全清理,随后按本轮结果重建
             if (!orphanResetDone) {
               await this.store.clearOrphanRows()
@@ -670,6 +728,9 @@ export class UsageCollector {
     this.#state.error = undefined
     try {
       const headers = await reader.list(signal)
+      const headersById = new Map(
+        headers.filter((item) => item.header !== undefined).map((item) => [item.id, item.header]),
+      )
       // 宿主已标注派生的会话直接跳过,不必读日志
       const targets = headers.filter((header) => header.derived !== true)
       this.#state.total = headers.length
@@ -688,7 +749,7 @@ export class UsageCollector {
             if (inspection.derived !== true) {
               const fold = new UsageFold()
               const inheritedCut = inspection.inheritedEventCount
-              const workspaceId = this.workspaceOf(target.id)
+              const workspaceId = this.workspaceOf(target.id, inspection.header ?? headersById.get(target.id), headersById)
               let sinceYield = 0
               for (const event of inspection.events) {
                 if (signal?.aborted) return

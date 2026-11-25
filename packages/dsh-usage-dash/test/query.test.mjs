@@ -9,6 +9,7 @@ import {
   aggregateRange,
   attachCosts,
 } from '../src/query.js'
+import { syntheticWorkspaceId } from '../src/workspace-id.js'
 
 const makeRow = (overrides = {}) => ({
   bucket: '2020-01-01',
@@ -155,6 +156,74 @@ test('D 粒度聚合总量排序与占比正确', () => {
     },
   ])
   assert.equal('truncated' in out, false)
+})
+
+test('D 聚合附带工作区用量与模型拆分', () => {
+  const rows = [
+    makeRow({ workspaceId: 'ws-a', model: 'm1', inputTokens: 100, requests: 2, turns: 1, bucket: '2020-01-01' }),
+    makeRow({ workspaceId: 'ws-a', model: 'm2', outputTokens: 50, requests: 1, bucket: '2020-01-02' }),
+    makeRow({ workspaceId: 'ws-b', model: 'm1', inputTokens: 10, requests: 1, bucket: '2020-01-01' }),
+    makeRow({ workspaceId: 'ws-b', model: '(turns)', turns: 2, requests: 0, bucket: '2020-01-01' }),
+  ]
+  const out = aggregateRange(rows, 'D', '2020-01-01', '2020-01-02')
+  assert.deepEqual(out.byWorkspace, [
+    {
+      workspaceId: 'ws-a',
+      tokens: 150,
+      requests: 3,
+      turns: 1,
+      activeDays: 2,
+      models: [
+        { model: 'm1', tokens: 100, requests: 2, turns: 1, activeDays: 1 },
+        { model: 'm2', tokens: 50, requests: 1, turns: 0, activeDays: 1 },
+      ],
+    },
+    {
+      workspaceId: 'ws-b',
+      tokens: 10,
+      requests: 1,
+      turns: 2,
+      activeDays: 1,
+      models: [{ model: 'm1', tokens: 10, requests: 1, turns: 0, activeDays: 1 }],
+    },
+  ])
+})
+
+test('合成目录只有主会话数大于 3 才单独成组,否则并回未知', () => {
+  const id = syntheticWorkspaceId('/work/repo')
+  const rows = [makeRow({ workspaceId: id, model: 'm1', inputTokens: 10, requests: 1 })]
+  const sessions = (count) => [{ workspaceId: id, sessions: Array.from({ length: count }, (_, i) => `s${i}`) }]
+  const enough = aggregateRange(rows, 'D', '2020-01-01', '2020-01-01', sessions(4))
+  assert.deepEqual(enough.byWorkspace.map((item) => [item.workspaceId, item.tokens]), [[id, 10]])
+  const tooFew = aggregateRange(rows, 'D', '2020-01-01', '2020-01-01', sessions(3))
+  assert.deepEqual(tooFew.byWorkspace.map((item) => [item.workspaceId, item.tokens]), [['(workspace-unknown)', 10]])
+})
+
+test('工作区聚合把缺失/空归属归一为未知,并保留 turn-only 工作区', () => {
+  const rows = [
+    makeRow({ model: 'm1', inputTokens: 5, requests: 1 }),
+    makeRow({ workspaceId: '', model: 'm1', inputTokens: 5, requests: 1 }),
+    makeRow({ workspaceId: 'ws-turn', model: '(turns)', turns: 2 }),
+  ]
+  const out = aggregateRange(rows, 'D', '2020-01-01', '2020-01-01')
+  assert.deepEqual(out.byWorkspace, [
+    {
+      workspaceId: '(workspace-unknown)',
+      tokens: 10,
+      requests: 2,
+      turns: 0,
+      activeDays: 1,
+      models: [{ model: 'm1', tokens: 10, requests: 2, turns: 0, activeDays: 1 }],
+    },
+    {
+      workspaceId: 'ws-turn',
+      tokens: 0,
+      requests: 0,
+      turns: 2,
+      activeDays: 0,
+      models: [],
+    },
+  ])
 })
 
 test('H 粒度零值槽全枚举含无数据槽', () => {

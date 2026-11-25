@@ -5,7 +5,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { UsageCollector } from '../src/collector.js'
+import { UsageCollector, isSyntheticWorkspaceId, workspaceIdForPath, workspaceIdForSession, workspacePathKey } from '../src/collector.js'
 import { modelUsageProjectionDefinition } from '../src/session-models.js'
 
 const local = (y, mo, d, h = 0, mi = 0) => new Date(y, mo - 1, d, h, mi).getTime()
@@ -32,6 +32,7 @@ const tick = () => new Promise((resolve) => setImmediate(resolve))
 function fakeStore({ failRecord = false, failMarkLive = false, hasBuckets = false, hasSessions = false, orphanResetPending = false } = {}) {
   const samples = []
   const liveSamples = []
+  const workspaceIds = []
   const sessionIndex = []
   const liveSessionIndex = []
   const state = { backfilledSessions: new Set(), liveFirstSeq: new Map(), hasBuckets, hasSessions, orphanResetPending }
@@ -39,6 +40,7 @@ function fakeStore({ failRecord = false, failMarkLive = false, hasBuckets = fals
   return {
     samples,
     liveSamples,
+    workspaceIds,
     sessionIndex,
     liveSessionIndex,
     state,
@@ -60,6 +62,7 @@ function fakeStore({ failRecord = false, failMarkLive = false, hasBuckets = fals
     async record(sample, options = {}) {
       if (failRecord) throw new Error('simulated record failure')
       samples.push(sample)
+      workspaceIds.push(options.workspaceId)
       if (options.live === true) liveSamples.push(sample)
     },
     async recordSession(id, time, options = {}) {
@@ -111,19 +114,28 @@ function fakeSessions(handles = []) {
 }
 
 // definitions: [{ id, events?, inheritedEventCount?, fail?, header?, derived? }]
-// 内部统一契约形状(list → [{id, derived?}],readLog → {inheritedEventCount, events, derived}),
+// 内部统一契约形状(list → [{id, header?, derived?}],readLog → {header?, inheritedEventCount, events, derived}),
 // 宿主 persistence 的多版本映射由 archive-reader 测试单独覆盖
 function fakePersistence(definitions = []) {
   const byId = new Map(definitions.map((def) => [def.id, def]))
   return {
     async list() {
-      return definitions.map((def) => (def.derived === undefined ? { id: def.id } : { id: def.id, derived: def.derived }))
+      return definitions.map((def) => ({
+        id: def.id,
+        header: def.header,
+        ...(def.derived === undefined ? {} : { derived: def.derived }),
+      }))
     },
     async readLog(id) {
       const def = byId.get(id)
       if (!def) throw new Error(`session "${id}" not found`)
       if (def.fail) throw new Error(def.fail)
-      return { inheritedEventCount: def.inheritedEventCount ?? 0, events: def.events ?? [], derived: def.derived ?? false }
+      return {
+        header: def.header,
+        inheritedEventCount: def.inheritedEventCount ?? 0,
+        events: def.events ?? [],
+        derived: def.derived ?? false,
+      }
     },
   }
 }
@@ -1402,6 +1414,109 @@ test('status() 返回快照,外部修改不影响内部状态', async () => {
 
 // ── 会话索引:真实会话写索引,派生会话只计用量不计会话数 ──────────────────────
 const derivedSession = (id) => ({ id, header: { id, origin: 'subagent', delegationDepth: 1 } })
+
+test('子会话注册缓存未命中:沿父会话归属工作区,普通分支不误继承', () => {
+  const headers = new Map([
+    ['root', { id: 'root' }],
+    ['child', { id: 'child', origin: 'subagent', parentSession: 'root', delegationDepth: 1 }],
+    ['grandchild', { id: 'grandchild', origin: 'subagent', parentSession: 'child', delegationDepth: 2 }],
+    ['fork', { id: 'fork', parentSession: 'root', delegationDepth: 0 }],
+    ['direct', { id: 'direct', origin: 'subagent', parentSession: 'root', delegationDepth: 1 }],
+    ['cycle-a', { id: 'cycle-a', origin: 'subagent', parentSession: 'cycle-b', delegationDepth: 1 }],
+    ['cycle-b', { id: 'cycle-b', origin: 'subagent', parentSession: 'cycle-a', delegationDepth: 1 }],
+  ])
+  const bySession = new Map([['root', 'ws-root'], ['direct', 'ws-direct']])
+  const resolve = (id) => workspaceIdForSession(id, { bySession, headerOf: (key) => headers.get(key) })
+  assert.equal(resolve('child'), 'ws-root')
+  assert.equal(resolve('grandchild'), 'ws-root')
+  assert.equal(resolve('direct'), 'ws-direct')
+  assert.equal(resolve('fork'), '(workspace-unknown)')
+  assert.equal(resolve('orphan'), '(workspace-unknown)')
+  assert.equal(resolve('cycle-a'), '(workspace-unknown)')
+})
+
+test('宿主未枚举的旧会话按 header.cwd 命中已注册工作区', () => {
+  const headers = new Map([
+    ['orphan', { id: 'orphan', cwd: '/work/repo/' }],
+    ['nested', { id: 'nested', cwd: '/work/repo/packages/app' }],
+    ['sibling', { id: 'sibling', cwd: '/work/repo-other' }],
+    ['member', { id: 'member', cwd: '/work/other' }],
+  ])
+  const bySession = new Map([['member', 'ws-member']])
+  const byPath = new Map([[workspacePathKey('/work/repo'), 'ws-repo'], [workspacePathKey('/work/other'), 'ws-other']])
+  const resolve = (id) => workspaceIdForSession(id, { bySession, byPath, headerOf: (key) => headers.get(key) })
+  assert.equal(resolve('orphan'), 'ws-repo')
+  assert.equal(resolve('nested'), 'ws-repo', '子目录归入父工作区')
+  assert.ok(isSyntheticWorkspaceId(resolve('sibling')), '同名前缀不能误归，未注册目录用合成分组')
+  assert.equal(resolve('member'), 'ws-member', '注册成员优先于路径兜底')
+})
+
+test('父子工作区嵌套时取最长路径', () => {
+  const byPath = new Map([
+    [workspacePathKey('/work/repo'), 'ws-parent'],
+    [workspacePathKey('/work/repo/pkg'), 'ws-child'],
+  ])
+  assert.equal(workspaceIdForPath('/work/repo/pkg/src', byPath), 'ws-child')
+  assert.equal(workspaceIdForPath('/work/repo/other', byPath), 'ws-parent')
+  assert.equal(workspaceIdForPath('/work/repo', byPath), 'ws-parent')
+})
+
+test('回扫/重建子会话用量:readLog 的 header 沿 parentSession 归入父工作区', async () => {
+  const t = local(2026, 8, 2, 14, 0)
+  const persistence = fakePersistence([{
+    id: 'child',
+    derived: true,
+    header: { id: 'child', origin: 'subagent', parentSession: 'root', delegationDepth: 1 },
+    events: [ev('assistant/message', 0, t, { turn: 0, step: 0, usage: usage(), message: {} })],
+  }])
+  const store = fakeStore()
+  const collector = new UsageCollector(fakeCtx({ persistence }), store)
+  collector.workspaceOf = (id, header) => workspaceIdForSession(id, {
+    bySession: new Map([['root', 'ws-root']]),
+    headerOf: () => header,
+  })
+  await collector.backfill(persistence, fakeSessions())
+  assert.deepEqual(store.workspaceIds, ['ws-root'])
+  assert.deepEqual(store.sessionIndex, [])
+})
+
+test('回扫/重建多级历史子会话:经列表 header 逐级回溯到根工作区', async () => {
+  const t = local(2026, 8, 2, 14, 0)
+  const persistence = fakePersistence([
+    { id: 'root', header: { id: 'root' } },
+    { id: 'child', derived: true, header: { id: 'child', origin: 'subagent', parentSession: 'root', delegationDepth: 1 } },
+    {
+      id: 'grandchild',
+      derived: true,
+      header: { id: 'grandchild', origin: 'subagent', parentSession: 'child', delegationDepth: 2 },
+      events: [ev('assistant/message', 1, t, { turn: 0, step: 0, usage: usage(), message: {} })],
+    },
+  ])
+  const store = fakeStore()
+  const collector = new UsageCollector(fakeCtx({ persistence }), store)
+  collector.workspaceOf = (id, header, headers) => workspaceIdForSession(id, {
+    bySession: new Map([['root', 'ws-root']]),
+    headerOf: (current) => current === id && header !== undefined ? header : headers?.get(current),
+  })
+  await collector.backfill(persistence, fakeSessions())
+  assert.deepEqual(store.workspaceIds, ['ws-root'])
+})
+
+test('实时子会话用量在注册缓存未命中时仍写入父会话工作区', async () => {
+  const headers = new Map([
+    ['root', { id: 'root' }],
+    ['child', { id: 'child', origin: 'subagent', parentSession: 'root', delegationDepth: 1 }],
+  ])
+  const { ctx, store, collector } = liveCollector()
+  collector.workspaceOf = (id) => workspaceIdForSession(id, {
+    bySession: new Map([['root', 'ws-root']]),
+    headerOf: (key) => headers.get(key),
+  })
+  ctx.emit('session/event', derivedSession('child'), ev('turn/end', 0, local(2026, 8, 2, 14, 37)))
+  await tick()
+  assert.deepEqual(store.workspaceIds, ['ws-root'])
+  assert.deepEqual(store.sessionIndex, [], '子会话仍不计入会话数量')
+})
 
 test('实时:真实会话样本同时写会话索引', async () => {
   const { ctx, store } = liveCollector()

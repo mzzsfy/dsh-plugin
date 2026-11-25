@@ -238,6 +238,21 @@ function sessionKey(g, workspaceId, bucket) {
 
 const normalizeWorkspaceId = (value) => typeof value === 'string' && value !== '' ? value : WORKSPACE_UNKNOWN
 
+// 旧版行键没有工作区段,第二段直接是桶串;新版第二段是工作区 id。
+// 只认这种结构差异,避免把当前版本里正常的 (workspace-unknown) 行误判为旧数据。
+const LEGACY_BUCKET_SEGMENT = /^\d{4}-\d{2}-\d{2}/
+function isLegacyRowKey(key) {
+  const segments = key.split('|')
+  return segments.length > 1 && LEGACY_BUCKET_SEGMENT.test(segments[1])
+}
+
+function countLegacyRows(table) {
+  if (!table) return 0
+  let count = 0
+  for (const key of table.keys()) if (isLegacyRowKey(key)) count += 1
+  return count
+}
+
 function emptyRow(bucket, workspaceId, provider, model, nowMs) {
   return {
     bucket,
@@ -328,6 +343,8 @@ export class UsageStore {
     // 游标空而已有行:启动时只标记,待本轮回扫成功读完任一会话后再清,
     // 防宿主全面拒读时每次启动清空历史(清库不再假定回扫必然可重建)
     this.orphanResetPending = false
+    // 旧版行键没有工作区段,按工作区过滤会整体漏掉;启动时记录,重建后归零
+    this.legacyRows = 0
     this.lastPruneDay = ''
     this.markChain = Promise.resolve()
     this.pending = new Map()
@@ -351,6 +368,7 @@ export class UsageStore {
     this.domain = domain
     this.table = domain.table(TABLE_BUCKETS)
     this.sessionTable = domain.table(TABLE_SESSIONS)
+    this.legacyRows = countLegacyRows(this.table) + countLegacyRows(this.sessionTable)
     // 游标空而已有行:无法区分半写坏态,标记待清理;由采集器确认回扫能读出
     // 至少一个会话后调用 clearOrphanRows,避免宿主全面拒读时反复清空历史
     const cursor = this.readCursor()
@@ -630,9 +648,44 @@ export class UsageStore {
     return matched
   }
 
+  // 主会话数按工作区分组:索引只写真实会话,合成目录门槛用它而不是 token 行数
+  async sessionWorkspaceCounts() {
+    await this.flushNow()
+    await this.ready
+    const counts = new Map()
+    if (this.sessionTable === undefined) return counts
+    for (const row of this.sessionTable.values()) {
+      const workspaceId = typeof row.workspaceId === 'string' && row.workspaceId !== '' ? row.workspaceId : WORKSPACE_UNKNOWN
+      const sessions = counts.get(workspaceId)
+      if (sessions === undefined) counts.set(workspaceId, new Set(row.sessions ?? []))
+      else for (const id of row.sessions ?? []) sessions.add(id)
+    }
+    return new Map([...counts].map(([workspaceId, sessions]) => [workspaceId, sessions.size]))
+  }
+
+  // 已删除工作区只剩历史行/索引,列表端点用它把缺失 id 一并交付
+  async workspaceIds() {
+    await this.flushNow()
+    await this.ready
+    const ids = new Set()
+    for (const row of this.requireTable().values()) {
+      if (typeof row.workspaceId === 'string' && row.workspaceId !== '') ids.add(row.workspaceId)
+    }
+    if (this.sessionTable !== undefined) {
+      for (const row of this.sessionTable.values()) {
+        if (typeof row.workspaceId === 'string' && row.workspaceId !== '') ids.add(row.workspaceId)
+      }
+    }
+    return [...ids]
+  }
+
   // 补扫判定:有历史用量但无会话索引 = 旧版本数据,需要一次性补建索引
   hasSessionRows() {
     return this.sessionTable !== undefined && this.sessionTable.size > 0
+  }
+
+  dataStatus() {
+    return { legacyRows: this.legacyRows }
   }
 
   hasBucketRows() {
@@ -691,6 +744,7 @@ export class UsageStore {
     await this.enqueueGlobalWrite(async () => {
       await this.flushBatch()
       await this.wipeTables()
+      this.legacyRows = 0
       const cursor = this.readCursor() ?? {}
       await this.writeGlobal([], cursor.liveFirstSeq ?? {})
       this.rebuildFromBootLive()
@@ -707,6 +761,7 @@ export class UsageStore {
       // 备份域不可用时跳过(仅失去回退点,backupInfo 透明展示),重建不被卡死
       await this.snapshotToBackup()
       await this.wipeTables()
+      this.legacyRows = 0
       const liveFirstSeq = {}
       if (boundaries) for (const [id, seq] of boundaries) liveFirstSeq[id] = seq
       await this.writeGlobal([], liveFirstSeq)
@@ -754,6 +809,7 @@ export class UsageStore {
       const sessions = this.requireSessionTable()
       for (const key of [...sessions.keys()]) await sessions.delete(key)
       for (const [key, row] of savedSessions) await sessions.put(key, row)
+      this.legacyRows = countLegacyRows(table) + countLegacyRows(sessions)
       this.sessionPending = new Map()
       this.sessionSeen.clear()
       // 回退到备份快照后表内容为快照时刻状态,累积器若保留会在下次清表时

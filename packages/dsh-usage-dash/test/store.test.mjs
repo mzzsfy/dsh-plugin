@@ -1146,6 +1146,17 @@ test('reset 前快照包含会话索引,restore 一并回退', async () => {
   assert.deepEqual(domain.sessionRows.get('D|(workspace-unknown)|2026-08-02').sessions, ['sid-a'])
 })
 
+test('旧版行键没有工作区段时标记待重建,重建后清除', async () => {
+  const domain = fakeDomain()
+  await domain.table().put('D|2026-08-02|a|m', rowOf('2026-08-02', 'a', 'm'))
+  await domain.table('sessions').put('H|2026-08-02T10|s1', { bucket: '2026-08-02T10', sessions: ['s1'] })
+  const store = makeStore(domain)
+  await store.readyPromise()
+  assert.deepEqual(store.dataStatus(), { legacyRows: 2 })
+  await store.reset(new Map())
+  assert.deepEqual(store.dataStatus(), { legacyRows: 0 })
+})
+
 test('hasSessionRows/hasBucketRows 反映两表现状', async () => {
   const domain = fakeDomain()
   const store = makeStore(domain)

@@ -33,6 +33,8 @@ const COST_ENDPOINTS = {
 // 模型免折叠上限:条目不超它全展示,超过才折叠为 top(上限-1)+Other
 const GROUP_UNFOLDED_MAX = 5
 const OTHER_MODEL = '\u0000other'
+// 与服务端 store.js 的 WORKSPACE_UNKNOWN 同值;客户端不能 import 服务端模块
+const WORKSPACE_UNKNOWN_ID = '(workspace-unknown)'
 
 const PAD_WIDTH = 2
 const MS_PER_HOUR = 60 * 60 * 1000
@@ -792,6 +794,7 @@ const MESSAGES_ZH = {
   viewMinute: '分钟',
   viewGroup: '统计粒度',
   'status.running': '回扫中 {done}/{total}',
+  dataOutdated: '数据版本过旧，工作区统计可能不完整。点击重建后重新统计。',
   rebuild: '重建',
   rebuildConfirm: '确认重建',
   restore: '回退数据',
@@ -885,6 +888,15 @@ const MESSAGES_ZH = {
   settingsSectionDesc: '官方弹窗补全与费用显示开关',
   workspaceFilter: '工作区',
   allWorkspaces: '全部工作区',
+  allModels: '全部模型',
+  modelFilter: '模型筛选',
+  workspaceUsage: '工作区用量',
+  workspaceDeleted: '已删除工作区',
+  workspaceUsageHint: '按当前时间范围比较各工作区的 token 用量',
+  workspaceUnknown: '未知工作区',
+  workspaceUsageEmpty: '当前范围内暂无工作区用量。',
+  workspaceUsageEmptyModel: '该模型在当前范围内暂无工作区用量。',
+  workspaceUsageTotal: '合计',
   displayGroup: '显示补全',
   displayGroupDesc: '官方用量与费用显示',
   recentGroup: '最近请求',
@@ -964,7 +976,6 @@ const MESSAGES_ZH = {
   'pricing.loading': '正在加载定价规则…',
   'pricing.backNow': '回到此刻',
   'pricing.search': '搜索平台或型号',
-  'pricing.searchPlaceholder': '也可输入完整的 平台/型号 试算',
   'pricing.noObserved': '当前统计范围内暂无已观察到的模型。',
   'pricing.noSearchResults': '暂无匹配的已观察模型。',
   'pricing.previousModels': '上一页型号',
@@ -1131,6 +1142,7 @@ const MESSAGES_EN = {
   viewMinute: 'Minute',
   viewGroup: 'Granularity',
   'status.running': 'Rescanning {done}/{total}',
+  dataOutdated: 'Usage data is outdated; workspace stats may be incomplete. Rebuild to rescan.',
   rebuild: 'Rebuild',
   rebuildConfirm: 'Confirm rebuild',
   restore: 'Restore data',
@@ -1224,6 +1236,15 @@ const MESSAGES_EN = {
   settingsSectionDesc: 'Official dialog additions and cost display',
   workspaceFilter: 'Workspace',
   allWorkspaces: 'All workspaces',
+  allModels: 'All models',
+  modelFilter: 'Model filter',
+  workspaceUsage: 'Workspace usage',
+  workspaceDeleted: 'Deleted workspace',
+  workspaceUsageHint: 'Compare token usage by workspace in the selected range',
+  workspaceUnknown: 'Unknown workspace',
+  workspaceUsageEmpty: 'No workspace usage in this range.',
+  workspaceUsageEmptyModel: 'No workspace usage for this model in this range.',
+  workspaceUsageTotal: 'Total',
   displayGroup: 'Display additions',
   displayGroupDesc: 'Official usage and cost display',
   recentGroup: 'Recent requests',
@@ -1303,7 +1324,6 @@ const MESSAGES_EN = {
   'pricing.loading': 'Loading pricing rules…',
   'pricing.backNow': 'Back to now',
   'pricing.search': 'Find a provider or model',
-  'pricing.searchPlaceholder': 'Enter a full provider/model to test its price',
   'pricing.noObserved': 'No models were observed in this usage range.',
   'pricing.noSearchResults': 'No observed models match the search.',
   'pricing.previousModels': 'Previous models',
@@ -1586,6 +1606,34 @@ const cardsStatsOf = (view, stats, pointView) => (view === 'day' ? stats : point
 const usageModelsOf = (view, grouped, pointView) => (
   view === 'day' ? grouped?.models ?? null : pointView ? topWithOther(pointView.models) : null
 )
+
+// 工作区对比行:工作区注册表与用量聚合取并集,零用量行不进表;模型筛选按拆分重算
+function workspaceDisplayName(workspace, deletedLabel) {
+  if (workspace?.deleted) return `${deletedLabel || workspace.id} ${String(workspace.id).slice(0, 8)}`
+  return workspace?.title || workspace?.path || workspace?.id || ''
+}
+
+function workspaceUsageRows(byWorkspace, workspaces, model, unknownLabel, deletedLabel) {
+  const usage = Array.isArray(byWorkspace) ? byWorkspace : []
+  const known = Array.isArray(workspaces) ? workspaces : []
+  const byId = new Map(usage.map((item) => [item.workspaceId, item]))
+  const names = new Map(known.map((item) => [item.id, workspaceDisplayName(item, deletedLabel)]))
+  const ids = new Set(known.map((item) => item.id))
+  for (const item of usage) ids.add(item.workspaceId)
+  return [...ids].map((id) => {
+    const item = byId.get(id)
+    const metric = model ? item?.models?.find((entry) => entry.model === model) : item
+    return {
+      id,
+      name: names.get(id) || (id === WORKSPACE_UNKNOWN_ID ? unknownLabel || id : id),
+      tokens: metric?.tokens ?? 0,
+      requests: metric?.requests ?? 0,
+      turns: metric?.turns ?? 0,
+      activeDays: metric?.activeDays ?? item?.activeDays ?? 0,
+    }
+  }).filter((row) => row.tokens > 0 || row.requests > 0 || row.turns > 0)
+    .sort((a, b) => b.tokens - a.tokens || b.requests - a.requests || a.name.localeCompare(b.name))
+}
 
 // 趋势图视口常量
 const CHART_HEIGHT = 220
@@ -3990,9 +4038,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 
 .ud-workspace-picker{display:inline-flex;align-items:center;gap:4px;flex:none;min-width:0;height:28px;padding:0 6px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary)}
 .ud-workspace-icon{display:inline-flex;flex:none}
-.ud-workspace-select{appearance:none;border:0;background:transparent;color:var(--dsw-alias-label-primary);font-size:12px;line-height:18px;max-width:110px;min-width:0;padding:0 12px 0 0;cursor:pointer;text-overflow:ellipsis}
+.ud-workspace-picker:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.ud-workspace-select{appearance:none;border:0;background:transparent;color:var(--dsw-alias-label-primary);width:auto;field-sizing:content;font-size:12px;line-height:18px;max-width:110px;min-width:0;padding:0;cursor:pointer;text-overflow:ellipsis}
 .ud-workspace-select:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
-.ud-workspace-picker::after{content:"";flex:none;width:5px;height:5px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(45deg);margin-inline-start:-12px;pointer-events:none}
 .ud-toolbar{display:flex;align-items:center;gap:8px}
 .ud-toolbar-main{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:1 1 auto;min-width:0}
 .ud-group{display:flex;align-items:center;gap:2px;padding:3px;border:0;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-module-platform)}
@@ -4007,7 +4055,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-btn{border:1px solid var(--ud-border-strong);background:transparent;color:var(--dsw-alias-label-secondary);border-radius:var(--dsw-radius-sm);padding:0 14px;height:32px;font-size:14px;line-height:1;cursor:pointer;transition:background .15s,color .15s}
 .ud-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .ud-btn:disabled{opacity:.5;cursor:not-allowed}
-.ud-toolbar-side{display:flex;align-items:center;gap:4px;flex:none;margin-left:auto;align-self:stretch}
+.ud-toolbar-side{display:flex;align-items:center;gap:2px;flex:none;margin-left:auto;align-self:stretch}
 .ud-toolbar-side .ud-btn--text{display:inline-flex;align-items:center;height:100%}
 .ud-toolbar-side .ud-workspace-select{max-width:100px}
 .ud-icon-btn{padding:0 12px}
@@ -4020,7 +4068,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-loading::after{width:60%}.ud-empty{border:.5px solid var(--ud-card-border);border-radius:var(--dsw-radius-md);color:var(--dsw-alias-label-tertiary);text-align:center;padding:24px 16px;font-size:14px;line-height:22px;background:var(--ud-card)}
 .ud-foot{color:var(--dsw-alias-label-tertiary);font-size:11px}
 .ud-status{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:4px;font-size:12px;color:var(--dsw-alias-label-tertiary)}
-.ud-status-fold{position:relative;display:inline-flex;align-items:center;justify-content:center;width:28px;height:100%;min-height:28px;border:none;background:none;padding:0;font:inherit;font-size:12px;line-height:1;color:var(--dsw-alias-label-tertiary);cursor:pointer;border-radius:var(--dsw-radius-sm)}
+.ud-status-fold{position:relative;display:inline-flex;align-items:center;justify-content:center;width:24px;height:100%;min-height:28px;border:none;background:none;padding:0;font:inherit;font-size:12px;line-height:1;color:var(--dsw-alias-label-tertiary);cursor:pointer;border-radius:var(--dsw-radius-sm)}
 .ud-status-fold:hover{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover)}
 .ud-status-fold-caret{display:block;width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid currentColor;transition:transform .15s ease}
 .ud-status-fold[aria-expanded="true"] .ud-status-fold-caret{transform:rotate(180deg)}
@@ -4028,6 +4076,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-status-track{display:inline-block;width:120px;height:2px;border-radius:999px;background:var(--dsw-alias-border-l1);overflow:hidden}
 .ud-status-fill{display:block;height:100%;background:var(--dsw-alias-state-business-primary)}
 .ud-status-err{color:var(--dsw-alias-state-error-primary)}
+.ud-rebuild-prompt{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 10px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary) 24%,var(--dsw-alias-border-l2));border-radius:var(--dsw-radius-sm);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 8%,transparent);color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px}
+.ud-rebuild-prompt-text{flex:1 1 auto;min-width:0}
+.ud-rebuild-prompt .ud-btn--danger-text{height:28px;padding:0 8px;margin-inline-start:auto}
 .ud-detail{width:100%;margin-top:4px;display:flex;flex-direction:column;gap:6px}
 .ud-detail-foot{display:flex;justify-content:flex-end;align-items:center}
 .ud-log{width:100%;border:.5px solid var(--ud-card-border);border-radius:var(--dsw-radius-sm);background:var(--ud-card);padding:8px 10px;display:flex;flex-direction:column;gap:4px;max-height:200px;overflow-y:auto;font-size:11px;line-height:1.5}
@@ -4119,6 +4170,22 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-donut-center{font-size:18px;font-weight:600;fill:var(--dsw-alias-label-primary)}
 .ud-donut-label{font-size:11px;fill:var(--dsw-alias-label-tertiary)}
 .ud-models{flex:1 1 260px;min-width:240px;display:flex;flex-direction:column}
+.ud-workspace-embedded{display:flex;flex-direction:column;gap:8px;padding-top:10px;border-top:.5px solid var(--dsw-alias-border-l1)}
+.ud-workspace-embedded .ud-section{gap:8px}
+.ud-workspace-embedded .ud-section-title{font-size:13px;line-height:20px}
+.ud-workspace-embedded .ud-workspace-usage-list{gap:8px}
+.ud-workspace-embedded .ud-workspace-usage-total{padding:6px 8px}
+.ud-workspace-usage-hint{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
+.ud-workspace-usage-total{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:8px 10px;border:.5px solid var(--ud-card-border);border-radius:var(--dsw-radius-sm);background:var(--ud-card);font-size:12px;color:var(--dsw-alias-label-secondary)}
+.ud-workspace-usage-total strong{color:var(--dsw-alias-label-primary);font-variant-numeric:tabular-nums}
+.ud-workspace-usage-list{display:flex;flex-direction:column;gap:10px}
+.ud-workspace-usage-row{display:flex;flex-direction:column;gap:4px;min-width:0}
+.ud-workspace-usage-top{display:flex;justify-content:space-between;align-items:baseline;gap:12px;min-width:0}
+.ud-workspace-usage-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary)}
+.ud-workspace-usage-value{flex:none;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums}
+.ud-workspace-usage-track{height:6px;border-radius:999px;background:var(--dsw-alias-bg-module-platform);overflow:hidden}
+.ud-workspace-usage-fill{display:block;height:100%;border-radius:inherit;background:var(--dsw-alias-state-business-primary)}
+.ud-workspace-usage-meta{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
 .ud-model-row{display:flex;align-items:center;gap:8px;min-height:46px;padding:1px 4px;border-bottom:1px solid var(--dsw-alias-border-l1)}
 .ud-model-row--expand{cursor:pointer}
 .ud-model-row--expand:hover{background:var(--dsw-alias-interactive-bg-hover)}
@@ -5052,6 +5119,163 @@ ${HUD_CSS}
                 ].filter((section) => section.rows.length > 0),
               })
             : null))
+    }
+
+    // 工作区用量对比:统计卡之外的独立视图,按 token 量排序;
+    // 选中模型时用模型拆分重算,避免把总量误当成模型用量
+    function WorkspaceUsage({ byWorkspace = [], workspaces = [], model = '', t = defaultT }) {
+      const rows = workspaceUsageRows(byWorkspace, workspaces, model, t('workspaceUnknown'), t('workspaceDeleted'))
+      const total = rows.reduce((sum, row) => sum + row.tokens, 0)
+      const max = rows.reduce((value, row) => Math.max(value, row.tokens), 0)
+      return h('div', { className: 'ud-section ud-workspace-usage' },
+        h('div', { className: 'ud-section-head' },
+          h('span', { className: 'ud-section-title' }, t('workspaceUsage')),
+          h('span', { className: 'ud-workspace-usage-hint' }, model ? `${t('workspaceUsageHint')} · ${model}` : t('workspaceUsageHint'))),
+        rows.length > 0
+          ? h('div', { className: 'ud-workspace-usage-total' },
+              h('span', null, t('workspaceUsageTotal')),
+              h('strong', null, `${formatTokensCompact(total)} tok`))
+          : null,
+        rows.length === 0
+          ? h('div', { className: 'ud-empty' }, t(model ? 'workspaceUsageEmptyModel' : 'workspaceUsageEmpty'))
+          : h('div', { className: 'ud-workspace-usage-list' },
+              rows.map((row) => {
+                const percent = total > 0 ? (row.tokens / total) * PERCENT_SCALE : 0
+                const width = max > 0 ? (row.tokens / max) * PERCENT_SCALE : 0
+                return h('div', { className: 'ud-workspace-usage-row', key: row.id },
+                  h('div', { className: 'ud-workspace-usage-top' },
+                    h('span', { className: 'ud-workspace-usage-name', title: row.name }, row.name),
+                    h('span', {
+                      className: 'ud-workspace-usage-value',
+                      title: `${formatTokens(row.tokens)} tok`,
+                    }, `${formatTokensCompact(row.tokens)} (${formatPercent(percent)})`)),
+                  h('div', { className: 'ud-workspace-usage-track', role: 'presentation' },
+                    h('span', { className: 'ud-workspace-usage-fill', style: { width: `${width}%` } })),
+                  h('div', { className: 'ud-workspace-usage-meta' },
+                    `${t('requests')} ${formatTokens(row.requests)} · ${t('activeDays')} ${row.activeDays}`))
+              })))
+    }
+
+    // 工作区用量块:嵌入「用量摘要」,只按日范围比较工作区,不混入统计视图与工作区筛选
+    function WorkspaceUsagePanel({ t = defaultT, embedded = false }) {
+      const [range, setRange] = useState(DEFAULT_RANGE)
+      const [customFrom, setCustomFrom] = useState('')
+      const [customTo, setCustomTo] = useState('')
+      const [stats, setStats] = useState(null)
+      const [workspaces, setWorkspaces] = useState([])
+      const [model, setModel] = useState('')
+      const [loading, setLoading] = useState(true)
+      const [error, setError] = useState('')
+      const [refreshTick, setRefreshTick] = useState(0)
+      const [timeZone, setTimeZone] = useState(() => Intl.DateTimeFormat().resolvedOptions().timeZone || null)
+      const generationRef = useRef(0)
+
+      useEffect(() => {
+        let alive = true
+        requestGet(ENDPOINTS.workspaces).then((result) => {
+          if (!alive || !result.ok) return
+          setWorkspaces(Array.isArray(result.value?.workspaces) ? result.value.workspaces : [])
+        })
+        return () => { alive = false }
+      }, [])
+
+      const request = range === 'custom'
+        ? { from: customFrom, to: customTo }
+        : resolveDayRange(range, new Date(), timeZone)
+      const ready = !!request?.from && !!request?.to
+
+      useEffect(() => {
+        if (!ready) {
+          generationRef.current += 1
+          setLoading(false)
+          setStats(null)
+          return undefined
+        }
+        const generation = ++generationRef.current
+        setLoading(true)
+        setError('')
+        requestPost(ENDPOINTS.range, request).then((result) => {
+          if (generationRef.current !== generation) return
+          setLoading(false)
+          if (!result.ok) {
+            setError(result.message)
+            return
+          }
+          setStats(result.value)
+          if (result.value?.timeZone && result.value.timeZone !== timeZone) setTimeZone(result.value.timeZone)
+        })
+        return () => { generationRef.current++ }
+      }, [range, customFrom, customTo, refreshTick, timeZone, ready])
+
+      useEffect(() => {
+        if (!model || !stats?.models) return
+        if (!stats.models.some((item) => item.model === model)) setModel('')
+      }, [stats, model])
+
+      const models = stats?.models ?? []
+      const activeModel = model && models.some((item) => item.model === model) ? model : ''
+      const emptyVisible = !!stats && isEmptyRange(stats)
+      const modelPicker = models.length > 0
+        ? h('label', { className: 'ud-workspace-picker', title: t('modelFilter') },
+          h('span', { className: 'ud-workspace-icon' }, h(Icon, { paths: ICONS.model })),
+          h('select', {
+            className: 'ud-workspace-select',
+            'aria-label': t('modelFilter'),
+            value: activeModel,
+            onChange: (event) => setModel(event.target.value),
+          },
+          h('option', { value: '' }, t('allModels')),
+          models.map((item) => h('option', {
+            key: item.model, value: item.model, title: item.model,
+          }, item.model))))
+        : null
+
+      return h('div', { className: cx(embedded ? 'ud-workspace-embedded' : 'ud-panel ud-workspace-panel') },
+        h('div', { className: 'ud-toolbar' },
+          h('div', { className: 'ud-toolbar-main' },
+            h('div', { className: 'ud-group', role: 'group', 'aria-label': t('range') },
+              DAY_PRESETS.map((id) => h('button', {
+                key: id,
+                className: cx('ud-seg-item', range === id && 'ud-seg-item--on'),
+                'aria-pressed': range === id,
+                onClick: () => setRange(id),
+              }, t(`rangePreset.${id}`))),
+              h('button', {
+                className: cx('ud-seg-item', range === 'custom' && 'ud-seg-item--on'),
+                'aria-pressed': range === 'custom',
+                onClick: () => setRange('custom'),
+              }, t('rangeCustom'))),
+            range === 'custom'
+              ? h('div', { className: 'ud-custom-range' },
+                  h('input', {
+                    type: 'date', className: 'ud-date-input', 'aria-label': t('from'),
+                    value: customFrom, max: customTo || undefined,
+                    onChange: (event) => setCustomFrom(event.target.value),
+                  }),
+                  h('span', { className: 'ud-custom-sep' }, '–'),
+                  h('input', {
+                    type: 'date', className: 'ud-date-input', 'aria-label': t('to'),
+                    value: customTo, min: customFrom || undefined, max: dayBucket(new Date(), timeZone),
+                    onChange: (event) => setCustomTo(event.target.value),
+                  }))
+              : null),
+          h('div', { className: 'ud-toolbar-side' },
+            modelPicker,
+            h('button', {
+              className: 'ud-btn ud-btn--text ud-icon-btn', 'aria-label': t('refresh'), title: t('refresh'),
+              disabled: loading, onClick: () => setRefreshTick((tick) => tick + 1),
+            }, h('span', { className: 'ud-icon', dangerouslySetInnerHTML: { __html: REFRESH_ICON_SVG } })))),
+        error ? h('div', { className: 'ud-error' }, error) : null,
+        loading && !stats ? h('div', { className: 'ud-loading', role: 'status', 'aria-busy': 'true', 'aria-label': t('loading') }) : null,
+        !emptyVisible && stats
+          ? h(WorkspaceUsage, {
+              byWorkspace: Array.isArray(stats.byWorkspace) ? stats.byWorkspace : [],
+              workspaces,
+              model: activeModel,
+              t,
+            })
+          : null,
+        emptyVisible ? h('div', { className: 'ud-empty' }, t('workspaceUsageEmpty')) : null)
     }
 
     // 规约形态开关:原生 checkbox 保语义并视觉隐藏,track/thumb 呈现选中态
@@ -6170,10 +6394,11 @@ ${HUD_CSS}
         ? h(PricingTree, { key: row.model, row, rules, t }) : null)
       return h('div', { className: 'ud-pricing-stack' },
         h('div', { className: 'ud-pricing-search' },
-          h('label', { className: 'ud-field' }, h('span', { className: 'ud-field-label' }, t('pricing.search')),
+          h('div', { className: 'ud-field' },
             h('span', { className: 'ud-pricing-search-input' }, h(Icon, { paths: ICONS.search }),
               h('input', {
-                type: 'search', className: 'ud-input', value: query, list: listId, placeholder: t('pricing.searchPlaceholder'),
+                type: 'search', className: 'ud-input', value: query, list: listId, placeholder: t('pricing.search'),
+                'aria-label': t('pricing.search'),
                 onChange: (event) => {
                   const value = event.target.value
                   if (value.trim() !== probeKey) {
@@ -6916,7 +7141,7 @@ ${HUD_CSS}
           h(HintText, { className: 'ud-log-detail', text: entry.detail }, entry.detail))))
     }
 
-    function RebuildButton({ machineRef, busy, onError, t = defaultT }) {
+    function RebuildButton({ machineRef, busy, onError, t = defaultT, danger = false }) {
       const [armed, setArmed] = useState(false)
       const armedTimerRef = useRef(null)
 
@@ -6939,8 +7164,20 @@ ${HUD_CSS}
         machineRef.current?.restart()
       }
 
-      return h('button', { className: 'ud-btn ud-btn--text', disabled: busy, onClick: rebuild },
-        armed ? t('rebuildConfirm') : t('rebuild'))
+      return h('button', {
+        className: cx('ud-btn ud-btn--text', danger && 'ud-btn--danger-text'),
+        disabled: busy, onClick: rebuild,
+      }, armed ? t('rebuildConfirm') : t('rebuild'))
+    }
+
+    // 旧版行键没有工作区段:工作区筛选会漏掉历史，明确提示并复用重建确认
+    function RebuildPrompt({ status, machineRef, onError, t = defaultT }) {
+      if (!status?.needsRebuild) return null
+      return h('div', { className: 'ud-rebuild-prompt', role: 'alert' },
+        h('span', { className: 'ud-rebuild-prompt-text' }, t('dataOutdated')),
+        h(RebuildButton, {
+          machineRef, busy: status.running === true, onError, t, danger: true,
+        }))
     }
 
     // 回退按钮:仅当存在重建快照(status.backup.available)时可点;
@@ -7106,8 +7343,10 @@ ${HUD_CSS}
       }, [load])
 
       const rawPreset = view === 'hour' ? hourPreset : view === 'minute' ? minutePreset : null
+      // 工作区对比固定按日范围;时/分视图才走点查询
+      const pointActive = view !== 'day'
       // 自定义挡输入不完整时 query 为 null:不发请求,已取数据留存缓存,输入恢复即按键命中
-      const activeQuery = view === 'day' ? null : resolvePointQuery(view, rawPreset, pointCustomFrom, pointCustomTo, new Date(), serverTimeZone)
+      const activeQuery = pointActive ? resolvePointQuery(view, rawPreset, pointCustomFrom, pointCustomTo, new Date(), serverTimeZone) : null
       const pointCacheKey = activeQuery && workspaceId ? `${activeQuery.key}|${workspaceId}` : activeQuery?.key
 
       useEffect(() => {
@@ -7286,7 +7525,6 @@ ${HUD_CSS}
       const pointView = activeQuery && pointStatsMatches(pointStats, view, pointCacheKey, activeQuery.timeZone) ? pointStats.value : null
       const pointGrouped = useMemo(() => (pointView ? groupPointSlots(pointView.daily) : null), [pointView])
 
-      const pointActive = view !== 'day'
       const trendSource = pointActive
         ? (pointGrouped ? { slots: pointGrouped.daily, models: pointGrouped.models, value: pointView } : null)
         : (grouped ? { slots: grouped.daily, models: grouped.models, value: stats } : null)
@@ -7322,8 +7560,8 @@ ${HUD_CSS}
           h('option', { value: '' }, t('allWorkspaces')),
           workspaces.map((workspace) => h('option', {
             key: workspace.id, value: workspace.id,
-            title: workspace.path || workspace.title,
-          }, workspace.title || workspace.path || workspace.id))))
+            title: workspaceDisplayName(workspace, t('workspaceDeleted')),
+          }, workspaceDisplayName(workspace, t('workspaceDeleted'))))))
         : null
 
       return h('div', { className: 'ud-panel' },
@@ -7399,6 +7637,7 @@ ${HUD_CSS}
               disabled: busy, onClick: refresh,
             }, h('span', { className: 'ud-icon', dangerouslySetInnerHTML: { __html: REFRESH_ICON_SVG } })))),
         h(StatusRow, { status, t }),
+        h(RebuildPrompt, { status, machineRef: statusMachineRef, onError: setError, t }),
         detailsOpen
           ? h('div', { className: 'ud-detail' },
               h(AnomalyLog, { status, t }),
@@ -8637,6 +8876,7 @@ ${HUD_CSS}
           card('month', t('hudMonth'), hudCostText(summary.cycle?.cost ?? 0, currency), metaOf(summary.cycle ?? {}), hudCostExact(summary.cycle?.cost ?? 0, currency), t('hudTipMonthDesc')),
           card('rate', t('hudRate'), rateText, Number.isFinite(summary.tokensPerHour) ? `${formatTokensCompact(summary.tokensPerHour)}/h` : null, rateExact, t('hudTipRateDesc')),
           card('cache', t('hudCacheHit'), cacheText, null, null, t('hudTipCacheDesc'))),
+        h(WorkspaceUsagePanel, { key: 'workspace-usage', t, embedded: true }),
         currency === null ? h('p', { className: 'ud-hud-note', key: 'noPricing' }, t('hudNoPricing')) : null,
         budgets.length === 0 || features.guard !== true ? null : h('section', { className: 'ud-hud-section', key: 'budget' },
           h('div', { className: 'ud-hud-section-head' },
@@ -8753,6 +8993,7 @@ ${HUD_CSS}
             { name: 'settings.section', id: 'usage-dash', order: 45, label: () => ctx.locale.bind(LOCALE_NS)('nav'), locale: LOCALE_NS },
             UsageDashPanel,
           ))
+
         // 两段式注册官方 dock 槽增强条目:宿主缺该插槽时注册抛错即禁用本功能;
         // order 2 排官方 activity(0)/usage(1) 之后,append 在官方数据后面
         try {

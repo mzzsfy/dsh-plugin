@@ -9,7 +9,7 @@
 import { z } from 'zod'
 
 import { withRouteGate } from './route-gate.mjs'
-import { MAX_SLOTS, aggregateRange, attachCosts } from './query.js'
+import { MAX_SLOTS, SYNTHETIC_WORKSPACE_MIN_SESSIONS, aggregateRange, attachCosts } from './query.js'
 import { CYCLE_DEFAULT, cycleWindowOf } from './cycle.js'
 import { buildBudgetStatus, buildSummary } from './summary.js'
 import { simulateWhatIf } from './whatif.js'
@@ -20,11 +20,13 @@ import {
   GRANULARITY_HOURLY,
   GRANULARITY_MINUTE,
   HOUR_RETENTION_DAYS,
+  WORKSPACE_UNKNOWN,
   MINUTE_BUCKET_SPAN_MINUTES,
   clampMinuteRetentionDays,
   dayKey,
   minuteKey,
 } from './store.js'
+import { isSyntheticWorkspaceId, syntheticWorkspacePath, syntheticWorkspaceTitle } from './workspace-id.js'
 
 const ROUTE_PREFIX = '/api/usage-dash'
 const MS_PER_DAY = 24 * 60 * 60 * 1000
@@ -259,8 +261,9 @@ const workspaceOfBody = (body) =>
 // D 端点费用优先按同窗口 H 行折叠,H 行已过保留期的历史日回落到日桶行计价
 async function aggregateWithPricing(deps, granularity, from, to, workspaceId) {
   const sessionRows = await SESSION_WINDOW_QUERIES[granularity](deps.store, from, to, workspaceId)
+  const workspaceSessionCounts = await deps.store.sessionWorkspaceCounts?.()
   const rows = await readRows(deps.store, granularity, from, to, workspaceId)
-  let value = aggregateRange(rows, granularity, from, to, sessionRows)
+  let value = aggregateRange(rows, granularity, from, to, sessionRows, workspaceSessionCounts)
   const pricing = deps.pricing
   if (pricing?.active) {
     const costRows = granularity === GRANULARITY_DAILY
@@ -334,15 +337,35 @@ const pricingHandler = (deps) => async (req, res) => {
 }
 
 const workspacesHandler = (deps) => async (req, res) => {
-  writeJson(res, { ok: true, value: { workspaces: deps.workspaces?.() ?? [] } })
+  const known = deps.workspaces?.() ?? []
+  const knownIds = new Set(known.map((workspace) => workspace.id))
+  const counts = await deps.store.sessionWorkspaceCounts?.() ?? new Map()
+  const synthetic = [...counts]
+    .filter(([id, count]) => isSyntheticWorkspaceId(id) && count > SYNTHETIC_WORKSPACE_MIN_SESSIONS && !knownIds.has(id))
+    .map(([id, count]) => ({
+      id,
+      title: syntheticWorkspaceTitle(id),
+      path: syntheticWorkspacePath(id),
+      sessionCount: count,
+      synthetic: true,
+    }))
+  const storedIds = await deps.store.workspaceIds?.() ?? []
+  const deleted = storedIds
+    .filter((id) => id !== WORKSPACE_UNKNOWN && !isSyntheticWorkspaceId(id) && !knownIds.has(id))
+    .map((id) => ({ id, title: '', path: '', sessionCount: counts.get(id) ?? 0, deleted: true }))
+  writeJson(res, { ok: true, value: { workspaces: [...known, ...synthetic, ...deleted] } })
 }
 
 const statusHandler = (deps) => async (req, res) => {
+  await deps.store.readyPromise?.()
+  const data = deps.store.dataStatus?.() ?? {}
   writeJson(res, {
     ok: true,
     value: {
       ...deps.collector.status(),
       backup: deps.store.backupInfo(),
+      legacyRows: data.legacyRows ?? 0,
+      needsRebuild: (data.legacyRows ?? 0) > 0,
       // 桶键按宿主本地日历聚合;面板必须用同一 IANA 时区生成 from/to,
       // 否则宿主 UTC、浏览器 +8 时日/小时/热力图日界整体平移
       timeZone: deps.timeZone,
