@@ -900,6 +900,19 @@ test('recordSession 带 workspaceId 时会话索引按工作区分行并可筛�
   assert.deepEqual(onlyA, [{ bucket: '2026-08-02', workspaceId: 'ws-a', sessions: ['sid-a'] }])
 })
 
+test('工作区会话计数与历史 id 只读索引不依赖 table.values', async () => {
+  const domain = fakeDomain()
+  const store = makeStore(domain)
+  const time = local(2026, 8, 2, 14, 37)
+  await store.recordSession('sid-a', time, { workspaceId: 'ws-a' })
+  await store.recordSession('sid-b', time, { workspaceId: 'ws-a' })
+  await store.recordSession('sid-c', time, { workspaceId: 'ws-b' })
+  await store.flushNow()
+
+  assert.deepEqual([...(await store.sessionWorkspaceCounts())], [['ws-a', 2], ['ws-b', 1]])
+  assert.deepEqual((await store.workspaceIds()).sort(), ['ws-a', 'ws-b'])
+})
+
 test('UO1 Given old owner with seen cursor and pending tokens, When new generation opens, Then old owner flushes every bucket once', async () => {
   __resetSharedStoreForTests()
   const facility = facilityWithReserved()

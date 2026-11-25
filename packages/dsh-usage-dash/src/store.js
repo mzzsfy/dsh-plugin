@@ -654,7 +654,7 @@ export class UsageStore {
     await this.ready
     const counts = new Map()
     if (this.sessionTable === undefined) return counts
-    for (const row of this.sessionTable.values()) {
+    for (const [, row] of this.sessionTable.entries()) {
       const workspaceId = typeof row.workspaceId === 'string' && row.workspaceId !== '' ? row.workspaceId : WORKSPACE_UNKNOWN
       const sessions = counts.get(workspaceId)
       if (sessions === undefined) counts.set(workspaceId, new Set(row.sessions ?? []))
@@ -668,11 +668,11 @@ export class UsageStore {
     await this.flushNow()
     await this.ready
     const ids = new Set()
-    for (const row of this.requireTable().values()) {
+    for (const [, row] of this.requireTable().entries()) {
       if (typeof row.workspaceId === 'string' && row.workspaceId !== '') ids.add(row.workspaceId)
     }
     if (this.sessionTable !== undefined) {
-      for (const row of this.sessionTable.values()) {
+      for (const [, row] of this.sessionTable.entries()) {
         if (typeof row.workspaceId === 'string' && row.workspaceId !== '') ids.add(row.workspaceId)
       }
     }
