@@ -3944,6 +3944,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       requests: ['M14 9a2 2 0 0 1-2 2H6l-3 3V5a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2Z', 'M17 7h2a2 2 0 0 1 2 2v10l-3-3h-5'],
       model: ['M5 5h14v14H5Z', 'M9 9h6v6H9Z', 'M9 2v3', 'M15 2v3', 'M9 19v3', 'M15 19v3', 'M2 9h3', 'M2 15h3', 'M19 9h3', 'M19 15h3'],
       rate: ['M22 12h-4l-3 9L9 3l-3 9H2'],
+      clock: ['M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z', 'M12 7v5l3 2'],
       days: ['M5 5h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z', 'M16 3v4', 'M8 3v4', 'M3 11h18'],
       trash: ['M3 6h18', 'M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6', 'M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2', 'M10 11v6', 'M14 11v6'],
       close: ['M18 6 6 18', 'M6 6l12 12'],
@@ -4204,6 +4205,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-pricing-board [hidden]{display:none!important}
 .ud-pricing-toolbar,.ud-pricing-line,.ud-pricing-clock{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
 .ud-pricing-toolbar{justify-content:space-between}
+.ud-pricing-timebar{display:flex;justify-content:flex-end;margin-top:-6px}
+.ud-pricing-clock-toggle{width:32px;height:32px;padding:0;justify-content:center;color:var(--dsw-alias-label-tertiary)}
+.ud-pricing-clock-toggle[aria-expanded=true],.ud-pricing-clock-toggle--active{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
 .ud-pricing-tabs .ud-seg-item{height:30px}
 .ud-pricing-clock{padding:8px;background:var(--dsw-alias-bg-layer-2);border-radius:var(--dsw-radius-md);align-items:end}
 .ud-pricing-board :is(button,input,select,textarea,summary,[tabindex]):focus-visible,.ud-pricing-dialog :is(button,input,select,textarea,summary,[tabindex]):focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
@@ -6668,11 +6672,7 @@ ${HUD_CSS}
             'aria-controls': panelId(entry.id), 'aria-selected': tab === entry.id,
             className: cx('ud-seg-item', tab === entry.id && 'ud-seg-item--on'),
             onClick: () => chooseTab(entry.id), onKeyDown: (event) => onTabKey(event, index),
-          }, t(entry.labelKey)))),
-        h('button', {
-          type: 'button', className: 'ud-btn', 'aria-expanded': clockOpen, 'aria-controls': `${boardId}-clock`,
-          onClick: () => { if (!snapshot) setNow(Date.now()); setClockOpen(!clockOpen) },
-        }, snapshot ? t('pricing.snapshot') : t('pricing.now')))
+          }, t(entry.labelKey)))))
       const clock = h('div', { className: 'ud-pricing-clock', id: `${boardId}-clock`, hidden: !clockOpen },
         h('label', { className: 'ud-field' },
           h('span', { className: 'ud-field-label' }, t('pricing.localSnapshot', { zone: timeZone || t('pricing.localZone') })),
@@ -6681,6 +6681,14 @@ ${HUD_CSS}
             onChange: (event) => { if (!event.target.value) setNow(Date.now()); setSnapshot(event.target.value) },
           })),
         h('button', { type: 'button', className: 'ud-btn', onClick: () => { setSnapshot(''); setNow(Date.now()) } }, t('pricing.backNow')))
+      const clockToggle = h('div', { className: 'ud-pricing-timebar' },
+        h('button', {
+          type: 'button', className: cx('ud-btn ud-pricing-clock-toggle', (clockOpen || snapshot) && 'ud-pricing-clock-toggle--active'),
+          'aria-label': snapshot ? t('pricing.snapshot') : t('pricing.now'),
+          title: snapshot ? t('pricing.snapshot') : t('pricing.now'),
+          'aria-expanded': clockOpen, 'aria-controls': `${boardId}-clock`,
+          onClick: () => { if (!snapshot) setNow(Date.now()); setClockOpen(!clockOpen) },
+        }, h(Icon, { paths: ICONS.clock })))
       const currencyPicker = h('div', { className: 'ud-group', role: 'group', 'aria-label': t('pricingCurrency') },
         CURRENCIES.map((symbol) => h('button', {
           key: symbol, type: 'button',
@@ -6779,7 +6787,7 @@ ${HUD_CSS}
         applyPricingValue(result.value, true)
         hudRefresh({ force: true }).catch(() => {})
       }
-      return h('div', { className: 'ud-pricing-board', ref: boardRef }, controls, clock,
+      return h('div', { className: 'ud-pricing-board', ref: boardRef }, controls, clockToggle, clock,
         PRICING_TABS.map((entry) => h('div', {
           key: entry.id, id: panelId(entry.id), role: 'tabpanel', 'aria-labelledby': tabId(entry.id), tabIndex: 0, hidden: tab !== entry.id,
         }, tab !== entry.id ? null : status ? h('div', { className: 'ud-empty' },

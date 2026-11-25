@@ -183,7 +183,7 @@ test('Given 已观察组合有分时费率 When 改快照与试探未知型号 T
   const view = () => mountView(f, byComponent(editor, 'PricingModels')).tree
   assert.match(text(view()), /#2 · 输入 ¥5/)
   assert.match(text(view()), /¥6\.00/)
-  byText(editor, '此刻').props.onClick(); await f.settle()
+  nodes(editor.tree).find(node => node.type === 'button' && node.props['aria-label'] === '此刻').props.onClick(); await f.settle()
   const clock = nodes(editor.tree).find(node => node.props.type === 'datetime-local')
   clock.props.onChange({ target: { value: '2026-11-24T20:00' } }); await f.settle()
   assert.doesNotMatch(text(view()), /#2 · 输入/)
@@ -453,7 +453,7 @@ test('Given 浏览器开着定价 When 跨过宿主墙钟分钟边界 Then 此�
   f.resolve(f.gets[0], { revision: 1, rules: [rule(1), conditional] }); await f.settle()
   const view = () => mountView(f, byComponent(editor, 'PricingModels')).tree
   assert.match(text(view()), /#2 · 输入 ¥5/)
-  byText(editor, '此刻').props.onClick(); await f.settle()
+  nodes(editor.tree).find(node => node.type === 'button' && node.props['aria-label'] === '此刻').props.onClick(); await f.settle()
   const clock = () => nodes(editor.tree).find(node => node.props.type === 'datetime-local')
   assert.equal(clock().props.value, '2026-11-24T09:00')
   const next = [...f.timers.values()].find(timer => timer.ms === 1000)
