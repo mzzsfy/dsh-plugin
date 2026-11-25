@@ -1,6 +1,120 @@
 // L3 包级断言表:基线步骤沿用 .compat/version-watch/l3-plan/steps.json 的 19 包判据,
 // 9 个目标包另加编号格 checks(定义见 scripts/compat/l3-checks.md 与各包兼容性测试.md)。
 // checks 只做只读断言:选择器命中/文本/计数、只读 API 2xx + 字段、页面内只读求值、截图。
+
+// 齿轮识别:两代官方齿轮首段路径前缀(与 dsh-settings-nav-icons 的 GEAR_PATHS 同源)
+export const GEAR_PATHS = ['M14.0861', 'M13.0107 7.79377']
+const GEAR_PATH_SAMPLE_LEN = Math.max(...GEAR_PATHS.map((path) => path.length))
+const GEAR_USE_PREFIX = '#dsw-icon-settings-outline'
+
+// 外部供给声明:插件用 data-<vendor>-nav-icon 公开声明「该分区图标由我供给」,
+// dsh-settings-nav-icons 按让位契约不接管(README 兜底边界)。按属性名判定,保留 kebab 原形;
+// dataset 键形态(dshMarketNavIcon)由宿主自动派生,不重复匹配。
+export const EXTERNAL_NAV_ICON_ATTR = /^data-[a-z0-9]+(?:-[a-z0-9]+)*-nav-icon$/
+
+// 外部供给缺陷:供给方本应把声明格内部 svg 隐藏(如 dshmarket 的 [data-*-nav-icon] > svg{display:none}),
+// 隐藏失效即 mask + svg 双图。级别归供给方,不参与本包 FAIL。
+export const EXTERNAL_SUPPLY_HIDDEN_BROKEN = 'external-supply-hidden-broken'
+
+export function isExternalSupplyCell(cell) {
+  return (cell?.attrs ?? []).some((name) => EXTERNAL_NAV_ICON_ATTR.test(name))
+}
+
+export function isGearSvg(svg) {
+  if (svg === null || svg === undefined) return false
+  if ((svg.useHrefs ?? []).some((href) => href.startsWith(GEAR_USE_PREFIX))) return true
+  return (svg.pathStarts ?? []).some((start) => GEAR_PATHS.some((gear) => start.startsWith(gear)))
+}
+
+// 导航格分类(纯函数):页面侧只采集结构快照,残差与外部供给缺陷在 Node 侧判定,便于单测锁定口径。
+// - 外部供给格一律不计残差(让位是契约结果,不是漏接管);
+// - 外部供给格内部 svg 实际渲染可见 = 供给方隐藏规则失效,记一条 external-supply-hidden-broken 发现;
+// - 已有 navicYield 记账的格是历史让位,永不重入,同不计残差;
+// - 其余格首枚 svg 仍是齿轮且未记账 = 漏接管残差。
+export function classifyNavCells(snapshot) {
+  const cells = Array.isArray(snapshot?.cells) ? snapshot.cells : []
+  const residual = []
+  const findings = []
+  for (const cell of cells) {
+    const svgs = cell.svgs ?? []
+    if (isExternalSupplyCell(cell)) {
+      for (const svg of svgs) {
+        if (svg.rendered === false) continue
+        if (svg.rendered === undefined && (svg.display === 'none' || svg.visibility === 'hidden')) continue
+        findings.push({
+          id: EXTERNAL_SUPPLY_HIDDEN_BROKEN,
+          severity: '外部供给缺陷',
+          cell: cell.label ?? null,
+          attr: (cell.attrs ?? []).filter((name) => EXTERNAL_NAV_ICON_ATTR.test(name)),
+          selector: svg.selector ?? null,
+          display: svg.display ?? null,
+          visibility: svg.visibility ?? null,
+          size: svg.width === undefined ? null : `${svg.width}x${svg.height}`,
+        })
+      }
+      continue
+    }
+    const primary = svgs[0]
+    if (primary === undefined || primary.navic !== '' || primary.yield === true) continue
+    if (!isGearSvg(primary)) continue
+    residual.push(cell.label ?? null)
+  }
+  return {
+    labels: snapshot?.labels ?? null,
+    suffixCells: cells.length,
+    navicSvgs: snapshot?.navicSvgs ?? null,
+    takenCells: cells.filter((cell) => (cell.svgs?.[0]?.navic ?? '') !== '').length,
+    residualGear: residual.length,
+    residual,
+    externalSupplyCells: cells.filter(isExternalSupplyCell).map((cell) => cell.label ?? null),
+    externalSupplyHiddenBroken: findings.length,
+    findings,
+    yieldedCells: cells.filter((cell) => (cell.svgs ?? []).some((svg) => svg.yield === true)).map((cell) => cell.label ?? null),
+    inert1: snapshot?.inert1 ?? null,
+  }
+}
+
+// #3 页面侧采集:只取结构事实(属性名、svg 路径、计算样式、几何),不做判定
+const navCellSnapshot = `(() => {
+  const selectorOf = (cell, el) => {
+    const segments = [];
+    for (let node = el; node !== null && node !== cell; node = node.parentElement) {
+      const slot = node.getAttribute('data-slot');
+      segments.unshift(node.tagName.toLowerCase() + (slot === null ? '' : '[data-slot="' + slot + '"]'));
+    }
+    return ['button[class*="_navCell"]', ...segments].join(' > ');
+  };
+  const labelOf = (cell) => (cell.querySelector('.VOzbGW_navLabel') ?? cell.querySelector('span[class*="_navLabel"]'))?.textContent?.trim() ?? null;
+  const cells = [...document.querySelectorAll('button[class*="_navCell"]')];
+  return {
+    labels: document.querySelectorAll('.VOzbGW_navLabel').length,
+    navicSvgs: document.querySelectorAll('svg[data-navic]').length,
+    inert1: document.querySelectorAll('[data-navic="1"]').length,
+    cells: cells.map((cell) => ({
+      label: labelOf(cell),
+      attrs: [...cell.attributes].map((attr) => attr.name),
+      svgs: [...cell.querySelectorAll('svg')].map((svg) => {
+        const style = getComputedStyle(svg);
+        const rect = svg.getBoundingClientRect();
+        return {
+          selector: selectorOf(cell, svg),
+          navic: svg.dataset.navic ?? '',
+          yield: svg.dataset.navicYield !== undefined,
+          rendered: typeof svg.checkVisibility === 'function'
+            ? svg.checkVisibility({ opacityProperty: true, visibilityProperty: true })
+            : style.display !== 'none' && style.visibility !== 'hidden',
+          useHrefs: [...svg.querySelectorAll('use')].map((use) => use.getAttribute('href') ?? ''),
+          pathStarts: [...svg.querySelectorAll('path')].map((path) => (path.getAttribute('d') ?? '').slice(0, ${GEAR_PATH_SAMPLE_LEN})),
+          display: style.display,
+          visibility: style.visibility,
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+        };
+      }),
+    })),
+  };
+})()`
+
 export const L3_BASE = {
   'dsh-auto-trust-all': {
     open: null,
@@ -1014,40 +1128,20 @@ export const L3_CHECKS = {
     },
     {
       id: 3,
-      label: 'svg[data-navic] 数 === 记账单元格数,无残留齿轮',
+      label: 'svg[data-navic] 数 === 记账单元格数,无残留齿轮(外部供给格不计残差)',
       steps: [
         { name: 'c3-stable', eval: 'window.__l3WaitStable ? window.__l3WaitStable() : new Promise((r) => setTimeout(r, 2000))' },
-        {
-        name: 'c3-taken',
-        eval: `(() => {
-  const GEAR_PATHS = ['M14.0861', 'M13.0107 7.79377'];
-  const gearish = (svg) => {
-    if (svg === null) return false;
-    if (svg.querySelector('use[href^="#dsw-icon-settings-outline"]') !== null) return true;
-    return [...svg.querySelectorAll('path')].some((p) => GEAR_PATHS.some((x) => (p.getAttribute('d') ?? '').startsWith(x)));
-  };
-  const cells = [...document.querySelectorAll('button[class*="_navCell"]')];
-  const primary = (cell) => cell.querySelector('svg');
-  const taken = cells.filter((c) => (primary(c)?.dataset.navic ?? '') !== '');
-  const residual = cells.filter((c) => {
-    const svg = primary(c);
-    return svg !== null && (svg.dataset.navic ?? '') === '' && gearish(svg);
-  }).map((c) => (c.querySelector('.VOzbGW_navLabel') ?? c.querySelector('span[class*="_navLabel"]'))?.textContent?.trim() ?? null);
-  return {
-    labels: document.querySelectorAll('.VOzbGW_navLabel').length,
-    suffixCells: cells.length,
-    navicSvgs: document.querySelectorAll('svg[data-navic]').length,
-    takenCells: taken.length,
-    residualGear: residual.length,
-    residual,
-    inert1: document.querySelectorAll('[data-navic="1"]').length,
-  };
-})()`,
-      }],
+        { name: 'c3-taken', eval: navCellSnapshot },
+      ],
       judge: (byName) => {
-        const v = byName.get('c3-taken')?.value
-        const ok = v?.takenCells > 0 && v.navicSvgs === v.takenCells && v.residualGear === 0
-        return { ok, expected: 'navicSvgs === takenCells > 0 且 residualGear=0(无未接管齿轮格)', actual: v }
+        const v = classifyNavCells(byName.get('c3-taken')?.value)
+        const ok = v.takenCells > 0 && v.navicSvgs === v.takenCells && v.residualGear === 0
+        return {
+          ok,
+          expected: 'navicSvgs === takenCells > 0 且 residualGear=0(带 data-*-nav-icon 的外部供给格让位不计残差;供给方隐藏失效记 external-supply-hidden-broken 发现,归供给方缺陷不参与判定)',
+          actual: v,
+          findings: v.findings,
+        }
       },
     },
     {
@@ -1111,7 +1205,7 @@ export const L3_CHECKS = {
   htmlLen: el.innerHTML.length,
   useAll: el.querySelectorAll('use').length,
   gearUse: el.querySelectorAll('use[href^="#dsw-icon-settings-outline"]').length,
-  gearPath: [...el.querySelectorAll('path')].filter((p) => ['M14.0861', 'M13.0107 7.79377'].some((x) => (p.getAttribute('d') ?? '').startsWith(x))).length,
+  gearPath: [...el.querySelectorAll('path')].filter((p) => ${JSON.stringify(GEAR_PATHS)}.some((x) => (p.getAttribute('d') ?? '').startsWith(x))).length,
 })))()`,
       }],
       judge: (byName) => {

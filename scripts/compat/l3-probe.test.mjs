@@ -12,7 +12,8 @@ import {
   matchField,
   readPath,
 } from './l3-assert.mjs'
-import { countNonHostConsole } from './l3-run.mjs'
+import { EXTERNAL_SUPPLY_HIDDEN_BROKEN, classifyNavCells, isExternalSupplyCell, isGearSvg } from './l3-checks.mjs'
+import { countNonHostConsole, judgePackage } from './l3-run.mjs'
 
 test('readPath 读嵌套字段、数组下标,缺失返回 undefined', () => {
   const body = { value: { keys: ['a', 'b'], nested: { ok: true } } }
@@ -137,6 +138,170 @@ test('judgeHttp 字段 length/notNull 与 present 缺失归因可机检', () => 
   const fail = judgeHttp({ fields: { activation: { notNull: true } } }, { status: 200, body: {} })
   assert.equal(fail.ok, false)
   assert.match(fail.error, /期望/)
+})
+
+// 导航格快照夹具:页面侧 c3-taken 采集的形态(结构事实,判定在 Node 侧)
+const navSvg = (overrides = {}) => ({
+  selector: 'button[class*="_navCell"] > span > svg',
+  navic: '',
+  useHrefs: [],
+  pathStarts: [],
+  display: 'inline-block',
+  visibility: 'visible',
+  width: 16,
+  height: 16,
+  ...overrides,
+})
+const navCell = (label, attrs, svgs) => ({ label, attrs: ['type', 'class', ...attrs], svgs })
+const navSnapshot = (cells) => ({
+  labels: cells.length,
+  navicSvgs: cells.reduce((total, cell) => total + cell.svgs.filter((svg) => svg.navic !== '').length, 0),
+  inert1: 0,
+  cells,
+})
+
+test('isExternalSupplyCell 只认 data-<vendor>-nav-icon 属性名', () => {
+  assert.equal(isExternalSupplyCell({ attrs: ['type', 'data-dsh-market-nav-icon'] }), true)
+  assert.equal(isExternalSupplyCell({ attrs: ['data-foo-bar-nav-icon'] }), true)
+  assert.equal(isExternalSupplyCell({ attrs: ['data-navic', 'data-dsh-market-nav-icon-x'] }), false)
+  assert.equal(isExternalSupplyCell({ attrs: ['data--nav-icon'] }), false)
+  assert.equal(isExternalSupplyCell({}), false)
+  assert.equal(isExternalSupplyCell(null), false)
+})
+
+test('isGearSvg 认两代齿轮 use 与 path 前缀,非齿轮不认', () => {
+  assert.equal(isGearSvg(navSvg({ useHrefs: ['#dsw-icon-settings-outline-medium'] })), true)
+  assert.equal(isGearSvg(navSvg({ pathStarts: ['M14.0861 2.5H17.9139'] })), true)
+  assert.equal(isGearSvg(navSvg({ pathStarts: ['M13.0107 7.79377C13.0107'] })), true)
+  assert.equal(isGearSvg(navSvg({ useHrefs: ['#dsw-icon-data-outline-medium'], pathStarts: ['M8 2.2'] })), false)
+  assert.equal(isGearSvg(null), false)
+})
+
+test('classifyNavCells:外部供给格不计残差(让位非漏接管),普通齿轮格才计残差', () => {
+  const snapshot = navSnapshot([
+    navCell('插件市场', ['data-dsh-market-nav-icon'], [
+      navSvg({
+        selector: 'button[class*="_navCell"] > span > span[data-slot="settings.section.icon"] > svg',
+        useHrefs: ['#dsw-icon-settings-outline-medium'],
+        display: 'block',
+      }),
+    ]),
+    navCell('通用设置', [], [navSvg({ navic: '通用设置', useHrefs: ['#navic-general'], pathStarts: ['M8 2.2'] })]),
+    navCell('模型', [], [navSvg({ useHrefs: ['#dsw-icon-data-outline-medium'], pathStarts: ['M8 2.2'] })]),
+    navCell('漏接管分区', [], [navSvg({ pathStarts: ['M14.0861 2.5H17.9139'] })]),
+  ])
+  const v = classifyNavCells(snapshot)
+  assert.equal(v.takenCells, 1)
+  assert.equal(v.navicSvgs, 1)
+  assert.deepEqual(v.residual, ['漏接管分区'])
+  assert.equal(v.residualGear, 1)
+  assert.deepEqual(v.externalSupplyCells, ['插件市场'])
+  // 外部供给格内部 svg 可见 = 供给方隐藏规则失效,记发现但不进残差
+  assert.equal(v.externalSupplyHiddenBroken, 1)
+  const [finding] = v.findings
+  assert.equal(finding.id, EXTERNAL_SUPPLY_HIDDEN_BROKEN)
+  assert.equal(finding.severity, '外部供给缺陷')
+  assert.equal(finding.cell, '插件市场')
+  assert.deepEqual(finding.attr, ['data-dsh-market-nav-icon'])
+  assert.equal(finding.selector, 'button[class*="_navCell"] > span > span[data-slot="settings.section.icon"] > svg')
+  assert.equal(finding.display, 'block')
+  assert.equal(finding.visibility, 'visible')
+  assert.equal(finding.size, '16x16')
+})
+
+test('classifyNavCells:外部供给格 svg 已隐藏(display:none / visibility:hidden)时零发现', () => {
+  const snapshot = navSnapshot([
+    navCell('插件市场', ['data-dsh-market-nav-icon'], [navSvg({ display: 'none' })]),
+    navCell('另一供给格', ['data-dsh-market-nav-icon'], [navSvg({ visibility: 'hidden' })]),
+    navCell('通用设置', [], [navSvg({ navic: '通用设置', useHrefs: ['#navic-general'] })]),
+  ])
+  const v = classifyNavCells(snapshot)
+  assert.equal(v.externalSupplyHiddenBroken, 0)
+  assert.deepEqual(v.findings, [])
+  assert.equal(v.residualGear, 0)
+  assert.equal(v.residual.length, 0)
+})
+
+test('classifyNavCells:祖先隐藏(checkVisibility=false)等价于已隐藏,不记发现', () => {
+  const snapshot = navSnapshot([
+    navCell('插件市场', ['data-dsh-market-nav-icon'], [navSvg({ rendered: false, display: 'block' })]),
+  ])
+  const v = classifyNavCells(snapshot)
+  assert.equal(v.externalSupplyHiddenBroken, 0)
+  assert.deepEqual(v.findings, [])
+})
+
+test('classifyNavCells:带 navicYield 的让位格不重入,不计残差', () => {
+  const snapshot = navSnapshot([
+    navCell('历史让位分区', [], [navSvg({ yield: true, pathStarts: ['M14.0861 2.5H17.9139'] })]),
+    navCell('通用设置', [], [navSvg({ navic: '通用设置', useHrefs: ['#navic-general'] })]),
+  ])
+  const v = classifyNavCells(snapshot)
+  assert.equal(v.residualGear, 0)
+  assert.deepEqual(v.yieldedCells, ['历史让位分区'])
+})
+
+test('classifyNavCells:首枚 svg 未记账、记账落在后续 svg 时仍计残差(与 #7 首枚语义一致)', () => {
+  const snapshot = navSnapshot([
+    navCell('错位记账', [], [
+      navSvg({ pathStarts: ['M14.0861 2.5H17.9139'] }),
+      navSvg({ navic: '错位记账', useHrefs: ['#navic-x'] }),
+    ]),
+  ])
+  const v = classifyNavCells(snapshot)
+  assert.equal(v.takenCells, 0)
+  assert.equal(v.navicSvgs, 1)
+  assert.deepEqual(v.residual, ['错位记账'])
+})
+
+test('classifyNavCells:空快照降级为零计数,不抛错', () => {
+  const v = classifyNavCells(null)
+  assert.equal(v.takenCells, 0)
+  assert.equal(v.residualGear, 0)
+  assert.equal(v.externalSupplyHiddenBroken, 0)
+  assert.deepEqual(v.findings, [])
+})
+
+test('judgePackage #3:外部供给双图记 external-supply-hidden-broken 发现且判定通过', () => {
+  const snapshot = navSnapshot([
+    navCell('插件市场', ['data-dsh-market-nav-icon'], [
+      navSvg({ useHrefs: ['#dsw-icon-settings-outline-medium'], display: 'block' }),
+    ]),
+    navCell('通用设置', [], [navSvg({ navic: '通用设置', useHrefs: ['#navic-general'] })]),
+  ])
+  const verdict = judgePackage('dsh-settings-nav-icons', {
+    results: [
+      { name: 'c3-stable', ok: true, value: 2 },
+      { name: 'c3-taken', ok: true, value: snapshot },
+    ],
+    consoleErrors: [],
+    consoleDetails: [],
+  })
+  const check = verdict.checks.find((entry) => entry.id === 3)
+  assert.equal(check.ok, true)
+  assert.equal(check.findings.length, 1)
+  assert.equal(check.findings[0].id, EXTERNAL_SUPPLY_HIDDEN_BROKEN)
+  assert.equal(check.findings[0].cell, '插件市场')
+})
+
+test('judgePackage #3:普通齿轮未被接管仍判失败(残差口径未被放宽)', () => {
+  const snapshot = navSnapshot([
+    navCell('插件市场', ['data-dsh-market-nav-icon'], [navSvg({ display: 'none' })]),
+    navCell('通用设置', [], [navSvg({ navic: '通用设置', useHrefs: ['#navic-general'] })]),
+    navCell('漏接管分区', [], [navSvg({ pathStarts: ['M14.0861 2.5H17.9139'] })]),
+  ])
+  const verdict = judgePackage('dsh-settings-nav-icons', {
+    results: [
+      { name: 'c3-stable', ok: true, value: 2 },
+      { name: 'c3-taken', ok: true, value: snapshot },
+    ],
+    consoleErrors: [],
+    consoleDetails: [],
+  })
+  const check = verdict.checks.find((entry) => entry.id === 3)
+  assert.equal(check.ok, false)
+  assert.deepEqual(check.actual.residual, ['漏接管分区'])
+  assert.equal(check.findings.length, 0)
 })
 
 test('countNonHostConsole 剔除 /login 噪声、负例探针 URL 与登记噪声文本', () => {
