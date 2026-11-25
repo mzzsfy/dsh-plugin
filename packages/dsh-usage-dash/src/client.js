@@ -984,8 +984,8 @@ const MESSAGES_ZH = {
   'pricing.conditionsHint': '所有条件均满足时生效',
   'pricing.showOthers': '显示其他 {n} 条规则',
   'pricing.hideOthers': '收起其他规则',
-  'pricing.withStar': '带 *',
-  'pricing.withoutStar': '不带 *',
+  'pricing.withStar': '通配规则',
+  'pricing.withoutStar': '精确规则',
   'pricing.globalFallback': '全局默认价',
   'pricing.conflict': '同优先级冲突',
   'pricing.billing': '计费 {n}',
@@ -1324,8 +1324,8 @@ const MESSAGES_EN = {
   'pricing.conditionsHint': 'All conditions must match',
   'pricing.showOthers': 'Show {n} other rules',
   'pricing.hideOthers': 'Hide other rules',
-  'pricing.withStar': 'With *',
-  'pricing.withoutStar': 'Without *',
+  'pricing.withStar': 'Wildcard rules',
+  'pricing.withoutStar': 'Exact rules',
   'pricing.globalFallback': 'Global fallback',
   'pricing.conflict': 'Equal-priority conflict',
   'pricing.billing': 'Billing {n}',
@@ -3944,6 +3944,10 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       trash: ['M3 6h18', 'M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6', 'M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2', 'M10 11v6', 'M14 11v6'],
       close: ['M18 6 6 18', 'M6 6l12 12'],
       chevron: ['m9 18 6-6-6-6'],
+      search: ['M16.5 10.5a6 6 0 1 1-12 0 6 6 0 0 1 12 0Z', 'm15 15 4.5 4.5'],
+      plus: ['M12 5v14', 'M5 12h14'],
+      edit: ['m14 6 4 4', 'm5 15 10-10a2.8 2.8 0 0 1 4 4L9 19l-5 1 1-5Z'],
+      rules: ['M8 6h12', 'M8 12h12', 'M8 18h12', 'M4 6h.01', 'M4 12h.01', 'M4 18h.01'],
     }
 
     function Icon({ paths }) {
@@ -4150,7 +4154,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-fold-summary{font-size:12px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}
 .ud-fold-caret{display:flex;align-items:center;justify-content:center;color:var(--dsw-alias-label-tertiary);transition:transform .15s ease}
 .ud-fold-caret svg{display:block;width:14px;height:14px}
-.ud-fold--open .ud-fold-caret{transform:rotate(90deg)}
+.ud-fold--open>.ud-fold-head .ud-fold-caret{transform:rotate(90deg)}
 .ud-fold-body{padding:12px 16px 16px;border-top:.5px solid var(--dsw-alias-border-l2)}
 .ud-fold-body[hidden]{display:none}
 .ud-pref-group{display:flex;flex-direction:column;gap:4px;border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-sm);padding:12px 16px}
@@ -4165,7 +4169,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-pref-text{display:flex;flex-direction:column;gap:2px;min-width:0}
 .ud-pref-title{font-size:13px;color:var(--dsw-alias-label-primary)}
 .ud-pref-desc{font-size:12px;color:var(--dsw-alias-label-tertiary)}
-.ud-pricing-fields{display:grid;gap:12px;padding:12px;border:.5px solid var(--ud-card-border);border-radius:var(--dsw-radius-md);background:var(--ud-card);min-width:0}
+.ud-pricing-fields{display:grid;gap:12px}
 .ud-pricing-fieldset{display:grid;gap:8px;min-width:0;padding-top:12px;border-top:.5px solid var(--ud-card-border)}
 .ud-pricing-fieldset h4{margin:0;font-size:14px;line-height:22px;font-weight:600}
 .ud-rule-conds{display:grid;gap:8px;min-width:0}
@@ -4184,10 +4188,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-field-error{font-size:11px;color:var(--dsw-alias-state-error-primary)}
 .ud-input{border:1px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-size:14px;line-height:20px;min-height:36px;padding:4px 8px;min-width:0;width:100%;box-sizing:border-box}
 .ud-price-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
-.ud-price-grid .ud-input{text-align:right}
-.ud-price-input{position:relative;display:block}
-.ud-price-input .ud-input{padding-right:20px}
-.ud-price-currency{position:absolute;right:8px;top:50%;transform:translateY(-50%);font-size:11px;color:var(--dsw-alias-label-tertiary);pointer-events:none}
+.ud-price-grid .ud-input{font-variant-numeric:tabular-nums}
 .ud-unit-note{font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}
 .ud-pricing-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .ud-pricing-board,.ud-pricing-stack{display:grid;gap:12px;min-width:0}
@@ -4196,12 +4197,16 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-pricing-search{display:flex;gap:8px;align-items:end;min-width:0}
 .ud-pricing-search .ud-field{flex:1}
 .ud-pricing-search .ud-pricing-clock-toggle{margin-block-end:4px}
-.ud-pricing-board .ud-pricing-clock-toggle{display:inline-grid;place-items:center;flex:none;width:28px;height:28px;padding:0;color:var(--dsw-alias-label-secondary)}
+.ud-pricing-search-input{position:relative;display:flex;align-items:center;min-width:0}
+.ud-pricing-search-input>svg{position:absolute;inset-inline-start:10px;color:var(--dsw-alias-label-secondary);pointer-events:none}
+.ud-pricing-search-input .ud-input{padding-inline-start:32px}
+.ud-pricing-board .ud-pricing-clock-toggle{position:relative;display:inline-grid;place-items:center;flex:none;width:28px;height:28px;padding:0;color:var(--dsw-alias-label-secondary)}
 .ud-pricing-clock-toggle svg{width:16px;height:16px}
 .ud-pricing-board .ud-pricing-clock-toggle:is([aria-expanded=true],.ud-pricing-clock-toggle--active){color:var(--dsw-alias-brand-primary);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent)}
-.ud-pricing-tabs{width:100%;gap:16px;padding:0;border-bottom:.5px solid var(--ud-card-border);border-radius:0;background:transparent}
-.ud-pricing-tabs .ud-seg-item{height:32px;padding:0 6px;border-bottom:2px solid transparent;border-radius:0;font-size:14px}
-.ud-pricing-tabs .ud-seg-item--on{border-bottom-color:var(--dsw-alias-brand-primary);background:transparent}
+.ud-pricing-clock-toggle--active::after{content:"";position:absolute;inset:4px 4px auto auto;width:5px;height:5px;border-radius:50%;background:var(--dsw-alias-state-business-primary)}
+.ud-pricing-toolbar>.ud-group{border-radius:var(--dsw-radius-sm)}
+.ud-pricing-toolbar .ud-seg-item{height:30px}
+.ud-pricing-create{display:inline-flex;align-items:center;gap:6px}
 .ud-pricing-clock{padding:0 0 12px;border-bottom:.5px solid var(--ud-card-border);align-items:end}
 .ud-pricing-clock .ud-field{flex:1 1 168px}
 .ud-pricing-clock .ud-input{max-width:100%}
@@ -4214,32 +4219,28 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-pricing-actions{margin-inline-start:auto}
 .ud-pricing-actions>.ud-group,.ud-pricing-weekdays{padding:2px;border-radius:var(--dsw-radius-sm)}
 .ud-pricing-actions>.ud-group{flex:none}
-.ud-pricing-rules,.ud-pricing-platforms,.ud-pricing-panel,.ud-pricing-summary,.ud-pricing-empty{border:.5px solid var(--ud-card-border);border-radius:var(--dsw-radius-md);background:var(--ud-card);min-width:0}
-.ud-pricing-rules,.ud-pricing-platforms{padding:0 12px}
-.ud-pricing-group+.ud-pricing-group,.ud-pricing-provider+.ud-pricing-provider{border-top:.5px solid var(--ud-card-border)}
-.ud-pricing-group-head{display:flex;align-items:center;gap:8px;padding:8px 8px 4px}
-.ud-pricing-group-title{margin:0;font-size:14px;line-height:22px;font-weight:600}
-.ud-pricing-group-count{font-size:12px;color:var(--ud-text-sub);font-variant-numeric:tabular-nums}
-.ud-pricing-rows{min-width:0}
-.ud-pricing-rule,.ud-pricing-model{position:relative;min-width:0}
-.ud-pricing-rule+.ud-pricing-rule{border-top:.5px solid var(--ud-card-border)}
-.ud-pricing-rule-bar{display:flex;align-items:center;gap:4px 8px;flex-wrap:wrap;padding:4px 0}
-.ud-pricing-rule--open::before,.ud-pricing-model:has(>.ud-pricing-row[aria-expanded=true])::before{
-  content:"";position:absolute;inset-block:8px;inset-inline-start:0;width:2px;border-radius:2px;background:var(--dsw-alias-brand-primary);pointer-events:none
-}
-.ud-pricing-model:has(>.ud-pricing-row[aria-expanded=true])::before{inset-block-end:auto;height:24px}
-.ud-pricing-rule--open .ud-pricing-rule-model,.ud-pricing-row[aria-expanded=true] .ud-pricing-rule-model{font-weight:600}
+.ud-pricing-rules,.ud-pricing-platforms{display:grid;gap:12px;min-width:0}
+.ud-pricing-empty{border:.5px solid var(--ud-card-border);border-radius:var(--dsw-radius-md);background:var(--ud-card);min-width:0}
+.ud-pricing-group{padding:4px 12px}
+.ud-pricing-group-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 16px;border-bottom:.5px solid var(--ud-card-border)}
+.ud-pricing-rule,.ud-pricing-model{min-width:0}
+.ud-pricing-rule+.ud-pricing-rule,.ud-pricing-model+.ud-pricing-model{border-top:.5px solid var(--ud-card-border)}
+.ud-pricing-rule-bar{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:0 8px;padding-inline-end:4px}
+.ud-pricing-rule--open{background:color-mix(in srgb,var(--dsw-alias-bg-module-platform) 60%,transparent);border-radius:var(--dsw-radius-sm)}
+.ud-pricing-row[aria-expanded=true]{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent);border-radius:var(--dsw-radius-sm)}
 .ud-pricing-empty{display:flex;flex-direction:column;align-items:center;gap:8px;padding:24px 12px;text-align:center}
 .ud-pricing-empty-text{margin:0;font-size:14px;line-height:22px;color:var(--dsw-alias-label-secondary)}
-.ud-pricing-panel{padding:8px 12px}
-.ud-pricing-rule-head,.ud-pricing-row{display:flex;align-items:center;gap:8px;min-height:40px;padding:6px 8px;border:0;background:transparent;color:inherit;font:inherit;text-align:start;cursor:pointer;border-radius:var(--dsw-radius-sm)}
-.ud-pricing-rule-head{flex:1 1 180px;min-width:0}
+.ud-pricing-rule-head,.ud-pricing-row{width:100%;min-width:0;min-height:46px;padding:6px 8px;border:0;background:transparent;color:inherit;font:inherit;text-align:start;cursor:pointer;border-radius:var(--dsw-radius-sm)}
 .ud-pricing-rule-head:hover,.ud-pricing-row:hover{background:var(--dsw-alias-interactive-bg-hover)}
-.ud-pricing-rule-no{flex:none;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;font-variant-numeric:tabular-nums}
-.ud-pricing-row-text{display:grid;gap:2px;flex:1;min-width:0}
-.ud-pricing-row-name{display:flex;align-items:center;gap:4px 8px;flex-wrap:wrap;min-width:0}
-.ud-pricing-rule-name{display:flex;align-items:baseline;gap:8px;min-width:0}
-.ud-pricing-rule-model{font-size:14px;line-height:20px;font-weight:500}
+.ud-pricing-board .ud-pricing-rule-head:focus-visible{outline-offset:-2px}
+.ud-pricing-rule-no{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;font-variant-numeric:tabular-nums}
+.ud-pricing-row-name{line-height:22px;min-width:0;overflow-wrap:anywhere}
+.ud-pricing-row-name>.ud-pricing-rule-no{margin-inline-end:8px}
+.ud-pricing-row-name>.ud-pricing-note,.ud-pricing-row-name>.ud-pricing-chip{margin-inline-start:8px}
+.ud-pricing-board .ud-model-name{white-space:normal;overflow-wrap:anywhere;line-height:22px}
+.ud-pricing-board .ud-model-provider{white-space:normal;line-height:18px;color:var(--dsw-alias-label-secondary)}
+.ud-pricing-row .ud-model-values{max-width:48%;min-width:0;flex:0 1 auto;text-align:end}
+.ud-pricing-row .ud-model-tokens{overflow-wrap:anywhere}
 .ud-pricing-rule-caret{display:flex;align-items:center;justify-content:center;flex:none;color:var(--dsw-alias-label-tertiary);transition:transform .15s}
 .ud-pricing-rule-caret svg{display:block;width:14px;height:14px}
 .ud-pricing-rule-head[aria-expanded=true] .ud-pricing-rule-caret{transform:rotate(90deg)}
@@ -4247,7 +4248,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-btn--danger-text:not(:disabled):not(.ud-delete-armed):hover{background:var(--dsw-alias-interactive-bg-hover-danger);color:var(--dsw-alias-state-error-primary)}
 .ud-btn--danger-text.ud-delete-armed,.ud-btn--danger-text.ud-delete-armed:hover{background:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-bg-base)}
 .ud-pricing-rule-tags{display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin-inline-start:auto}
-.ud-pricing-board .ud-pricing-rule-edit{font-size:13px;padding:0 8px;color:var(--dsw-alias-label-secondary)}
+.ud-pricing-rule-tags .ud-pricing-icon{color:var(--dsw-alias-label-secondary)}
 .ud-pricing-danger-zone{justify-content:flex-end}
 .ud-pricing-form-head{display:grid;gap:8px;min-width:0}
 .ud-pricing-form-head .ud-btn--text{color:var(--dsw-alias-label-secondary)}
@@ -4258,29 +4259,33 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-pricing-board h3,.ud-pricing-dialog h3{font-size:14px;line-height:22px}
 .ud-pricing-board code,.ud-pricing-dialog code{font-family:var(--ds-font-family-code);overflow-wrap:anywhere;min-width:0}
 .ud-pricing-summary,.ud-pricing-prices{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:0}
-.ud-pricing-summary{grid-template-columns:minmax(0,1.5fr) repeat(3,minmax(0,1fr));align-items:center;gap:8px;padding:10px 12px}
-.ud-pricing-summary dt,.ud-pricing-prices dt,.ud-pricing-note{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}
-.ud-pricing-summary dd,.ud-pricing-prices dd{margin:0;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
-.ud-pricing-summary dd{font-size:14px;font-weight:500;line-height:22px}
-.ud-pricing-summary>div:first-child dd{font-size:20px;font-weight:600;line-height:24px}
+.ud-pricing-summary .ud-card{gap:4px;padding:10px 12px}
+.ud-pricing-summary .ud-card-icon{flex:none}
+.ud-pricing-summary .ud-card-label{overflow-wrap:anywhere}
+.ud-pricing-summary .ud-card-value{text-overflow:ellipsis}
+.ud-pricing-prices dt,.ud-pricing-note{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}
+.ud-pricing-prices dd{margin:0;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
 .ud-pricing-row[aria-expanded=true] .ud-pricing-rule-caret{transform:rotate(90deg)}
-.ud-pricing-model + .ud-pricing-model{border-top:.5px solid var(--ud-card-border)}
-.ud-pricing-row{width:100%}
-.ud-pricing-provider{padding-block:4px}
-.ud-pricing-provider>.ud-pricing-row{font-weight:600}
-.ud-pricing-provider>.ud-pricing-row code{flex:1;font-family:inherit}
-.ud-pricing-provider>.ud-pricing-row[aria-expanded=true]+div{border-top:.5px solid var(--ud-card-border)}
+.ud-pricing-provider>.ud-fold-head:focus-visible{outline-offset:-2px}
+.ud-pricing-provider>.ud-fold-body{padding:4px 12px 8px}
+.ud-pricing-provider .ud-fold-title{overflow-wrap:anywhere}
+.ud-pricing-pages{justify-content:flex-end;padding-block-start:8px}
 .ud-pricing-chip{display:inline-flex;align-items:center;height:20px;font-weight:500;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:var(--dsw-radius-sm);padding:0 6px;font-size:11px;line-height:18px;white-space:nowrap}
 .ud-pricing-chip--button{height:24px;border:0;cursor:pointer;font:inherit;font-size:12px;line-height:18px}
 .ud-pricing-chip--button:not(:disabled):hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .ud-pricing-chip--button:disabled{opacity:.5;cursor:not-allowed}
 .ud-pricing-warn{color:var(--dsw-alias-state-warn-primary)}
-.ud-pricing-tree{border-inline-start:2px solid var(--ud-card-border);padding-inline-start:8px;margin:8px 0 8px 8px}
-.ud-pricing-tree ul,.ud-pricing-rule-detail ul,.ud-pricing-dialog-list{list-style:none;margin:0;padding:0;display:grid;gap:6px}
-.ud-pricing-tree-row{display:grid;gap:6px;padding:8px 0}
-.ud-pricing-tree-row+.ud-pricing-tree-row{border-top:.5px solid var(--dsw-alias-border-l2)}
-.ud-pricing-tree-row--winner code{font-weight:600}
-.ud-pricing-rule-detail{display:grid;gap:6px;padding:4px 8px 12px}
+.ud-pricing-tree{border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);padding:8px 12px;margin:4px 0}
+.ud-pricing-tree ul,.ud-pricing-dialog-list{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+.ud-pricing-tree-row{display:grid;gap:6px;padding:4px 0}
+.ud-pricing-tree-row+.ud-pricing-tree-row{border-top:.5px solid var(--dsw-alias-border-l2);padding-top:8px}
+.ud-pricing-tree-title{font-size:14px;overflow-wrap:anywhere}
+.ud-pricing-tree-row--winner .ud-pricing-tree-title{font-weight:600}
+.ud-pricing-rule-detail{display:grid;gap:6px;padding:4px 12px 12px}
+.ud-pricing-rule-unit{font-size:12px;line-height:18px;font-weight:600;color:var(--dsw-alias-label-secondary)}
+.ud-pricing-rule-meta{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 12px;padding-top:8px;border-top:.5px solid var(--ud-card-border)}
+.ud-pricing-rule-meta ul{display:flex;flex-wrap:wrap;gap:4px 12px;list-style:none;margin:0;padding:0}
+.ud-pricing-rule-detail .ud-pricing-prices dd{font-size:16px;line-height:22px;font-weight:600}
 .ud-pricing-prices dd{font-size:13px;font-weight:500;line-height:20px}
 .ud-pricing-dialog{box-sizing:border-box;width:min(480px,calc(100vw - 24px));max-height:calc(100dvh - 24px);overflow:auto;padding:16px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);box-shadow:var(--dsw-shadow-lv3);font-size:14px;line-height:22px}
 .ud-pricing-dialog[open],.ud-pricing-dialog form{display:grid;gap:12px}
@@ -4297,6 +4302,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
   .ud-cond-kind{justify-self:start}
   .ud-cond-fields,.ud-cond>.ud-field-error{grid-column:1/-1}
   .ud-cond .ud-pricing-icon{grid-column:2;grid-row:1}
+}
+@container ud-pricing (max-width:380px){
+  .ud-pricing-rule-bar{grid-template-columns:minmax(0,1fr)}
 }
 @media(max-width:480px){.ud-pricing-dialog .ud-pricing-prices{grid-template-columns:repeat(2,minmax(0,1fr))}}
 /* dock 内并列条目:官方 pill 满宽不动,空间不足时高收缩因子让自身先收缩(min-width:0 配合 ellipsis),挤压力不转嫁官方 */
@@ -5777,9 +5785,9 @@ ${HUD_CSS}
     }
 
     // 设置区折叠容器:标题按钮承担展开/收起语义,body 保留子树状态
-    function SectionFold({ title, description, summary, open, onToggle, children }) {
+    function SectionFold({ title, description, summary, open, onToggle, children, className }) {
       const bodyId = React.useId()
-      return h('section', { className: cx('ud-fold', open && 'ud-fold--open') },
+      return h('section', { className: cx('ud-fold', open && 'ud-fold--open', className) },
         h('button', {
           type: 'button', className: 'ud-fold-head', 'aria-expanded': open, 'aria-controls': bodyId,
           onClick: onToggle,
@@ -5897,13 +5905,13 @@ ${HUD_CSS}
       }
       const priceField = (key, labelKey) => h('label', { key, className: 'ud-field' },
         h('span', { className: 'ud-field-label' }, t(labelKey)),
-        h('span', { className: 'ud-price-input' },
-          h('span', { className: 'ud-price-currency', 'aria-hidden': 'true' }, currency),
+        h('span', { className: 'ud-guard-amount' },
           h('input', {
-            type: 'number', className: 'ud-input', min: 0, step: 'any',
+            type: 'number', className: 'ud-input', min: 0, step: 'any', inputMode: 'decimal',
             value: rule.price?.[key] ?? '',
             onChange: (event) => onPricePatch({ price: { ...rule.price, [key]: event.target.value } }),
-          })),
+          }),
+          h('span', { className: 'ud-guard-unit', 'aria-hidden': 'true' }, currency)),
         errorTextOf(`${pathPrefix}price.${key}`))
       return h('div', { className: 'ud-price-grid' },
         priceField('input', 'priceInput'),
@@ -6007,7 +6015,7 @@ ${HUD_CSS}
           'aria-invalid': Boolean(invalid), 'aria-describedby': invalid ? errorId : undefined,
           spellCheck: false, autoComplete: 'off', onChange: (event) => onChange(event.target.value),
         }))
-      return h('div', { className: 'ud-pricing-fields' },
+      return h('div', { className: 'ud-card ud-pricing-fields' },
         h('div', { className: 'ud-pricing-pattern' },
           field('pricing.providerPattern', rule.invalidProvider ?? provider, (value) => {
             if (value.includes(SEGMENT_SEPARATOR)) actions.rename(slot, rule.model, value)
@@ -6070,7 +6078,7 @@ ${HUD_CSS}
       const others = (row.candidates ?? []).filter((rule) => rule !== row.winner)
       const entry = (rule) => h('li', { key: pricingRuleNumber(rules, rule), className: cx('ud-pricing-tree-row', rule === row.winner && 'ud-pricing-tree-row--winner') },
         h('div', { className: 'ud-pricing-line' },
-          h('code', null, `${pricingRuleNumber(rules, rule)} ${rule.model}`),
+          h('span', { className: 'ud-pricing-tree-title' }, `${pricingRuleNumber(rules, rule)} ${rule.model}`),
           h('span', { className: 'ud-pricing-chip' }, t(rule === row.winner ? 'pricing.active' : 'pricing.inactive')),
           row.conflictRules.includes(rule) ? h('span', { className: 'ud-pricing-chip ud-pricing-warn' }, t('pricing.conflict')) : null),
         h('span', { className: 'ud-pricing-note' }, pricingConditionsText(rule, t)),
@@ -6088,7 +6096,7 @@ ${HUD_CSS}
     const PRICING_MODELS_PER_PAGE = 20
     const PRICING_SEARCH_SUGGESTIONS = 40
 
-    function PricingModels({ analysis, rules, moment, query, onQuery, selectedModel, onSelect, onEdit, clockToggle, clock, t }) {
+    function PricingModels({ analysis, rules, moment, query, onQuery, selectedModel, onSelect, onEdit, clockToggle, clock, modelColors, t }) {
       const listId = React.useId()
       const [providerOverrides, setProviderOverrides] = useState(() => new Map())
       const [providerPages, setProviderPages] = useState(() => new Map())
@@ -6113,47 +6121,52 @@ ${HUD_CSS}
       const priced = rows.filter((row) => row.winner)
       const amountsAvailable = rows.length > 0 && rows.every((row) => row.cost !== null)
       const totals = [
-        ['pricing.estimated', amountsAvailable ? formatCost(rows.reduce((sum, row) => sum + row.cost, 0), aggregateCurrencyOf(rules)) : TOOLTIP_MISSING],
-        ['pricing.priced', `${priced.length}/${rows.length}`],
-        ['pricing.fallback', priced.filter((row) => isPricingFallback(row.winner)).length],
-        ['pricing.rules', rules.length],
+        ['pricing.estimated', ICONS.coins, amountsAvailable ? formatCost(rows.reduce((sum, row) => sum + row.cost, 0), aggregateCurrencyOf(rules)) : TOOLTIP_MISSING],
+        ['pricing.priced', ICONS.model, `${priced.length}/${rows.length}`],
+        ['pricing.fallback', ICONS.rate, String(priced.filter((row) => isPricingFallback(row.winner)).length)],
+        ['pricing.rules', ICONS.rules, String(rules.length)],
       ]
       const modelToggle = (row, label, detailId) => h('button', {
-        type: 'button', className: 'ud-pricing-row', 'aria-controls': detailId, 'aria-expanded': selectedModel === row.model,
+        type: 'button', className: 'ud-model-row ud-pricing-row', 'aria-controls': detailId, 'aria-expanded': selectedModel === row.model,
         'data-ud-price-model': row.model,
         onClick: () => onSelect(selectedModel === row.model ? null : row.model),
-      }, h('span', { className: 'ud-pricing-row-text' },
-        h('span', { className: 'ud-pricing-row-name' },
-          h('code', { className: 'ud-pricing-rule-model' }, label),
-          row.winner && isPricingFallback(row.winner) ? h('span', { className: 'ud-pricing-chip' }, t('pricing.globalFallback')) : null),
-        h('span', { className: cx('ud-pricing-note', !row.winner && 'ud-pricing-warn') },
-          row.winner ? `${pricingRuleNumber(rules, row.winner)} · ${t('priceInput')} ${row.winner.currency ?? ''}${row.winner.price.input} · ${t('priceOutput')} ${row.winner.currency ?? ''}${row.winner.price.output}` : t('pricing.unpriced'))),
-      h('span', { className: 'ud-pricing-rule-caret', 'aria-hidden': 'true' }, h(Icon, { paths: ICONS.chevron })))
+      },
+        h('i', { className: 'ud-model-swatch', 'aria-hidden': true, style: { background: modelColors.get(row.model) ?? 'var(--ud-chart-other)' } }),
+        h('span', { className: 'ud-model-id' },
+          h('span', { className: 'ud-model-name' }, label),
+          row.winner && isPricingFallback(row.winner) ? h('span', { className: 'ud-model-provider' }, t('pricing.globalFallback')) : null),
+        h('span', { className: cx('ud-model-values', !row.winner && 'ud-pricing-warn') },
+          h('span', { className: 'ud-model-tokens' }, row.winner
+            ? `${pricingRuleNumber(rules, row.winner)} · ${t('priceInput')} ${row.winner.currency ?? ''}${row.winner.price.input} · ${t('priceOutput')} ${row.winner.currency ?? ''}${row.winner.price.output}`
+            : t('pricing.unpriced'))),
+        h('span', { className: 'ud-pricing-rule-caret', 'aria-hidden': 'true' }, h(Icon, { paths: ICONS.chevron })))
       const modelDetails = (row, id) => h('div', { id, hidden: selectedModel !== row.model }, selectedModel === row.model
         ? h(PricingTree, { key: row.model, row, rules, t }) : null)
       return h('div', { className: 'ud-pricing-stack' },
         h('div', { className: 'ud-pricing-search' },
           h('label', { className: 'ud-field' }, h('span', { className: 'ud-field-label' }, t('pricing.search')),
-            h('input', {
-              type: 'search', className: 'ud-input', value: query, list: listId, placeholder: t('pricing.searchPlaceholder'),
-              onChange: (event) => {
-                const value = event.target.value
-                if (value.trim() !== probeKey) {
-                  setProviderOverrides(new Map())
-                  setProviderPages(new Map())
-                }
-                onQuery(value)
-                onSelect(analysis.rows.has(value.trim()) ? value.trim() : null)
-              },
-            })),
+            h('span', { className: 'ud-pricing-search-input' }, h(Icon, { paths: ICONS.search }),
+              h('input', {
+                type: 'search', className: 'ud-input', value: query, list: listId, placeholder: t('pricing.searchPlaceholder'),
+                onChange: (event) => {
+                  const value = event.target.value
+                  if (value.trim() !== probeKey) {
+                    setProviderOverrides(new Map())
+                    setProviderPages(new Map())
+                  }
+                  onQuery(value)
+                  onSelect(analysis.rows.has(value.trim()) ? value.trim() : null)
+                },
+              }))),
           clockToggle),
         clock,
         h('datalist', { id: listId }, suggestions),
-        probe ? h('div', { className: 'ud-pricing-panel' },
-          h('div', { className: 'ud-pricing-note' }, t('pricing.probe')),
+        probe ? h('div', { className: 'ud-card' },
+          h('div', { className: 'ud-card-label' }, t('pricing.probe')),
           modelToggle(probe, probe.model, `${listId}-probe`), modelDetails(probe, `${listId}-probe`)) : null,
-        rows.length ? h('dl', { className: 'ud-pricing-summary' }, totals.map(([key, value]) => h('div', { key },
-          h('dt', null, t(key)), h('dd', null, value)))) : null,
+        rows.length ? h('div', { className: 'ud-pricing-summary' }, totals.map(([key, icon, value]) => h(Card, {
+          key, icon, label: t(key),
+        }, h('div', { title: value }, h(FitText, null, value))))) : null,
         rows.length > priced.length ? h('p', { className: 'ud-pricing-warn' }, t('pricing.unpricedCount', { n: rows.length - priced.length })) : null,
         !rules.length ? h('div', { className: 'ud-pricing-empty' },
           h('p', { className: 'ud-pricing-empty-text' }, t('pricingNotConfigured')),
@@ -6162,25 +6175,22 @@ ${HUD_CSS}
           h('p', { className: 'ud-pricing-empty-text' }, t(rows.length ? 'pricing.noSearchResults' : 'pricing.noObserved'))) : null,
         groups.length ? h('div', { className: 'ud-pricing-platforms' }, groups.map(([provider, items], index) => {
           const open = exactObserved || (providerOverrides.get(provider) ?? index < (search ? PRICING_SEARCH_AUTO_GROUPS : 1))
-          const detailsId = `${listId}-provider-${encodeURIComponent(provider)}`
           const lastPage = Math.ceil(items.length / PRICING_MODELS_PER_PAGE) - 1
           const page = Math.min(providerPages.get(provider) ?? 0, lastPage)
           const start = page * PRICING_MODELS_PER_PAGE
           const paginate = (next) => setProviderPages((previous) => new Map(previous).set(provider, next))
-          return h('section', { key: provider, className: 'ud-pricing-provider' },
-            h('button', {
-              className: 'ud-pricing-row', type: 'button', 'aria-expanded': open, 'aria-controls': detailsId,
-              onClick: () => setProviderOverrides((previous) => new Map(previous).set(provider, !open)),
-            }, h('code', null, provider), h('span', { className: 'ud-pricing-note' }, t('pricing.modelCount', { n: items.length })),
-            h('span', { className: 'ud-pricing-rule-caret', 'aria-hidden': 'true' }, h(Icon, { paths: ICONS.chevron }))),
-            h('div', { id: detailsId, hidden: !open }, open ? items.slice(start, start + PRICING_MODELS_PER_PAGE).map((row) => {
-              const id = `${listId}-${encodeURIComponent(row.model)}`
-              return h('div', { key: row.model, className: 'ud-pricing-model' }, modelToggle(row, modelNameOf(row.model), id), modelDetails(row, id))
-            }) : null,
-            open && lastPage > 0 ? h('div', { className: 'ud-pricing-line' },
-              h('button', { type: 'button', className: 'ud-btn', disabled: page === 0, onClick: () => paginate(page - 1) }, t('pricing.previousModels')),
-              h('span', { className: 'ud-pricing-note' }, `${page + 1}/${lastPage + 1}`),
-              h('button', { type: 'button', className: 'ud-btn', disabled: page === lastPage, onClick: () => paginate(page + 1) }, t('pricing.nextModels'))) : null))
+          return h(SectionFold, {
+            key: provider, className: 'ud-pricing-provider', title: provider, open,
+            summary: t('pricing.modelCount', { n: items.length }),
+            onToggle: () => setProviderOverrides((previous) => new Map(previous).set(provider, !open)),
+          }, open ? items.slice(start, start + PRICING_MODELS_PER_PAGE).map((row) => {
+            const id = `${listId}-${encodeURIComponent(row.model)}`
+            return h('div', { key: row.model, className: 'ud-pricing-model' }, modelToggle(row, modelNameOf(row.model), id), modelDetails(row, id))
+          }) : null,
+          open && lastPage > 0 ? h('div', { className: 'ud-pricing-line ud-pricing-pages' },
+            h('button', { type: 'button', className: 'ud-btn', disabled: page === 0, onClick: () => paginate(page - 1) }, t('pricing.previousModels')),
+            h('span', { className: 'ud-pricing-note' }, `${page + 1}/${lastPage + 1}`),
+            h('button', { type: 'button', className: 'ud-btn', disabled: page === lastPage, onClick: () => paginate(page + 1) }, t('pricing.nextModels'))) : null)
         })) : null)
     }
 
@@ -6248,12 +6258,14 @@ ${HUD_CSS}
         ? formatCost(stats.billing.reduce((sum, row) => sum + row.cost, 0), rule.currency) : TOOLTIP_MISSING
       const tokens = formatTokens(stats.billing.reduce((sum, row) => sum + (row.usage.tokens ?? 0), 0))
       return h('div', { className: 'ud-pricing-rule-detail' },
+        h('p', { className: 'ud-pricing-rule-unit' }, t('pricingUnit')),
         h(PricingPriceReadout, { rule, t }),
-        h('p', { className: 'ud-pricing-note' }, t('pricing.ruleEstimate', { cost, tokens })),
-        takeover.size ? h('ul', null, [...takeover].map(([winner, n]) => {
-          const number = pricingRuleNumber(rules, winner)
-          return h('li', { key: number }, t('pricing.takeoverDetail', { rule: number, n }))
-        })) : null)
+        h('div', { className: 'ud-pricing-rule-meta ud-pricing-note' },
+          h('p', null, t('pricing.ruleEstimate', { cost, tokens })),
+          takeover.size ? h('ul', null, [...takeover].map(([winner, n]) => {
+            const number = pricingRuleNumber(rules, winner)
+            return h('li', { key: number }, t('pricing.takeoverDetail', { rule: number, n }))
+          })) : null))
     }
 
     function PricingRules({ analysis, rules, onEditRule, onJump, t }) {
@@ -6265,18 +6277,18 @@ ${HUD_CSS}
         .sort((a, b) => a.segments[0].localeCompare(b.segments[0], 'en') || a.segments[1].localeCompare(b.segments[1], 'en') || a.index - b.index), [rules])
       const statsByKey = useMemo(() => new Map([...analysis.ruleStats].map(([rule, stats]) => [ruleStatsKey(rule), stats])), [analysis])
       const badge = (rule, kind, n, stats) => n > 0 ? h('button', {
-        type: 'button', className: 'ud-pricing-chip ud-pricing-chip--button',
+        type: 'button', className: 'ud-pricing-chip ud-pricing-chip--button', 'aria-haspopup': 'dialog',
         onClick: (event) => { event?.stopPropagation(); setDetail({ rule, kind, stats }) },
       }, t(`pricing.${kind}`, { n })) : null
       return h('div', { className: 'ud-pricing-rules' },
         labels.map((hasStar) => {
           const group = items.filter(({ rule }) => rule.model.includes(MODEL_WILDCARD) === hasStar)
           if (!group.length) return null
-          return h('section', { key: String(hasStar), className: 'ud-pricing-group' },
+          return h('section', { key: String(hasStar), className: 'ud-fold' },
             h('div', { className: 'ud-pricing-group-head' },
-              h('h3', { className: 'ud-pricing-group-title' }, t(hasStar ? 'pricing.withStar' : 'pricing.withoutStar')),
-              h('span', { className: 'ud-pricing-group-count' }, String(group.length))),
-            h('div', { className: 'ud-pricing-rows' }, group.map(({ rule, index }) => {
+              h('h3', { className: 'ud-fold-title' }, t(hasStar ? 'pricing.withStar' : 'pricing.withoutStar')),
+              h('span', { className: 'ud-fold-summary' }, t('pricingRuleCount', { n: group.length }))),
+            h('div', { className: 'ud-pricing-group' }, group.map(({ rule, index }) => {
               const stats = statsByKey.get(ruleStatsKey(rule)) ?? { billing: [], taken: [], conflict: false }
               const key = rule[DRAFT_SLOT]
               const detailId = `${listId}-${key}`
@@ -6290,26 +6302,25 @@ ${HUD_CSS}
               return h('article', { key, className: cx('ud-pricing-rule', open && 'ud-pricing-rule--open') },
                 h('div', { className: 'ud-pricing-rule-bar' },
                   h('button', {
-                    type: 'button', className: 'ud-pricing-rule-head', 'aria-expanded': open,
+                    type: 'button', className: 'ud-model-row ud-pricing-rule-head', 'aria-expanded': open,
                     'aria-controls': detailId, onClick: toggle,
                   },
-                    h('span', { className: 'ud-pricing-row-text' },
-                      h('span', { className: 'ud-pricing-rule-name' },
+                    h('span', { className: 'ud-pricing-rule-caret', 'aria-hidden': 'true' }, h(Icon, { paths: ICONS.chevron })),
+                    h('span', { className: 'ud-model-id' },
+                      h('span', { className: 'ud-pricing-row-name' },
                         h('span', { className: 'ud-pricing-rule-no' }, `#${index + 1}`),
-                        h('span', { className: 'ud-pricing-row-name' },
-                          h('code', { className: 'ud-pricing-rule-model' }, rule.model),
-                          isPricingFallback(rule) ? h('span', { className: 'ud-pricing-chip' }, t('pricing.globalFallback')) : null,
-                          stats.conflict ? h('span', { className: 'ud-pricing-chip ud-pricing-warn' }, t('pricing.conflict')) : null)),
-                      rule.conditions?.length ? h('span', { className: 'ud-pricing-note' }, pricingConditionsText(rule, t)) : null),
-                    h('span', { className: 'ud-pricing-rule-caret', 'aria-hidden': 'true' }, h(Icon, { paths: ICONS.chevron }))),
+                        h('span', { className: 'ud-model-name' }, h('span', { className: 'ud-pricing-rule-model' }, rule.model)),
+                        isPricingFallback(rule) ? h('span', { className: 'ud-pricing-note' }, t('pricing.globalFallback')) : null,
+                        stats.conflict ? h('span', { className: 'ud-pricing-chip ud-pricing-warn' }, t('pricing.conflict')) : null),
+                      rule.conditions?.length ? h('span', { className: 'ud-model-provider' }, pricingConditionsText(rule, t)) : null)),
                   h('div', { className: 'ud-pricing-rule-tags' },
                     badge(rule, 'billing', stats.billing.length, stats),
                     badge(rule, 'taken', stats.taken.length, stats),
                     h('button', {
-                      type: 'button', className: 'ud-btn ud-btn--text ud-pricing-rule-edit',
+                      type: 'button', className: 'ud-btn ud-btn--text ud-pricing-icon',
                       'aria-label': `${t('pricing.editRule')} #${index + 1} ${rule.model}`,
-                      onClick: () => onEditRule(index),
-                    }, t('pricing.editRule')))),
+                      title: t('pricing.editRule'), onClick: () => onEditRule(index),
+                    }, h(Icon, { paths: ICONS.edit })))),
                 h('div', { id: detailId, hidden: !open }, open ? h(PricingRuleDetails, { rule, stats, rules, t }) : null))
             })))
         }),
@@ -6424,7 +6435,7 @@ ${HUD_CSS}
             h('button', { type: 'button', className: 'ud-btn ud-btn--primary', disabled: saving, onClick: onSave }, t('save')))))
     }
 
-    function PricingEditor({ t = defaultT, publishedRules, observed = EMPTY_PRICING_ROWS, open = true, timeZone }) {
+    function PricingEditor({ t = defaultT, publishedRules, observed = EMPTY_PRICING_ROWS, open = true, timeZone, modelColors }) {
       const [tab, setTab] = useState(PRICING_TABS[0].id)
       const [snapshot, setSnapshot] = useState('')
       const [clockOpen, setClockOpen] = useState(false)
@@ -6688,7 +6699,8 @@ ${HUD_CSS}
           })) : null
       const listPanel = h('div', { className: 'ud-pricing-stack' },
         h('div', { className: 'ud-pricing-toolrow' },
-          h('button', { type: 'button', className: 'ud-btn', onClick: openCreateRule }, t('pricing.createRule')),
+          h('button', { type: 'button', className: 'ud-btn ud-pricing-create', onClick: openCreateRule },
+            h(Icon, { paths: ICONS.plus }), t('pricing.createRule')),
           h('div', { className: 'ud-pricing-actions' },
             saved ? h('span', { className: 'ud-pref-desc', role: 'status' }, t('saved')) : null,
             currencyPicker, saveButton, clockToggle)),
@@ -6725,7 +6737,7 @@ ${HUD_CSS}
       const views = {
         models: analysis ? h(PricingModels, {
           analysis, rules: currentRules, moment, query,
-          onQuery: setQuery, selectedModel, onSelect: setSelectedModel, clockToggle, clock, t,
+          onQuery: setQuery, selectedModel, onSelect: setSelectedModel, clockToggle, clock, modelColors, t,
           onEdit: () => { if (!activeRule) openCreateRule(); chooseTab('rules', true) },
         }) : null,
         rules: analysis ? h(React.Fragment, null, editorPanel ?? listPanel, batchPanel) : null,
@@ -6772,7 +6784,7 @@ ${HUD_CSS}
     }
 
     // 定价规则折叠区:编辑器保持挂载以保留草稿,折叠只隐藏 body
-    function PricingSection({ rules = null, observed, timeZone, t = defaultT }) {
+    function PricingSection({ rules = null, observed, timeZone, modelColors, t = defaultT }) {
       const [open, setOpen] = useState(false)
       const summary = !Array.isArray(rules) ? undefined
         : rules.length > 0 ? t('pricingRuleCount', { n: rules.length }) : t('pricingNotConfigured')
@@ -6782,7 +6794,7 @@ ${HUD_CSS}
         summary,
         open,
         onToggle: () => setOpen((value) => !value),
-      }, h(PricingEditor, { t, open, publishedRules: rules, observed, timeZone }))
+      }, h(PricingEditor, { t, open, publishedRules: rules, observed, timeZone, modelColors }))
     }
 
     // 扫描异常日志入口:仅箭头标识,明细在展开的日志块中展示;
@@ -7204,6 +7216,7 @@ ${HUD_CSS}
       const usageModels = usageModelsOf(view, grouped, pointView)
       // 模型配色取当期窗口模型排名,防跨窗口取色错位
       const colorFor = useMemo(() => colorForModel(cardsStats ? cardsStats.models : []), [cardsStats])
+      const modelColors = useMemo(() => new Map((usageModels ?? []).map(({ model }) => [model, colorFor(model)])), [usageModels, colorFor])
       const maxSlots = pointActive ? maxSlotsFor(view, rawPreset) : DAY_MAX_SLOTS
       const trimmedSlots = trendSource ? trimSlots(trendSource.slots, maxSlots) : null
       const { costReady, money, chartSlots } = moneyViewOf(trimmedSlots, costView)
@@ -7331,7 +7344,7 @@ ${HUD_CSS}
         cardsStats?.to ? h('div', { className: 'ud-foot' }, `${t('asOf')} ${slotLabelFor(view)(cardsStats.to)}`) : null,
         h('div', { className: 'ud-settings-stack' },
           h(StatsLineOptions, { key: 'prefs', t }),
-          h(PricingSection, { key: 'pricing', t, rules: pricingRules, observed: cardsStats?.models, timeZone: serverTimeZone }),
+          h(PricingSection, { key: 'pricing', t, rules: pricingRules, observed: cardsStats?.models, timeZone: serverTimeZone, modelColors }),
           // 成本控制四卡:用量摘要 / 成本护栏 / 异常哨兵 / 省钱沙盘(沙盘用得少,排在最后)
           h(HudSummarySection, { key: 'hud', t }),
           h(GuardSection, { key: 'guard', t }),

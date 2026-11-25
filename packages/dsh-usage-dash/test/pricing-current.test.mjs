@@ -103,7 +103,7 @@ function fixture({ observed = [], timeZone, time = new Date(2026, 10, 24, 9, 0).
     const row = nodes(rendered.tree).find(node => node.type === 'article' && nodes(node).some(child =>
       child.props.className === 'ud-pricing-rule-model' && text(child) === model))
     assert.ok(row, `规则行应存在: ${model}; got ${nodes(rendered.tree).filter(n => n.props?.className === 'ud-pricing-rule-model').map(n => text(n)).join(',')}`)
-    const button = nodes(row).find(node => node.type === 'button' && text(node) === '编辑规则')
+    const button = nodes(row).find(node => node.type === 'button' && node.props['aria-label']?.startsWith('编辑规则 #'))
     assert.ok(button, `规则行应提供编辑规则入口: ${model}`)
     button.props.onClick(); render(owner)
     return owner
