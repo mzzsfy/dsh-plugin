@@ -141,7 +141,7 @@ export function judgeHttp(expect, response) {
     const statuses = [].concat(expect.status)
     const actualStatus = response?.status
     if (!statuses.includes(actualStatus)) {
-      return { ok: false, expected: statuses, actual: actualStatus, error: formatMismatch(statuses, actualStatus) }
+      return { ok: false, expected: statuses, actual: actualStatus, error: `${actualStatus} 不满足门槛 ${statuses.join('|')}` }
     }
   }
   if (expect.fields !== undefined) {
