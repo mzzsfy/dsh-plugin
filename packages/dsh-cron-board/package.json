@@ -51,7 +51,8 @@
     "croner": "^10.0.1"
   },
   "peerDependencies": {
-    "@deepseek-ai/schemastery": ">=3.18.0"
+    "@deepseek-ai/schemastery": ">=3.18.0",
+    "@deepseek-ai/dsh-tools": ">=0.1.5-rc.2"
   },
   "files": [
     "src",

@@ -72,6 +72,8 @@ test('P3:设置项全部自带中文说明,logKeepPerJob 默认取常量不再�
   assert.equal(schema.dict.logKeepPerJob.meta.default, mod.DEFAULT_LOG_KEEP_PER_JOB)
   assert.equal(schema.dict.tickSeconds.meta.default, DEFAULT_TICK_MS / 1000)
   assert.equal(schema.dict.maxConcurrent.meta.default, DEFAULT_MAX_CONCURRENT)
+  // Then 模型工具默认关闭(追加/覆盖两种模式都需用户显式开启)
+  assert.equal(schema.dict.toolsAppend.meta.default, false)
 })
 
 test('index:apply 注册 prefix 路由且请求走通(列表接口)', async () => {
@@ -172,6 +174,7 @@ function makeFullCtx({ timerAvailable = true } = {}) {
     },
   }
   const intervals = []
+  const toolDefs = []
   const ctx = {
     effect(fn) { fn() },
     get(name) {
@@ -204,6 +207,19 @@ function makeFullCtx({ timerAvailable = true } = {}) {
       if (deps[0] === 'settings') {
         fn({ settings: settingsService })
       }
+      if (deps[0] === 'tools') {
+        fn({
+          tools: {
+            register(definition) {
+              toolDefs.push(definition)
+              return () => {
+                const index = toolDefs.indexOf(definition)
+                if (index >= 0) toolDefs.splice(index, 1)
+              }
+            },
+          },
+        })
+      }
     },
     webServer: {
       register(route) {
@@ -212,7 +228,7 @@ function makeFullCtx({ timerAvailable = true } = {}) {
       },
     },
   }
-  return { ctx, routes, registered, intervals, settingsService, sessions, published }
+  return { ctx, routes, registered, intervals, settingsService, sessions, published, toolDefs }
 }
 
 test('index:inject 声明 webServer(sessionController 不进 inject,旧宿主不 pending)', async () => {
@@ -331,6 +347,29 @@ test('index:tickSeconds 设置变更经 watch 重建 interval', async () => {
   watchFn()
   // Then interval 重建
   assert.equal(intervals.length, 2)
+})
+
+test('index:toolsAppend 开关控制看板工具注册与撤销', async () => {
+  // Given 设置开关打开(legacy settings 形态,watch 回调可触发)
+  let watchFn = null
+  const base = makeFullCtx()
+  base.settingsService.get = () => ({ toolsAppend: true })
+  base.settingsService.register = () => ({ get: () => ({ toolsAppend: true }), watch(fn) { watchFn = fn } })
+  apply(base.ctx)
+  // Then 四个看板工具全部注册
+  assert.deepEqual(base.toolDefs.map((definition) => definition.name).sort(), [
+    'cron_board_create', 'cron_board_edit', 'cron_board_list', 'cron_board_view',
+  ])
+  // When 关闭开关并触发设置变更
+  base.settingsService.get = () => ({ toolsAppend: false })
+  watchFn()
+  // Then 全部撤销,不留残留
+  assert.equal(base.toolDefs.length, 0)
+  // When 再次打开
+  base.settingsService.get = () => ({ toolsAppend: true })
+  watchFn()
+  // Then 重新挂载且不重复
+  assert.equal(base.toolDefs.length, 4)
 })
 
 test('index:写路由成功受理即发布总线变更,失败不发布', async () => {
@@ -460,6 +499,7 @@ function makeRc17Ctx({ configStore = {}, configEditorAvailable = true, configure
   const effects = []
   const listeners = new Map()
   const intervals = []
+  const toolDefs = []
   const ctx = {
     calls,
     fiber: { entry: { options: { id: 'cron-board', name: '@mzzsfy/dsh-cron-board' } } },

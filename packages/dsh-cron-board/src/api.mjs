@@ -6,6 +6,7 @@
 import { assertValidSchedule, normalizeSchedule, nextRunAtOf, nextRunAtOfSchedules, nextRunsOf, nextRunsOfSchedules, splitSchedules, summarizeCron, summarizeSchedules } from './cron.mjs'
 import { DEFAULT_LOG_TAIL_LINES, DEFAULT_MAX_EXPANSION, DEFAULT_TIMEOUT_MS, SESSION_UNAVAILABLE_REASON } from './config.mjs'
 import { maskValue } from './env-text.mjs'
+import { AGENT_PRESET_PATTERN, JOB_MESSAGES, JOB_WRITABLE_FIELDS, normalizeJob } from './job-fields.mjs'
 
 const ROUTE_PREFIX = '/api/cron-board'
 // 编辑表单预览的触发点条数(单条表达式与合并计划同口径)
@@ -14,24 +15,18 @@ const PREVIEW_RUNS = 3
 export const BODY_MAX_BYTES = 64 * 1024
 
 export const MESSAGES = {
+  ...JOB_MESSAGES,
   notFound: '接口不存在',
   methodNotAllowed: '请求方法不支持',
   badJsonBody: '请求体不是合法 JSON',
   bodyTooLarge: '请求体超过上限',
   bodyAborted: '请求体读取中断',
   nameRequired: '变量名不能为空',
-  jobNameRequired: '任务名称不能为空',
-  commandRequired: '任务命令不能为空',
-  badKind: '任务类型不合法',
-  badSessionMode: '会话模式仅支持 fresh 或 pinned',
-  badAgentPreset: '执行预设 ID 仅限小写字母、数字与连字符',
-  badSessionModel: '模型指定不合法:provider 与 model 必须为非空文本,reasoningEffort 可省略',
   jobNotFound: '任务不存在',
   jobConflict: '任务已被其他操作修改,请关闭后重新打开编辑再保存',
   jobNotTerminated: '任务仍有在途运行未能终止,已取消删除,请稍后重试',
   runNotFound: '运行记录不存在',
   sessionUnavailable: SESSION_UNAVAILABLE_REASON,
-  noFutureTrigger: 'cron 表达式没有可执行的未来触发点,请调整表达式',
   systemError: '操作失败(系统级错误,详见服务端日志)',
 }
 
@@ -277,82 +272,6 @@ export function parseEnvText(text) {
 // 任务字段校验与规范化:非法即业务错误;返回可落库字段集
 
 // 会话任务专有字段(设计 §3.2 job.session 子对象);agentPreset 形态对齐宿主预设目录 id(dsh-im 同款校验)
-const AGENT_PRESET_PATTERN = /^[a-z0-9][a-z0-9-]*$/
-
-// 模型指定归一:provider/model 必填非空文本,reasoningEffort 可省;
-// provider/model 均为空白 = 未指定(返回 undefined,跟随宿主默认);形态残缺即业务错误
-function normalizeSessionModel(raw) {
-  if (raw === undefined) return undefined
-  if (raw === null || typeof raw !== 'object') throw new Error(MESSAGES.badSessionModel)
-  const provider = typeof raw.provider === 'string' ? raw.provider.trim() : ''
-  const model = typeof raw.model === 'string' ? raw.model.trim() : ''
-  if (provider === '' && model === '') return undefined
-  if (provider === '' || model === '') throw new Error(MESSAGES.badSessionModel)
-  const reasoningEffort = typeof raw.reasoningEffort === 'string' ? raw.reasoningEffort.trim() : ''
-  if (raw.reasoningEffort !== undefined && reasoningEffort === '') throw new Error(MESSAGES.badSessionModel)
-  return reasoningEffort === '' ? { provider, model } : { provider, model, reasoningEffort }
-}
-
-// 会话任务专有字段(设计 §3.2 job.session 子对象)
-function normalizeSession(body) {
-  if (body.kind !== 'session') return undefined
-  const raw = body.session && typeof body.session === 'object' ? body.session : {}
-  if (raw.mode !== undefined && raw.mode !== 'fresh' && raw.mode !== 'pinned') throw new Error(MESSAGES.badSessionMode)
-  const agentPreset = typeof raw.agentPreset === 'string' ? raw.agentPreset.trim() : ''
-  if (agentPreset !== '' && !AGENT_PRESET_PATTERN.test(agentPreset)) throw new Error(MESSAGES.badAgentPreset)
-  const session = {
-    mode: raw.mode === 'pinned' ? 'pinned' : 'fresh',
-    pinnedSessionId: typeof raw.pinnedSessionId === 'string' ? raw.pinnedSessionId.trim() : '',
-    // 空串 = 跟随宿主当前默认(driver 建会话时对空值省略字段)
-    agentPreset,
-  }
-  const model = normalizeSessionModel(raw.model)
-  if (model) session.model = model
-  return session
-}
-
-function normalizeJob(body, { requireFutureTrigger = true } = {}) {
-  const name = typeof body.name === 'string' ? body.name.trim() : ''
-  if (name === '') throw new Error(MESSAGES.jobNameRequired)
-  const kind = body.kind === 'session' ? 'session' : 'shell'
-  if (body.kind !== 'shell' && body.kind !== 'session') throw new Error(MESSAGES.badKind)
-  const command = typeof body.command === 'string' ? body.command.trim() : ''
-  if (kind === 'shell' && command === '') throw new Error(MESSAGES.commandRequired)
-  const schedule = normalizeSchedule(body.schedule)
-  assertValidSchedule(schedule)
-  // 无未来触发点(如 2 月 30 日)的表达式合法但永不执行:新建或改期时逐条拒绝
-  // (任一表达式永不触发即整份计划不完整);旧数据里的此类表达式仍允许停用/改名等维护性 PATCH
-  // 逐行只求值一次:校验用的下一次触发点与合并 nextAt 共用同一批结果
-  const lineNext = splitSchedules(schedule).map((line) => nextRunAtOf(line))
-  if (requireFutureTrigger && lineNext.includes(null)) throw new Error(MESSAGES.noFutureTrigger)
-  const nextAt = lineNext.reduce((min, at) => (at === null ? min : min === null || at < min ? at : min), null)
-  const normalized = {
-    name,
-    kind,
-    command,
-    prompt: typeof body.prompt === 'string' ? body.prompt : '',
-    workdir: typeof body.workdir === 'string' ? body.workdir.trim() : '',
-    schedule,
-    enabled: body.enabled !== false,
-    session: normalizeSession(body),
-  }
-  if (normalized.session === undefined) delete normalized.session
-  // 会话任务投递即终态无超时语义,timeoutMs 仅为 shell 真实执行保留
-  if (kind === 'shell') {
-    normalized.timeoutMs = Number.isInteger(body.timeoutMs) && body.timeoutMs > 0 ? body.timeoutMs : DEFAULT_TIMEOUT_MS
-  }
-  // 单次运行:真实运行入队即禁用(executor dispatch 承担),缺省关闭
-  normalized.runOnce = body.runOnce === true
-  // 任务级并发上限:合法正整数才落库,缺省走全局闸门(executor min 规则);
-  // 显式 null = 清空该键(mutate 按 undefined 删键),表达「不限并发」
-  if (body.concurrency === null) normalized.concurrency = undefined
-  else if (Number.isInteger(body.concurrency) && body.concurrency > 0) normalized.concurrency = body.concurrency
-  // nextRunAt:调用方可显式指定(导入任务保留原状态 / 测试注入到期时刻),缺省按 schedule 计算
-  normalized.nextRunAt = typeof body.nextRunAt === 'number' && Number.isFinite(body.nextRunAt)
-    ? body.nextRunAt
-    : nextAt
-  return normalized
-}
 
 // 数据集合损坏时在只读响应中显式告警:空表不得伪装成「没有数据」
 function storageWarning(store) {
@@ -631,7 +550,7 @@ export function createApi({ store, logger, executor, scheduler, periodic, report
         // 在服务缺失期照旧可用(否则会把停用开关一起打断)
         if (fields.kind === 'session' && existing.kind !== 'session' && !sessionAvailable()) return rejectSessionUnavailable(res)
         const patch = {}
-        for (const key of ['name', 'kind', 'command', 'prompt', 'workdir', 'schedule', 'enabled', 'timeoutMs', 'runOnce', 'concurrency']) {
+        for (const key of JOB_WRITABLE_FIELDS) {
           if (body[key] !== undefined) patch[key] = fields[key]
         }
         if (body.session !== undefined || body.kind !== undefined) patch.session = fields.session

@@ -17,6 +17,8 @@ import { createExecutor } from './executor.mjs'
 import { createLogger } from './logger.mjs'
 import { createScheduler } from './scheduler.mjs'
 import { createSessionDriver } from './session-driver.mjs'
+import { createJobTools } from './tools.mjs'
+import { createOverlayManager } from './tools-overlay.mjs'
 import { createStore } from './store.mjs'
 
 export const name = 'dsh-cron-board'
@@ -44,6 +46,8 @@ const SETTINGS_SCHEMA = schemastery.object({
   maskEnvInPrompt: schemastery.boolean().default(false).description('会话任务投递文本中环境变量打码'),
   sidebarTab: schemastery.boolean().default(false).description('看板移入 better-sidebar 侧边栏(需已安装;关闭时始终使用主界面)'),
   showAutomationTasks: schemastery.boolean().default(false).description('看板显示宿主自动化任务(只读聚合)并隐藏侧栏重复入口;需宿主提供自动化任务服务'),
+  toolsAppend: schemastery.boolean().default(false).description('追加看板工具(cron_board_list/view/create/edit):让模型读取并创建/修改/删除看板任务;默认关闭'),
+  toolsOverlay: schemastery.boolean().default(false).description('覆盖官方自动化任务工具(schedule_list/view/create/edit 同名遮蔽):模型操作宿主自动化任务;默认关闭'),
 })
 
 // 0.1.7 宿主以静态 Config 导出生成设置节表单(maintain 同构);legacy 宿主经
@@ -162,7 +166,7 @@ export function apply(ctx, config) {
         logSystem: (line) => (ctx.logger && ctx.logger.warn ? ctx.logger.warn(line) : undefined),
         notifyChange,
       })
-      return { api, scheduler }
+      return { api, scheduler, store, executor, logger }
     } catch (error) {
       // 半失败装配:解绑引用并回收已建执行链,重试不累积未收尾实例
       schedulerRef.current = { dispose() {} }
@@ -258,6 +262,7 @@ export function apply(ctx, config) {
   ctx.effect(() => {
     const off = ctx.on?.('loader/volatile-update', () => {
       if (armTick && periodic.running) armTick()
+      reconcileTools()
     })
     return () => off?.()
   }, 'cron-board volatile tick rebuild')
@@ -274,7 +279,7 @@ export function apply(ctx, config) {
     const scope = sctx.settings.register(SETTINGS_NS, SETTINGS_SCHEMA, { base: config })
     // tick 周期等设置变更即时对账(重建 interval)
     if (scope && typeof scope.watch === 'function') {
-      scope.watch(() => { if (armTick && periodic.running) armTick() })
+      scope.watch(() => { if (armTick && periodic.running) armTick(); reconcileTools() })
     }
   })
 
@@ -300,6 +305,65 @@ export function apply(ctx, config) {
     },
     'cron-board api',
   )
+
+  // 看板工具(追加模式):设置开关 toolsAppend 打开才注册,关闭即撤销;
+  // 注册半失败整体回滚,不留半套工具;tools 服务缺失时静默不挂(旧宿主无工具面)
+  const toolReconcilers = []
+  const reconcileTools = () => {
+    for (const reconcile of toolReconcilers) reconcile()
+  }
+  ctx.inject(['tools'], (tctx) => {
+    const disposers = []
+    const unmount = () => {
+      for (const dispose of disposers.splice(0).reverse()) {
+        try {
+          dispose()
+        } catch (error) {
+          ctx.logger?.warn?.('[cron-board] 工具撤销失败: ' + String(error && error.message ? error.message : error))
+        }
+      }
+    }
+    const mount = () => {
+      let definitions
+      try {
+        definitions = createJobTools({ getRuntime, getSessionController })
+      } catch (error) {
+        ctx.logger?.warn?.('[cron-board] 工具定义构建失败: ' + String(error && error.message ? error.message : error))
+        return
+      }
+      try {
+        for (const definition of definitions) disposers.push(tctx.tools.register(definition))
+      } catch (error) {
+        unmount()
+        ctx.logger?.warn?.('[cron-board] 工具注册失败: ' + String(error && error.message ? error.message : error))
+      }
+    }
+    let mounted = false
+    const reconcileAppend = () => {
+      const wanted = readBoolean('toolsAppend', false)
+      if (wanted === mounted) return
+      if (wanted) mount()
+      else unmount()
+      mounted = wanted
+    }
+    toolReconcilers.push(reconcileAppend)
+    reconcileAppend()
+    return () => {
+      const index = toolReconcilers.indexOf(reconcileAppend)
+      if (index >= 0) toolReconcilers.splice(index, 1)
+      unmount()
+    }
+  })
+
+  // 覆盖模式:agent 作用域注册同名 schedule_* 工具,开关关闭即撤销
+  const overlay = createOverlayManager(ctx, {
+    readEnabled: () => readBoolean('toolsOverlay', false),
+    getSchedule: () => ctx.get('schedule'),
+    logger: ctx.logger,
+  })
+  toolReconcilers.push(overlay.reconcile)
+  overlay.reconcile()
+  ctx.effect(() => () => overlay.dispose(), 'cron-board overlay tools lifecycle')
 
   // defer 挂起定时器随插件生命周期回收,不遗留生命周期外触发
   // 生命周期钩子:scheduler dispose 停 tick 并收敛执行链(清队/杀在途/等归零)
