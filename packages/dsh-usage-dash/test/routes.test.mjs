@@ -27,6 +27,7 @@ const ROUTE_PREFIX = '/api/usage-dash'
 const PATH_RANGE = `${ROUTE_PREFIX}/range`
 const PATH_HOURS = `${ROUTE_PREFIX}/hours`
 const PATH_MINUTES = `${ROUTE_PREFIX}/minutes`
+const PATH_WORKSPACES = `${ROUTE_PREFIX}/workspaces`
 const PATH_STATUS = `${ROUTE_PREFIX}/status`
 const PATH_RESET = `${ROUTE_PREFIX}/reset`
 const PATH_RESTORE = `${ROUTE_PREFIX}/restore`
@@ -90,15 +91,15 @@ function makeStore({ rows = [], sessionRows = [], fail, failSessionRows, backupA
       calls.restoreFromBackup = (calls.restoreFromBackup ?? 0) + 1
       return { takenAt: 0, rows: 0 }
     },
-    async rangeRows(g, from, to) {
+    async rangeRows(g, from, to, workspaceId) {
       calls.rangeRows += 1
       if (fail) throw fail
-      return rows.filter((row) => row.bucket >= from && row.bucket <= to)
+      return rows.filter((row) => row.bucket >= from && row.bucket <= to && (!workspaceId || row.workspaceId === workspaceId))
     },
-    async sessionRangeRows(g, from, to) {
-      calls.sessionRangeRows.push([g, from, to])
+    async sessionRangeRows(g, from, to, workspaceId) {
+      calls.sessionRangeRows.push(workspaceId ? [g, from, to, workspaceId] : [g, from, to])
       if (failSessionRows) throw failSessionRows
-      return sessionRows.filter((row) => row.bucket >= from && row.bucket <= to)
+      return sessionRows.filter((row) => row.bucket >= from && row.bucket <= to && (!workspaceId || row.workspaceId === workspaceId))
     },
   }
 }
@@ -153,7 +154,7 @@ function makePricing({ active = true, rules = [] } = {}) {
   }
 }
 
-function mount({ store, collector, retentionDays, now, pricing, timeZone } = {}) {
+function mount({ store, collector, retentionDays, now, pricing, workspaces, timeZone } = {}) {
   const ctx = makeCtx()
   ctx.webServer = makeWebServer()
   const dispose = registerUsageRoutes(ctx, {
@@ -162,6 +163,7 @@ function mount({ store, collector, retentionDays, now, pricing, timeZone } = {})
     retentionDays: retentionDays ?? (() => DEFAULT_MINUTE_RETENTION_DAYS),
     now: now ?? (() => FIXED_NOW),
     pricing,
+    workspaces,
     timeZone,
   })
   return { routes: ctx.webServer.routes, dispose, ctx }
@@ -451,6 +453,37 @@ test('range 合法请求回 UsageStatsRange 信封', async () => {
     { from: '2026-02-01', to: '2026-02-02', tokens: 8, daily: ['2026-02-01', '2026-02-02'] },
   )
   assert.equal(store.calls.rangeRows, 1)
+})
+
+test('range 带 workspaceId 时只取该工作区的用量与会话行', async () => {
+  const store = makeStore({
+    rows: [
+      makeRow({ bucket: '2026-02-01', workspaceId: 'ws-a', inputTokens: 1 }),
+      makeRow({ bucket: '2026-02-01', workspaceId: 'ws-b', inputTokens: 9 }),
+    ],
+    sessionRows: [
+      { bucket: '2026-02-01', workspaceId: 'ws-a', sessions: ['s1'] },
+      { bucket: '2026-02-01', workspaceId: 'ws-b', sessions: ['s2', 's3'] },
+    ],
+  })
+  const { routes } = mount({ store })
+  const res = await invokeJson(routes, PATH_RANGE, {
+    payload: { from: '2026-02-01', to: '2026-02-01', workspaceId: 'ws-a' },
+  })
+  const parsed = JSON.parse(res.body)
+  assert.equal(res.statusCode, 200)
+  assert.equal(parsed.value.tokens, 1)
+  assert.equal(parsed.value.sessions, 1)
+  assert.deepEqual(store.calls.sessionRangeRows, [['D', '2026-02-01', '2026-02-01', 'ws-a']])
+})
+
+test('workspaces 返回宿主工作区列表', async () => {
+  const workspaces = [{ id: 'ws-a', title: 'Alpha', path: '/tmp/alpha', sessionCount: 2 }]
+  const { routes } = mount({ workspaces: () => workspaces })
+  const res = await invoke(routes, PATH_WORKSPACES, { method: 'GET' })
+  const parsed = JSON.parse(res.body)
+  assert.equal(res.statusCode, 200)
+  assert.deepEqual(parsed.value.workspaces, workspaces)
 })
 
 test('status 回采集快照并附带回退点元信息与宿主时区', async () => {

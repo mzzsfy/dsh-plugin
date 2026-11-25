@@ -17,6 +17,8 @@ export const GRANULARITY_MINUTE = 'M'
 
 export const MODEL_TURNS = '(turns)'
 export const MODEL_UNKNOWN = '(unknown)'
+// 旧记录没有工作区归属:保留为独立分组,不冒充任一真实工作区
+export const WORKSPACE_UNKNOWN = '(workspace-unknown)'
 
 export const DEFAULT_MINUTE_RETENTION_DAYS = 7
 
@@ -166,6 +168,7 @@ export function providerOf(modelRef) {
 
 export const usageRowSchema = z.object({
   bucket: z.string(),
+  workspaceId: z.string().default(WORKSPACE_UNKNOWN),
   provider: z.string(),
   model: z.string(),
   inputTokens: z.number(),
@@ -186,6 +189,7 @@ export const usageRowSchema = z.object({
 // 会话索引行:bucket 为该桶的桶串,sessions 为桶内去重的真实会话 id
 export const sessionRowSchema = z.object({
   bucket: z.string(),
+  workspaceId: z.string().default(WORKSPACE_UNKNOWN),
   sessions: z.array(z.string()),
 })
 
@@ -224,13 +228,20 @@ export const usageBackupDomain = defineDomain({
   },
 })
 
-export function rowKey(g, bucket, provider, model) {
-  return `${g}|${bucket}|${provider}|${model}`
+export function rowKey(g, workspaceId, bucket, provider, model) {
+  return `${g}|${workspaceId}|${bucket}|${provider}|${model}`
 }
 
-function emptyRow(bucket, provider, model, nowMs) {
+function sessionKey(g, workspaceId, bucket) {
+  return `${g}|${workspaceId}|${bucket}`
+}
+
+const normalizeWorkspaceId = (value) => typeof value === 'string' && value !== '' ? value : WORKSPACE_UNKNOWN
+
+function emptyRow(bucket, workspaceId, provider, model, nowMs) {
   return {
     bucket,
+    workspaceId,
     provider,
     model,
     inputTokens: 0,
@@ -250,8 +261,9 @@ function emptyRow(bucket, provider, model, nowMs) {
 // 样本折叠为计数增量:turn/request 只计次,token 样本累加四类桶;
 // decodeTokens 与 durationMs 同源配对构成速度,timing 缺失按零累计
 function deltaOf(sample, nowMs) {
-  const delta = emptyRow('', '', '', nowMs)
+  const delta = emptyRow('', WORKSPACE_UNKNOWN, '', '', nowMs)
   delete delta.bucket
+  delete delta.workspaceId
   delete delta.provider
   delete delta.model
   if (sample.turn) delta.turns = 1
@@ -391,12 +403,13 @@ export class UsageStore {
     const nowMs = this.now()
     const model = sample.turn ? MODEL_TURNS : sample.model ? sample.model : MODEL_UNKNOWN
     const provider = sample.turn ? PROVIDER_UNSET : providerOf(model)
+    const workspaceId = normalizeWorkspaceId(options.workspaceId)
     const delta = deltaOf(sample, nowMs)
     for (const [g, bucketOf] of GRANULARITIES) {
       if (!withinRetention(g, bucketOf(sample.time), nowMs, this.retentionDays())) continue
       const bucket = bucketOf(sample.time)
-      const entry = { ...delta, bucket, provider, model }
-      const key = rowKey(g, bucket, provider, model)
+      const entry = { ...delta, workspaceId, bucket, provider, model }
+      const key = rowKey(g, workspaceId, bucket, provider, model)
       const existing = this.pending.get(key)
       this.pending.set(key, existing ? addDelta(existing, entry) : entry)
       if (options.live === true) this.accumulateBootLive(key, entry)
@@ -417,7 +430,7 @@ export class UsageStore {
     for (const [key, delta] of this.bootLive.buckets) this.pending.set(key, { ...delta })
     this.sessionSeen.clear()
     for (const [key, entry] of this.bootLive.sessions) {
-      this.sessionPending.set(key, { bucket: entry.bucket, sessions: new Set(entry.sessions) })
+      this.sessionPending.set(key, { bucket: entry.bucket, workspaceId: entry.workspaceId, sessions: new Set(entry.sessions) })
       for (const id of entry.sessions) this.sessionSeen.add(`${key}|${id}`)
     }
   }
@@ -429,22 +442,23 @@ export class UsageStore {
     await this.ready
     this.requireSessionTable()
     const nowMs = this.now()
+    const workspaceId = normalizeWorkspaceId(options.workspaceId)
     let added = false
     for (const [g, bucketOf] of SESSION_GRANULARITIES) {
       const bucket = bucketOf(time)
       if (!sessionWithinRetention(g, bucket, nowMs)) continue
-      const seenKey = `${g}|${bucket}|${sessionId}`
+      const seenKey = `${g}|${workspaceId}|${bucket}|${sessionId}`
       if (this.sessionSeen.has(seenKey)) continue
       this.sessionSeen.add(seenKey)
       added = true
-      const key = `${g}|${bucket}`
+      const key = sessionKey(g, workspaceId, bucket)
       const existing = this.sessionPending.get(key)
       if (existing !== undefined) existing.sessions.add(sessionId)
-      else this.sessionPending.set(key, { bucket, sessions: new Set([sessionId]) })
+      else this.sessionPending.set(key, { bucket, workspaceId, sessions: new Set([sessionId]) })
       if (options.live === true) {
         const live = this.bootLive.sessions.get(key)
         if (live !== undefined) live.sessions.add(sessionId)
-        else this.bootLive.sessions.set(key, { bucket, sessions: new Set([sessionId]) })
+        else this.bootLive.sessions.set(key, { bucket, workspaceId, sessions: new Set([sessionId]) })
       }
     }
     if (added) this.scheduleFlush()
@@ -522,23 +536,27 @@ export class UsageStore {
   }
 
   async applySessionEntry(table, key, entry) {
-    const apply = (current) => ({ bucket: entry.bucket, sessions: mergeSessionIds(current?.sessions, entry.sessions) })
+    const apply = (current) => ({
+      bucket: entry.bucket,
+      workspaceId: entry.workspaceId,
+      sessions: mergeSessionIds(current?.sessions, entry.sessions),
+    })
     try {
       await table.update(key, apply)
     } catch (err) {
       if (!isMissingRecord(err)) throw err
-      await table.put(key, { bucket: entry.bucket, sessions: [] })
+      await table.put(key, { bucket: entry.bucket, workspaceId: entry.workspaceId, sessions: [] })
       await table.update(key, apply)
     }
   }
 
   async applyDelta(table, key, delta) {
-    const apply = (current) => addDelta(current ?? emptyRow(delta.bucket, delta.provider, delta.model, delta.lastSeen), delta)
+    const apply = (current) => addDelta(current ?? emptyRow(delta.bucket, delta.workspaceId, delta.provider, delta.model, delta.lastSeen), delta)
     try {
       await table.update(key, apply)
     } catch (err) {
       if (!isMissingRecord(err)) throw err
-      await table.put(key, emptyRow(delta.bucket, delta.provider, delta.model, delta.lastSeen))
+      await table.put(key, emptyRow(delta.bucket, delta.workspaceId, delta.provider, delta.model, delta.lastSeen))
       await table.update(key, apply)
     }
   }
@@ -583,7 +601,7 @@ export class UsageStore {
     }
   }
 
-  async rangeRows(g, from, to) {
+  async rangeRows(g, from, to, workspaceId) {
     await this.flushNow()
     await this.ready
     const table = this.requireTable()
@@ -591,13 +609,14 @@ export class UsageStore {
     const matched = []
     for (const [key, existing] of table.entries()) {
       if (!key.startsWith(prefix)) continue
+      if (workspaceId && existing.workspaceId !== workspaceId) continue
       if (existing.bucket >= from && existing.bucket <= to) matched.push(existing)
     }
     return matched
   }
 
   // 会话索引窗口行:与 rangeRows 同构,读前先落 pending 保证读己之写
-  async sessionRangeRows(g, from, to) {
+  async sessionRangeRows(g, from, to, workspaceId) {
     await this.flushNow()
     await this.ready
     const table = this.requireSessionTable()
@@ -605,6 +624,7 @@ export class UsageStore {
     const matched = []
     for (const [key, existing] of table.entries()) {
       if (!key.startsWith(prefix)) continue
+      if (workspaceId && existing.workspaceId !== workspaceId) continue
       if (existing.bucket >= from && existing.bucket <= to) matched.push(existing)
     }
     return matched

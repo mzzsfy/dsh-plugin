@@ -7,6 +7,7 @@
 
 import { createArchiveReader } from './archive-reader.js'
 import { isDerivedSessionHeader } from './session-kind.js'
+import { WORKSPACE_UNKNOWN } from './store.js'
 
 const UNKNOWN_SESSION_ID = '(unknown-session)'
 const SEQ_UNKNOWN = -1
@@ -318,6 +319,8 @@ export class UsageCollector {
     }
     this.folds = new Map()
     this.routes = new Map()
+    // 工作区归属由宿主注入;服务缺席时落未知分组,面板仍可看总量
+    this.workspaceOf = () => WORKSPACE_UNKNOWN
     this.started = false
     this.liveMarked = new Set()
     this.liveMarkBuffer = new Map()
@@ -406,12 +409,13 @@ export class UsageCollector {
       if (!sample) return
       // turn 标记落合成行不归因;其余样本先取本调用 source,再取会话路由
       if (!sample.turn) sample.model = fromSource ?? this.routeFor(sid)
-      void this.store.record(sample, { live: true }).catch((error) => {
+      const workspaceId = this.workspaceOf(sid)
+      void this.store.record(sample, { live: true, workspaceId }).catch((error) => {
         this.pushLog('record', error?.message ?? String(error))
       })
       // 会话索引只记真实会话:派生会话的回合/请求/token 仍照常统计
       if (sid !== UNKNOWN_SESSION_ID && !isDerivedSessionHeader(session?.header)) {
-        void this.store.recordSession(sid, sample.time, { live: true }).catch((error) => {
+        void this.store.recordSession(sid, sample.time, { live: true, workspaceId }).catch((error) => {
           this.pushLog('record', error?.message ?? String(error))
         })
       }
@@ -595,6 +599,7 @@ export class UsageCollector {
           }
           // 每会话全新 fold:(turn,step) 键按会话隔离,并发重放不共享
           const fold = new UsageFold()
+          const workspaceId = this.workspaceOf(header.id)
           let route = ''
           try {
             const inspection = await reader.readLog(header.id, signal)
@@ -620,8 +625,8 @@ export class UsageCollector {
               const sample = fold.fold(event)
               if (sample) {
                 if (!sample.turn) sample.model = route || undefined
-                await this.store.record(sample)
-                if (!derived) await this.store.recordSession(header.id, sample.time)
+                await this.store.record(sample, { workspaceId })
+                if (!derived) await this.store.recordSession(header.id, sample.time, { workspaceId })
               }
             }
             completed.push(header.id)
@@ -683,12 +688,13 @@ export class UsageCollector {
             if (inspection.derived !== true) {
               const fold = new UsageFold()
               const inheritedCut = inspection.inheritedEventCount
+              const workspaceId = this.workspaceOf(target.id)
               let sinceYield = 0
               for (const event of inspection.events) {
                 if (signal?.aborted) return
                 if (inheritedCut > 0 && typeof event.seq === 'number' && event.seq < inheritedCut) continue
                 const sample = fold.fold(event)
-                if (sample) await this.store.recordSession(target.id, sample.time)
+                if (sample) await this.store.recordSession(target.id, sample.time, { workspaceId })
                 sinceYield += 1
                 if (sinceYield >= SCAN_YIELD_EVERY_EVENTS) {
                   sinceYield = 0

@@ -18,7 +18,7 @@ const DEFAULT_MINUTE_PRESET = '3h'
 // 天视图渲染上限;时/分上限 = 闭区间桶数(hour N+1 槽,minute N/10+1 槽)
 const DAY_MAX_SLOTS = 180
 const API_PREFIX = '/api/usage-dash/'
-const ENDPOINTS = { range: 'range', hours: 'hours', minutes: 'minutes', status: 'status', reset: 'reset', restore: 'restore', pricing: 'pricing' }
+const ENDPOINTS = { range: 'range', hours: 'hours', minutes: 'minutes', workspaces: 'workspaces', status: 'status', reset: 'reset', restore: 'restore', pricing: 'pricing' }
 // 成本控制端点名:四模块共用一张表,各模块只取自己需要的键,避免并行改动同一常量
 const COST_ENDPOINTS = {
   summary: 'summary',
@@ -883,7 +883,8 @@ const MESSAGES_ZH = {
   requestCurrentTag: '当前',
   settingsSection: '显示与增强',
   settingsSectionDesc: '官方弹窗补全与费用显示开关',
-  sectionDesc: '按模型与时点估算费用，定价规则与快照试算都在这里',
+  workspaceFilter: '工作区',
+  allWorkspaces: '全部工作区',
   displayGroup: '显示补全',
   displayGroupDesc: '官方用量与费用显示',
   recentGroup: '最近请求',
@@ -1224,7 +1225,8 @@ const MESSAGES_EN = {
   requestCurrentTag: 'Current',
   settingsSection: 'Display & enhancements',
   settingsSectionDesc: 'Official dialog additions and cost display',
-  sectionDesc: 'Estimates cost per model and point in time; pricing rules and snapshot probes live here',
+  workspaceFilter: 'Workspace',
+  allWorkspaces: 'All workspaces',
   displayGroup: 'Display additions',
   displayGroupDesc: 'Official usage and cost display',
   recentGroup: 'Recent requests',
@@ -3950,6 +3952,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       plus: ['M12 5v14', 'M5 12h14'],
       edit: ['m14 6 4 4', 'm5 15 10-10a2.8 2.8 0 0 1 4 4L9 19l-5 1 1-5Z'],
       rules: ['M8 6h12', 'M8 12h12', 'M8 18h12', 'M4 6h.01', 'M4 12h.01', 'M4 18h.01'],
+      workspace: ['M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z'],
     }
 
     function Icon({ paths }) {
@@ -3990,9 +3993,13 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 --ud-chart-1:var(--dsw-alias-state-business-primary);--ud-chart-2:var(--dsw-alias-state-success-primary);--ud-chart-3:var(--dsw-alias-state-warn-primary);--ud-chart-4:hsl(262 84% 65%);--ud-chart-5:hsl(329 85% 55%);--ud-chart-other:var(--dsw-alias-label-tertiary);
 --ud-heat-0:color-mix(in srgb, var(--dsw-alias-label-tertiary) 12%, transparent);--ud-heat-1:color-mix(in srgb, var(--dsw-alias-state-business-primary) 18%, transparent);--ud-heat-2:color-mix(in srgb, var(--dsw-alias-state-business-primary) 36%, transparent);--ud-heat-3:color-mix(in srgb, var(--dsw-alias-state-business-primary) 54%, transparent);--ud-heat-4:color-mix(in srgb, var(--dsw-alias-state-business-primary) 74%, transparent);--ud-heat-5:var(--dsw-alias-state-business-primary);--ud-trend-line:var(--dsw-alias-state-business-primary);--ud-trend-speed:var(--dsw-alias-state-success-primary);--ud-trend-ttft:var(--dsw-alias-state-warn-primary);
 --ud-bg-overlay:var(--dsw-alias-bg-layer-2);--ud-border:var(--dsw-alias-border-l2);--ud-border-strong:var(--dsw-alias-border-l3);--ud-text:var(--dsw-alias-label-primary);--ud-text-sub:var(--dsw-alias-label-secondary);--ud-text-dim:var(--dsw-alias-label-tertiary);--ud-accent:var(--dsw-alias-state-business-primary);--ud-hover-bg:var(--dsw-alias-interactive-bg-hover);--ud-shadow-lv3:var(--dsw-shadow-lv3);--ud-radius-md:var(--dsw-radius-md);--ud-radius-sm:var(--dsw-radius-sm);--ud-card:var(--dsw-alias-bg-layer-1);--ud-card-border:var(--dsw-alias-border-l2)}
-.ud-section-page-head{display:flex;flex-direction:column;gap:2px;min-width:0}
+.ud-section-page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;min-width:0}
 .ud-section-page-title{margin:0;font-size:18px;line-height:26px;font-weight:600;color:var(--dsw-alias-label-primary)}
-.ud-section-page-desc{margin:0;font-size:13px;line-height:20px;color:var(--dsw-alias-label-tertiary)}
+.ud-workspace-picker{display:inline-flex;align-items:center;gap:6px;flex:none;min-width:0;height:30px;padding:0 8px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary)}
+.ud-workspace-icon{display:inline-flex;flex:none}
+.ud-workspace-select{appearance:none;border:0;background:transparent;color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px;max-width:150px;min-width:0;padding:0 14px 0 0;cursor:pointer;text-overflow:ellipsis}
+.ud-workspace-select:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
+.ud-workspace-picker::after{content:"";flex:none;width:5px;height:5px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(45deg);margin-inline-start:-12px;pointer-events:none}
 .ud-toolbar{display:flex;align-items:flex-start;gap:12px}
 .ud-toolbar-main{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:1 1 auto;min-width:0}
 .ud-group{display:flex;align-items:center;gap:2px;padding:3px;border:0;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-module-platform)}
@@ -6963,6 +6970,9 @@ ${HUD_CSS}
 
     function UsageDashPanel({ t = defaultT }) {
       const [view, setView] = useState('day')
+      // 工作区筛选是整页数据范围,与图表口径开关分离
+      const [workspaceId, setWorkspaceId] = useState('')
+      const [workspaces, setWorkspaces] = useState([])
       // 趋势图金额口径开关:会话态,与视图/挡位同为面板内临时状态
       const [costView, setCostView] = useState(false)
       // 跨组件悬浮联动:图例/模型行/扇区悬停时趋势图同模型柱段保持高亮,其余降透明
@@ -7006,12 +7016,23 @@ ${HUD_CSS}
         setServerTimeZone((previous) => (previous === zone ? previous : zone))
       }
 
+      // 工作区列表:只在面板装载时取一次;宿主没有注册表时保持为空并隐藏筛选
+      useEffect(() => {
+        let alive = true
+        requestGet(ENDPOINTS.workspaces).then((result) => {
+          if (!alive || !result.ok) return
+          setWorkspaces(Array.isArray(result.value?.workspaces) ? result.value.workspaces : [])
+        })
+        return () => { alive = false }
+      }, [])
+
       // 热力图独立请求:范围切换不重取,价格变更重算费用,过期响应丢弃
       useEffect(() => {
         const generation = ++heatGenerationRef.current
         const request = {
           from: localDay(-(HEAT_WINDOW_DAYS - 1), new Date(), serverTimeZone),
           to: localDay(0, new Date(), serverTimeZone),
+          ...(workspaceId ? { workspaceId } : {}),
         }
         requestPost(ENDPOINTS.range, request).then((result) => {
           if (heatGenerationRef.current !== generation || !result.ok) return
@@ -7030,12 +7051,13 @@ ${HUD_CSS}
           }))
         })
         return () => { heatGenerationRef.current++ }
-      }, [pricingTick, heatFetchTick, serverTimeZone])
+      }, [pricingTick, heatFetchTick, serverTimeZone, workspaceId])
 
       const load = useCallback(async () => {
         const request = range === 'custom'
           ? { from: customFrom, to: customTo }
           : resolveDayRange(range, new Date(), serverTimeZone)
+        if (request && workspaceId) request.workspaceId = workspaceId
         // 不完整范围:先取消在飞请求并复位 loading,否则首屏请求的 loading
         // 会被本次提前 return 继承,刷新按钮/骨架永久卡住
         if (!request || !request.from || !request.to) {
@@ -7057,7 +7079,7 @@ ${HUD_CSS}
         adoptValueTimeZone(result.value)
         setError('')
         setStats(result.value)
-      }, [range, customFrom, customTo, pricingTick, serverTimeZone])
+      }, [range, customFrom, customTo, pricingTick, serverTimeZone, workspaceId])
 
       useEffect(() => {
         load()
@@ -7067,6 +7089,7 @@ ${HUD_CSS}
       const rawPreset = view === 'hour' ? hourPreset : view === 'minute' ? minutePreset : null
       // 自定义挡输入不完整时 query 为 null:不发请求,已取数据留存缓存,输入恢复即按键命中
       const activeQuery = view === 'day' ? null : resolvePointQuery(view, rawPreset, pointCustomFrom, pointCustomTo, new Date(), serverTimeZone)
+      const pointCacheKey = activeQuery && workspaceId ? `${activeQuery.key}|${workspaceId}` : activeQuery?.key
 
       useEffect(() => {
         if (!activeQuery) {
@@ -7075,12 +7098,13 @@ ${HUD_CSS}
           return
         }
         if (
-          pointStatsMatches(pointStats, view, activeQuery.key, activeQuery.timeZone)
+          pointStatsMatches(pointStats, view, pointCacheKey, activeQuery.timeZone)
           && pointStats.pricingTick === pricingTick
         ) return
         const generation = ++pointGenerationRef.current
         setPointStatus('loading')
-        requestPost(view === 'hour' ? ENDPOINTS.hours : ENDPOINTS.minutes, activeQuery.request).then((result) => {
+        const request = workspaceId ? { ...activeQuery.request, workspaceId } : activeQuery.request
+        requestPost(view === 'hour' ? ENDPOINTS.hours : ENDPOINTS.minutes, request).then((result) => {
           if (pointGenerationRef.current !== generation) return
           if (!result.ok) {
             setPointStatus('error')
@@ -7092,14 +7116,14 @@ ${HUD_CSS}
           setPointStatus('ok')
           setPointStats({
             view,
-            preset: activeQuery.key,
+            preset: pointCacheKey,
             timeZone: activeQuery.timeZone,
             pricingTick,
             value: result.value,
           })
         })
         return () => { pointGenerationRef.current++ }
-      }, [view, rawPreset, pointCustomFrom, pointCustomTo, fetchTick, pricingTick, serverTimeZone])
+      }, [view, rawPreset, pointCustomFrom, pointCustomTo, fetchTick, pricingTick, serverTimeZone, workspaceId])
 
       const refreshPoints = useCallback(() => {
         setPointStats(null)
@@ -7240,7 +7264,7 @@ ${HUD_CSS}
       }, [])
 
       const grouped = useMemo(() => (stats ? groupStats(stats) : null), [stats])
-      const pointView = activeQuery && pointStatsMatches(pointStats, view, activeQuery.key, activeQuery.timeZone) ? pointStats.value : null
+      const pointView = activeQuery && pointStatsMatches(pointStats, view, pointCacheKey, activeQuery.timeZone) ? pointStats.value : null
       const pointGrouped = useMemo(() => (pointView ? groupPointSlots(pointView.daily) : null), [pointView])
 
       const pointActive = view !== 'day'
@@ -7267,7 +7291,25 @@ ${HUD_CSS}
       return h('div', { className: 'ud-panel' },
         h('header', { className: 'ud-section-page-head' },
           h('h2', { className: 'ud-section-page-title' }, t('nav')),
-          h('p', { className: 'ud-section-page-desc' }, t('sectionDesc'))),
+          workspaces.length > 0
+            ? h('label', { className: 'ud-workspace-picker', title: t('workspaceFilter') },
+              h('span', { className: 'ud-workspace-icon' }, h(Icon, { paths: ICONS.workspace })),
+              h('select', {
+                className: 'ud-workspace-select',
+                'aria-label': t('workspaceFilter'),
+                value: workspaceId,
+                onChange: (event) => {
+                  setWorkspaceId(event.target.value)
+                  setStats(null)
+                  setPointStats(null)
+                },
+              },
+              h('option', { value: '' }, t('allWorkspaces')),
+              workspaces.map((workspace) => h('option', {
+                key: workspace.id, value: workspace.id,
+                title: workspace.path || workspace.title,
+              }, workspace.title || workspace.path || workspace.id))))
+            : null),
         h('div', { className: 'ud-toolbar' },
           h('div', { className: 'ud-toolbar-main' },
             h('div', { className: 'ud-group', role: 'group', 'aria-label': t('viewGroup') },

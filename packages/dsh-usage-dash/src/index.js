@@ -24,7 +24,7 @@ import { modelUsageProjectionDefinition } from './session-models.js'
 import { recentRequestsProjectionDefinition } from './recent-requests.js'
 import { recentSpeedProjectionDefinition } from './recent-speed.js'
 import { HOST_TIME_ZONE, registerUsageRoutes } from './routes.js'
-import { DEFAULT_MINUTE_RETENTION_DAYS, MINUTE_RETENTION_MAX_DAYS, sharedStore } from './store.js'
+import { DEFAULT_MINUTE_RETENTION_DAYS, MINUTE_RETENTION_MAX_DAYS, WORKSPACE_UNKNOWN, sharedStore } from './store.js'
 import { readSpent } from './summary.js'
 // 顶层 inject 仅声明 web profile 必然存在的四个服务;settings 在 apply 内
 // 嵌套 inject(通道级静默不激活),构成干净禁用。
@@ -136,6 +136,29 @@ async function migrateProfilePricing({ ctx, editor, entry, pricingStore }) {
 export function apply(ctx, config) {
   const store = sharedStore(ctx.storageDomain)
   const collector = new UsageCollector(ctx, store)
+  // 工作区归属按会话查宿主注册表;缓存窗口只吸收连续事件查询,成员变化后自动刷新
+  const WORKSPACE_CACHE_MS = 5000
+  let workspaceCache = { at: 0, bySession: new Map(), list: [] }
+  const workspaceSnapshot = () => {
+    const now = Date.now()
+    if (now - workspaceCache.at < WORKSPACE_CACHE_MS) return workspaceCache
+    const registry = ctx.get?.('workspaceRegistry')
+    const workspaces = typeof registry?.list === 'function' ? registry.list() : []
+    const list = workspaces.map((workspace) => ({
+      id: workspace.id,
+      title: workspace.title,
+      path: workspace.path,
+      sessionCount: (workspace.sessionIds ?? []).length,
+    }))
+    const bySession = new Map()
+    for (const workspace of workspaces) {
+      for (const sessionId of workspace.sessionIds ?? []) bySession.set(sessionId, workspace.id)
+    }
+    workspaceCache = { at: now, bySession, list }
+    return workspaceCache
+  }
+  collector.workspaceOf = (sessionId) => workspaceSnapshot().bySession.get(sessionId) ?? WORKSPACE_UNKNOWN
+
   // 定价能力门面:规则表落 usage_pricing 域,读同步取域内快照,写串行自增
   // revision;域打开失败时定价读写均返回不可用
   const pricingStore = sharedPricingStore(ctx.storageDomain)
@@ -344,5 +367,6 @@ export function apply(ctx, config) {
     sentinel,
     features,
     guard: () => guard.current?.status?.() ?? null,
+    workspaces: () => workspaceSnapshot().list,
   })
 }

@@ -241,23 +241,30 @@ function requireSlotCount(fromParts, toParts, stepMs, maxSlots, maxDays) {
 // 会话索引窗口策略:天/小时视图按同粒度行取并集;分钟视图没有会话行,
 // 把窗口截到覆盖小时按小时行近似(边界最多外扩一小时)
 const HOUR_KEY_WIDTH = 'YYYY-MM-DDTHH'.length
+const readRows = (store, g, from, to, workspaceId) =>
+  workspaceId ? store.rangeRows(g, from, to, workspaceId) : store.rangeRows(g, from, to)
+const readSessionRows = (store, g, from, to, workspaceId) =>
+  workspaceId ? store.sessionRangeRows(g, from, to, workspaceId) : store.sessionRangeRows(g, from, to)
 const SESSION_WINDOW_QUERIES = {
-  [GRANULARITY_DAILY]: (store, from, to) => store.sessionRangeRows(GRANULARITY_DAILY, from, to),
-  [GRANULARITY_HOURLY]: (store, from, to) => store.sessionRangeRows(GRANULARITY_HOURLY, from, to),
-  [GRANULARITY_MINUTE]: (store, from, to) =>
-    store.sessionRangeRows(GRANULARITY_HOURLY, from.slice(0, HOUR_KEY_WIDTH), to.slice(0, HOUR_KEY_WIDTH)),
+  [GRANULARITY_DAILY]: (store, from, to, workspaceId) => readSessionRows(store, GRANULARITY_DAILY, from, to, workspaceId),
+  [GRANULARITY_HOURLY]: (store, from, to, workspaceId) => readSessionRows(store, GRANULARITY_HOURLY, from, to, workspaceId),
+  [GRANULARITY_MINUTE]: (store, from, to, workspaceId) =>
+    readSessionRows(store, GRANULARITY_HOURLY, from.slice(0, HOUR_KEY_WIDTH), to.slice(0, HOUR_KEY_WIDTH), workspaceId),
 }
+
+const workspaceOfBody = (body) =>
+  typeof body?.workspaceId === 'string' && body.workspaceId !== '' ? body.workspaceId : undefined
 
 // 聚合 + 定价注入:pricing 激活才挂 cost/unpriced,缺省响应形状与现状一致;
 // D 端点费用优先按同窗口 H 行折叠,H 行已过保留期的历史日回落到日桶行计价
-async function aggregateWithPricing(deps, granularity, from, to) {
-  const sessionRows = await SESSION_WINDOW_QUERIES[granularity](deps.store, from, to)
-  const rows = await deps.store.rangeRows(granularity, from, to)
+async function aggregateWithPricing(deps, granularity, from, to, workspaceId) {
+  const sessionRows = await SESSION_WINDOW_QUERIES[granularity](deps.store, from, to, workspaceId)
+  const rows = await readRows(deps.store, granularity, from, to, workspaceId)
   let value = aggregateRange(rows, granularity, from, to, sessionRows)
   const pricing = deps.pricing
   if (pricing?.active) {
     const costRows = granularity === GRANULARITY_DAILY
-      ? await deps.store.rangeRows(GRANULARITY_HOURLY, from, `${to}${LAST_HOUR_OF_DAY}`)
+      ? await readRows(deps.store, GRANULARITY_HOURLY, from, `${to}${LAST_HOUR_OF_DAY}`, workspaceId)
       : rows
     const fallbackRows = granularity === GRANULARITY_DAILY ? rows : []
     value = attachCosts(value, costRows, granularity, pricing.rules(), fallbackRows)
@@ -265,37 +272,40 @@ async function aggregateWithPricing(deps, granularity, from, to) {
   return value
 }
 
-async function respondAggregate(deps, res, granularity, from, to) {
-  const value = await aggregateWithPricing(deps, granularity, from, to)
+async function respondAggregate(deps, res, granularity, from, to, workspaceId) {
+  const value = await aggregateWithPricing(deps, granularity, from, to, workspaceId)
   // 聚合响应对齐的宿主日历随值下发,客户端可据此校正范围时区
   writeJson(res, { ok: true, value: { ...value, timeZone: deps.timeZone } })
 }
 
 const rangeHandler = (deps) => async (req, res) => {
-  const { from, to, fromParts, toParts } = requireBucketRange(await readJsonBody(req), DAY_KEY_PARTS, 'day key')
+  const body = await readJsonBody(req)
+  const { from, to, fromParts, toParts } = requireBucketRange(body, DAY_KEY_PARTS, 'day key')
   const spanDays = (utcDayOf(toParts) - utcDayOf(fromParts)) / MS_PER_DAY + 1
   if (spanDays > MAX_RANGE_SPAN_DAYS) {
     throw usageError(HTTP_STATUS_BAD_REQUEST, `${ERROR_PREFIX}span exceeds ${MAX_RANGE_SPAN_DAYS} days`)
   }
-  await respondAggregate(deps, res, GRANULARITY_DAILY, from, to)
+  await respondAggregate(deps, res, GRANULARITY_DAILY, from, to, workspaceOfBody(body))
 }
 
 const hoursHandler = (deps) => async (req, res) => {
-  const { from, to, fromParts, toParts } = requireBucketRange(await readJsonBody(req), HOUR_KEY_PARTS, 'hour key')
+  const body = await readJsonBody(req)
+  const { from, to, fromParts, toParts } = requireBucketRange(body, HOUR_KEY_PARTS, 'hour key')
   requireSlotCount(fromParts, toParts, MS_PER_HOUR, MAX_HOUR_SLOTS, MAX_HOUR_SPAN_DAYS)
-  await respondAggregate(deps, res, GRANULARITY_HOURLY, from, to)
+  await respondAggregate(deps, res, GRANULARITY_HOURLY, from, to, workspaceOfBody(body))
 }
 
 // 分钟保留窗口(天)换算为起点桶串:起点晚于请求 from 即窗口外已清理,
 // 标注实际可用范围;禁用(0)时恒无数据,covered 标注空串。
 // retentionDays 经 clamp 归一(非法回落默认,超上限截断),与 store.pruneMinutes 同源
 const minuteHandler = (deps) => async (req, res) => {
-  const { from, to, fromParts, toParts } = requireBucketRange(await readJsonBody(req), MINUTE_KEY_PARTS, 'minute key')
+  const body = await readJsonBody(req)
+  const { from, to, fromParts, toParts } = requireBucketRange(body, MINUTE_KEY_PARTS, 'minute key')
   if (fromParts[fromParts.length - 1] % MINUTE_BUCKET_SPAN_MINUTES !== 0) {
     throw usageError(HTTP_STATUS_BAD_REQUEST, `${ERROR_PREFIX}minute key must align to ${MINUTE_BUCKET_SPAN_MINUTES} minutes`)
   }
   requireSlotCount(fromParts, toParts, MS_PER_MINUTE * MINUTE_BUCKET_SPAN_MINUTES, MAX_MINUTE_SLOTS, MAX_MINUTE_SPAN_DAYS)
-  const value = await aggregateWithPricing(deps, GRANULARITY_MINUTE, from, to)
+  const value = await aggregateWithPricing(deps, GRANULARITY_MINUTE, from, to, workspaceOfBody(body))
   const retention = clampMinuteRetentionDays(deps.retentionDays())
   if (retention > 0) {
     const windowStart = minuteKey(deps.now() - retention * MS_PER_DAY)
@@ -321,6 +331,10 @@ const pricingHandler = (deps) => async (req, res) => {
   }
   const rules = await pricing.replace(parsed.data)
   writeJson(res, { ok: true, value: { revision: pricing.revision(), rules } })
+}
+
+const workspacesHandler = (deps) => async (req, res) => {
+  writeJson(res, { ok: true, value: { workspaces: deps.workspaces?.() ?? [] } })
 }
 
 const statusHandler = (deps) => async (req, res) => {
@@ -521,6 +535,7 @@ const ENDPOINTS = [
   { path: `${ROUTE_PREFIX}/range`, mount: rangeHandler },
   { path: `${ROUTE_PREFIX}/hours`, mount: hoursHandler },
   { path: `${ROUTE_PREFIX}/minutes`, mount: minuteHandler },
+  { path: `${ROUTE_PREFIX}/workspaces`, mount: workspacesHandler, guards: READ_GUARDS },
   { path: `${ROUTE_PREFIX}/status`, mount: statusHandler },
   { path: `${ROUTE_PREFIX}/reset`, mount: resetHandler },
   { path: `${ROUTE_PREFIX}/restore`, mount: restoreHandler },
@@ -534,10 +549,10 @@ export const HOST_TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone
 
 export function registerUsageRoutes(
   ctx,
-  { store, collector, retentionDays, now = Date.now, pricing, budget, cycle, sentinel, features, guard, timeZone = HOST_TIME_ZONE },
+  { store, collector, retentionDays, now = Date.now, pricing, budget, cycle, sentinel, features, guard, workspaces, timeZone = HOST_TIME_ZONE },
 ) {
   const deps = {
-    store, collector, retentionDays, now, pricing, budget, cycle, sentinel, features, guard, timeZone,
+    store, collector, retentionDays, now, pricing, budget, cycle, sentinel, features, guard, workspaces, timeZone,
     // 摘要与预算只需要配置只读面,门面对象留给 /cycle 自己用(isActive/replace)
     cycleConfig: () => cycle?.config?.() ?? CYCLE_DEFAULT,
   }

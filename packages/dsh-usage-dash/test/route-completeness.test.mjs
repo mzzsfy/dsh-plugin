@@ -12,6 +12,7 @@ const EXPECTED_PATHS = [
   `${ROUTE_PREFIX}/range`,
   `${ROUTE_PREFIX}/hours`,
   `${ROUTE_PREFIX}/minutes`,
+  `${ROUTE_PREFIX}/workspaces`,
   `${ROUTE_PREFIX}/status`,
   `${ROUTE_PREFIX}/reset`,
   `${ROUTE_PREFIX}/restore`,
@@ -53,7 +54,7 @@ function registeredPaths() {
   return ctx.paths
 }
 
-test('Given 成本控制四模块全部启用 When 注册路由 Then 十四个端点齐全', () => {
+test('Given 成本控制四模块全部启用 When 注册路由 Then 十五个端点齐全', () => {
   // When 注册
   const paths = registeredPaths()
   // Then 集合完全一致,多一条少一条都算缺陷
@@ -70,7 +71,7 @@ test('Given 注册参数 When 重建 deps Then 每个能力门面都不丢', () 
   assert.ok(rebuild, '缺少 deps 重建')
   // 注释里也有逗号,先剥注释再切键
   const rebuilt = rebuild[1].replace(/\/\/[^\n]*/g, '').split(',').map((item) => item.trim().split(':')[0].trim())
-  for (const key of ['pricing', 'budget', 'cycle', 'sentinel', 'features', 'guard']) {
+  for (const key of ['pricing', 'budget', 'cycle', 'sentinel', 'features', 'guard', 'workspaces']) {
     assert.ok(declared.includes(key), `解构签名缺 ${key}`)
     assert.ok(rebuilt.includes(key), `deps 重建缺 ${key}`)
   }
