@@ -113,7 +113,7 @@ export function createCollector({ getControl, router, registry, executor, resolv
     const phase = phaseOf(route.market), at = now()
     return current.instance.id === instance.id && current.routeEpoch === routeEpoch && marketPhases.get(route.market) === phase.state && marketDate(route.market, at) === day
   }
-  async function batch(selected, securities, periodic, config, gen, signal, phaseOf, day, peek, basis) {
+  async function batch(selected, securities, periodic, config, gen, signal, phaseOf, day, peek, basis, deadline) {
     const { route, instance, routeEpoch } = selected
     const key = `${config.routingRevision}:${route.id}:${instance.id}:${routeEpoch}:${securities.map(s => s.id).sort().join(',')}`
     const current = () => !signal.aborted && isCurrent(basis, config, gen, phaseOf, day)
@@ -128,7 +128,7 @@ export function createCollector({ getControl, router, registry, executor, resolv
       throw error
     }
       try {
-        const result = await executor.run(instance, 'quotes', { securities, routingRevision: config.routingRevision, routeEpoch, requestId: key, market: route.market }, { signal, periodic })
+        const result = await executor.run(instance, 'quotes', { securities, routingRevision: config.routingRevision, routeEpoch, requestId: key, market: route.market }, { signal, periodic, deadline })
         if (!completedInPhase()) cancelled()
         const map = new Map(), requested = new Set(securities.map(s => s.id))
         for (const quote of result.items) {
@@ -221,7 +221,7 @@ export function createCollector({ getControl, router, registry, executor, resolv
           const size = Math.min(20, registry.get(sel.instance.adapterId).descriptor.maxQuoteBatch), out = []
           for (let start = 0; start < list.length; start += size) {
             const chunk = list.slice(start, start + size)
-            try { out.push(await batch(sel, chunk, !!options.periodic, config, gen, signal, phaseOf, day, peek, basis)) }
+            try { out.push(await batch(sel, chunk, !!options.periodic, config, gen, signal, phaseOf, day, peek, basis, options.deadline)) }
             catch (e) { out.push({ ok: false, error: e, ids: list.slice(start).map(s => s.id) }); break }
           }
           return out

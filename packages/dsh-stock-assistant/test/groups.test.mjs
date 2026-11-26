@@ -138,4 +138,6 @@ test('主题签名能分辨换肤, 但不被无关字段干扰', async () => {
   assert.notEqual(themeSignature({ ...theme, MA: ['#000', ...theme.MA.slice(1)] }), base, '指标线换色必须重涂')
   // 背景变化必须重涂: 画布底色铺的就是它, canvas 不透明, 漏掉等于换了主题背景还停在旧色
   assert.notEqual(themeSignature({ ...theme, background: '#000' }), base, '背景变化必须重涂')
+  // 量均线是后加的一组 token: 签名漏了它就只在重涂时漏掉两条线
+  assert.notEqual(themeSignature({ ...theme, MAVOL: ['#000', theme.MAVOL[1]] }), base, '量均线换色必须重涂')
 })

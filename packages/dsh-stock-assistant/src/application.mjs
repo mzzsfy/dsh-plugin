@@ -13,7 +13,7 @@ import { openState, digest } from './state.mjs'
 import { parseConfiguration, preferencesSchema, defaultConfig, klineQuerySchema, refreshSecuritiesSchema, CAPABILITIES, TREND_ROUTE_MIGRATION, tickPeriodMs } from './schemas.mjs'
 import { createWatchlistService } from './service.mjs'
 import { createBudget } from './budget.mjs'
-import { createExecutor } from './executor.mjs'
+import { createExecutor, routeTimeoutMs, requestBudgetMs } from './executor.mjs'
 import { createCollector, deriveDelay } from './collector.mjs'
 import { createCatalog } from './catalog.mjs'
 import { createDemand } from './demand.mjs'
@@ -31,8 +31,16 @@ export async function createApplication({ storageDomain, providers = [tushare, t
   // 凭据解析: 宿主提供 credentials 服务时交给它(插件存储层优先, 再逐层回退到进程环境与 .env 文件),
   // 否则退回进程环境变量。引用只表示"哪个密钥", 值始终由宿主保管。
   // 接口按能力逐个核对: 宿主给的对象缺哪个方法, 就只退回哪条路径, 而不是在取数时炸掉。
-  const credentialStore = credentials && ['resolve', 'set', 'unset'].every(method => typeof credentials[method] === 'function') ? credentials : null
-  const resolveCredential = credentialStore ? async ref => (await credentialStore.resolve(ref))?.value : async ref => env[ref]
+  // 服务按次取: 宿主凭据 fiber 可能晚于插件 apply 就绪, 只取一次会把"晚到"固化成永久缺失
+  const credentialService = () => typeof credentials === 'function' ? credentials() : credentials
+  const credentialStoreOf = () => {
+    const service = credentialService()
+    return service && ['resolve', 'set', 'unset'].every(method => typeof service[method] === 'function') ? service : null
+  }
+  const resolveCredential = async ref => {
+    const store = credentialStoreOf()
+    return store ? (await store.resolve(ref))?.value : env[ref]
+  }
   let snapshotSeq = 0, stopped = false, collector, catalog, demand, watchlist, recoveryLoop
   let ensuring = null, lastEnsure = -Infinity, ensureError = null, hadDemand = false, ensureCaches = () => {}
   const usSymbols = new Map()
@@ -106,7 +114,7 @@ export async function createApplication({ storageDomain, providers = [tushare, t
   }
   const snapshot = () => {
     const control = state.get(); delete control.operations
-    return { serverEpoch, snapshotSeq, routingRevision: control.routingRevision, control, quotes: collector.watchEntries(), routeSelections: router.selections(), catalogs: catalog.status(), adapters: registry.descriptors(), suggested: defaultConfig(), ensureError, vendorAvailable, providerStatus: control.providers.map(p => ({ id: p.id, credentialPresent: p.credentialRef === null || credentialPresence.get(`${p.id}:credential`) === true, credentialRef: p.credentialRef, proxy: !!p.proxy, proxyCredentialRef: p.proxyCredentialRef ?? null, proxyCredentialPresent: p.proxyCredentialRef ? credentialPresence.get(`${p.id}:proxy`) === true : null, endpointsCovered: Object.keys(p.endpoints || {}).length, recentRequests: executor.recentRequests(p.id) })), klineReady: Object.fromEntries(control.routes.filter(r => r.capability === 'kline').map(r => [r.market, true])), markets: Object.fromEntries(Object.entries(MARKET_META).map(([market, meta]) => [market, { currency: meta.currency, verified: meta.verifiedByDefault }])) }
+    return { serverEpoch, snapshotSeq, routingRevision: control.routingRevision, control, quotes: collector.watchEntries(), timeouts: { route: routeTimeoutMs(control.preferences) }, routeSelections: router.selections(), catalogs: catalog.status(), adapters: registry.descriptors(), suggested: defaultConfig(), ensureError, vendorAvailable, providerStatus: control.providers.map(p => ({ id: p.id, credentialPresent: p.credentialRef === null || credentialPresence.get(`${p.id}:credential`) === true, credentialRef: p.credentialRef, proxy: !!p.proxy, proxyCredentialRef: p.proxyCredentialRef ?? null, proxyCredentialPresent: p.proxyCredentialRef ? credentialPresence.get(`${p.id}:proxy`) === true : null, endpointsCovered: Object.keys(p.endpoints || {}).length, recentRequests: executor.recentRequests(p.id) })), klineReady: Object.fromEntries(control.routes.filter(r => r.capability === 'kline').map(r => [r.market, true])), markets: Object.fromEntries(Object.entries(MARKET_META).map(([market, meta]) => [market, { currency: meta.currency, verified: meta.verifiedByDefault }])) }
   }
   function assertLive() { if (stopped) fail('STOPPED', '股票工具已停止', 503) }
   async function providerCheck(input, signal) {
@@ -165,12 +173,15 @@ export async function createApplication({ storageDomain, providers = [tushare, t
   }
   // K 线类请求的即时故障转移: 触发码 NETWORK/TIMEOUT/BAD_PAYLOAD 时顺着「环上下一格」试一次;
   // 只有当前选择自己的失败算一轮, 顺着链试备源是同一轮里的补救, 不额外计次
-  async function runWithFailover(capability, route, primary, fallbacks, request, signal, reportRound = error => router.recordRound(route.id, error)) {
+  // 一条请求(含分批与备源链)共用的截止时刻: 超出即按超时收尾, 不让路由层 504 掉已成功的部分
+  const deadlineOf = () => Date.now() + requestBudgetMs(state.get().preferences)
+
+  async function runWithFailover(capability, route, primary, fallbacks, request, signal, reportRound = error => router.recordRound(route.id, error), deadline = null) {
     const chain = [primary, ...fallbacks]
     let lastError, unsupported
     for (const [index, cand] of chain.entries()) {
       try {
-        const result = await executor.run(cand, capability, request, { signal })
+        const result = await executor.run(cand, capability, request, { signal, deadline })
         // 当前选择能出数就是最好的证据: 清掉它的失败计数与探测退避
         if (index === 0) reportRound(null)
         return result
@@ -256,6 +267,8 @@ export async function createApplication({ storageDomain, providers = [tushare, t
   }
 
   return {
+    // 路由层超时随刷新档位走: 节拍越慢, 落在拍后半段的请求要等越久, 超时必须盖住这段等待
+    routeTimeoutMs: () => routeTimeoutMs(state.get().preferences),
     snapshot, providerCheck, configuration,
     demand(message) { assertLive(); demand.update(message) },
     async search(q, phase = 'local', signal) {
@@ -312,7 +325,7 @@ export async function createApplication({ storageDomain, providers = [tushare, t
             }
           }
           try {
-            const data = await runWithFailover(capability, route, instance, fallbacks, request, sharedSignal, reportRound)
+            const data = await runWithFailover(capability, route, instance, fallbacks, request, sharedSignal, reportRound, deadlineOf())
             assertRoute(epoch)
             await trendCache.put(activeKey, data)
             return { ...data, routeEpoch: epoch }
@@ -342,7 +355,7 @@ export async function createApplication({ storageDomain, providers = [tushare, t
           if (cached) return { ...cached.payload, source: cand.id, revision: config.revision }
         }
       }
-      const result = await runWithFailover(capability, route, instance, fallbacks, request, signal)
+      const result = await runWithFailover(capability, route, instance, fallbacks, request, signal, undefined, deadlineOf())
       await klineCache.put({ providerInstanceId: result.providerInstanceId, market: exchange, period, code, limit }, result, config.routingRevision)
       return { ...result, source: result.providerInstanceId, revision: config.revision }
     },
@@ -384,6 +397,7 @@ export async function createApplication({ storageDomain, providers = [tushare, t
     // 密钥只写宿主的凭据存储, 不回显也不落插件状态;引用必须已被某个数据源声明, 插件不越界写别人的密钥空间。
     async credential(input) {
       assertLive()
+      const credentialStore = credentialStoreOf()
       if (!credentialStore) fail('UNSUPPORTED', '宿主未提供凭据服务', 501)
       const ref = z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/).parse(input.ref)
       if (!state.get().providers.some(p => p.credentialRef === ref || p.proxyCredentialRef === ref)) fail('INVALID_REQUEST', '该凭据未被任何数据源使用', 422)
@@ -414,7 +428,7 @@ export async function createApplication({ storageDomain, providers = [tushare, t
         fail('INVALID_REFRESH', `刷新证券参数无效：${path} ${first.message}`, 400)
       }
       let quotes
-      try { quotes = await collector.refresh(submitted?.data, { signal, automatic: input.automatic === true }) } catch (e) {
+      try { quotes = await collector.refresh(submitted?.data, { signal, automatic: input.automatic === true, deadline: deadlineOf() }) } catch (e) {
         // peek 刷新失败时 collector 里还留着带 lastError 的条目(否则详情只剩"等待报价");
         // 常驻快照按自选过滤会顺手删掉它, 这里在快照构造前抓一份只随本次错误下发的报价。
         const failed = e.quotes ?? collector.entries()

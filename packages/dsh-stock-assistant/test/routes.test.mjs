@@ -78,7 +78,8 @@ test('全部 /api/stock-assistant 路由在宿主拒绝时 401 且不触达业�
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   t.after(async () => { stop(); await new Promise(resolve => server.close(resolve)) })
   const base = `http://127.0.0.1:${server.address().port}/api/stock-assistant`
-  const names = ['snapshot', 'search', 'browse', 'watchlist', 'preferences', 'configuration', 'provider-check', 'credential', 'catalog-sync', 'route-selection', 'refresh', 'kline']
+  // 闸门覆盖率靠「注册了什么就查什么」: 写死清单会让新增路由逃过这条用例
+  const names = [...routes.keys()].map(path => path.split('/').at(-1))
   for (const name of names) {
     const response = await fetch(`${base}/${name}`)
     assert.equal(response.status, 401, `${name} 必须先过宿主闸门`)

@@ -77,3 +77,17 @@ test('X05 探针覆盖五市场且不支持的交易所直接拒绝', async () =
   assert.equal(ready.status, 'ready')
   await assert.rejects(() => xueqiu.probe({ capability: 'quotes', market: 'XJPX' }, ctx), (e) => e.code === 'UNSUPPORTED_CAPABILITY')
 })
+
+test('X06 来源给 null 的字段按缺失下发, 不当成 0', async () => {
+  const { ctx } = harness(async (url) => {
+    if (url.includes('xueqiu.com/') && !url.includes('batch')) return { ok: true, status: 200, headers: { getSetCookie: () => ['xq_a_token=abc; Path='] } }
+    return { ok: true, status: 200, json: async () => body([row('SH600519', { volume: null, amount: null, turnover_rate: null, market_capital: null, timestamp: null })]) }
+  })
+  const result = await xueqiu.quotes({ providerInstanceId: 'xq', securities: [security('XSHG', '600519')] }, ctx)
+  const quote = result.items[0]
+  assert.equal(quote.volume, null, '缺量不能变 0 股')
+  assert.equal(quote.amount, null, '缺额不能变 0 元')
+  assert.equal(quote.turnoverRate, null, '缺换手率不能变 0.00%')
+  assert.equal(quote.marketCapital, null, '缺市值不能变 0')
+  assert.equal(quote.quoteAt, null, '缺时间戳不能变 1970')
+})

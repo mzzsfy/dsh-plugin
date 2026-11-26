@@ -3,11 +3,12 @@ import assert from 'node:assert/strict'
 import { createApplication } from '../src/application.mjs'
 import { parseConfiguration } from '../src/schemas.mjs'
 import { eastmoney } from '../src/providers/eastmoney.mjs'
+import { tencent } from '../src/providers/tencent.mjs'
 import { initialControl } from '../src/schemas.mjs'
 import { memoryStorage, provider } from './helpers.mjs'
 
 // 分时是独立能力:
-//   Given K 线主源不支持分时(腾讯只有日/周/月)
+//   Given K 线主源不支持分时(只有日/周/月的来源)
 //   When 用户看分时
 //   Then 分时走自己的路由, 不被 K 线主源连带打死
 //   Given 存量配置没有分时路由
@@ -20,7 +21,7 @@ const trendBody = instanceId => ({ providerInstanceId: instanceId, fetchedAt: 1,
 
 const MARKETS = ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON']
 
-// 两个假适配器: 一个声明分时, 一个只有 K 线(腾讯真实情况的形状)
+// 两个假适配器: 一个声明分时, 一个只有 K 线。名字不能借用真实来源: 真实腾讯已经声明 trend
 function adapters() {
   const calls = { trend: 0, kline: 0 }
   const em = {
@@ -31,7 +32,7 @@ function adapters() {
     async trend(request) { calls.trend++; return trendBody(request.providerInstanceId) },
   }
   const tx = {
-    descriptor: { adapterId: 'tencent', capabilities: ['kline'], markets: MARKETS, instruments: ['equity'] },
+    descriptor: { adapterId: 'kline-only', capabilities: ['kline'], markets: MARKETS, instruments: ['equity'] },
     async probe(request) { return { status: 'ready', capability: request.capability, market: request.market, instrument: 'equity' } },
     async kline(request) { calls.kline++; return klineBody(request.providerInstanceId, 20) },
   }
@@ -40,7 +41,7 @@ function adapters() {
 
 const routeOf = (capability, market = 'XHKG', primary = 'em-one') => ({ id: `${market.toLowerCase()}-${capability}`, capability, market, instrument: 'equity', primaryInstanceId: primary, fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true })
 // 免凭据实例: credentialRef 为 null 才不需要环境里的密钥
-const instances = () => [provider('em-one', 'eastmoney'), provider('tx-one', 'tencent')].map(p => ({ ...p, credentialRef: null }))
+const instances = () => [provider('em-one', 'eastmoney'), provider('tx-one', 'kline-only')].map(p => ({ ...p, credentialRef: null }))
 
 // 存量配置: 八市场 K 线全指给只有日 K 的源, 且没有分时路由(旧版本写下的形态, 也没有迁移标记)
 function legacyStorage() {
@@ -69,9 +70,12 @@ test('默认配置给每个市场一条独立的分时路由, 主源声明了 tr
   } finally { await app.close() }
 })
 
-test('适配器能力矩阵: 东财声明分时, 腾讯只有 K 线', () => {
+test('适配器能力矩阵: 东财与腾讯都声明分时', () => {
   assert.equal(eastmoney.descriptor.capabilities.includes('trend'), true)
   assert.equal(eastmoney.descriptor.capabilities.includes('kline'), true)
+  // 真实腾讯有 trend(量能按分钟增量差分): 这条断言防止能力声明被误删后又回到「腾讯只有 K 线」的旧模型
+  assert.equal(tencent.descriptor.capabilities.includes('trend'), true)
+  assert.equal(tencent.descriptor.capabilities.includes('kline'), true)
 })
 
 test('存量配置缺分时路由时启动补齐, 且不跟 K 线主源走', async () => {
@@ -99,7 +103,7 @@ test('存量配置缺分时路由时启动补齐, 且不跟 K 线主源走', asy
 // 分时只有一个来源时, 它一断整块就空白: 启动时要把其它声明分时的实例登记成备源
 test('单源分时路由在启动时补上备源并允许网络失败自动切换', async () => {
   const body = (request, close) => ({ providerInstanceId: request.providerInstanceId, fetchedAt: 1, complete: true, preClose: 10, candles: [candle('09:30', close), candle('15:00', close)] })
-  const providers = ['eastmoney', 'tencent'].map(adapterId => ({
+  const providers = ['eastmoney', 'kline-only'].map(adapterId => ({
     descriptor: { adapterId, capabilities: ['quotes', 'kline', 'trend'], markets: ['XHKG'], instruments: ['equity'], maxQuoteBatch: 20 },
     async probe(request) { return { status: 'ready', capability: request.capability, market: request.market, instrument: 'equity' } },
     async quotes() { return { providerInstanceId: `${adapterId}-one`, fetchedAt: 1, items: [], errors: [] } },
@@ -108,7 +112,7 @@ test('单源分时路由在启动时补上备源并允许网络失败自动切�
   }))
   const storage = memoryStorage()
   const { routeMigration: _migration, ...legacy } = initialControl()
-  storage.maps.control.set('root', { ...legacy, providers: [{ ...provider('em-one', 'eastmoney'), credentialRef: null }, { ...provider('tx-one', 'tencent'), credentialRef: null }], routes: [routeOf('trend', 'XHKG', 'em-one')] })
+  storage.maps.control.set('root', { ...legacy, providers: [{ ...provider('em-one', 'eastmoney'), credentialRef: null }, { ...provider('tx-one', 'kline-only'), credentialRef: null }], routes: [routeOf('trend', 'XHKG', 'em-one')] })
   const app = await createApplication({ storageDomain: storage, providers, env: {}, now: () => 1000 })
   try {
     const route = app.snapshot().control.routes.find(r => r.capability === 'trend' && r.market === 'XHKG')
@@ -118,7 +122,7 @@ test('单源分时路由在启动时补上备源并允许网络失败自动切�
 })
 
 test('已经有备源的分时路由不被重复改写', async () => {
-  const providers = ['eastmoney', 'tencent'].map(adapterId => ({
+  const providers = ['eastmoney', 'kline-only'].map(adapterId => ({
     descriptor: { adapterId, capabilities: ['trend'], markets: ['XHKG'], instruments: ['equity'], maxQuoteBatch: 20 },
     async probe(request) { return { status: 'ready', capability: request.capability, market: request.market, instrument: 'equity' } },
     async trend(request) { return { providerInstanceId: request.providerInstanceId, fetchedAt: 1, complete: true, preClose: 10, candles: [candle('09:30', 10)] } },
@@ -126,7 +130,7 @@ test('已经有备源的分时路由不被重复改写', async () => {
   const storage = memoryStorage()
   const { routeMigration: _migration, ...legacy } = initialControl()
   const kept = { ...routeOf('trend', 'XHKG', 'em-one'), fallbackInstanceIds: ['tx-one'], failoverMode: 'network' }
-  storage.maps.control.set('root', { ...legacy, providers: [{ ...provider('em-one', 'eastmoney'), credentialRef: null }, { ...provider('tx-one', 'tencent'), credentialRef: null }], routes: [kept] })
+  storage.maps.control.set('root', { ...legacy, providers: [{ ...provider('em-one', 'eastmoney'), credentialRef: null }, { ...provider('tx-one', 'kline-only'), credentialRef: null }], routes: [kept] })
   const app = await createApplication({ storageDomain: storage, providers, env: {}, now: () => 1000 })
   try {
     assert.deepEqual(app.snapshot().control.routes.find(r => r.capability === 'trend').fallbackInstanceIds, ['tx-one'], '不重复追加')
@@ -134,7 +138,7 @@ test('已经有备源的分时路由不被重复改写', async () => {
 })
 
 test('已有备用链的分时路由不被迁移改写', async () => {
-  const providers = ['eastmoney', 'tencent'].map(adapterId => ({
+  const providers = ['eastmoney', 'kline-only'].map(adapterId => ({
     descriptor: { adapterId, capabilities: ['trend'], markets: ['XHKG'], instruments: ['equity'], maxQuoteBatch: 20 },
     async probe(request) { return { status: 'ready', capability: request.capability, market: request.market, instrument: 'equity' } },
     async trend(request) { return { providerInstanceId: request.providerInstanceId, fetchedAt: 1, complete: true, preClose: 10, candles: [candle('09:30', 10)] } },
@@ -142,7 +146,7 @@ test('已有备用链的分时路由不被迁移改写', async () => {
   const storage = memoryStorage()
   const { routeMigration: _migration, ...legacy } = initialControl()
   const kept = { ...routeOf('trend', 'XHKG', 'em-one'), fallbackInstanceIds: ['tx-one'], failoverMode: 'off' }
-  storage.maps.control.set('root', { ...legacy, providers: [{ ...provider('em-one', 'eastmoney'), credentialRef: null }, { ...provider('tx-one', 'tencent'), credentialRef: null }], routes: [kept] })
+  storage.maps.control.set('root', { ...legacy, providers: [{ ...provider('em-one', 'eastmoney'), credentialRef: null }, { ...provider('tx-one', 'kline-only'), credentialRef: null }], routes: [kept] })
   const app = await createApplication({ storageDomain: storage, providers, env: {}, now: () => 1000 })
   try {
     const route = app.snapshot().control.routes.find(r => r.capability === 'trend')
@@ -158,7 +162,7 @@ test('暂时没有分时源时不烧迁移标记: 之后装上东财还能自动
   // 存量: 只有腾讯(不声明分时), 且日韩英只有目录/搜索路由、没有 K 线路由
   storage.maps.control.set('root', {
     ...legacy,
-    providers: [{ ...provider('tx-one', 'tencent'), credentialRef: null }],
+    providers: [{ ...provider('tx-one', 'kline-only'), credentialRef: null }],
     routes: [routeOf('kline', 'XHKG', 'tx-one'), routeOf('catalog', 'XJPX', 'tx-one'), routeOf('search', 'XJPX', 'tx-one')],
   })
   const first = await createApplication({ storageDomain: storage, providers, env: {}, now: () => 1000 })
@@ -191,13 +195,13 @@ test('迁移只做一次: 用户删掉分时路由后重启不再补回来', asy
 
 test('没有分时路由也没有支持分时的源时, 报错指明分时来源未配置', async () => {
   const onlyKline = {
-    descriptor: { adapterId: 'tencent', capabilities: ['kline'], markets: ['XHKG'], instruments: ['equity'] },
+    descriptor: { adapterId: 'kline-only', capabilities: ['kline'], markets: ['XHKG'], instruments: ['equity'] },
     async probe(request) { return { status: 'ready', capability: request.capability } },
     async kline(request) { return klineBody(request.providerInstanceId, 20) },
   }
   const storage = memoryStorage()
   const control = initialControl()
-  control.providers = [{ ...provider('tx-one', 'tencent'), credentialRef: null }]
+  control.providers = [{ ...provider('tx-one', 'kline-only'), credentialRef: null }]
   control.routes = [routeOf('kline', 'XHKG', 'tx-one')]
   storage.maps.control.set('root', control)
   const app = await createApplication({ storageDomain: storage, providers: [onlyKline], env: {}, now: () => 1000 })

@@ -1,12 +1,14 @@
 export const name = 'dsh-stock-assistant'
-export const inject = ['webServer', 'storageDomain', 'credentials']
+// credentials 不在必需注入里: 缺该服务的宿主退回进程环境变量, 不该整插件禁用
+export const inject = ['webServer', 'storageDomain']
 import { setupCommonTools, createChangeNotifier } from '@mzzsfy/dsh-common-tools/host'
 import { createApplication } from './application.mjs'
 import { registerRoutes } from './routes.mjs'
 import { serveVendor, VENDOR_PREFIX, vendorReadable } from './serve-vendor.mjs'
 import { withHostGate } from './route-gate.mjs'
 export async function apply(ctx) {
-  if (typeof ctx.webServer?.register !== 'function' || typeof ctx.webServer?.registerUpgrade !== 'function' || typeof ctx.storageDomain?.open !== 'function') {
+  // upgrade 是公共总线的可选通道: 缺失时总线自行降级为 noop, 不必把整插件判为不可用
+  if (typeof ctx.webServer?.register !== 'function' || typeof ctx.storageDomain?.open !== 'function') {
     ctx.logger?.warn?.('股票工具已禁用：缺少webServer或storageDomain能力')
     return
   }
@@ -20,7 +22,7 @@ export async function apply(ctx) {
     let vendorAvailable = true
     try { vendorAvailable = vendorReadable() } catch { vendorAvailable = false }
     // 凭据服务由宿主提供; 接口不全时应用层会整体退回进程环境变量, 不因此拒绝启动
-    application = await createApplication({ storageDomain: ctx.storageDomain, credentials: ctx.credentials ?? null, publish: () => notifier?.refresh(), vendorAvailable })
+    application = await createApplication({ storageDomain: ctx.storageDomain, credentials: () => ctx.get?.('credentials') ?? null, publish: () => notifier?.refresh(), vendorAvailable })
     if (disposed) { await application.close(); return }
     bus = setupCommonTools(ctx)
     notifier = createChangeNotifier(() => bus.publish({ type: 'invalidate', serverEpoch: application.snapshot().serverEpoch, snapshotSeq: application.snapshot().snapshotSeq }))

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createExecutor } from '../src/executor.mjs'
+import { createExecutor, routeTimeoutMs, maxTickWaitMs, UPSTREAM_TIMEOUT_MS } from '../src/executor.mjs'
 import { createRegistry } from '../src/provider-registry.mjs'
 import { createBudget } from '../src/budget.mjs'
 import { StockError } from '../src/market-model.mjs'
@@ -86,7 +86,7 @@ test('每次上游请求记入实例环形日志(20条封顶,最近在前)', asy
   assert.equal(log.length, 20, '环形封顶 20 条')
   assert.equal(log[0].status, 'ok')
   assert.ok(log[0].at >= log[19].at, '最近在前')
-  assert.match(log[0].url, /quotes fake/, '条目含能力与适配器描述')
+  assert.match(log[0].label, /quotes fake/, '条目含能力与适配器描述')
   assert.deepEqual(executor.recentRequests('missing'), [])
   executor.dispose()
 })
@@ -120,5 +120,83 @@ test('组内节拍等待唤醒后时钟已推进满间隔(定时器截断与唤�
   // 第二拍:无论注入多少时钟滞后,不应以 RATE_LIMIT 拒绝
   const result = await executor.run(provider('b', 'fake'), 'quotes', {})
   assert.deepEqual(result.items, [])
+  executor.dispose()
+})
+
+test('请求日志里带凭据的地址一律掩码', async () => {
+  // 适配器错误文案可能带请求地址: 这条日志随快照进设置页, 明文等于把密钥摆到 DOM 里
+  const registry = createRegistry([{ descriptor, probe() {}, async quotes() { throw new StockError('NETWORK', 'https://finnhub.io/api/v1/quote?symbol=AAPL&token=secret-value 请求失败', 502) } }])
+  const executor = createExecutor({ registry, budget: { reserve() {} }, env: { DSH_STOCK_TUSHARE_TOKEN: 'fake' }, fetch: async () => ({}) })
+  await assert.rejects(executor.run(provider('a', 'fake'), 'quotes', {}), e => e.code === 'NETWORK')
+  const [entry] = executor.recentRequests('a')
+  assert.doesNotMatch(JSON.stringify(entry), /secret-value/, '密钥不得出现在日志里')
+  assert.match(entry.message, /token=\*\*\*/)
+  assert.match(entry.message, /symbol=AAPL/, '非敏感参数保留')
+  assert.equal(entry.label, 'quotes fake', '标签只记能力与适配器, 不含地址')
+  executor.dispose()
+})
+
+test('文案里嵌地址时同一套掩码仍生效', async () => {
+  // 整串不是 URL 时 new URL 会失败: 没有第二层正则, 密钥就跟着中文句子进快照
+  const registry = createRegistry([{ descriptor, probe() {}, async quotes() { throw new StockError('NETWORK', '请求 https://finnhub.io/api/v1/quote?symbol=AAPL&token=secret-value 失败', 502) } }])
+  const executor = createExecutor({ registry, budget: { reserve() {} }, env: { DSH_STOCK_TUSHARE_TOKEN: 'fake' }, fetch: async () => ({}) })
+  await assert.rejects(executor.run(provider('a', 'fake'), 'quotes', {}), e => e.code === 'NETWORK')
+  const [entry] = executor.recentRequests('a')
+  assert.doesNotMatch(entry.message, /secret-value/)
+  assert.match(entry.message, /token=\*\*\*/)
+  assert.match(entry.message, /symbol=AAPL/, '非敏感参数保留')
+  executor.dispose()
+})
+
+test('路由超时盖住最坏节拍等待 + 上游预算', () => {
+  // 最慢档位: 列表与浮窗都 30 秒 → 节拍 27 秒, 拍后半段的请求要等半拍
+  const worst = routeTimeoutMs({ refreshSeconds: 30, floatRefreshSeconds: 30 })
+  assert.ok(worst > maxTickWaitMs({ refreshSeconds: 30, floatRefreshSeconds: 30 }) + UPSTREAM_TIMEOUT_MS, '路由超时必须大于「等半拍 + 上游超时」')
+  assert.equal(maxTickWaitMs({ refreshSeconds: 30, floatRefreshSeconds: 30 }), 13500)
+  assert.equal(worst, 13500 + 10 * 1000 + 8000 + 2000)
+  const fast = routeTimeoutMs({ refreshSeconds: 15, floatRefreshSeconds: 3 })
+  assert.ok(fast < worst, '档位越快, 超时越短')
+  assert.ok(fast > 0)
+})
+
+test('请求截止时刻到点即按超时收尾, 不把整条请求拖到路由层超时', async () => {
+  let calls = 0
+  const registry = createRegistry([{ descriptor, probe() {}, async quotes() { calls++; return { items: [] } } }])
+  let now = 1000
+  const executor = createExecutor({ registry, budget: createBudget(() => now), env: { DSH_STOCK_TUSHARE_TOKEN: 'fake' }, now: () => now })
+  // 截止时刻已过: 分批/备源的后续段直接超时, 已成功的段照常保留
+  await assert.rejects(executor.run(provider('a', 'fake'), 'quotes', {}, { deadline: now - 1 }), e => e.code === 'TIMEOUT' && e.retryable)
+  assert.equal(calls, 0, '预算耗尽后不得再打上游')
+  await executor.run(provider('a', 'fake'), 'quotes', {}, { deadline: now + 60 * 1000 })
+  assert.equal(calls, 1, '预算充足时照常发请求')
+  executor.dispose()
+})
+
+test('rpm 未声明时组内间隔不吃掉上游计时窗口', async () => {
+  // 未声明每分钟上限的来源按 10 秒排队, 而单次上游活动只给 8 秒:
+  // 排队期间不停表, 第二次 fetch 还没发出去就必然超时
+  let now = 1000, calls = 0
+  const alarms = new Map()
+  let seq = 0
+  const timers = {
+    setTimeout(fn, ms) {
+      // 上游超时(8 秒)是闹钟: 按虚拟时钟到点才响, 排队等待则直接把时钟推过去
+      if (ms === UPSTREAM_TIMEOUT_MS) { alarms.set(++seq, { at: now + ms, fn }); return seq }
+      now += ms
+      for (const [id, alarm] of [...alarms]) if (alarm.at <= now) { alarms.delete(id); alarm.fn() }
+      queueMicrotask(fn)
+      return -1
+    },
+    clearTimeout(id) { alarms.delete(id) },
+  }
+  const registry = createRegistry([{ descriptor, probe() {}, async quotes(_req, ctx) {
+    await ctx.fetch('http://fixture/one'); calls++
+    await ctx.fetch('http://fixture/two'); calls++
+    return { items: [] }
+  } }])
+  const noRpm = { ...provider('a', 'fake'), budget: { requestsPerMinute: null } }
+  const executor = createExecutor({ registry, budget: { reserve() {} }, env: { DSH_STOCK_TUSHARE_TOKEN: 'fake' }, now: () => now, timers, fetch: async () => ({}) })
+  await executor.run(noRpm, 'quotes', {})
+  assert.equal(calls, 2, '两次上游活动都发得出去')
   executor.dispose()
 })

@@ -1,7 +1,7 @@
 // 雪球公开行情接口适配器:quotes(沪深港美)。
 // 与新浪/东财的差别:同一请求可混装多市场,且额外给出换手率/振幅/市值/总股本。
 // 接口需要 xq_a_token cookie,匿名访问首页即可拿到,本适配器惰性获取并按 TTL 缓存。
-import { normalizeQuote, parseQuoteTime, StockError } from '../market-model.mjs'
+import { normalizeQuote, numberOrNull, parseQuoteTime, StockError } from '../market-model.mjs'
 const ENDPOINT = 'https://stock.xueqiu.com/v5/stock/batch/quote.json'
 const HOME = 'https://xueqiu.com/'
 const HEADERS = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }
@@ -11,7 +11,8 @@ let token = { value: null, until: 0 }
 // 沪深用大写市场前缀, 港股与美股直接用代码本身(实测 HK00700 返回空, 00700 才有数据)
 const symbolOf = security => (security.exchange === 'XSHG' ? 'SH' : security.exchange === 'XSHE' ? 'SZ' : '') + security.code
 const PROBE_SECURITY = { XSHG: '600519', XSHE: '000001', XHKG: '00700', XNAS: 'AAPL', XNYS: 'BABA' }
-const quote = value => { const n = Number(value); return Number.isFinite(n) ? n.toFixed(2) : null }
+// 缺失(undefined/null/'')一律当缺失: Number(null) 是 0, 只比有限性会把「来源没给」显示成 0 价/0 量
+const quote = value => { const n = numberOrNull(value); return n === null ? null : n.toFixed(2) }
 
 export const xueqiu = {
   descriptor: { adapterId: 'xueqiu', capabilities: ['quotes'], markets: ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS'], instruments: ['equity'], maxQuoteBatch: 60, credential: 'none', description: '雪球公开接口：免凭据（匿名 token），沪深港美行情，可混装多市场，额外提供换手率与市值' },
@@ -50,15 +51,16 @@ export const xueqiu = {
       if (seen.has(security.id)) throw new StockError('BAD_PAYLOAD', '报价身份冲突', 502)
       seen.add(security.id)
       // 雪球 volume 统一是股, amount 统一是元; 时间戳是毫秒 Unix
+      const volume = numberOrNull(row.volume), amount = numberOrNull(row.amount), marketCapital = numberOrNull(row.market_capital), stamp = numberOrNull(row.timestamp)
       result.push(normalizeQuote({
         securityId: security.id, providerInstanceId: request.providerInstanceId, adapterId: 'xueqiu', providerSymbol: row.symbol,
         last: quote(row.current), previousClose: quote(row.last_close), open: quote(row.open), high: quote(row.high), low: quote(row.low),
-        volume: Number.isFinite(Number(row.volume)) ? String(Math.round(Number(row.volume))) : null, volumeUnit: 'share',
-        amount: Number.isFinite(Number(row.amount)) ? String(Math.round(Number(row.amount))) : null, amountUnit: String(row.currency || ''),
-        quoteAt: Number.isFinite(Number(row.timestamp)) ? new Date(Number(row.timestamp)).toISOString() : null, timestampKind: 'trade',
+        volume: volume === null ? null : String(Math.round(volume)), volumeUnit: 'share',
+        amount: amount === null ? null : String(Math.round(amount)), amountUnit: String(row.currency || ''),
+        quoteAt: stamp === null ? null : new Date(stamp).toISOString(), timestampKind: 'trade',
         receivedAt: ctx.now(), delayKind: 'unknown', delaySeconds: null, securityState: 'unknown',
-        turnoverRate: Number.isFinite(Number(row.turnover_rate)) ? Number(row.turnover_rate) : null,
-        marketCapital: Number.isFinite(Number(row.market_capital)) ? Math.round(Number(row.market_capital)) : null,
+        turnoverRate: numberOrNull(row.turnover_rate),
+        marketCapital: marketCapital === null ? null : Math.round(marketCapital),
       }))
     }
     return { providerInstanceId: request.providerInstanceId, fetchedAt: ctx.now(), items: result, errors: request.securities.filter(s => !seen.has(s.id)).map(s => ({ securityId: s.id, code: 'NO_DATA', message: '来源未返回此证券报价' })) }

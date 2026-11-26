@@ -21,10 +21,11 @@ test('暂停期间显式刷新应用新价，普通快照仍保持暂停行情',
   assert.equal(runtime.getSnapshot().data.quotes.a.quote.last, '12.00')
   runtime.dispose()
 })
-test('U04 行菜单开启时冻结行序并继续更新数字', async () => {
+test('U04 键盘导航期间冻结行序并继续更新数字', async () => {
   const { plugin } = await loadClient({ modules: { react: React } })
   const data = { control: { watchlist: { order: ['a','b'], items: { a: { id: 'a', officialName: '甲证券', code: '600001', exchange: 'XSHG' }, b: { id: 'b', officialName: '乙证券', code: '600002', exchange: 'XSHG' } } }, preferences: {} }, quotes: { a: { quote: { changePct: '-1.00', last: '9.00' } }, b: { quote: { changePct: '2.00', last: '12.00' } } } }
-  const runtime = { getSnapshot: () => ({ data, busy: {}, view: { sort: 'desc', menuId: 'a', frozenOrder: ['a','b'], view: 'list' } }), subscribe: () => () => {} }
+  // 冻结只由键盘导航触发(行菜单的 menuId 是死状态, 已删): 排序为降序时仍按冻结顺序渲染
+  const runtime = { getSnapshot: () => ({ data, busy: {}, view: { sort: 'desc', keyboardNavigating: true, frozenOrder: ['a','b'], view: 'list' } }), subscribe: () => () => {} }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime, layout: {} }))
   assert.ok(html.indexOf('甲证券') < html.indexOf('乙证券')); assert.match(html, /12\.00/)
 })

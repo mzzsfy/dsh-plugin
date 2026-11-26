@@ -58,6 +58,15 @@ test('一只都没勾时列表给引导, 刷新按钮不可用', async () => {
   assert.match(foot, /停|刷新/, '禁用态仍要说明原因')
 })
 
+test('面板暂停采集时底部如实说明且不提供无效的恢复按钮', async () => {
+  const { FloatFoot } = await load()
+  const foot = renderToStaticMarkup(React.createElement(FloatFoot, { mode: 'list', securityId: order[0], picked: order, current: items[order[0]], stamp: Date.now(), stale: false, alertOn: false, error: '', liveOn: true, paused: true, refresh: 3, onBell() {}, onLive() {}, onDetail() {} }))
+  assert.match(foot, /面板已暂停采集/)
+  assert.doesNotMatch(foot, /行情每 3 秒自动刷新/, '暂停时不能再宣称在自动刷新')
+  assert.match(foot, /aria-label="面板已暂停采集"/)
+  assert.match(foot, /disabled=""/, '暂停由面板恢复, 浮窗按钮不再可点')
+})
+
 test('底部文案用悬浮盯盘自己的间隔', async () => {
   const { FloatFoot } = await load()
   const foot = renderToStaticMarkup(React.createElement(FloatFoot, { mode: 'list', securityId: order[0], picked: order, current: items[order[0]], stamp: Date.now(), stale: false, alertOn: false, error: '', liveOn: true, refresh: 3, onBell() {}, onLive() {}, onDetail() {} }))

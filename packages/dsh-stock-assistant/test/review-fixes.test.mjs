@@ -473,6 +473,24 @@ test('C5 请求超时映射中文错误且带 TIMEOUT', async () => {
   value.dispose()
 })
 
+// 时限同源: 客户端按快照里的服务端预算加 1 秒裕度, 不能自己先掐断服务端还能等到的结果
+test('C5 普通路由时限取服务端预算加裕度, 快照没带时才用兜底值', async () => {
+  const { value, clock } = await runtimeWith(hangingFetch())
+  value.applySnapshot({ ...snapshot(1, emptyControl()), timeouts: { route: 20 * 1000 } })
+  const flight = value.refresh()
+  let settled = false
+  flight.finally(() => { settled = true }).catch(() => {})
+  const expectation = assert.rejects(() => flight, error => error.code === 'TIMEOUT')
+  await clock.advance(11 * 1000)
+  assert.equal(settled, false, '11 秒是兜底值, 有服务端预算时不能在这里超时')
+  await clock.advance(9 * 1000)
+  assert.equal(settled, false, '预算内(20 秒)仍要在等')
+  await clock.advance(1 * 1000)
+  await expectation
+  assert.equal(value.getSnapshot().errorCode, 'TIMEOUT')
+  value.dispose()
+})
+
 // C5: 超时属于可退避错误, K线首拍超时后要退避重试一次再落错误
 test('C5 K线超时按可退避错误重试一次后落中文错误', async () => {
   const calls = []

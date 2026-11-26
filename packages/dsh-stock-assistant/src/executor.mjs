@@ -1,9 +1,36 @@
 import { StockError, fail } from './market-model.mjs'
+import { tickPeriodMs } from './schemas.mjs'
 // 每实例上游请求环形日志容量: 概览"最近请求"展示面
 const REQUEST_LOG_LIMIT = 20
 const DEFAULT_RETRY_AFTER_MS = 60 * 1000
 // 上游给的等待时间不能无限冻结某个证券: 超过一小时按一小时算
 const MAX_RETRY_AFTER_MS = 60 * 60 * 1000
+// 单次网络活动的超时预算: 分页适配器每次网络活动重置计时
+export const UPSTREAM_TIMEOUT_MS = 8 * 1000
+// 同一额度组内两次请求的最小间隔; 来源没给每分钟上限时按 10 秒保守排队
+const GROUP_GAP_MS = 1000, GROUP_GAP_UNKNOWN_RPM_MS = 10 * 1000
+// 路由超时: 一个请求最坏要等半个节拍(节拍周期由刷新档位推出) + 组内间隔 + 上游预算。
+// 三者之和必须小于路由层超时, 否则落在拍后半段的合法请求会在等待中被 504 掉
+const ROUTE_TIMEOUT_MARGIN_MS = 2 * 1000
+export const maxTickWaitMs = preferences => Math.ceil(tickPeriodMs(preferences) / 2)
+export const routeTimeoutMs = preferences => maxTickWaitMs(preferences) + GROUP_GAP_UNKNOWN_RPM_MS + UPSTREAM_TIMEOUT_MS + ROUTE_TIMEOUT_MARGIN_MS
+// 请求内部可用预算: 比分给路由层的超时短一个裕度, 让收尾(序列化响应/写日志)留在路由计时之内
+export const requestBudgetMs = preferences => routeTimeoutMs(preferences) - ROUTE_TIMEOUT_MARGIN_MS
+// 请求日志会随快照进浏览器: 适配器错误文案可能带请求地址, 凭据类查询参数一律掩码
+const MASK = '***'
+const SECRET_QUERY = /^(token|api_?key|access_?token|secret|signature|sig|password)$/i
+// 文案里嵌 URL(不在串首)时 new URL 解析会失败: 再按查询串形态掩码一遍, 两条路径都盖住
+const SECRET_IN_TEXT = /\b(token|api_?key|access_?token|secret|signature|sig|password)=[^&\s"'<>]+/gi
+const redactSecrets = text => {
+  const raw = String(text)
+  let masked = raw
+  try {
+    const parsed = new URL(raw)
+    for (const key of [...parsed.searchParams.keys()]) if (SECRET_QUERY.test(key)) parsed.searchParams.set(key, MASK)
+    masked = parsed.toString()
+  } catch { /* 整串不是 URL: 交给下面的正则 */ }
+  return masked.replace(SECRET_IN_TEXT, (_, key) => `${key}=${MASK}`)
+}
 function retryDelay(value, now) {
   if (!value) return DEFAULT_RETRY_AFTER_MS
   const seconds = Number(value)
@@ -27,9 +54,9 @@ export function createExecutor({ registry, budget, env = process.env, resolveCre
   const requestLogs = new Map(), proxies = new Map()
   let stopped = false, running = 0
   // probe 标记只给后台探测用: 界面上的"最近请求"只该反映用户请求
-  const record = (instanceId, url, status, startedAt, probe = false, message = null) => {
+  const record = (instanceId, label, status, startedAt, probe = false, message = null) => {
     const log = requestLogs.get(instanceId) || []
-    log.unshift({ at: now(), url: String(url), status, ms: Math.max(0, now() - startedAt), ...(message ? { message } : {}), ...(probe ? { probe: true } : {}) })
+    log.unshift({ at: now(), label, status, ms: Math.max(0, now() - startedAt), ...(message ? { message: redactSecrets(message) } : {}), ...(probe ? { probe: true } : {}) })
     if (log.length > REQUEST_LOG_LIMIT) log.length = REQUEST_LOG_LIMIT
     requestLogs.set(instanceId, log)
   }
@@ -63,6 +90,10 @@ export function createExecutor({ registry, budget, env = process.env, resolveCre
   // (CI 双架构高发竞态);唤醒后 now-starts>=间隔 恒成立,预算门恒过。
   const THROTTLE_SLACK_MS = 5
   const throttleDelay = gap => Math.ceil(gap) + THROTTLE_SLACK_MS
+  // 请求级截止时刻: 一条路由请求里的分批与备源共享同一预算。超出按超时收尾,
+  // 让已成功的批次照常返回, 而不是整条请求在路由层 504 掉把它们一起丢了
+  const remainingOf = deadline => deadline == null ? Infinity : deadline - now()
+  const assertWithinDeadline = deadline => { if (remainingOf(deadline) > 0) return; fail('TIMEOUT', '来源请求超时', 504, { retryable: true }) }
   const waitFor = (ms, signal) => new Promise((resolve, reject) => {
     const abort = () => { timers.clearTimeout(id); reject(new StockError('CANCELLED', '请求已取消', 503)) }
     const id = timers.setTimeout(() => { signal.removeEventListener('abort', abort); resolve() }, ms)
@@ -103,11 +134,12 @@ export function createExecutor({ registry, budget, env = process.env, resolveCre
         let timeout, acquired = false
         const startedAt = now()
         try {
+          assertWithinDeadline(options.deadline)
           // 闸门放在实际发请求之前, 与 1 秒防连打一起构成两次等待: 先等节拍, 再等组内间隔。
           // 等完再判一次: 等待期间别的请求可能已经开了新拍, 这里要跟着新拍走
-          for (let tick = tickDelay(instance, capability, options); tick; tick = tickDelay(instance, capability, options)) await waitFor(throttleDelay(tick), controller.signal)
-          const gap = Math.max(0, (starts.get(instance.quotaGroup) ?? -Infinity) + (instance.budget?.requestsPerMinute === null ? 10 * 1000 : 1000) - now())
-          if (gap) await waitFor(throttleDelay(gap), controller.signal)
+          for (let tick = tickDelay(instance, capability, options); tick; tick = tickDelay(instance, capability, options)) { assertWithinDeadline(options.deadline); await waitFor(Math.min(throttleDelay(tick), remainingOf(options.deadline)), controller.signal) }
+          const gap = Math.max(0, (starts.get(instance.quotaGroup) ?? -Infinity) + (instance.budget?.requestsPerMinute === null ? GROUP_GAP_UNKNOWN_RPM_MS : GROUP_GAP_MS) - now())
+          if (gap) { assertWithinDeadline(options.deadline); await waitFor(Math.min(throttleDelay(gap), remainingOf(options.deadline)), controller.signal) }
           await acquire(controller.signal); acquired = true
           starts.set(instance.quotaGroup, now())
           const adapter = registry.get(instance.adapterId), method = options.probe ? 'probe' : capability
@@ -119,13 +151,14 @@ export function createExecutor({ registry, budget, env = process.env, resolveCre
           if (instance.credentialRef !== null && !secret) fail('AUTH', '未配置凭据', 422)
           const proxyUrl = await untilAbort(proxyUrlOf(instance), controller.signal)
           // 超时计时覆盖整个能力调用;分页适配器每次网络活动重置计时,空闲超过窗口才判超时。
-          const armTimeout = () => { timers.clearTimeout(timeout); timeout = timers.setTimeout(() => controller.abort(new StockError('TIMEOUT', '来源请求超时', 504, { retryable: true })), 8 * 1000) }
+          const armTimeout = () => { timers.clearTimeout(timeout); timeout = timers.setTimeout(() => controller.abort(new StockError('TIMEOUT', '来源请求超时', 504, { retryable: true })), Math.max(1, Math.min(UPSTREAM_TIMEOUT_MS, remainingOf(options.deadline)))) }
           armTimeout()
           const ctx = { now, signal: controller.signal, usSymbols, endpoints: instance.endpoints || null, credential: () => secret,
             fetch: async (...args) => {
               if (used) {
-                const gap = Math.max(0, starts.get(instance.quotaGroup) + (instance.budget?.requestsPerMinute === null ? 10 * 1000 : 1000) - now())
-                if (gap) await waitFor(throttleDelay(gap), controller.signal)
+                const gap = Math.max(0, starts.get(instance.quotaGroup) + (instance.budget?.requestsPerMinute === null ? GROUP_GAP_UNKNOWN_RPM_MS : GROUP_GAP_MS) - now())
+                // 组内间隔不是上游活动: 等它的时候要把上游计时停掉, 否则最近的 8 秒窗口会被排队吃掉
+                if (gap) { timers.clearTimeout(timeout); assertWithinDeadline(options.deadline); await waitFor(Math.min(throttleDelay(gap), remainingOf(options.deadline)), controller.signal) }
               }
               if (controller.signal.aborted) fail('CANCELLED', '请求已取消', 503)
               armTimeout()
@@ -167,6 +200,13 @@ export function createExecutor({ registry, budget, env = process.env, resolveCre
     recentRequests: instanceId => [...(requestLogs.get(instanceId) || [])],
     // 有没有活干: 后台探测靠它避让, 不与用户请求抢并发槽和组链
     idle: () => running === 0 && queues.size === 0,
-    dispose() { stopped = true; for (const c of controllers) c.abort(); controllers.clear() },
+    dispose() {
+      stopped = true
+      for (const c of controllers) c.abort()
+      controllers.clear()
+      // 代理 dispatcher 持有 socket 池: 插件禁用/热重载后不关只会等到进程退出
+      for (const d of proxies.values()) { try { d.close?.() } catch { } }
+      proxies.clear(); queues.clear(); starts.clear(); requestLogs.clear(); tickOpenedAt.clear()
+    },
   }
 }

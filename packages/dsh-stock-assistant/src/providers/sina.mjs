@@ -1,5 +1,5 @@
 // 新浪公开行情接口适配器:quotes(沪深港美)/catalog(沪深)。非官方端点,需Referer,无SLA;延迟未知,时间为来源快照时间。
-import { normalizeQuote, parseQuoteTime, makeSecurity, securityId, StockError } from '../market-model.mjs'
+import { normalizeQuote, numberOrNull, parseQuoteTime, makeSecurity, securityId, StockError } from '../market-model.mjs'
 const ENDPOINT = 'https://hq.sinajs.cn/list='
 const LIST_ENDPOINT = 'https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData'
 const HEADERS = { Referer: 'https://finance.sina.com.cn/', 'User-Agent': 'Mozilla/5.0' }
@@ -20,7 +20,7 @@ const symbolOf = security => {
 const PROBE_SECURITY = { XSHG: '600519', XSHE: '000001', XHKG: '00700', XNAS: 'AAPL', XNYS: 'BABA' }
 // 新浪价格固定三位以上小数,A股最小变动0.01,裁剪到两位不损失精度;港美同理按分呈现
 const trim = value => /^\d+(\.\d+)?$/.test(value) ? Number(value).toFixed(2) : value
-const count = value => value == null || Number.isNaN(Number(value)) ? null : String(Math.round(Number(value)))
+const count = value => { const parsed = numberOrNull(value); return parsed === null ? null : String(Math.round(parsed)) }
 // 各市场字段位置:沪深34列、港股25列、美股36列,同一行内的列义由前缀决定
 const FIELD_MAP = {
   cn: f => ({ open: f[1], previousClose: f[2], last: f[3], high: f[4], low: f[5], volume: f[8], amount: f[9], quoteAt: `${f[30]} ${f[31]}` }),

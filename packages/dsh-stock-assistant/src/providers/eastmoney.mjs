@@ -9,6 +9,8 @@ const DEFAULT_ENDPOINTS = {
   trend: 'https://push2his.eastmoney.com/api/qt/stock/trends2/get',
 }
 const endpointOf = (ctx, key) => ctx.endpoints?.[key] || DEFAULT_ENDPOINTS[key]
+// suggest 接口的公开站点参数(不是本插件凭据), 两处调用必须同源
+const SUGGEST_TOKEN = 'D43BF722C8E33BDC906FB84D85E326E8'
 // 沪深市场代码(其余市场的 secid 前缀见 SECID_PREFIX)
 const MARKET = { XSHG: '1', XSHE: '0' }
 // 搜索联想 MktNum→交易所全集(实测: 1/0 沪深, 116 港, 105/106/107 美三大, 176/177/155 日韩英)
@@ -149,7 +151,7 @@ export const eastmoney = {
   async search(request, ctx) {
     // 不限市场时扩大候选量: 单次响应要覆盖调用方负责的多个市场
     const count = request.market ? Math.min(20, request.limit || 10) : Math.min(50, (request.limit || 10) * 3)
-    const url = `${endpointOf(ctx, 'search')}?input=${encodeURIComponent(request.q)}&type=14&token=D43BF722C8E33BDC906FB84D85E326E8&count=${count}`
+    const url = `${endpointOf(ctx, 'search')}?input=${encodeURIComponent(request.q)}&type=14&token=${SUGGEST_TOKEN}&count=${count}`
     const body = await getJson(ctx, url)
     const rows = body?.QuotationCodeTable?.Data
     if (!Array.isArray(rows)) return { providerInstanceId: request.providerInstanceId, fetchedAt: ctx.now(), items: [], errors: [] }
@@ -188,7 +190,7 @@ export const eastmoney = {
     return buildKlineResponse(request, body.data, ctx)
   },
   async resolveUsSecid(request, ctx) {
-    const url = `${endpointOf(ctx, 'search')}?input=${encodeURIComponent(request.code)}&type=14&token=D43BF722C8E33BDC906FB84D85E326E8&count=5`
+    const url = `${endpointOf(ctx, 'search')}?input=${encodeURIComponent(request.code)}&type=14&token=${SUGGEST_TOKEN}&count=5`
     const body = await getJson(ctx, url)
     const row = body?.QuotationCodeTable?.Data?.find(r => r.Code === request.code && /^10[567]$/.test(r.MktNum || ''))
     return row ? { mktNum: row.MktNum, jys: row.JYS || null, at: ctx.now() } : null

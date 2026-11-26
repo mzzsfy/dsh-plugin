@@ -69,7 +69,11 @@ const refreshSecuritySchema = z.union([
     return parts.length === 3 && parts[1] === 'equity' && MARKET_META[parts[0]] !== undefined && /^[\w.]{1,15}$/.test(parts[2])
   }, '证券标识无效'),
   z.object({ id: z.string().min(1).max(64), exchange: marketSchema, code: z.string().min(1).max(20), officialName: z.string().min(1).max(100).optional() })
-    .superRefine((value, ctx) => { if (value.id !== `${value.exchange}:equity:${value.code}`) ctx.addIssue({ code: 'custom', message: '证券身份不一致' }) }),
+    // 代码形状必须与市场一致: 否则 makeSecurity 抛普通 Error, 路由层会把它折叠成 500 而不是 400
+    .superRefine((value, ctx) => {
+      if (value.id !== `${value.exchange}:equity:${value.code}`) ctx.addIssue({ code: 'custom', message: '证券身份不一致' })
+      if (!MARKET_META[value.exchange]?.codePattern.test(value.code)) ctx.addIssue({ code: 'custom', message: '证券代码与市场不符' })
+    }),
 ])
 export const refreshSecuritiesSchema = z.array(refreshSecuritySchema).max(100)
 // 路由上限: 八市场 × 全部能力, 全开也要装得下

@@ -29,6 +29,19 @@ test('密钥写入宿主凭据存储并立即反映在快照的存在性上', as
   assert.equal(JSON.stringify(app.snapshot()).includes('real-secret'), false, '密钥不回显到快照')
 })
 
+test('凭据服务晚到也能用: 装配时只取一次会把缺失固化成永久', async () => {
+  // 宿主凭据 fiber 可能晚于插件 apply 就绪: 服务按次取, 晚到之后写密钥/解析密钥都要恢复正常
+  let service = null
+  const credentials = fakeCredentials()
+  const app = await createApplication({ storageDomain: memoryStorage(), providers: [fake], credentials: () => service, env: {}, now: () => 1000 })
+  await app.configuration({ ...operation(), payload: configured })
+  await assert.rejects(app.credential({ ref: REF, value: 'early' }), e => e.code === 'UNSUPPORTED')
+  service = credentials
+  assert.deepEqual(await app.credential({ ref: REF, value: 'late-secret' }), { ref: REF, present: true })
+  assert.equal(credentials.store.get(REF), 'late-secret')
+  await app.close()
+})
+
 test('清除密钥后存在性回落且插件状态里不留副本', async () => {
   const credentials = fakeCredentials({ [REF]: 'old-secret' })
   const app = await createApplication({ storageDomain: memoryStorage(), providers: [fake], credentials, env: {}, now: () => 1000 })

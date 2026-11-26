@@ -57,6 +57,37 @@ export function createCatalog({ state, getControl = state.get, router, executor,
     const score = s => { const code = s.code.toLowerCase(), name = s.officialName.toLowerCase(); return code === query ? 0 : name === query ? 1 : code.startsWith(query) ? 2 : name.includes(query) ? 3 : s.cnspell?.toLowerCase().startsWith(query) ? 4 : 99 }
     return all().map(s => ({ s, rank: score(s) })).filter(r => r.rank < 99).sort((a, b) => a.rank - b.rank || a.s.id.localeCompare(b.s.id)).slice(0, limit).map(r => r.s)
   }
+  // 目录同步走闭包: 挂在返回对象上时 this.sync 一旦被解构或换绑就丢 this
+  const sync = async (market, capabilities = ['catalog', 'calendar']) => {
+      const config = structuredClone(getControl()), key = `${config.routingRevision}:${market}:${capabilities.join(',')}`
+      if (flights.has(key)) return flights.get(key)
+      const controller = new AbortController(); controllers.add(controller)
+      const job = (async () => {
+        const status = []
+        for (const capability of capabilities) {
+          try {
+            const selected = router.select(capability, market)
+            const today = marketDate(market, now())
+            const request = { market, routingRevision: config.routingRevision, startDate: shiftDate(today, -7), endDate: shiftDate(today, 45) }
+            const batch = await executor.run(selected.instance, capability, request, { signal: controller.signal })
+            if (stopped || config.routingRevision !== getControl().routingRevision) fail('ROUTE_CONFLICT', '来源已变化，旧目录已丢弃', 409)
+            if (!Array.isArray(batch.items) || capability === 'catalog' && batch.items.some(s => !securitySchema.safeParse(s).success || s.exchange !== market) || capability === 'calendar' && batch.items.some(d => !/^\d{4}-\d{2}-\d{2}$/.test(d.date) || typeof d.isOpen !== 'boolean')) fail('BAD_PAYLOAD', '目录来源返回不受支持的证券身份', 502)
+            const items = batch.items
+            await state.cache.put(`${capability}:${selected.instance.id}:${market}`, { kind: capability, source: selected.instance.id, fetchedAt: now(), payload: { routingRevision: config.routingRevision, market, complete: batch.complete ?? true, items } })
+            if (capability === 'calendar') marketStateCache.clear()
+            setBounded(syncAttempts, `${capability}:${market}`, { ok: true, at: now(), revision: config.routingRevision }, SYNC_ATTEMPT_LIMIT)
+            status.push({ capability, ok: true, count: items.length }); changed()
+          } catch (e) {
+            setBounded(syncAttempts, `${capability}:${market}`, { ok: false, at: now(), revision: config.routingRevision, error: { code: e.code, message: e.message } }, SYNC_ATTEMPT_LIMIT)
+            status.push({ capability, ok: false, error: { code: e.code, message: e.message } })
+          }
+        }
+        return status
+      })()
+      flights.set(key, job)
+      job.finally(() => { flights.delete(key); controllers.delete(controller) }).catch(() => {})
+      return job
+  }
   return {
     search,
     async browse({ market, offset, limit }) {
@@ -69,12 +100,12 @@ export function createCatalog({ state, getControl = state.get, router, executor,
         // 只认当前路由版本下的失败: 换过路由还回旧版本的错误, 会把已经修好的市场显示成失败
         const failed = attempt?.ok === false && attempt.revision === revision
         const due = !failed || now() - attempt.at >= AUTO_SYNC_RETRY_MS
-        if (due) this.sync(market, ['catalog']).catch(() => {})
+        if (due) sync(market, ['catalog']).catch(() => {})
         return { syncing: true, syncError: failed ? attempt.error : null, syncAttemptAt: failed ? attempt.at : null, total: 0, items: [] }
       }
       // 已有目录但过期: 先展示旧数据, 同时后台刷新, 下一次浏览/轮询就能拿到新目录
       const newest = Math.max(...cached.map(c => c.fetchedAt))
-      if (now() - newest > CATALOG_TTL) this.sync(market, ['catalog']).catch(() => {})
+      if (now() - newest > CATALOG_TTL) sync(market, ['catalog']).catch(() => {})
       const securities = all().filter(s => s.exchange === market).sort((a, b) => a.code.localeCompare(b.code))
       const start = Math.max(0, Math.trunc(Number(offset) || 0)), size = Math.min(200, Math.max(1, Math.trunc(Number(limit) || 50)))
       return { total: securities.length, items: securities.slice(start, start + size) }
@@ -142,39 +173,10 @@ export function createCatalog({ state, getControl = state.get, router, executor,
         const today = marketDate(route.market, now())
         const ttl = route.capability === 'calendar' ? CALENDAR_TTL : CATALOG_TTL
         const missing = !cache || now() - cache.fetchedAt > ttl || route.capability === 'calendar' && !cache.payload.items.some(day => day.date === today)
-        if (missing) await this.sync(route.market, [route.capability])
+        if (missing) await sync(route.market, [route.capability])
       }
     },
-    async sync(market, capabilities = ['catalog', 'calendar']) {
-      const config = structuredClone(getControl()), key = `${config.routingRevision}:${market}:${capabilities.join(',')}`
-      if (flights.has(key)) return flights.get(key)
-      const controller = new AbortController(); controllers.add(controller)
-      const job = (async () => {
-        const status = []
-        for (const capability of capabilities) {
-          try {
-            const selected = router.select(capability, market)
-            const today = marketDate(market, now())
-            const request = { market, routingRevision: config.routingRevision, startDate: shiftDate(today, -7), endDate: shiftDate(today, 45) }
-            const batch = await executor.run(selected.instance, capability, request, { signal: controller.signal })
-            if (stopped || config.routingRevision !== getControl().routingRevision) fail('ROUTE_CONFLICT', '来源已变化，旧目录已丢弃', 409)
-            if (!Array.isArray(batch.items) || capability === 'catalog' && batch.items.some(s => !securitySchema.safeParse(s).success || s.exchange !== market) || capability === 'calendar' && batch.items.some(d => !/^\d{4}-\d{2}-\d{2}$/.test(d.date) || typeof d.isOpen !== 'boolean')) fail('BAD_PAYLOAD', '目录来源返回不受支持的证券身份', 502)
-            const items = batch.items
-            await state.cache.put(`${capability}:${selected.instance.id}:${market}`, { kind: capability, source: selected.instance.id, fetchedAt: now(), payload: { routingRevision: config.routingRevision, market, complete: batch.complete ?? true, items } })
-            if (capability === 'calendar') marketStateCache.clear()
-            setBounded(syncAttempts, `${capability}:${market}`, { ok: true, at: now(), revision: config.routingRevision }, SYNC_ATTEMPT_LIMIT)
-            status.push({ capability, ok: true, count: items.length }); changed()
-          } catch (e) {
-            setBounded(syncAttempts, `${capability}:${market}`, { ok: false, at: now(), revision: config.routingRevision, error: { code: e.code, message: e.message } }, SYNC_ATTEMPT_LIMIT)
-            status.push({ capability, ok: false, error: { code: e.code, message: e.message } })
-          }
-        }
-        return status
-      })()
-      flights.set(key, job)
-      job.finally(() => { flights.delete(key); controllers.delete(controller) }).catch(() => {})
-      return job
-    },
+    sync,
     marketState(market) {
       const at = now(), date = marketDate(market, at), revision = getControl().routingRevision
       const key = `${market}:${date}:${revision}`

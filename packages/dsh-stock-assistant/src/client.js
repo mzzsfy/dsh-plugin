@@ -153,11 +153,11 @@ window.__ModuleLoader__.load({
     const REQUEST_TIMEOUT_MESSAGE = '请求超时，请重试'
     // 页面重置/换代主动中止在飞请求不是故障: 用可识别的取消错误代替英文 AbortError
     const REQUEST_CANCELLED_MESSAGE = '请求已取消，请重试'
-    const REQUEST_TIMEOUT_MS = 11 * 1000, PROVIDER_CHECK_TIMEOUT_MS = 61 * 1000, CATALOG_SYNC_TIMEOUT_MS = 121 * 1000
+    const ROUTE_TIMEOUT_FALLBACK_MS = 10 * 1000, ROUTE_TIMEOUT_SLACK_MS = 1 * 1000, PROVIDER_CHECK_TIMEOUT_MS = 61 * 1000, CATALOG_SYNC_TIMEOUT_MS = 121 * 1000
     function createPageRuntime({ layout, bus, tools, document: doc = document, fetch: request = fetch }) {
       let disposed = false, generation = 0, demandGeneration = 0, pageId = crypto.randomUUID(), timer, heartbeat, undoTimer, browseTimer, queryGeneration = 0, querying, composing = false
       const subscribers = new Set(), retiredEpochs = new Set(), requests = new Set()
-      let state = { view: { view: 'list', query: '', selectedId: null, detailId: null, sort: 'manual', focusId: null, keyboardNavigating: false, frozenOrder: null, settingsDraft: null, scrollTop: 0, menuId: null, alias: '', browseMarket: 'XSHG', browseRows: null, browseTotal: 0, browseOffset: 0, notice: '', browsePeek: {} }, data: null, paused: false, error: '', errorCode: '', errorKey: '', dataError: '', busy: {}, candidates: [], composing: false, undo: null, peekQuotes: {} }
+      let state = { view: { view: 'list', query: '', selectedId: null, detailId: null, sort: 'manual', focusId: null, keyboardNavigating: false, frozenOrder: null, settingsDraft: null, scrollTop: 0, alias: '', browseMarket: 'XSHG', browseRows: null, browseTotal: 0, browseOffset: 0, notice: '', browsePeek: {} }, data: null, paused: false, error: '', errorCode: '', errorKey: '', dataError: '', busy: {}, candidates: [], composing: false, undo: null, peekQuotes: {} }
       function emit() { for (const fn of subscribers) fn() }
       function patch(next) { if (!disposed) { state = { ...state, ...next }; emit() } }
       // 操作错误按产生它的动作记账: 只有同名动作重试或用户关闭才清; 数据面快照刷新不清
@@ -194,7 +194,9 @@ window.__ModuleLoader__.load({
         const controller = new AbortController(); requests.add(controller)
         const abort = () => controller.abort(); signal?.addEventListener('abort', abort, { once: true })
         let timedOut = false
-        const timeoutMs = path === '/provider-check' ? PROVIDER_CHECK_TIMEOUT_MS : path === '/catalog-sync' ? CATALOG_SYNC_TIMEOUT_MS : REQUEST_TIMEOUT_MS
+        // 普通路由的时限跟着服务端算出的预算走: 客户端先超时会把服务端还能等到的结果白白丢掉
+        const routeBudget = state.data?.timeouts?.route
+        const timeoutMs = path === '/provider-check' ? PROVIDER_CHECK_TIMEOUT_MS : path === '/catalog-sync' ? CATALOG_SYNC_TIMEOUT_MS : (Number.isFinite(routeBudget) ? routeBudget : ROUTE_TIMEOUT_FALLBACK_MS) + ROUTE_TIMEOUT_SLACK_MS
         const timeoutError = () => Object.assign(new Error(REQUEST_TIMEOUT_MESSAGE), { code: 'TIMEOUT' })
         const cancelledError = () => Object.assign(new Error(REQUEST_CANCELLED_MESSAGE), { code: 'CANCELLED', cancelled: true })
         const timeout = setTimeout(() => { timedOut = true; controller.abort() }, timeoutMs)
@@ -847,10 +849,13 @@ window.__ModuleLoader__.load({
       for (let at = 0; at < (series || []).length; at += 2) rows.push(series.slice(at, at + 2).map(([label, value]) => `${label} ${price(value)}`).join('　'))
       return rows
     }
-    // 时间键归一: 日K的 time 可能是字符串或 BusinessDay, 分时是 Unix 秒, 跨形态比较前先拍平
+    // 时间键归一: 日K的 time 可能是字符串或 BusinessDay, 分时是 Unix 秒, 跨形态比较前先拍平。
+    // BusinessDay 必须补零成 YYYY-MM-DD, 否则与来源的日期串在 1-9 月/日上前缀相同却永不相等
     function timeKeyOf(time) {
       if (typeof time === 'number' || typeof time === 'string') return time
-      return time?.year ? `${time.year}-${time.month}-${time.day}` : ''
+      if (!time?.year) return ''
+      const pad = n => String(n).padStart(2, '0')
+      return `${time.year}-${pad(time.month)}-${pad(time.day)}`
     }
     function crosshairTimeText(time, trend, zone) {
       if (time == null) return ''
@@ -862,13 +867,6 @@ window.__ModuleLoader__.load({
     // 读数浮层贴光标右上, 靠边时翻到内侧: 固定在画布上, 不跟着价格轴漂
     function crosshairTipStyle({ point, width, height }) {
       return { left: Math.max(4, Math.min(point.x + 14, Math.max(4, width - 204))), top: Math.max(4, Math.min(point.y + 14, Math.max(4, height - 160))) }
-    }
-    // 列表悬停浮层: 高度按行数估算, 下方放不下就翻到行上方, 多标记时也不能撞出视口
-    const ROWTIP_LINE = 17.4, ROWTIP_PAD = 12
-    function rowTipPositionOf({ top, bottom, lines, viewportHeight }) {
-      const height = lines * ROWTIP_LINE + ROWTIP_PAD
-      const limit = viewportHeight - height - 8
-      return { height, top: top + height > viewportHeight - 8 ? Math.max(8, Math.min(bottom - height, limit)) : Math.max(8, Math.min(top, limit)) }
     }
     // 标记价提醒: 现价从安全侧越到标记侧才触发一次, 回到安全侧还要再离开一个滞回幅度
     // 才算重新武装, 两次触发之间另有冷却——阈值附近的抖动与来回穿越都不该连续叫人
@@ -986,7 +984,9 @@ window.__ModuleLoader__.load({
       // 打开时才量坐标: 设置页有折叠区, 渲染期算出的位置会过期
       const openMenu = React.useCallback(() => {
         if (disabled || !triggerRef.current) return
-        setPlace(dropdownPlacement(triggerRef.current.getBoundingClientRect(), { width: innerWidth, height: innerHeight }, entries.length))
+        // 与悬浮窗夹取同源: 布局视口不含经典滚动条, 菜单右/下边界才不会压到滚动条下面
+        const viewport = viewportOf() || { width: typeof window === 'undefined' ? 0 : window.innerWidth, height: typeof window === 'undefined' ? 0 : window.innerHeight }
+        setPlace(dropdownPlacement(triggerRef.current.getBoundingClientRect(), viewport, entries.length))
         setActive(selectedAt); setOpen(true)
       }, [disabled, entries.length, selectedAt])
       React.useEffect(() => {
@@ -1079,9 +1079,9 @@ window.__ModuleLoader__.load({
         if (aa === null || bb === null) return aa === bb ? 0 : aa === null ? 1 : -1
         return view.sort === 'asc' ? aa - bb : bb - aa
       })
-      const order = (view.menuId || view.keyboardNavigating) && view.frozenOrder ? [...view.frozenOrder.filter(id => w.items[id]), ...sortedOrder.filter(id => !view.frozenOrder.includes(id))] : sortedOrder
+      const order = view.keyboardNavigating && view.frozenOrder ? [...view.frozenOrder.filter(id => w.items[id]), ...sortedOrder.filter(id => !view.frozenOrder.includes(id))] : sortedOrder
       // 草稿清理由 updateView 在 detailId 变更处统一处理, 这里再清一遍会把键盘导航到同一只时输了一半的内容抹掉
-      function open(id) { runtime.updateView({ detailId: id, selectedId: id, overlay: 'detail', focusId: id, keyboardNavigating: false, menuId: null }) }
+      function open(id) { runtime.updateView({ detailId: id, selectedId: id, overlay: 'detail', focusId: id, keyboardNavigating: false }) }
       // 概览横幅: 仅异常态显示(健康态运维摘要收进「更多」菜单), Leek-Fund 模式=主页纯列表
       // 概览横幅直指用户请求: 后台探测的失败不是用户动作, 不在横幅上报
       const lastFailure = s => (s.recentRequests || []).find(r => !r.probe)
@@ -1192,7 +1192,7 @@ window.__ModuleLoader__.load({
                     h('div', { className: 'ssb-row-main' },
                       h('span', { className: 'ssb-grip', 'aria-hidden': true, title: canDrag ? '拖动排序' : '切回手动顺序后可拖动' }, '⠿'),
                       h('button', { className: 'ssb-stock-name', 'data-security-id': id, onClick: () => open(id), onFocus: () => { if (view.focusId !== id) runtime.updateView({ focusId: id }) }, onBlur: e => { if (!e.relatedTarget?.closest('.ssb-stock-name')) runtime.updateView({ keyboardNavigating: false, frozenOrder: null }) }, onKeyDown: e => {
-                    if (e.key === 'Escape') { runtime.updateView({ menuId: null, frozenOrder: null, keyboardNavigating: false, view: 'list' }); return }
+                    if (e.key === 'Escape') { runtime.updateView({ frozenOrder: null, keyboardNavigating: false, view: 'list' }); return }
                     if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) {
                       // 导航序列=实际渲染 DOM 序(tab 过滤后与全量 order 错位), focusId 取目标行 data-security-id 保持状态同步
                       e.preventDefault(); const buttons = [...e.currentTarget.closest('.ssb-rows').querySelectorAll('.ssb-stock-name')]; const at = buttons.indexOf(e.currentTarget), next = e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1 : Math.max(0, Math.min(buttons.length - 1, at + (e.key === 'ArrowDown' ? 1 : -1)))
@@ -1384,12 +1384,16 @@ window.__ModuleLoader__.load({
       }, [item.id, period])
       function drawMarks(series, palette, list) {
         if (!series) return
-        for (const line of markLinesRef.current) { try { series.removePriceLine(line) } catch { } }
-        markLinesRef.current = (list || []).map(mark => series.createPriceLine({
-          price: mark.price,
-          color: mark.kind === 'cost' ? palette.cost : palette.target,
-          lineStyle: 3, lineWidth: 1, axisLabelVisible: true,
-          title: mark.kind === 'cost' ? '成本' : '卖价',
+        for (const entry of markLinesRef.current) { try { series.removePriceLine(entry.line) } catch { } }
+        // 建线时把种类记下来: 重涂只换颜色, 不能依赖 liveRef 与列表的索引对齐
+        markLinesRef.current = (list || []).map(mark => ({
+          kind: mark.kind,
+          line: series.createPriceLine({
+            price: mark.price,
+            color: mark.kind === 'cost' ? palette.cost : palette.target,
+            lineStyle: 3, lineWidth: 1, axisLabelVisible: true,
+            title: mark.kind === 'cost' ? '成本' : '卖价',
+          }),
         }))
       }
       function drawLine(ref, options) {
@@ -1499,11 +1503,8 @@ window.__ModuleLoader__.load({
         for (const [key, list] of Object.entries(indicatorRef.current)) list.forEach((series, index) => series.applyOptions({ color: Array.isArray(palette[key]) ? palette[key][index] : palette[key] }))
         // 参考线建好后就固定了, 只换颜色; 没有对应的线时 applyOptions 是 no-op
         preCloseLineRef.current?.applyOptions({ color: t.crosshair })
-        // 标记线按种类各一个颜色, 逐条换
-        for (const [index, line] of markLinesRef.current.entries()) {
-          const mark = (liveRef.current.marks || [])[index]
-          line.applyOptions({ color: mark?.kind === 'target' ? t.target : t.cost })
-        }
+        // 标记线按建线时记下的种类换色: 与列表索引无关, 列表晚一拍也不会同色
+        for (const { kind, line } of markLinesRef.current) line.applyOptions({ color: kind === 'target' ? t.target : t.cost })
         highLineRef.current?.applyOptions({ color: t.textColor })
         lowLineRef.current?.applyOptions({ color: t.textColor })
       }
@@ -1659,7 +1660,9 @@ window.__ModuleLoader__.load({
       }
       // effect B: 只在标的/周期变化时发起加载; 灌图由下面的数据 effect 统一负责,
       // 否则手动刷新(↻)只改 state 不进图表, 出现图例已更新而蜡烛还是旧的
-      useTrendPolling({ enabled: wantTrend, runtime, securityId: item.id, context: wantTrend ? runtime.trendContext(item.id) : null })
+      // 面板暂停时详情分时也不自动取数: 恢复后 enabled 变化会让这条 effect 重跑
+      const trendEnabled = wantTrend && !state.paused
+      useTrendPolling({ enabled: trendEnabled, runtime, securityId: item.id, context: trendEnabled ? runtime.trendContext(item.id) : null })
       React.useEffect(() => {
         if (wantTrend) return
         let dead = false
@@ -1717,7 +1720,6 @@ window.__ModuleLoader__.load({
             h('div', { className: 'ssb-kline-tip-time' }, crosshair.time),
             ...crosshair.lines.map((line, index) => h('div', { key: index }, line))) : null))
     }
-    // 浮层原语: 遮罩+Esc/遮罩关闭, 抽屉(detail)与模态(settings)共用关闭语义
     // 浮层原语: 遮罩+Esc/遮罩关闭+焦点移入/困住/还原+背景滚动锁定, 抽屉(detail)与模态(settings)共用
     function Overlay({ runtime, state, layout }) {
       const { view } = state
@@ -1906,11 +1908,12 @@ window.__ModuleLoader__.load({
       return [value, next => { writePref(key, { ...readPref(key, fallback), ...next }) }]
     }
     // ---- FloatingTicker: 悬浮盯盘, portal 到 body 常驻, 不随面板切换卸载 ----
-    function useFloatingPolling({ runtime, open, picked, items, live, floatSeconds, allQuiet, epoch, revision, retryTick, setFetched, setError }) {
+    function useFloatingPolling({ runtime, open, picked, items, live, paused, floatSeconds, allQuiet, epoch, revision, retryTick, setFetched, setError }) {
       const pickedKey = [...picked].sort().join(',')
       const lastAttempt = React.useRef(-Infinity)
       React.useEffect(() => {
-        if (!open || !picked.length || live === false) return
+        // 面板暂停采集时浮窗同步停拍: 否则「暂停」只停列表, 浮窗仍在消耗来源额度
+        if (!open || !picked.length || live === false || paused) return
         // 勾选或路由版本变化就是新的一轮观测: 从立即取数开始, 不继承上一轮的等待档与错误
         lastAttempt.current = -Infinity
         setError('')
@@ -1939,7 +1942,7 @@ window.__ModuleLoader__.load({
         pull()
         const timer = setInterval(pull, delay)
         return () => { controller.abort(); clearInterval(timer) }
-      }, [runtime, open, pickedKey, live, floatSeconds, allQuiet, epoch, revision, retryTick])
+      }, [runtime, open, pickedKey, live, paused, floatSeconds, allQuiet, epoch, revision, retryTick])
     }
     function useTrendPolling({ enabled, runtime, securityId, context, trading = false }) {
       React.useEffect(() => {
@@ -2249,15 +2252,15 @@ window.__ModuleLoader__.load({
         // 标记价常驻一行: 图里画得出的是范围内的横线, 范围外的用这行交代, 不必悬停才知道
         (current.marks || []).length ? h('div', { className: 'ssb-float-marks' }, ...(current.marks || []).map(mark => h('span', { key: mark.id, className: mark.kind === 'cost' ? 'ssb-legend-cost' : 'ssb-legend-target' }, `${mark.kind === 'cost' ? '成本' : '卖价'} ${priceTextOf(mark.price, current.priceScale)}`))) : null)
     }
-    function FloatFoot({ mode, securityId, picked, current, stamp, stale, alertOn, error, liveOn, refresh, onBell, onLive, onDetail }) {
+    function FloatFoot({ mode, securityId, picked, current, stamp, stale, alertOn, error, liveOn, paused, refresh, onBell, onLive, onDetail }) {
       const stampTitle = stamp == null ? '尚未取到行情' : `${stale ? '行情未更新，' : ''}最近价时刻 ${timeText(stamp)}`
       const stampLabel = stamp == null ? `${picked.length} 只，尚未取到行情` : `${picked.length} 只，最近价时刻 ${timeText(stamp)}${stale ? '，数据已过时' : ''}`
-      const refreshLabel = !picked.length ? '还没有勾选观测目标' : error ? `更新失败：${error}，点击重试` : liveOn ? `行情每 ${refresh} 秒自动刷新，点击暂停` : '自动刷新已暂停，点击恢复'
+      const refreshLabel = !picked.length ? '还没有勾选观测目标' : error ? `更新失败：${error}，点击重试` : paused ? '面板已暂停采集，浮窗同步停拍；在面板「更多」里恢复' : liveOn ? `行情每 ${refresh} 秒自动刷新，点击暂停` : '自动刷新已暂停，点击恢复'
       return h('div', { className: 'ssb-float-foot' },
         h('span', { className: `ssb-float-stamp${stale ? ' ssb-float-stamp-stale' : ''}`, title: stampTitle, 'aria-label': stampLabel },
           `${mode === 'kline' && securityId ? `${picked.indexOf(securityId) + 1}/${picked.length}` : `${picked.length} 只`}${stamp == null ? '' : ` · ${clockText(stamp)}`}`),
         h('button', { type: 'button', className: `ssb-float-icon ssb-float-bell${alertOn ? ' on' : ''}`, 'aria-label': alertOn ? '关闭标记价提醒' : '开启标记价提醒', 'aria-pressed': alertOn, title: alertOn ? '标记价提醒已开启：现价穿越成本或卖价时通知' : '标记价提醒已关闭', onClick: onBell }, bellIcon(alertOn)),
-        h('button', { type: 'button', className: `ssb-float-icon ssb-float-live${error ? ' ssb-float-live-error' : ''}`, 'aria-label': !picked.length ? '自动刷新不可用' : error ? '重试自动刷新' : liveOn ? '暂停自动刷新' : '恢复自动刷新', 'aria-pressed': liveOn, title: refreshLabel, disabled: !picked.length, onClick: onLive }, liveOn ? pauseIcon() : playIcon()),
+        h('button', { type: 'button', className: `ssb-float-icon ssb-float-live${error ? ' ssb-float-live-error' : ''}`, 'aria-label': !picked.length ? '自动刷新不可用' : paused ? '面板已暂停采集' : error ? '重试自动刷新' : liveOn ? '暂停自动刷新' : '恢复自动刷新', 'aria-pressed': liveOn, title: refreshLabel, disabled: !picked.length || paused, onClick: onLive }, liveOn ? pauseIcon() : playIcon()),
         h('button', { type: 'button', className: 'ssb-float-icon', 'aria-label': '打开详情', title: securityId ? `打开 ${current?.alias || current?.officialName} 详情` : '还没有可打开的标的', disabled: !securityId, onClick: onDetail }, '⤢'))
     }
     function FloatingTicker({ runtime }) {
@@ -2300,9 +2303,9 @@ window.__ModuleLoader__.load({
       }
       const quoteOf = id => entryOf(id)?.quote
       const allQuiet = picked.every(id => QUIET_STATES.has(quoteOf(id)?.sessionState))
-      useFloatingPolling({ runtime, open, picked, items, live: floating.live, floatSeconds: floatRefresh, allQuiet, epoch, revision, retryTick, setFetched, setError: setQuoteError })
+      useFloatingPolling({ runtime, open, picked, items, live: floating.live, paused: state.paused, floatSeconds: floatRefresh, allQuiet, epoch, revision, retryTick, setFetched, setError: setQuoteError })
       const trading = TRADING_STATES.includes(quoteOf(securityId)?.sessionState) || !quoteOf(securityId)?.sessionState
-      const showTrend = open && mode === 'kline' && !picker && floating.live !== false
+      const showTrend = open && mode === 'kline' && !picker && floating.live !== false && !state.paused
       useTrendPolling({ enabled: showTrend, runtime, securityId, context: showTrend ? runtime.trendContext(securityId) : null, trading })
       const trendData = mode === 'kline' && securityId ? runtime.getTrend(securityId) : null
       const trendQuote = entryOf(securityId), timezone = items[securityId]?.timezone
@@ -2396,7 +2399,7 @@ window.__ModuleLoader__.load({
             ? h(FloatList, { picked, items, securityId, entryOf, onPick: id => update(id === securityId ? { mode: 'kline', securityId: id } : { securityId: id }), onTip: showRowTip, onLeave: () => setRowTip(null), onScroll: () => setRowTip(null) })
             : !current ? h('p', { className: 'ssb-muted' }, '未选择标的') : h(FloatChart, { securityId, current, candles, preClose: base, error, last, pct, offline: trendData?.offline }),
         h(FloatFoot, {
-          mode, securityId, picked, current, stamp, stale, alertOn, error, liveOn: floating.live !== false, refresh: floatRefresh,
+          mode, securityId, picked, current, stamp, stale, alertOn, error, liveOn: floating.live !== false, paused: state.paused, refresh: floatRefresh,
           onBell: () => { const next = !alertOn; alertStates.current = {}; setAlert({ on: next }); if (next) requestAlertPermission() },
           onLive: () => {
             if (!picked.length) return
@@ -2593,7 +2596,7 @@ window.__ModuleLoader__.load({
                   h('summary', { className: 'ssb-muted' }, `接口反代${status?.endpointsCovered ? `（已覆盖 ${status.endpointsCovered} 项）` : ''}`),
                   h('p', { className: 'ssb-muted', style: { gridColumn: '1 / -1' } }, '自建反向代理或镜像站时替换对应地址，留空使用官方默认。路径与参数由本插件拼接，反代只需原样转发。'),
                   h('div', { className: 'ssb-form-grid' }, ...adapter.endpointKeys.map(({ key, label }) => field(label, (p.endpoints || {})[key] || '', value => { const endpoints = { ...p.endpoints }; if (value) endpoints[key] = value; else delete endpoints[key]; providerChange(p.id, { endpoints: Object.keys(endpoints).length ? endpoints : undefined }) }, { placeholder: '官方默认', spellCheck: false })))) : null,
-                h('details', { key: 'obs-' + p.id, style: { gridColumn: '1 / -1' } }, h('summary', { className: 'ssb-muted' }, '运行状态'), status?.recentRequests?.length ? h('ul', { className: 'ssb-reqlog' }, ...status.recentRequests.slice(0, 5).map((r, i) => h('li', { key: i }, `${timeText(r.at)} · ${r.url} · ${r.status} · ${r.ms}ms`))) : h('p', { className: 'ssb-muted' }, '暂无请求记录；启用并保存后，行情/K线/分时请求会在此留最近 20 条轨迹。'))))) : null)
+                h('details', { key: 'obs-' + p.id, style: { gridColumn: '1 / -1' } }, h('summary', { className: 'ssb-muted' }, '运行状态'), status?.recentRequests?.length ? h('ul', { className: 'ssb-reqlog' }, ...status.recentRequests.slice(0, 5).map((r, i) => h('li', { key: i }, `${timeText(r.at)} · ${r.label} · ${r.status} · ${r.ms}ms`))) : h('p', { className: 'ssb-muted' }, '暂无请求记录；启用并保存后，行情/K线/分时请求会在此留最近 20 条轨迹。'))))) : null)
       })
       const routeRows = Object.keys(MARKET_LABEL).map(market => {
         const caps = ['catalog', 'search', 'quotes', 'kline', 'trend', ...(['XSHG', 'XSHE'].includes(market) ? ['calendar'] : [])]
@@ -2997,7 +3000,7 @@ window.__ModuleLoader__.load({
           data && view.overlay ? h(Overlay, { runtime, state, layout }) : null))
     }
     return {
-      inject: ['slots', 'locale', 'layout'],
+      inject: ['slots', 'layout'],
       apply(ctx) {
         if (!ctx.slots?.inject || !ctx.layout?.panelInfo?.subscribe) return
         const bus = tools.setupCommonTools(ctx)
@@ -3024,7 +3027,7 @@ window.__ModuleLoader__.load({
           return () => { for (const stop of disposers.reverse()) stop() }
         }, 'stock-assistant main panel')
       },
-      __testing: { createPageRuntime, StockPage, FloatingTicker, FloatHeader, FloatPicker, FloatList, FloatChart, FloatFoot, KlineView, Sparkline, Select, dropdownPlacement, dragOrder, quiet, seriesMA, seriesEMA, seriesBoll, seriesBBI, seriesMAVOL, volumeBarPoints, trendAxis, ratioText, percentText, MAVOL_WINDOWS, readPref, writePref, subscribePref, LWC_LOAD_TIMEOUT_MS, klineKeyOf, klineShipPlan, klineViewportOf, applyKlineViewport, chartOptions, KLINE_HISTORY_LIMIT, KLINE_INITIAL_BARS, finiteOr, formatAmount, toneClass, priceTextOf, tagTabs, resolveTab, costBaseOf, costPlOf, markPct, QUIET_STATES, floatPollDelay, floatIntervalOf, FLOAT_INTERVALS, FLOAT_FALLBACK_SECONDS, timestampOf, floatFreshness, priceTimeOf, clockText, staleAfter, markAlertOf, markAlertText, deliverMarkAlert, sparkIndexAt, candleTimeText, quoteTipLines, crosshairTipLines, crosshairTimeText, timeKeyOf, crosshairTipStyle, rowTipPositionOf, sparkRangeOf, sparkTicksOf, sparkWindowOf, sparkZoomOf, sparkPanOf, sparkNormalizeOf, sparkFollowOf, seriesPaintPlan, sanitizeCandles, themeSignature, ensureLwc, clampFloatPlacement, FLOAT_MARGIN, FLOAT_WIDTH, FLOAT_HEIGHT, routesForProviders, routesForAdapter, routesForAdapters, providerChangeDraft, settingsSavePayload, pruneDeniedTargets, selectEntries, offlineText, offlinePrefix, floatReadout },
+      __testing: { createPageRuntime, StockPage, FloatingTicker, FloatHeader, FloatPicker, FloatList, FloatChart, FloatFoot, KlineView, Sparkline, Select, dropdownPlacement, dragOrder, quiet, seriesMA, seriesEMA, seriesBoll, seriesBBI, seriesMAVOL, volumeBarPoints, trendAxis, ratioText, percentText, MAVOL_WINDOWS, readPref, writePref, subscribePref, LWC_LOAD_TIMEOUT_MS, klineKeyOf, klineShipPlan, klineViewportOf, applyKlineViewport, chartOptions, KLINE_HISTORY_LIMIT, KLINE_INITIAL_BARS, finiteOr, formatAmount, toneClass, priceTextOf, tagTabs, resolveTab, costBaseOf, costPlOf, markPct, QUIET_STATES, floatPollDelay, floatIntervalOf, FLOAT_INTERVALS, FLOAT_FALLBACK_SECONDS, timestampOf, floatFreshness, priceTimeOf, clockText, staleAfter, markAlertOf, markAlertText, deliverMarkAlert, sparkIndexAt, candleTimeText, quoteTipLines, crosshairTipLines, crosshairTimeText, timeKeyOf, crosshairTipStyle, sparkRangeOf, sparkTicksOf, sparkWindowOf, sparkZoomOf, sparkPanOf, sparkNormalizeOf, sparkFollowOf, seriesPaintPlan, sanitizeCandles, themeSignature, ensureLwc, clampFloatPlacement, FLOAT_MARGIN, FLOAT_WIDTH, FLOAT_HEIGHT, routesForProviders, routesForAdapter, routesForAdapters, providerChangeDraft, settingsSavePayload, pruneDeniedTargets, selectEntries, offlineText, offlinePrefix, floatReadout },
     }
   },
 })

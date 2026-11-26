@@ -155,6 +155,9 @@ export const tencent = {
     if (!rows.length || !day) throw new StockError('NO_DATA', '来源未返回此证券分时', 422)
     const stamp = `${day[1]}-${day[2]}-${day[3]}`
     const candles = []
+    // minute/query 的第 3、4 列是当日累计量/额(实测: 末条等于全天成交量, 且单调递增),
+    // 而 candle.volume/amount 的契约是与东财 f56/f57 一致的区间增量, 这里必须做差分
+    let prevVolume = 0, prevAmount = 0
     for (const row of rows) {
       const cols = String(row).split(' ')
       // 价格必须是纯数字才收: 上游偶有畸形行, 与其把 NaN 画进图里, 不如少一点
@@ -162,7 +165,14 @@ export const tencent = {
       const time = `${cols[0].padStart(4, '0').slice(0, 2)}:${cols[0].padStart(4, '0').slice(2)}`
       const price = num(cols[1])
       if (price == null) continue
-      candles.push({ time, at: zonedUnixSeconds(`${stamp} ${time}`, SOURCE_ZONE), open: price, close: price, high: price, low: price, volume: sharesFromLots(num(cols[2]), request.market), amount: num(cols[3]), avg: null })
+      // 累计量偶尔回退(来源补数/清理), 差分取 0 而不是画负数
+      const cumulativeVolume = sharesFromLots(num(cols[2]), request.market)
+      const cumulativeAmount = num(cols[3])
+      const volume = cumulativeVolume === null ? null : Math.max(0, cumulativeVolume - prevVolume)
+      const amount = cumulativeAmount === null ? null : Math.max(0, cumulativeAmount - prevAmount)
+      if (cumulativeVolume !== null) prevVolume = cumulativeVolume
+      if (cumulativeAmount !== null) prevAmount = cumulativeAmount
+      candles.push({ time, at: zonedUnixSeconds(`${stamp} ${time}`, SOURCE_ZONE), open: price, close: price, high: price, low: price, volume, amount, avg: null })
     }
     if (!candles.length) throw new StockError('NO_DATA', '来源分时数据不可解析', 422)
     const qt = Array.isArray(body?.data?.[symbol]?.qt?.[symbol]) ? body.data[symbol].qt[symbol] : null

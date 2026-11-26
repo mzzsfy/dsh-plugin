@@ -161,6 +161,12 @@ function decimal(n) {
   const abs = n < 0n ? -n : n
   return `${sign}${abs / 100n}.${String(abs % 100n).padStart(2, '0')}`
 }
+// 上游的"没有数据"有两种写法: null 与空串。两者都必须保持缺失, 不能顺着 Number() 变成 0
+export function numberOrNull(value) {
+  if (value == null || value === '') return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
 export function normalizeQuote(input) {
   const last = cents(input.last), previous = cents(input.previousClose)
   const change = last !== null && previous !== null ? last - previous : null

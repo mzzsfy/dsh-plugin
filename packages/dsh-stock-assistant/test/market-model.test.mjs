@@ -49,3 +49,15 @@ test('G11 归一到分: 来源三位及以上小数按四舍五入保留, 不再
   assert.equal(quote('0.001').last, null, '进位后为零仍视为无值')
   assert.equal(quote('4.755').change, '0.21', '涨跌额随归一分值计算')
 })
+
+test('缺失值的两种写法都保持缺失, 不顺 Number() 折成 0', async () => {
+  const { numberOrNull } = await import('../src/market-model.mjs')
+  // null/空串是"来源没给", 不能显示成 0 价、0 量、0.00% 换手率
+  assert.equal(numberOrNull(null), null)
+  assert.equal(numberOrNull(undefined), null)
+  assert.equal(numberOrNull(''), null)
+  assert.equal(numberOrNull('0'), 0, '真实的 0 是有效数据')
+  assert.equal(numberOrNull(0), 0)
+  assert.equal(numberOrNull('12.5'), 12.5)
+  assert.equal(numberOrNull('abc'), null, '解析不了同样记缺失')
+})

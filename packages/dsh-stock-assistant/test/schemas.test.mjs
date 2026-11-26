@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseConfiguration, initialControl, marketSchema, klineQuerySchema, capability, preferencesSchema, storedControlSchema, DEFAULT_FLOAT_REFRESH_SECONDS } from '../src/schemas.mjs'
+import { parseConfiguration, initialControl, marketSchema, klineQuerySchema, capability, preferencesSchema, storedControlSchema, refreshSecuritiesSchema, DEFAULT_FLOAT_REFRESH_SECONDS } from '../src/schemas.mjs'
 import { provider, route } from './helpers.mjs'
 test('配置拒绝重复能力路由与不同变量外的密钥字段', () => {
   assert.throws(() => parseConfiguration({ providers: [provider()], routes: [route(), { ...route(), id: 'other' }] }))
@@ -133,4 +133,12 @@ test('旧控制记录缺悬浮档位时读入补默认', () => {
   assert.equal(storedControlSchema.parse(legacy).preferences.floatRefreshSeconds, DEFAULT_FLOAT_REFRESH_SECONDS)
   const kept = { ...legacy, preferences: { ...legacy.preferences, floatRefreshSeconds: 5 } }
   assert.equal(storedControlSchema.parse(kept).preferences.floatRefreshSeconds, 5, '已有值不被默认盖掉')
+})
+
+// 手动刷新的对象形态必须走与字符串形态同一条代码校验: 否则 makeSecurity 抛普通 Error, 路由层折叠成 500
+test('刷新证券的对象形态拒绝与市场不符的代码', () => {
+  assert.equal(refreshSecuritiesSchema.safeParse([{ id: 'XSHG:equity:600519', exchange: 'XSHG', code: '600519' }]).success, true)
+  assert.equal(refreshSecuritiesSchema.safeParse([{ id: 'XSHG:equity:abc', exchange: 'XSHG', code: 'abc' }]).success, false, '沪深代码只能是数字')
+  assert.equal(refreshSecuritiesSchema.safeParse([{ id: 'XNAS:equity:aapl', exchange: 'XNAS', code: 'aapl' }]).success, false, '美股代码大写')
+  assert.equal(refreshSecuritiesSchema.safeParse([{ id: 'XSHG:equity:600519', exchange: 'XNAS', code: '600519' }]).success, false, '身份与市场不一致')
 })

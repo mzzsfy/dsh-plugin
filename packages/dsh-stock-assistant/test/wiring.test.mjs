@@ -69,8 +69,23 @@ test('hook 的解构参数与调用处传的键必须一致', () => {
   assert.equal(calls.length, 2, '应当只有一处定义与一处调用')
   const [definition, invocation] = calls
   assert.deepEqual(keysOf(invocation), keysOf(definition), '传参键集必须与解构键集完全一致')
-  // 参数表里出现的每个键都要在函数体里真的被用到, 反之函数体里读的键必须来自参数或本函数内声明
+  // 键集一致只保证调用与解构对齐; 参数被解构却没在函数体里用, 行为会静默消失(这个错漏到过线上)
+  const body = /function useFloatingPolling\(\{([^}]*)\}\)\s*\{([\s\S]*?)\n    \}\n/.exec(client)
+  assert.ok(body, '必须能定位 useFloatingPolling 的函数体')
+  for (const key of keysOf(body[1])) {
+    if (key === 'runtime' || key === 'setFetched' || key === 'setError') continue
+    assert.ok(new RegExp(`\\b${key}\\b`).test(body[2]), `参数 ${key} 解构后必须在函数体里被用到`)
+  }
+  // 暂停必须同时出现在守卫与依赖里: 只加守卫不改依赖, 暂停后定时器还在跑
+  assert.match(body[2], /if \(!open \|\| !picked\.length \|\| live === false \|\| paused\) return/, '暂停必须进轮询守卫')
+  assert.match(body[2], /\}, \[[^\]]*\bpaused\b[^\]]*\]\)/, '暂停必须在 effect 依赖里')
+})
 
+test('标记线重涂按建线时记下的种类换色', () => {
+  // 曾经重涂读 liveRef.marks(从未写入), 切主题后成本线与卖价线同色
+  must(/markLinesRef\.current = \(list \|\| \[\]\)\.map\(mark => \(\{\s*kind: mark\.kind,/, '建线时必须记下种类')
+  must(/for \(const \{ kind, line \} of markLinesRef\.current\) line\.applyOptions\(\{ color: kind === 'target'/, '重涂必须按记录的种类取色')
+  mustNot(/liveRef.current.marks/, '重涂不得回读从未写入的 marks')
 })
 
 test('量副图两种形态都建, 量均线挂在量副图那一栏', () => {

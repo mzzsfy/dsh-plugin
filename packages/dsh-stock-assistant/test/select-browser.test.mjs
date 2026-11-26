@@ -125,6 +125,8 @@ test('鼠标点开下拉并选择: 菜单进 DOM, 选择后写盘且菜单关闭
 })
 
 test('键盘打开与选择, Escape 只关菜单不关设置弹窗', async () => {
+  // 不依赖上一条用例把设置弹窗留着: 单跑本用例也要能过
+  if (!(await page.getByRole('dialog').count())) await openPreferences()
   const trigger = page.getByRole('combobox', { name: '刷新间隔' })
   await trigger.focus()
   await page.keyboard.press('Enter')
@@ -585,6 +587,60 @@ test('悬浮图 3 秒档继续消费报价，首分钟内不重拉分时', async
   }
 })
 
+test('暂停采集后悬浮盯盘停拍, 恢复后继续', async () => {
+  const tab = await context.newPage()
+  const path = '**/api/stock-assistant/'
+  const id = 'XSHG:equity:600519'
+  const epoch = 'fixture-pause'
+  const quotes = [], errors = []
+  const item = { id, exchange: 'XSHG', code: '600519', officialName: '茅台', priceScale: 2, timezone: 'Asia/Shanghai' }
+  const snapshot = { serverEpoch: epoch, snapshotSeq: 1, routingRevision: 1, quotes: {}, control: { revision: 1, watchlist: { order: [id], items: { [id]: item } }, preferences: { refreshSeconds: 15, floatRefreshSeconds: 3 }, routes: [], providers: [] } }
+  tab.on('pageerror', e => errors.push(e.message))
+  try {
+    // 真时钟: 暂停开关在「更多」菜单里, 假时钟暂停后 React 提交与菜单开合都要靠推进虚拟时间, 交互链更脆
+    await tab.route(`${path}snapshot`, handler => handler.fulfill({ json: { ok: true, data: snapshot } }))
+    await tab.route(`${path}refresh`, async handler => {
+      const at = Date.now()
+      quotes.push(at)
+      const quote = { securityId: id, routingRevision: 1, quoteAt: new Date(at).toISOString(), timestampKind: 'trade', receivedAt: at, sessionState: 'trading', last: '10.30', previousClose: '10.00' }
+      return handler.fulfill({ json: { ok: true, data: { ...snapshot, quotes: { [id]: { health: 'ok', quote } } } } })
+    })
+    await tab.addInitScript(sid => localStorage.setItem('ssb-floating', JSON.stringify({ open: true, ids: [sid], mode: 'list' })), id)
+    await tab.goto(page.url())
+    // 面板默认不激活时夹具只渲染入口按钮: 暂停开关在面板顶栏里, 先把面板打开
+    const entry = tab.getByRole('button', { name: '打开股票' })
+    if (await entry.count()) await entry.click()
+    await tab.locator('.ssb-float-row-price').filter({ hasText: /10.30/ }).waitFor({ timeout: 5000 })
+    const first = quotes.length
+    assert.ok(first >= 1, '首拍已取数')
+    // 暂停后浮窗不应再发自动刷新: 面板暂停的语义是停掉全部自动采集
+    // 勾选后菜单仍开着: 再点「更多」只会把它关掉, 所以先确保菜单是展开态
+    const togglePause = async () => {
+      if (!(await tab.locator('.ssb-menu').count())) await tab.getByRole('button', { name: '更多操作' }).click()
+      await tab.locator('.ssb-menu .ssb-switch input').first().click()
+      await tab.keyboard.press('Escape')
+      await tab.locator('.ssb-menu').waitFor({ state: 'detached', timeout: 2000 }).catch(() => {})
+    }
+    await togglePause()
+    await tab.getByText('自动采集已暂停', { exact: false }).waitFor({ timeout: 5000 })
+    // 在途的一拍可能在点暂停前已发出: 等它落地再取基线, 否则会假红
+    await tab.waitForTimeout(300)
+    const pausedAt = quotes.length
+    await tab.waitForTimeout(4 * 1000)
+    assert.equal(quotes.length, pausedAt, '暂停后浮窗停拍')
+    await togglePause()
+    await tab.getByText('自动采集已暂停', { exact: false }).waitFor({ state: 'detached', timeout: 5000 })
+    await tab.waitForTimeout(4 * 1000)
+    assert.ok(quotes.length > pausedAt, '恢复采集后浮窗继续取数')
+    assert.deepEqual(errors, [])
+  } finally {
+    await tab.evaluate(() => localStorage.removeItem('ssb-floating')).catch(() => {})
+    await tab.unroute(`${path}snapshot`).catch(() => {})
+    await tab.unroute(`${path}refresh`).catch(() => {})
+    await tab.close()
+  }
+})
+
 test('窗口缩小后悬浮盯盘收回视口, 放大回保存位置', async () => {
   const base = '**/api/stock-assistant/'
   const id = 'XSHG:equity:600001'
@@ -604,14 +660,24 @@ test('窗口缩小后悬浮盯盘收回视口, 放大回保存位置', async () 
     await handler.fulfill({ response, json: body })
   })
   await page.route(`${base}refresh`, handler => handler.fulfill({ json: { ok: true, data: { quotes: {} } } }))
+  // 用户可见契约: 四边至少留 8px; 贴边的一侧必须正好是 8px, 不是"大于 8"
+  const MARGIN = 8
   const placeOf = async float => {
     const box = await float.boundingBox(), viewport = page.viewportSize()
-    // 与 client.js 的 FLOAT_MARGIN 同一个口径: 这里是用户可见的 8px 边距, 不是实现细节
-    const margin = 8
-    return { box, viewport, inside: box.x >= margin - 0.5 && box.y >= margin - 0.5 && box.x + box.width <= viewport.width - margin + 0.5 && box.y + box.height <= viewport.height - margin + 0.5 }
+    const gaps = { left: box.x, top: box.y, right: viewport.width - box.x - box.width, bottom: viewport.height - box.y - box.height }
+    return { box, viewport, gaps, inside: Object.values(gaps).every(gap => gap >= MARGIN - 0.5) }
   }
-  // 视口变化要等 React 提交落地再断言: 后台标签页不跑 rAF, 用固定等待而不是帧同步
-  const settle = () => page.waitForTimeout(200)
+  // 视口变化要等 React 提交落地: 后台标签页不跑 rAF, 用条件轮询而不是帧同步或固定 sleep
+  const until = async (float, check, label, timeout = 4000) => {
+    const deadline = Date.now() + timeout
+    let last
+    for (;;) {
+      last = await placeOf(float)
+      if (check(last)) return last
+      if (Date.now() > deadline) assert.fail(`等待超时: ${label} (${JSON.stringify(last)})`)
+      await page.waitForTimeout(50)
+    }
+  }
   try {
     await page.bringToFront()
     await page.setViewportSize({ width: 1280, height: 900 })
@@ -621,22 +687,19 @@ test('窗口缩小后悬浮盯盘收回视口, 放大回保存位置', async () 
     await float.waitFor()
     // 快照到达前浮窗只有空态: 先等已勾选的行渲染出来, 否则序列器还没把自选交给浮窗
     await float.locator('.ssb-float-row').first().waitFor()
-    await settle()
-    const placed = await placeOf(float)
+    const placed = await until(float, place => Math.round(place.box.x) === saved.x && Math.round(place.box.y) === saved.y, '大视口按保存坐标放置')
     assert.deepEqual([Math.round(placed.box.x), Math.round(placed.box.y)], [saved.x, saved.y], '大视口按保存坐标放置')
     await page.setViewportSize({ width: 700, height: 520 })
-    await settle()
-    const shrunk = await placeOf(float)
+    const shrunk = await until(float, place => place.inside, '缩小后收回视口')
     assert.ok(shrunk.inside, `缩小后整张卡仍在视口内: ${JSON.stringify(shrunk)}`)
+    assert.ok(Math.abs(shrunk.gaps.right - MARGIN) <= 1, `右侧边距正好 8px: ${shrunk.gaps.right}`)
     await float.getByRole('button', { name: '选择观测目标' }).click()
     await float.getByText('跟随自选页手动排序', { exact: true }).waitFor()
-    await settle()
-    const grown = await placeOf(float)
+    const grown = await until(float, place => place.inside, '卡片长高后仍收在视口内')
     assert.ok(grown.inside, `卡片长高后仍收在视口内: ${JSON.stringify(grown)}`)
     await float.getByRole('button', { name: '完成选择' }).click()
     await page.setViewportSize({ width: 1280, height: 900 })
-    await settle()
-    const restored = await placeOf(float)
+    const restored = await until(float, place => Math.round(place.box.x) === saved.x && Math.round(place.box.y) === saved.y, '放大后回到保存位置')
     assert.deepEqual([Math.round(restored.box.x), Math.round(restored.box.y)], [saved.x, saved.y], '放大后回到保存位置, 尺寸变化不改写偏好')
     assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('ssb-floating')).x), saved.x, '保存的坐标不被渲染侧夹取覆盖')
     assert.deepEqual(errors, [], 'resize/RO 期间不得有页面异常')

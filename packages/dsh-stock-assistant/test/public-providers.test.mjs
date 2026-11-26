@@ -197,10 +197,23 @@ test('腾讯分时: 时刻/量换算/昨收, 畸形行丢弃', async () => {
   assert.equal(result.candles[0].time, '09:30')
   assert.equal(result.candles[0].close, 1426.3)
   assert.deepEqual([result.candles[0].open, result.candles[0].high, result.candles[0].low], [1426.3, 1426.3, 1426.3], '分时没有开高低, 填成同一价')
-  assert.equal(result.candles[0].volume, 18900, '手 → 股, 与日K/详情同口径')
+  assert.equal(result.candles[0].volume, 18900, '首根就是首分钟量, 手 → 股, 与日K/详情同口径')
   assert.equal(result.candles[0].amount, 26957070)
+  // 来源第 3、4 列是当日累计量/额: 第二根必须是区间增量, 不是累计值
+  assert.equal(result.candles[1].volume, (998 - 189) * 100, '累计量差分成分钟量')
+  assert.equal(result.candles[1].amount, 142677800.25 - 26957070, '累计额差分成分钟额')
   assert.equal(result.candles[0].at, Math.floor(Date.parse('2026-11-16T01:30:00Z') / 1000), '北京时间换算成 Unix 秒')
   assert.equal(result.preClose, 1435.26, 'qt[4]=昨收')
+})
+
+test('腾讯分时: 分钟量之和等于当日总量', async () => {
+  // 真实形状: 末条累计量等于当日成交量, 逐分钟差分后求和必须还原它
+  const rows = ['0930 1470.00 555 81585000.00', '0931 1468.20 1775 260000000.00', '0932 1465.00 2294 341000000.00']
+  const body = { code: 0, data: { sh600519: { data: { date: '20261126', data: rows }, qt: { sh600519: ['1', '贵州茅台', '600519', '1470.00', '1460.00'] } } } }
+  const result = await tencent.trend(TREND_REQ, tencentTrendCtx(body))
+  assert.deepEqual(result.candles.map(c => c.volume), [55500, 122000, 51900])
+  assert.equal(result.candles.reduce((sum, c) => sum + c.volume, 0), 229400, '差分后求和等于末条累计量')
+  assert.ok(result.candles.every(c => c.volume >= 0), '累计值回退时不出负量')
 })
 
 test('腾讯分时不覆盖美股', async () => {

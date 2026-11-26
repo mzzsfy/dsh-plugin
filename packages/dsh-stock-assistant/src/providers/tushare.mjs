@@ -1,6 +1,15 @@
-import { makeSecurity, normalizeQuote, parseQuoteTime, StockError } from '../market-model.mjs'
+import { makeSecurity, normalizeQuote, numberOrNull, parseQuoteTime, StockError } from '../market-model.mjs'
 const EXCHANGE = { XSHG: 'SSE', XSHE: 'SZSE' }
 const SUFFIX = { XSHG: 'SH', XSHE: 'SZ' }
+// 成交量: 来源按手, 对外按股; 缺失保持缺失, 不折成 0
+const lotsToShares = (volume, market) => {
+  const lots = numberOrNull(volume)
+  return lots === null ? null : String(lots * 100)
+}
+const amountOf = value => {
+  const parsed = numberOrNull(value)
+  return parsed === null ? null : String(parsed)
+}
 const FIELD = {
   quotes: 'ts_code,name,pre_close,open,high,low,close,vol,amount,trade_time',
   catalog: 'ts_code,symbol,name,cnspell,market,exchange,curr_type,list_status,list_date',
@@ -84,7 +93,7 @@ export const tushare = {
       seen.add(row.ts_code)
       const security = securities.get(row.ts_code)
       items.push(normalizeQuote({ securityId: security.id, last: row.close, previousClose: row.pre_close, open: row.open, high: row.high, low: row.low,
-        volume: row.vol == null ? null : String(Number(row.vol) * 100), volumeUnit: 'share', amount: row.amount == null ? null : String(row.amount), amountUnit: 'CNY',
+        volume: lotsToShares(row.vol, request.market), volumeUnit: 'share', amount: amountOf(row.amount), amountUnit: 'CNY',
         providerInstanceId: request.providerInstanceId, adapterId: 'tushare', providerSymbol: row.ts_code, quoteAt: parseQuoteTime(row.trade_time), timestampKind: 'trade', receivedAt: ctx.now(), delayKind: 'unknown', delaySeconds: null, securityState: 'unknown' }))
     }
     return { providerInstanceId: request.providerInstanceId, fetchedAt: ctx.now(), items, errors: request.securities.filter(s => !seen.has(symbol(s))).map(s => ({ securityId: s.id, code: 'NO_DATA', message: '来源未返回此证券报价' })) }

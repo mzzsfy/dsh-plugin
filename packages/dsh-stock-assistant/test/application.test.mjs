@@ -96,15 +96,16 @@ test('F02 进入面板时缓存新鲜则跳过重复拉取, 过期才刷新', as
   await app.watchlist({ ...operation(2, app.snapshot().control.revision), action: 'add', payload: { securityId: security.id } })
   const pageId = '00000000-0000-4000-8000-0000000000aa'
   // 每次进入前推进一拍: 组内节拍等待基于冻结时钟, 不推进会真实等待 1 秒
-  const open = async generation => { clock += 1000; app.demand({ pageId, generation, active: true }); await new Promise(resolve => setTimeout(resolve, 60)) }
-  await open(1)
+  // 谓词等待: 固定 sleep 在慢机器上会抢跑, 在快机器上白等
+  const open = async (generation, expected) => { clock += 1000; app.demand({ pageId, generation, active: true }); await waitFor(() => quoteCalls >= expected, `第 ${generation} 代需求应拉到 ${expected} 次报价`) }
+  await open(1, 1)
   assert.equal(quoteCalls, 1, '首次进入拉取一次')
   app.demand({ pageId, generation: 2, active: false })
-  await open(3)
+  await open(3, 1)
   assert.equal(quoteCalls, 1, '缓存新鲜时再次进入不再拉取')
   clock += 20_000
   app.demand({ pageId, generation: 4, active: false })
-  await open(5)
+  await open(5, 2)
   assert.equal(quoteCalls, 2, '缓存过期后进入重新拉取')
   await app.close()
 })

@@ -152,17 +152,6 @@ test('刻度标签按步长定精度, 不出现重复读数', async () => {
   assert.deepEqual([...wide], ['430', '440', '450'], '步长 ≥1 时不带多余小数')
 })
 
-test('列表浮层在窗口底部放不下时向上翻', async () => {
-  const { rowTipPositionOf } = (await loadClient()).plugin.__testing
-  const roomy = rowTipPositionOf({ top: 300, bottom: 326, lines: 2, viewportHeight: 1000 })
-  assert.equal(roomy.top, 300, '放得下就贴着行')
-  for (const lines of [2, 4, 12]) {
-    const cramped = rowTipPositionOf({ top: 900, bottom: 926, lines, viewportHeight: 1000 })
-    assert.ok(cramped.top >= 8, `N=${lines} 不能顶出上边界`)
-    assert.ok(cramped.top + cramped.height <= 992, `N=${lines} 不能超出视口底部`)
-  }
-})
-
 test('没有悬停时不渲染读出浮层', async () => {
   const { plugin } = await loadClient()
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.Sparkline, { candles: [{ time: '09:31', close: 10 }, { time: '09:32', close: 10.1 }], preClose: 10, marks: [], scale: 2 }))

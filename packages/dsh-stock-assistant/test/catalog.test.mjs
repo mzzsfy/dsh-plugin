@@ -31,16 +31,15 @@ test('浏览接口按市场分页返回代码升序目录', async () => {
 // M2: Given无目录缓存 When浏览 Then返回syncing态并触发后台同步(不再甩422给用户)
 test('浏览接口无目录缓存时返回同步中态', async () => {
   const storage = memoryStorage(), state = await openState(storage)
-  let syncCalled = 0
-  const catalog = createCatalog({ state, getControl: () => state.get(), router: { select: () => ({ instance: { id: 'd' }, route: {} }) }, executor: { run: async () => ({ items: [] }) }, now: () => 100 })
-  const origSync = catalog.sync.bind(catalog)
-  catalog.sync = (...args) => { syncCalled++; return Promise.resolve() }
+  // 同步走闭包, 不能在返回对象上打桩: 数上游调用次数才是后台同步真的跑了
+  let runs = 0
+  const catalog = createCatalog({ state, getControl: () => state.get(), router: { select: () => ({ instance: { id: 'd' }, route: {} }) }, executor: { run: async () => { runs++; return { items: [], complete: true } } }, now: () => 100 })
   const page = await catalog.browse({ market: 'XSHG', offset: 0, limit: 50 })
   assert.equal(page.syncing, true, 'syncing 态')
   assert.equal(page.items.length, 0)
-  await new Promise(r => setTimeout(r, 20))
-  assert.ok(syncCalled >= 1, '后台同步已触发')
-  catalog.sync = origSync
+  // 谓词等待: 固定 sleep 在并行负载下会抢跑, 这条用例真的红过一次
+  for (let tries = 0; tries < 100 && runs < 1; tries++) await new Promise(r => setTimeout(r, 10))
+  assert.ok(runs >= 1, '后台同步已触发')
 })
 // M4: Given越界分页参数 When浏览 Then钳制不抛错
 test('浏览接口钳制越界分页参数', async () => {

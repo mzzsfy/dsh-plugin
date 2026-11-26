@@ -23,7 +23,10 @@ async function loadClient() {
 const candles = volumes => volumes.map((volume, index) => ({ time: `2026-11-${String(index + 1).padStart(2, '0')}`, open: 10, close: 11, high: 11, low: 9, volume }))
 
 test('MAVOL 前导补 null, 尾部为窗口均量', async () => {
-  const { seriesMAVOL } = await loadClient()
+  const { seriesMAVOL, MAVOL_WINDOWS } = await loadClient()
+  // 文档对外承诺的是 MAVOL5/MAVOL10: 窗口值被改动必须在这里红
+  assert.deepEqual([...MAVOL_WINDOWS], [5, 10])
+  assert.deepEqual([...seriesMAVOL(candles([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), 10)], [null, null, null, null, null, null, null, null, null, 5.5])
   assert.deepEqual([...seriesMAVOL(candles([10, 20, 30, 40, 50]), 3)], [null, null, 20, 30, 40])
   assert.deepEqual([...seriesMAVOL(candles([10, 20]), 3)], [null, null])
 })
@@ -59,7 +62,20 @@ test('量柱数据 K 线用业务日期, 分时用行情自带时刻', async () 
 })
 
 const jsonCtx = body => ({ now: () => 100, signal: new AbortController().signal, usSymbols: new Map(), fetch: async () => ({ ok: true, json: async () => body }) })
-const gbkCtx = text => ({ now: () => 100, signal: new AbortController().signal, usSymbols: new Map(), fetch: async () => ({ ok: true, arrayBuffer: async () => new TextEncoder().encode(text).buffer }) })
+// 上游是 GBK 页面: 喂 UTF-8 字节解出来是乱码, 只是这两条用例只断言数值所以看不出来。
+// 名称字符的 GBK 字节在这里显式给出, 编码本身的行为由 public-providers 用真实响应覆盖
+const GBK = { 贵: [0xb9, 0xf3], 州: [0xd6, 0xdd], 茅: [0xc3, 0xa9], 台: [0xcc, 0xa8], 腾: [0xcc, 0xda], 讯: [0xd1, 0xb6], 控: [0xbf, 0xd8], 股: [0xb9, 0xc9] }
+const gbkBytes = text => {
+  const bytes = []
+  for (const char of text) {
+    const mapped = GBK[char]
+    if (mapped) bytes.push(...mapped)
+    else if (char.charCodeAt(0) < 0x80) bytes.push(char.charCodeAt(0))
+    else throw new Error(`夹具缺「${char}」的 GBK 字节`)
+  }
+  return new Uint8Array(bytes)
+}
+const gbkCtx = text => ({ now: () => 100, signal: new AbortController().signal, usSymbols: new Map(), fetch: async () => ({ ok: true, arrayBuffer: async () => gbkBytes(text).buffer }) })
 
 test('东财 f8/f10 映射为换手率与量比, 港美同义', async () => {
   const row = { f2: 1462.99, f5: 15568, f6: 2277648306, f8: 0.12, f10: 0.86, f12: '600519', f13: 1, f14: '贵州茅台', f15: 1470, f16: 1456, f17: 1470, f18: 1474.84, f124: 1795661664 }
@@ -73,6 +89,9 @@ test('东财 f8/f10 映射为换手率与量比, 港美同义', async () => {
   assert.equal(halted.items[0].volumeRatio, null)
   const hk = await eastmoney.quotes({ ...req, market: 'XHKG', securities: [makeSecurity('XHKG', '00700', '腾讯控股')] }, jsonCtx({ data: { diff: [{ ...row, f12: '00700', f13: 116, f8: 0.14, f10: 0.95 }] } }))
   assert.deepEqual([hk.items[0].turnoverRate, hk.items[0].volumeRatio], [0.14, 0.95])
+  // 美股同义: 只映射沪深港会把「八市场都给」的承诺漏掉一半
+  const us = await eastmoney.quotes({ ...req, market: 'XNAS', securities: [makeSecurity('XNAS', 'AAPL', '苹果')] }, jsonCtx({ data: { diff: [{ ...row, f12: 'AAPL', f13: 105, f8: 0.37, f10: 1.06 }] } }))
+  assert.deepEqual([us.items[0].turnoverRate, us.items[0].volumeRatio], [0.37, 1.06])
 })
 
 test('腾讯只在沪深取 f[38]/f[49]; 港股同列位语义不同不映射', async () => {

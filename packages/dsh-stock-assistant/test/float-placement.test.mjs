@@ -27,6 +27,15 @@ const { clampFloatPlacement, FLOAT_MARGIN, FLOAT_WIDTH, FLOAT_HEIGHT } = loadCli
 const viewport = { width: 1280, height: 900 }
 const card = { width: FLOAT_WIDTH, height: FLOAT_HEIGHT }
 
+// 用户可见契约: 边距 8px、卡宽 288px, 且与样式里的宽度/锚定同源; 期望值写死, 不用实现常量自算
+test('夹取口径与样式声明一致', () => {
+  assert.equal(FLOAT_MARGIN, 8)
+  assert.equal(FLOAT_WIDTH, 288)
+  assert.equal(FLOAT_HEIGHT, 210)
+  assert.match(source, /.ssb-float {[^}]*right:24px; bottom:24px/, '无坐标时靠样式锚在右下角')
+  assert.match(source, /.ssb-float {[^}]*width:288px/, '默认宽度与 FLOAT_WIDTH 同源')
+})
+
 test('保存坐标在视口内时原样放置', () => {
   assert.deepEqual({ ...clampFloatPlacement({ ...card, viewport, x: 100, y: 80 }) }, { x: 100, y: 80 })
   // 贴边也算合法: 右下正好留出一个边距时不移动
@@ -35,29 +44,27 @@ test('保存坐标在视口内时原样放置', () => {
 })
 
 test('视口缩小到保存坐标之外时收回右下边距内', () => {
-  const small = { width: 700, height: 520 }
-  const placed = clampFloatPlacement({ ...card, viewport: small, x: 980, y: 640 })
-  assert.deepEqual({ ...placed }, { x: small.width - card.width - FLOAT_MARGIN, y: small.height - card.height - FLOAT_MARGIN })
-  assert.ok(placed.x >= 0 && placed.y >= 0, '收回后不出现负坐标')
+  const placed = clampFloatPlacement({ ...card, viewport: { width: 700, height: 520 }, x: 980, y: 640 })
+  assert.deepEqual({ ...placed }, { x: 404, y: 302 }, '700-288-8 / 520-210-8')
 })
 
 test('只有一边越界时另一边保持不动', () => {
   const placed = clampFloatPlacement({ ...card, viewport, x: 10, y: 5000 })
   assert.equal(placed.x, 10)
-  assert.equal(placed.y, viewport.height - card.height - FLOAT_MARGIN, '纵向收回视口')
+  assert.equal(placed.y, 682, '900-210-8')
 })
 
 test('卡片长高后按实际高度上移, 不是按旧高度', () => {
   const tall = { width: card.width, height: 400 }
-  assert.equal(clampFloatPlacement({ ...tall, viewport, x: 100, y: 640 }).y, viewport.height - tall.height - FLOAT_MARGIN)
+  assert.equal(clampFloatPlacement({ ...tall, viewport, x: 100, y: 640 }).y, 492, '900-400-8')
 })
 
 test('卡片比视口还大时贴左上边距, 保留左上角可见', () => {
-  assert.deepEqual({ ...clampFloatPlacement({ width: 900, height: 800, viewport: { width: 640, height: 480 }, x: 0, y: 0 }) }, { x: FLOAT_MARGIN, y: FLOAT_MARGIN })
+  assert.deepEqual({ ...clampFloatPlacement({ width: 900, height: 800, viewport: { width: 640, height: 480 }, x: 0, y: 0 }) }, { x: 8, y: 8 })
 })
 
 test('视口比卡片还窄时收到边距, 不出现负坐标', () => {
-  assert.deepEqual({ ...clampFloatPlacement({ ...card, viewport: { width: 1, height: 1 }, x: 500, y: 500 }) }, { x: FLOAT_MARGIN, y: FLOAT_MARGIN })
+  assert.deepEqual({ ...clampFloatPlacement({ ...card, viewport: { width: 1, height: 1 }, x: 500, y: 500 }) }, { x: 8, y: 8 })
 })
 
 // 渲染侧接线: 夹取必须落在组件真正写出的样式上, 纯函数对而组件没接等于没修
@@ -88,8 +95,8 @@ test('组件渲染时写入夹取后的坐标', () => {
   // 坐标在视口外: 渲染时收回, 但本地保存值不动
   const outside = renderFloat({ x: 5000, y: 5000 })
   assert.doesNotMatch(positionOf(outside), /left:5000px/, '越界坐标不得原样渲染')
-  assert.match(positionOf(outside), new RegExp(`left:${viewport.width - FLOAT_WIDTH - FLOAT_MARGIN}px`), '按视口宽与卡片宽度收边')
-  assert.match(positionOf(outside), new RegExp(`top:${viewport.height - FLOAT_HEIGHT - FLOAT_MARGIN}px`), '按视口高与卡片高度收边')
+  assert.match(positionOf(outside), /left:984px/, '1280-288-8')
+  assert.match(positionOf(outside), /top:682px/, '900-210-8')
 })
 
 test('坐标缺失或写坏时退回样式里的右下角锚定', () => {

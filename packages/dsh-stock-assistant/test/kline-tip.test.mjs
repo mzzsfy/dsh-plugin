@@ -61,6 +61,10 @@ test('日K每根的涨跌以它前一根收盘为基准', async () => {
   const { crosshairTipLines, timeKeyOf } = await load()
   const lines = crosshairTipLines({ candle: { open: 4140, high: 4160, low: 4130, close: 4150, volume: 6.5e10 }, scale: 2, preClose: 4100 })
   assert.equal(lines[2], '+1.22%　量 650.0亿', '相对前收 4100 而不是当日昨收')
-  assert.equal(timeKeyOf({ year: 2026, month: 5, day: 26 }), '2026-5-26', 'BusinessDay 拍平成可比较的键')
+  // 图上存的是来源日期串, 十字线回调拿到的是 LWC 的 BusinessDay 对象: 两者必须归一到同一个键,
+  // 否则 1-9 月/日的柱子查找恒为 -1, 涨跌退回最近昨收
+  assert.equal(timeKeyOf({ year: 2026, month: 5, day: 26 }), '2026-05-26', 'BusinessDay 补零成与来源日期串同形')
   assert.equal(timeKeyOf('2026-05-26'), '2026-05-26')
+  assert.equal(timeKeyOf({ year: 2026, month: 5, day: 26 }), timeKeyOf('2026-05-26'), '同一根柱子两种时间形态必须相等')
+  assert.equal(timeKeyOf({ year: 2026, month: 11, day: 6 }), '2026-11-06', '两位数原样保留')
 })

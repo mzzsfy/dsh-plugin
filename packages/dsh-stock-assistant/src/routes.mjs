@@ -2,6 +2,9 @@ import { z } from 'zod'
 import { StockError, fail } from './market-model.mjs'
 import { withRouteGate } from './route-gate.mjs'
 const PREFIX = '/api/stock-assistant'
+// provider-check 串行探针多条路由, catalog-sync 分页抓全量目录: 各自单列预算;
+// 其余路由走应用层按刷新档位推出的超时(见 application.routeTimeoutMs)
+const PROVIDER_CHECK_TIMEOUT_MS = 60 * 1000, CATALOG_SYNC_TIMEOUT_MS = 120 * 1000, DEFAULT_ROUTE_TIMEOUT_MS = 10 * 1000
 const operationSchema = z.object({ operationId: z.uuid(), expectedRevision: z.number().int().nonnegative() })
 async function body(req) {
   const chunks = []; let size = 0
@@ -44,9 +47,12 @@ export function registerRoutes(webServer, app, ctx) {
         const controller = new AbortController(); controllers.add(controller)
         const onClose = () => { if (!res.writableEnded) controller.abort() }
         res.on('close', onClose)
-        const timeout = name === 'provider-check' ? 60 * 1000 : name === 'catalog-sync' ? 120 * 1000 : 10 * 1000
         let timer
         try {
+          // 应用层没给或给了非数值时退回默认预算: 传进 setTimeout 的必须是有限正数。
+          // 取值放进 try: 这里抛错也必须有响应写出, 否则请求悬挂到客户端超时
+          const derived = app.routeTimeoutMs?.()
+          const timeout = name === 'provider-check' ? PROVIDER_CHECK_TIMEOUT_MS : name === 'catalog-sync' ? CATALOG_SYNC_TIMEOUT_MS : Number.isFinite(derived) && derived > 0 ? derived : DEFAULT_ROUTE_TIMEOUT_MS
           const input = method === 'GET' ? Object.fromEntries(new URL(req.url, 'http://local').searchParams) : await body(req)
           if (method === 'POST' && (input === null || typeof input !== 'object' || Array.isArray(input))) fail('INVALID_REQUEST', '请求内容必须为JSON对象')
           const data = await Promise.race([
