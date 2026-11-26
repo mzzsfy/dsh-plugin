@@ -172,3 +172,12 @@ test('探测节奏跟着面板走: 活跃时立刻探一次并按周期重复, �
   loop.stop()
   assert.equal(started.length, 1, '整个生命周期只起过一次定时器')
 })
+
+test('应用层把配置读取器接对: 传整条控制记录会让回探静默失效', async () => {
+  // 接线曾经写成 getControl(整个控制记录), 而 createRecovery 读的是 getConfig().routes:
+  // 每轮都在 getConfig 处抛 TypeError, 被循环的 catch 吞掉, 自动回切一次都没跑过
+  const { readFile } = await import('node:fs/promises')
+  const source = await readFile(new URL('../src/application.mjs', import.meta.url), 'utf8')
+  assert.match(source, /createRecovery\(\{ getConfig: \(\) => state\.get\(\), router, executor \}\)/, '必须传能读出 routes/providers 的读取器')
+  assert.doesNotMatch(source, /createRecovery\(\{ getControl/, '不得把整条控制记录当配置传进去')
+})

@@ -21,7 +21,8 @@ async function loadClient() {
 
 const item = { id: 'XSHG:equity:600519', exchange: 'XSHG', code: '600519', officialName: '贵州茅台', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false }
 const candle = (at, close) => ({ time: '10:10', at, open: close, close, high: close, low: close, volume: 1 })
-const runtimeOf = trend => ({ getTrend: () => trend, trendContext: () => 'test' })
+// 详情分时订阅趋势通道: 假运行时给出恒定版本
+const runtimeOf = trend => ({ getTrend: () => trend, trendContext: () => 'test', subscribeTrend: () => () => {}, trendRevision: () => 0 })
 
 test('详情页工具栏带离线提示', async () => {
   const { KlineView } = await loadClient()

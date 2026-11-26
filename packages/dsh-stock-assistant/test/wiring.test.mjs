@@ -5,6 +5,8 @@ import { readFile } from 'node:fs/promises'
 // 纯函数有牙, 但调用点是裸奔的: 上一轮做了 30 个变异, 把下面这些接线改回坏写法, 全量测试仍然全绿。
 // 这些 bug 都已经真实发生过一次, 所以用结构断言把它们钉住——宁可脆弱, 也不要第二次静默回归。
 const client = await readFile(new URL('../src/client.js', import.meta.url), 'utf8')
+// 注释里会出现「坏写法」的名字, 形态断言只看代码行
+const code = client.split(/\r?\n/).filter(line => !line.trim().startsWith('//')).join('\n')
 
 const count = re => [...client.matchAll(re)].length
 const must = (re, why) => assert.match(client, re, why)
@@ -148,4 +150,49 @@ test('数据源保存声明保留路由草稿, 路由页保存提交整份草稿
   // 数据源页只提交实例: 若调用处不声明 keepRoutes, 市场/能力页里改了一半的路由会被整份草稿清空
   must(/runtime\.configuration\(providersOnly, \{ keepRoutes: true \}\)/, '数据源页保存必须声明保留路由草稿')
   must(/runtime\.configuration\(routesOnly\)/, '路由页保存提交整份草稿')
+})
+
+// 这些结构断言锁的是「接线」: 行为用例锁得住结果时优先用行为用例, 下面几条只能靠源码形态约束。
+test('趋势更新走独立通道, 不借 patch({}) 伪造整页刷新', () => {
+  // 趋势数据存在闭包里: 用 patch({}) 通知会把整个面板重渲染, 而真正要更新的是浮窗与详情
+  assert.doesNotMatch(code, /patch\(\{\}\)/, '不得再靠空 patch 强制刷新')
+  must(/const bumpTrend = \(\) => \{[^}]*trendRevision \+= 1[^}]*trendListeners/, 'bumpTrend 必须递增版本并通知订阅者')
+  must(/subscribeTrend\(fn\) \{ trendListeners\.add\(fn\)/, '必须暴露订阅入口')
+  must(/trendRevision: \(\) => trendRevision/, '快照必须是纯数字, 引用恒定')
+  // 浮窗与详情分时都读闭包里的趋势, 漏订阅就整块冻结
+  assert.equal(count(/useSyncExternalStore\(runtime\.subscribeTrend, runtime\.trendRevision, runtime\.trendRevision\)/g), 2, '浮窗与详情分时都要订阅')
+  must(/subscribers\.clear\(\); trendListeners\.clear\(\)/, 'dispose 必须清掉趋势监听')
+})
+
+test('表格滚动位置不进响应式状态', () => {
+  // 滚动每帧写 state 会把整面板重渲染一遍; 它只需要重挂载后恢复
+  mustNot(/scrollTop: 0, alias/, '初始 state 不保留 scrollTop')
+  must(/getScrollTop: \(\) => scrollTop/, '运行时保管滚动位置')
+  must(/setScrollTop\(value\) \{ scrollTop = value \}/, '写入不触发通知')
+  must(/onScroll: e => runtime\.setScrollTop\(e\.currentTarget\.scrollTop\)/, 'onScroll 不得再 patch')
+  must(/ref: node => \{ const saved = runtime\.getScrollTop\(\)/, '重挂载按运行时保存的位置恢复')
+})
+
+test('标记保存成功才清草稿, 失败就地在表单里报错', () => {
+  must(/runtime\.mutate\('marks', \{ securityId: item\.id, marks: \[\.\.\.marks, \{ id: crypto\.randomUUID\(\)\.slice\(0, 8\), price, kind \}\] \}\)\s*\.then\(\(\) => runtime\.updateView\(\{ markDraft: null, markError: '' \}\)\)\s*\.catch\(e => runtime\.updateView\(\{ markError: e\?\.message \|\| '标记保存失败' \}\)\)/, '必须按写入结果决定清不清草稿')
+  mustNot(/applyMarks\(\[\.\.\.marks, \{ id: crypto\.randomUUID\(\)\.slice\(0, 8\), price, kind \}\]\)\(\)/, '提交不得走吞错的 quiet 包装')
+})
+
+test('搜索结果预览是按钮, 且去掉浏览器默认按钮样式', () => {
+  must(/h\('button', \{ type: 'button', className: 'ssb-peek'/, '预览必须是真按钮, Enter/Space 才有语义')
+  must(/\.ssb-peek \{[^}]*background:none; border:0; padding:0; font:inherit/, '按钮默认样式必须重置, 否则候选行会被撑变形')
+})
+
+test('悬浮窗夹取按视觉缩放换算, 并能在缩放变化后重新渲染', () => {
+  // CSS zoom 不改 clientWidth, 只放大视觉尺寸: 只按布局 px 夹会放行越界
+  must(/function clampFloatPlacement\(\{ x, y, width, height, viewport, scale = 1 \}\)/, '夹取必须接受缩放比')
+  must(/visualWidth = width \* s/, '视觉尺寸 = 布局尺寸 × 缩放')
+  must(/return \{ x: clamp\(x \* s, viewport\.width - visualWidth - FLOAT_MARGIN \* s\) \/ s/, '夹完要换回布局坐标')
+  // 指针事件给的是视觉坐标, 夹取收布局坐标: 不换算会让缩放页里拖动跳位并写坏偏好
+  must(/const \{ x, y \} = clamp\(\(e\.clientX - dragRef\.current\.dx\) \/ scale/, '拖动位移要先换回布局坐标')
+  must(/const visualScaleOf = element => \{/, '缩放比由 rect 与 offsetWidth 之比得出')
+  // 缩放不触发 resize, 只能靠观察根元素发现; 尺寸相同也要因缩放变化而重渲染
+  must(/observer\?\.observe\(document\.documentElement\)/, '必须观察根元素才能感知页面缩放')
+  must(/Math\.abs\(current\.scale - scale\) < SCALE_EPSILON \? current : \{ width, height, scale \}/, '缩放变化必须触发重渲染')
+  must(/onDrop\(\{ x: Math\.round\(box\.left \/ scale\), y: Math\.round\(box\.top \/ scale\) \}\)/, '落点要换算回布局坐标再保存')
 })

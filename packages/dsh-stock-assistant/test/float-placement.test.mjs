@@ -67,6 +67,37 @@ test('视口比卡片还窄时收到边距, 不出现负坐标', () => {
   assert.deepEqual({ ...clampFloatPlacement({ ...card, viewport: { width: 1, height: 1 }, x: 500, y: 500 }) }, { x: 8, y: 8 })
 })
 
+
+// 页面缩放的夹取契约: CSS zoom / transform 不改布局视口(clientWidth 恒为 1280), 只放大视觉尺寸。
+// 期望值写死为字面量: 缩放 1.5 时卡宽视觉 432、高 315、边距 12。
+test('缩放后按视觉尺寸夹取, 再换算回布局坐标', () => {
+  const placed = clampFloatPlacement({ ...card, viewport, scale: 1.5, x: 5000, y: 5000 })
+  // 布局坐标 = (视口 - 卡片视觉尺寸 - 视觉边距) / 缩放: (1280-432-12)/1.5 与 (900-315-12)/1.5
+  assert.equal(Number(placed.x.toFixed(2)), 557.33)
+  assert.equal(Number(placed.y.toFixed(2)), 382)
+  assert.equal(placed.x * 1.5 + card.width * 1.5, 1268, '视觉右缘留 12px 边距')
+  assert.equal(placed.y * 1.5 + card.height * 1.5, 888, '视觉下缘留 12px 边距')
+})
+
+test('缩放前就在屏内的坐标不被缩放误夹', () => {
+  assert.deepEqual({ ...clampFloatPlacement({ ...card, viewport, scale: 1.5, x: 100, y: 80 }) }, { x: 100, y: 80 })
+})
+
+test('缩小到 0.8 不越界时保持原样', () => {
+  assert.deepEqual({ ...clampFloatPlacement({ ...card, viewport, scale: 0.8, x: 900, y: 600 }) }, { x: 900, y: 600 })
+})
+
+test('缩放后卡片视觉尺寸超过视口时贴左上边距', () => {
+  const placed = clampFloatPlacement({ width: 900, height: 800, viewport: { width: 640, height: 480 }, scale: 1.5, x: 0, y: 0 })
+  assert.deepEqual({ ...placed }, { x: 8, y: 8 }, '视觉边距 12 换算回布局坐标仍是 8')
+})
+
+test('缩放比为 1 时与未缩放完全同值', () => {
+  const args = { ...card, viewport, x: 5000, y: 5000 }
+  assert.deepEqual({ ...clampFloatPlacement({ ...args, scale: 1 }) }, { ...clampFloatPlacement(args) })
+  assert.deepEqual({ ...clampFloatPlacement({ ...args, scale: 1 }) }, { x: 984, y: 682 }, '1280-288-8 / 900-210-8')
+})
+
 // 渲染侧接线: 夹取必须落在组件真正写出的样式上, 纯函数对而组件没接等于没修
 const item = { id: 'XSHG:equity:600001', exchange: 'XSHG', code: '600001', officialName: '标的1', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false }
 const state = {
@@ -77,7 +108,7 @@ const state = {
     quotes: {},
   },
 }
-const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, trendContext: () => 'test', getTrend: () => null, openDetail() {} }
+const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0, trendContext: () => 'test', getTrend: () => null, openDetail() {} }
 const positionOf = html => {
   const tag = /<div[^>]*role="complementary"[^>]*>/.exec(html)?.[0] || ''
   return /style="([^"]*)"/.exec(tag)?.[1] || ''
@@ -105,5 +136,13 @@ test('坐标缺失或写坏时退回样式里的右下角锚定', () => {
     const html = renderFloat(pref)
     assert.equal(positionOf(html), '', `不给 left/top: ${JSON.stringify(pref)}`)
     assert.match(html, /role="complementary"/, '卡片仍然渲染')
+  }
+})
+
+test('缩放比退化(0 或 NaN)按未缩放处理', () => {
+  // 退化值会让坐标变成 Infinity/NaN 而把卡片整个弄丢: 守卫删掉这两条就红
+  for (const scale of [0, Number.NaN, -1]) {
+    const placed = clampFloatPlacement({ ...card, viewport, scale, x: 5000, y: 5000 })
+    assert.deepEqual({ ...placed }, { x: 984, y: 682 }, `scale=${scale} 与未缩放同值`)
   }
 })

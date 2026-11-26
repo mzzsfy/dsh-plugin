@@ -101,9 +101,9 @@ test('K2/K3 打开即回写: 端点和 operations 载荷都不再留明文', asy
   const root = state.get()
   assert.equal(new URL(root.providers[0].proxy).username, '', '代理 URL 无 userinfo')
   assert.equal(new URL(root.providers[0].endpoints.kline).username, '', '端点 URL 无 userinfo')
-  const payload = root.operations[0].payload
-  assert.equal(new URL(payload.providers[0].proxy).username, '', 'operations.payload.providers 同样剥离')
-  assert.equal(new URL(payload.endpoints.quotes).username, '', 'operations.payload.endpoints 同样剥离')
+  // 台账不再存配置副本: 打开即丢弃, 明文也就没有落脚点
+  assert.equal('payload' in root.operations[0], false, 'legacy operations.payload 打开时被丢弃')
+  assert.equal(opened.includes('alt.example.com'), false, '文件里不再有台账载荷')
   await state.close()
 })
 

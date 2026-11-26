@@ -64,7 +64,7 @@ async function runtimeWith(fetchImpl) {
   })
   const doc = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} }
   const value = plugin.__testing.createPageRuntime({
-    layout: { panelInfo: { getSnapshot: () => ({ activePanelId: 'stock-assistant' }), subscribe: () => () => {} }, selectPanel() {} },
+    layout: { panelInfo: { getSnapshot: () => ({ activePanelId: 'stock-assistant' }), subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0 }, selectPanel() {} },
     bus: { publish() {}, subscribe: (fn, options) => { onReset = options?.onReset; return () => {} } },
     tools: { createSnapshotRefresh: fn => { snapshotRefresh = fn; return { refresh() {}, dispose() {} } } },
     document: doc,
@@ -192,7 +192,7 @@ test('K7 浏览页在目录同步失败时给出原因与重试入口', async ()
     busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', paused: false,
     data: { control: emptyControl(), quotes: {}, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false },
   }
-  const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadBrowse: () => Promise.resolve(), sync: () => Promise.resolve() }
+  const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0, updateView: () => {}, loadBrowse: () => Promise.resolve(), sync: () => Promise.resolve() }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
   assert.match(html, /目录同步失败：未配置该市场的数据来源/)
   assert.match(html, /重试同步/)
@@ -405,7 +405,7 @@ test('C2 后台快照错误独立自愈, 不与操作错误互相清除', async 
 test('C2 操作错误与数据面错误分别渲染并各自可关闭', async () => {
   const { plugin } = await loadPlugin()
   const state = { view: { view: 'list', query: '', selectedId: null, sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '数据已被其他页面修改，请重新确认', errorCode: 'REVISION_CONFLICT', errorKey: 'write', dataError: '服务暂时不可用', paused: false, data: { control: { revision: 1, watchlist: { order: [], items: {} }, preferences: {} }, quotes: {}, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, vendorAvailable: false } }
-  const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, updateView() {}, clearError() {}, clearDataError() {}, refresh: async () => {}, mutate: async () => {} }
+  const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0, updateView() {}, clearError() {}, clearDataError() {}, refresh: async () => {}, mutate: async () => {} }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
   assert.match(html, /数据已被其他页面修改/)
   assert.match(html, /服务暂时不可用/)
@@ -696,4 +696,49 @@ test('R3 自选与偏好的错误横幅互不清除', async () => {
   await value.preferences({ refreshSeconds: 20 })
   assert.equal(value.getSnapshot().error, '自选保存失败', '偏好成功不得清自选失败')
   value.dispose()
+})
+
+// 债务清理补齐: 以下三条此前没有任何断言, 都是"改了但没人拦"的位置
+
+test('推荐配置把 skipped 当未测, 不剪掉对应路由', async () => {
+  // 预算用完的目标只是没验过, 不是不可用: 当成 denied 会把好路由剪掉, 而这里曾经因为
+  // denied/dened 的拼写问题整段不可执行, 空 routes 的用例正好绕过了它
+  const calls = []
+  const fetchImpl = async (url, options = {}) => {
+    const path = stripBase(url)
+    calls.push(path)
+    if (path === '/provider-check') {
+      const { routes } = JSON.parse(options.body)
+      return jsonResponse({ ok: true, data: { checkId: 'c1', partial: true, checks: routes.map(route => ({ providerInstanceId: route.primaryInstanceId, capability: route.capability, market: route.market, status: route.market === 'XSHG' ? 'ready' : 'skipped', ms: 0, error: { code: 'CHECK_DEADLINE', message: '预算用完' } })) } })
+    }
+    if (path === '/configuration') return jsonResponse({ ok: true, data: { revision: 2, unchanged: false } })
+    return jsonResponse({ ok: false, error: { code: 'UNEXPECTED', message: path } })
+  }
+  const { value } = await runtimeWith(fetchImpl)
+  value.applySnapshot(snapshot(1, emptyControl({ revision: 1 })))
+  const providers = [{ id: 'p1', adapterId: 'tushare', enabled: true, credentialRef: null }]
+  const routes = ['XSHG', 'XSHE'].map(market => ({ id: `r-${market.toLowerCase()}`, capability: 'quotes', market, instrument: 'equity', primaryInstanceId: 'p1', fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true }))
+  await value.commitConfiguration({ providers, routes, notice: '已应用推荐配置' })
+  const saved = calls.indexOf('/configuration')
+  assert.ok(saved > 0, '必须真的走到保存')
+  assert.equal(calls.filter(path => path === '/provider-check').length, 1, 'skipped 不该触发重查轮次')
+  assert.equal(value.getSnapshot().view.view, 'list', '保存后回到列表视图')
+  assert.match(value.getSnapshot().view.notice, /1 项目标超预算未测/, '未测的目标要在提示里交代')
+})
+
+test('趋势通道先自增版本再通知, 退订与 dispose 后不再回调', async () => {
+  const { value } = await runtimeWith(async () => jsonResponse({ ok: true, data: {} }))
+  const seen = []
+  const stop = value.subscribeTrend(() => seen.push(value.trendRevision()))
+  value.bumpTrend()
+  // 订阅者读快照必须已经看到新版本: 先通知后自增会让订阅者拿到旧值, React 会判"没变"而丢更新
+  assert.deepEqual(seen, [1], '通知时版本已自增')
+  assert.equal(value.trendRevision(), 1, '快照是纯数字')
+  stop()
+  value.bumpTrend()
+  assert.equal(seen.length, 1, '退订后不再回调')
+  const stop2 = value.subscribeTrend(() => seen.push(value.trendRevision()))
+  value.dispose()
+  value.bumpTrend()
+  assert.equal(seen.length, 1, 'dispose 之后不再回调')
 })

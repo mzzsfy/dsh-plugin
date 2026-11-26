@@ -8,7 +8,11 @@ const MAX_RETRY_AFTER_MS = 60 * 60 * 1000
 // 单次网络活动的超时预算: 分页适配器每次网络活动重置计时
 export const UPSTREAM_TIMEOUT_MS = 8 * 1000
 // 同一额度组内两次请求的最小间隔; 来源没给每分钟上限时按 10 秒保守排队
+// 组内间隔 = 声明额度推出的间隔, 没声明额度时按 10 秒保守排队。探针预算也按它推导, 所以导出
 const GROUP_GAP_MS = 1000, GROUP_GAP_UNKNOWN_RPM_MS = 10 * 1000
+// 全局并发槽位数: 探针预算与真实请求共用这条闸门, 预算推导必须按它摊总工作量
+export const EXECUTOR_CONCURRENCY = 2
+export const groupGapMs = instance => instance?.budget?.requestsPerMinute === null ? GROUP_GAP_UNKNOWN_RPM_MS : GROUP_GAP_MS
 // 路由超时: 一个请求最坏要等半个节拍(节拍周期由刷新档位推出) + 组内间隔 + 上游预算。
 // 三者之和必须小于路由层超时, 否则落在拍后半段的合法请求会在等待中被 504 掉
 const ROUTE_TIMEOUT_MARGIN_MS = 2 * 1000
@@ -114,7 +118,7 @@ export function createExecutor({ registry, budget, env = process.env, resolveCre
   }
   const slots = []
   async function acquire(signal) {
-    if (running < 2) { running++; return }
+    if (running < EXECUTOR_CONCURRENCY) { running++; return }
     await new Promise((resolve, reject) => {
       const slot = { resolve: () => { signal.removeEventListener('abort', abort); resolve() } }
       const abort = () => { const i = slots.indexOf(slot); if (i >= 0) slots.splice(i, 1); reject(new StockError('CANCELLED', '请求已取消', 503)) }
@@ -126,7 +130,17 @@ export function createExecutor({ registry, budget, env = process.env, resolveCre
     run(instance, capability, request, options = {}) {
       const group = options.probe ? `${instance.quotaGroup}#probe` : instance.quotaGroup
       const previous = queues.get(group) || Promise.resolve()
-      const job = previous.catch(() => {}).then(async () => {
+      // 排队段也要能被取消: 等前一个请求 settle 才看 abort 的话, 论到它时预算早过了
+      const turn = (async () => {
+        if (!options.signal) return previous.catch(() => {})
+        if (options.signal.aborted) fail('CANCELLED', '请求已取消', 503)
+        return new Promise((resolve, reject) => {
+          const onAbort = () => reject(new StockError('CANCELLED', '请求已取消', 503))
+          options.signal.addEventListener('abort', onAbort, { once: true })
+          previous.catch(() => {}).then(() => { options.signal.removeEventListener('abort', onAbort); resolve() }, reject)
+        })
+      })()
+      const job = turn.then(async () => {
         if (stopped || options.signal?.aborted) fail('CANCELLED', '请求已取消', 503)
         const controller = new AbortController(); controllers.add(controller)
         const abort = () => controller.abort(options.signal?.reason)
@@ -138,7 +152,7 @@ export function createExecutor({ registry, budget, env = process.env, resolveCre
           // 闸门放在实际发请求之前, 与 1 秒防连打一起构成两次等待: 先等节拍, 再等组内间隔。
           // 等完再判一次: 等待期间别的请求可能已经开了新拍, 这里要跟着新拍走
           for (let tick = tickDelay(instance, capability, options); tick; tick = tickDelay(instance, capability, options)) { assertWithinDeadline(options.deadline); await waitFor(Math.min(throttleDelay(tick), remainingOf(options.deadline)), controller.signal) }
-          const gap = Math.max(0, (starts.get(instance.quotaGroup) ?? -Infinity) + (instance.budget?.requestsPerMinute === null ? GROUP_GAP_UNKNOWN_RPM_MS : GROUP_GAP_MS) - now())
+          const gap = Math.max(0, (starts.get(instance.quotaGroup) ?? -Infinity) + groupGapMs(instance) - now())
           if (gap) { assertWithinDeadline(options.deadline); await waitFor(Math.min(throttleDelay(gap), remainingOf(options.deadline)), controller.signal) }
           await acquire(controller.signal); acquired = true
           starts.set(instance.quotaGroup, now())
@@ -156,7 +170,7 @@ export function createExecutor({ registry, budget, env = process.env, resolveCre
           const ctx = { now, signal: controller.signal, usSymbols, endpoints: instance.endpoints || null, credential: () => secret,
             fetch: async (...args) => {
               if (used) {
-                const gap = Math.max(0, starts.get(instance.quotaGroup) + (instance.budget?.requestsPerMinute === null ? GROUP_GAP_UNKNOWN_RPM_MS : GROUP_GAP_MS) - now())
+                const gap = Math.max(0, starts.get(instance.quotaGroup) + groupGapMs(instance) - now())
                 // 组内间隔不是上游活动: 等它的时候要把上游计时停掉, 否则最近的 8 秒窗口会被排队吃掉
                 if (gap) { timers.clearTimeout(timeout); assertWithinDeadline(options.deadline); await waitFor(Math.min(throttleDelay(gap), remainingOf(options.deadline)), controller.signal) }
               }

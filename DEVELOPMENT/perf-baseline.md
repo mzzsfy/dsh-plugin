@@ -48,6 +48,9 @@ node scripts/perf/bench.mjs --compare .work/perf-base.json # 比对,不可判定
 | `boss/queryBoard-1000` | 任务看板首页投影（`queryBoard` 默认 `limit`） | 1000 任务 | 是 |
 | `boss/projectTaskDetail-1000` | 逐任务详情投影 | 1000 任务 | 是 |
 | `stock/sessionStateOf` | 交易时段判定的日历缺失回退路径 | 100 笔 / 2 时区 | 是 |
+| `stock/state-get-256ops` | 控制记录稳态读(记忆化命中, 只剩版本比较) | 256 条台账 | 是 |
+| `stock/state-get-cold` | 控制记录冷读(每次推进一代后的首次读, 一次深拷贝 + 冻结) | 256 条台账 | 是 |
+| `stock/catalog-search-15000` | 目录本地搜索(索引命中 + 打分排序) | 15000 只证券 | 否(离散常超阈值) |
 
 ## 新增用例
 

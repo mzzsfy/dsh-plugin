@@ -2,8 +2,8 @@ import { z } from 'zod'
 import { StockError, fail } from './market-model.mjs'
 import { withRouteGate } from './route-gate.mjs'
 const PREFIX = '/api/stock-assistant'
-// provider-check 串行探针多条路由, catalog-sync 分页抓全量目录: 各自单列预算;
-// 其余路由走应用层按刷新档位推出的超时(见 application.routeTimeoutMs)
+// catalog-sync 分页抓全量目录: 单独预算; 探针与其余路由都由应用层推导(见 application.providerCheckTimeoutMs / routeTimeoutMs),
+// 应用层给不出时退回这里的兜底值
 const PROVIDER_CHECK_TIMEOUT_MS = 60 * 1000, CATALOG_SYNC_TIMEOUT_MS = 120 * 1000, DEFAULT_ROUTE_TIMEOUT_MS = 10 * 1000
 const operationSchema = z.object({ operationId: z.uuid(), expectedRevision: z.number().int().nonnegative() })
 async function body(req) {
@@ -49,12 +49,13 @@ export function registerRoutes(webServer, app, ctx) {
         res.on('close', onClose)
         let timer
         try {
-          // 应用层没给或给了非数值时退回默认预算: 传进 setTimeout 的必须是有限正数。
-          // 取值放进 try: 这里抛错也必须有响应写出, 否则请求悬挂到客户端超时
-          const derived = app.routeTimeoutMs?.()
-          const timeout = name === 'provider-check' ? PROVIDER_CHECK_TIMEOUT_MS : name === 'catalog-sync' ? CATALOG_SYNC_TIMEOUT_MS : Number.isFinite(derived) && derived > 0 ? derived : DEFAULT_ROUTE_TIMEOUT_MS
           const input = method === 'GET' ? Object.fromEntries(new URL(req.url, 'http://local').searchParams) : await body(req)
           if (method === 'POST' && (input === null || typeof input !== 'object' || Array.isArray(input))) fail('INVALID_REQUEST', '请求内容必须为JSON对象')
+          // 应用层没给或给了非数值时退回默认预算: 传进 setTimeout 的必须是有限正数。
+          // 取值放进 try: 这里抛错也必须有响应写出, 否则请求悬挂到客户端超时。
+          // 探针的预算要按待测目标数算, 所以必须等输入解析完再取
+          const derived = name === 'provider-check' ? app.providerCheckTimeoutMs?.(input) : app.routeTimeoutMs?.()
+          const timeout = name === 'catalog-sync' ? CATALOG_SYNC_TIMEOUT_MS : Number.isFinite(derived) && derived > 0 ? derived : name === 'provider-check' ? PROVIDER_CHECK_TIMEOUT_MS : DEFAULT_ROUTE_TIMEOUT_MS
           const data = await Promise.race([
             Promise.resolve(action(input, controller.signal)),
             // 超时错误随 abort reason 一起下发: 即使 abort 监听先被同步派发, 也拿到 TIMEOUT 而不是 CANCELLED
@@ -64,6 +65,9 @@ export function registerRoutes(webServer, app, ctx) {
           json(res, 200, { ok: true, data })
         } catch (e) {
           const error = e instanceof StockError ? e : new StockError('INVALID_REQUEST', e instanceof z.ZodError ? '请求参数格式错误' : '股票工具请求失败', e instanceof z.ZodError ? 400 : 500)
+          // 服务端失败必须有痕迹: 只记路由与错误码, 不记文案(文案可能带上游地址与凭据形态)。
+          // 客户端关页/切详情触发的取消不是故障, 记成 5xx 只会让日志看起来一直在报错
+          if (error.status >= 500 && error.code !== 'CANCELLED') ctx?.logger?.warn?.(`股票助手请求失败: ${name} ${error.code} (${error.status})`)
           json(res, error.status, { ok: false, error: { code: error.code, message: error.message, retryable: error.retryable, retryAfterMs: error.retryAfterMs }, ...(error.details === undefined ? {} : { details: error.details }), ...(error.revision === undefined ? {} : { revision: error.revision }), ...(e.snapshot ? { snapshot: e.snapshot } : {}) })
         } finally { clearTimeout(timer); controllers.delete(controller); res.removeListener('close', onClose) }
       }

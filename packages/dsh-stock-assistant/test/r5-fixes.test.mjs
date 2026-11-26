@@ -77,7 +77,7 @@ const fakeDoc = () => {
 const fire = (window, type, props = {}) => window.dispatchEvent(Object.assign({ type }, props))
 
 const pageState = () => ({ view: { view: 'list', query: '', selectedId: null, sort: 'manual', focusId: null, menuOpen: false, overlay: null, notice: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', errorKey: '', dataError: '', paused: false, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: {}, providers: [], routes: [] }, quotes: {}, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: true } })
-const pageRuntime = state => ({ getSnapshot: () => state, subscribe: () => () => {}, updateView() {}, refresh() {}, clearError() {}, clearDataError() {}, mutate: async () => {}, loadBrowse: async () => {}, search() {}, setPaused() {} })
+const pageRuntime = state => ({ getSnapshot: () => state, subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0, updateView() {}, refresh() {}, clearError() {}, clearDataError() {}, mutate: async () => {}, loadBrowse: async () => {}, search() {}, setPaused() {} })
 
 // C4: setItem 抛错(隐私模式/配额满)时不能广播"已生效", 且必须有可见提示
 test('C4 本地偏好写失败不广播, 页面横幅可见, 恢复后可写', async () => {

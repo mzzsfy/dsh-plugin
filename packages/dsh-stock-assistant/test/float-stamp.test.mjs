@@ -35,7 +35,7 @@ const stateWith = quotes => ({
     quotes,
   },
 })
-const runtimeStub = state => ({ getSnapshot: () => state, subscribe: () => () => {}, trendContext: () => 'test', getTrend: () => null, openDetail() {} })
+const runtimeStub = state => ({ getSnapshot: () => state, subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0, trendContext: () => 'test', getTrend: () => null, openDetail() {} })
 // 必须锚到元素 class: 样式表里也有 .ssb-float-stamp-stale 定义, 全文匹配会永远为真
 const stampOf = html => (html.match(/<span class="ssb-float-stamp[^"]*"[^>]*>/) || [''])[0]
 const renderFloat = async (state, pref = { open: true, mode: 'list', live: true }) => {

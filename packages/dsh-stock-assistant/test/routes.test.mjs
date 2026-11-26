@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import { registerRoutes } from '../src/routes.mjs'
-import { fail } from '../src/market-model.mjs'
+import { fail, StockError } from '../src/market-model.mjs'
 test('C03 HTTP刷新等待完成且同价不依赖WS回执，非法方法拒绝', async t => {
   const routes = new Map()
   const app = { snapshot: () => ({ snapshotSeq: 1 }), refresh: async () => ({ snapshotSeq: 2, samePrice: true }) }
@@ -203,4 +203,58 @@ test('C3-1 三类路由超时都返回 TIMEOUT 而不是 CANCELLED', async t => 
     assert.equal(body.ok, false, `${name} 超时体`)
     assert.equal(body.error.code, 'TIMEOUT', `${name} 超时必须可退避, 不能被 abort 监听抢先报取消`)
   }
+})
+
+// 探针预算必须由应用层按待测目标数给出: 固定 60 秒会把 40 多个目标的检查拦腰截断
+test('provider-check 路由取应用层推导的预算', async t => {
+  const routes = new Map()
+  const seen = []
+  const app = { providerCheck: (input, signal) => new Promise((_, reject) => signal.addEventListener('abort', () => { seen.push('aborted'); reject(signal.reason) })), providerCheckTimeoutMs: () => 5000 }
+  const stop = registerRoutes({ register: r => { routes.set(r.path, r.handler); return () => routes.delete(r.path) } }, app)
+  t.after(() => stop())
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const chunks = []
+  const res = { statusCode: 0, headers: {}, destroyed: false, writableEnded: false, writeHead(status, headers) { this.statusCode = status; Object.assign(this.headers, headers) }, setHeader() {}, end(text) { this.writableEnded = true; chunks.push(text) }, on() {}, removeListener() {} }
+  const req = { method: 'POST', url: '/api/stock-assistant/provider-check', headers: { 'content-type': 'application/json' }, async *[Symbol.asyncIterator]() { yield Buffer.from('{"capabilities":["quotes"]}') } }
+  const flight = routes.get('/api/stock-assistant/provider-check')(req, res)
+  await new Promise(resolve => setImmediate(resolve))
+  t.mock.timers.tick(4000)
+  assert.equal(res.writableEnded, false, '推导预算内不得提前收尾')
+  t.mock.timers.tick(1000)
+  await flight
+  assert.equal(res.statusCode, 504)
+  assert.deepEqual(seen, ['aborted'], '超时必须同时取消在途检查')
+})
+
+// 服务端 500 必须留痕: 没有日志就只能靠客户端截图排障
+test('500 响应写下路由与错误码, 不写上游文案', async t => {
+  const routes = new Map(), logs = []
+  const app = { snapshot: () => { throw new Error('上游地址 https://user:secret@example.com/path 失败') } }
+  const ctx = { get: () => undefined, logger: { warn: message => logs.push(message) } }
+  const stop = registerRoutes({ register: r => { routes.set(r.path, r.handler); return () => routes.delete(r.path) } }, app, ctx)
+  const server = http.createServer((req, res) => { const handler = routes.get(new URL(req.url, 'http://local').pathname); if (handler) handler(req, res); else { res.statusCode = 404; res.end() } })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(async () => { stop(); await new Promise(resolve => server.close(resolve)) })
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/api/stock-assistant/snapshot`)
+  assert.equal(response.status, 500)
+  assert.equal(logs.length, 1, '每个失败请求一条日志')
+  assert.ok(logs[0].includes('snapshot') && logs[0].includes('500'), `日志要点明路由与状态: ${logs[0]}`)
+  assert.equal(logs[0].includes('secret'), false, '日志不得带上游文案里的敏感片段')
+})
+
+// 客户端关页/切详情会取消在途请求: 那不是故障, 不能让日志看起来一直在报错
+test('客户端取消不写 5xx 日志', async t => {
+  const routes = new Map(), logs = []
+  // 路由的 close 监听用 StockError(CANCELLED) 作为 abort reason, 取消以它收尾
+  const app = { snapshot: () => { throw new StockError('CANCELLED', '请求已取消', 503) } }
+  const ctx = { get: () => undefined, logger: { warn: message => logs.push(message) } }
+  const stop = registerRoutes({ register: r => { routes.set(r.path, r.handler); return () => routes.delete(r.path) } }, app, ctx)
+  t.after(() => stop())
+  const chunks = []
+  const res = { statusCode: 0, headers: {}, writableEnded: false, writeHead(status, headers) { this.statusCode = status; Object.assign(this.headers, headers) }, end(chunk) { chunks.push(String(chunk)); this.writableEnded = true }, on() {}, removeListener() {} }
+  const req = { method: 'GET', url: '/api/stock-assistant/snapshot', headers: {}, async *[Symbol.asyncIterator]() {} }
+  const flight = routes.get('/api/stock-assistant/snapshot')(req, res)
+  await flight
+  assert.equal(res.statusCode, 503, '取消按 5xx 收尾但不算故障')
+  assert.deepEqual(logs, [], '取消不是服务端失败')
 })

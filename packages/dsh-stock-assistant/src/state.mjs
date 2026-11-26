@@ -20,8 +20,23 @@ export async function openState(storageDomain, changed = () => {}, now = Date.no
   } catch (e) { await Promise.allSettled([domain.close()]); throw e }
   const cache = createMemoryCache({ limit: CATALOG_CACHE_LIMIT }), klineCache = createMemoryCache({ limit: KLINE_CACHE_LIMIT }), trendCache = createMemoryCache({ limit: TREND_CACHE_LIMIT })
   let tail = Promise.resolve(), stopped = false
+  // 读侧按版本记忆化: 控制记录只在 mutate 里整体替换, 同一版本读出来的内容恒定,
+  // 每次深拷贝会把"每标的取一次配置"的热路径变成每秒数毫秒的开销。
+  // 返回的对象深冻结: 读侧原地改会在严格模式下直接抛错, 而不是悄悄污染共享快照。
+  const deepFreeze = value => {
+    if (value && typeof value === 'object') { for (const child of Object.values(value)) deepFreeze(child); Object.freeze(value) }
+    return value
+  }
+  // 缓存键同时看两个版本: 路由换代也会改变读到的语义, 只认 revision 会漏掉只改路由版本的写入
+  const versionOf = root => `${root.revision}:${root.routingRevision}`
+  let snapshot = null, snapshotVersion = ''
+  const current = () => {
+    const root = table.get('root'), version = versionOf(root)
+    if (version !== snapshotVersion) { snapshot = deepFreeze(structuredClone(root)); snapshotVersion = version }
+    return snapshot
+  }
   return {
-    get: () => structuredClone(table.get('root')),
+    get: () => current(),
     cache, klineCache, trendCache,
     replay(operation) {
       const prior = table.get('root').operations.find(o => o.id === operation.operationId && now() - o.at < DAY)
@@ -44,7 +59,7 @@ export async function openState(storageDomain, changed = () => {}, now = Date.no
         next.revision = current.revision + 1
         const result = { revision: next.revision, unchanged: false, ...(next.operationResult || {}) }
         delete next.operationResult
-        next.operations = [...current.operations.filter(o => now() - o.at < DAY), { id: operation.operationId, hash, at: now(), result, action: operation.action, payload: operation.payload }].slice(-256)
+        next.operations = [...current.operations.filter(o => now() - o.at < DAY), { id: operation.operationId, hash, at: now(), result, action: operation.action }].slice(-256)
         try { controlSchema.parse(next) } catch (e) { fail('INVARIANT_VIOLATION', '写入结果违反内部不变式', 500, { cause: e }) }
         try {
           await table.update('root', stored => {

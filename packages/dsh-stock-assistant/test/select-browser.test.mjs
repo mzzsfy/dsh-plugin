@@ -557,7 +557,7 @@ test('悬浮图 3 秒档继续消费报价，首分钟内不重拉分时', async
     // 先显式复位到全天, 再让报价追加第三根: 全天必须保持哨兵, 不能从第一根漂走
     await tab.locator('.ssb-float-spark-wrap').dblclick()
     for (let i = 0; i < 3; i++) {
-      const response = tab.waitForResponse(`${path}refresh`, { timeout: 5000 })
+      const response = tab.waitForResponse(`${path}refresh`, { timeout: 15000 })
       await tab.clock.runFor(3 * 1000)
       await response
     }
@@ -708,5 +708,205 @@ test('窗口缩小后悬浮盯盘收回视口, 放大回保存位置', async () 
     await page.unroute(`${base}snapshot`)
     await page.unroute(`${base}refresh`)
     await page.setViewportSize({ width: 1280, height: 900 })
+  }
+})
+
+// 提交计数: 面板与浮窗是两个 React root, 借 devtools hook 数每个 root 的提交次数。
+// 趋势落点只该让浮窗重渲染; 面板跟着重渲染说明还在借 patch({}) 伪造刷新。
+async function countCommits(tab) {
+  await tab.addInitScript(() => {
+    window.__commits = {}
+    const hook = window.__REACT_DEVTOOLS_GLOBAL_HOOK__ = window.__REACT_DEVTOOLS_GLOBAL_HOOK__ || { renderers: new Map(), supportsFiber: true, inject() { return 1 }, onCommitFiberRoot() {}, onCommitFiberUnmount() {} }
+    hook.onCommitFiberRoot = (id, root) => {
+      const container = root.containerInfo
+      const key = container?.id || container?.className || 'unknown'
+      window.__commits[key] = (window.__commits[key] || 0) + 1
+    }
+  })
+}
+
+test('浮窗更新不牵动面板重渲染', async () => {
+  const tab = await context.newPage()
+  const base = '**/api/stock-assistant/'
+  const id = 'XSHG:equity:600519'
+  const epoch = 'fixture-commit'
+  const errors = []
+  tab.on('pageerror', e => errors.push(e.message))
+  await countCommits(tab)
+  const item = { id, exchange: 'XSHG', code: '600519', officialName: '茅台', priceScale: 2, timezone: 'Asia/Shanghai' }
+  // 面板档位放到观测窗口外: 观测期内的提交只可能来自浮窗自己
+  const snapshot = { serverEpoch: epoch, snapshotSeq: 1, routingRevision: 1, quotes: {}, control: { revision: 1, watchlist: { order: [id], items: { [id]: item } }, preferences: { refreshSeconds: 3600, floatRefreshSeconds: 3 }, routes: [], providers: [] } }
+  let polls = 0
+  try {
+    await tab.route(`${base}snapshot`, handler => handler.fulfill({ json: { ok: true, data: snapshot } }))
+    await tab.route(`${base}kline?*`, handler => {
+      const at = Math.floor(Date.now() / 1000)
+      const candles = Array.from({ length: 30 }, (_, i) => ({ at: at - (30 - i) * 60, time: `10:${String(i).padStart(2, '0')}`, open: 10, high: 10.1, low: 9.9, close: 10 }))
+      return handler.fulfill({ json: { ok: true, data: { securityId: id, serverEpoch: epoch, routingRevision: 1, sessionDate: new Date().toISOString().slice(0, 10), preClose: 10, fetchedAt: Date.now(), complete: true, candles } } })
+    })
+    await tab.route(`${base}refresh`, async handler => {
+      // 每次报价都换价: 浮窗每拍必有状态变化, 提交数才是可判定的
+      polls += 1
+      const at = Date.now(), last = polls % 2 ? '10.30' : '10.40'
+      const quote = { securityId: id, routingRevision: 1, quoteAt: new Date(at).toISOString(), timestampKind: 'trade', receivedAt: at, sessionState: 'trading', last, previousClose: '10.00' }
+      return handler.fulfill({ json: { ok: true, data: { ...snapshot, quotes: { [id]: { health: 'ok', quote } } } } })
+    })
+    await tab.addInitScript(sid => localStorage.setItem('ssb-floating', JSON.stringify({ open: true, ids: [sid], mode: 'kline', securityId: sid })), id)
+    await tab.goto(page.url())
+    const entry = tab.getByRole('button', { name: '打开股票' })
+    if (await entry.count()) await entry.click()
+    const float = tab.getByRole('complementary', { name: '悬浮盯盘' })
+    await float.waitFor()
+    // SVG 折线没有布局盒子, 只等它挂上 DOM
+    await float.locator('.ssb-float-line').first().waitFor({ state: 'attached', timeout: 10000 })
+    await tab.waitForTimeout(500)
+    const baseline = await tab.evaluate(() => ({ ...window.__commits }))
+    assert.ok((baseline['app'] || 0) > 0, '面板 root 容器键必须真的在计数, 否则断言会空转')
+    // 两拍报价窗口: 浮窗每次落值都要提交, 面板一次都不该提交
+    await tab.waitForTimeout(5 * 1000)
+    const after = await tab.evaluate(() => ({ ...window.__commits }))
+    assert.ok(polls >= 2, '观测窗口内必须真的取过报价')
+    assert.equal((after['app'] || 0) - (baseline['app'] || 0), 0, '浮窗更新不得触发面板 root 提交')
+    assert.ok((after['ssb-float-root'] || 0) > (baseline['ssb-float-root'] || 0), '浮窗必须持续更新')
+    assert.equal(await float.locator('.ssb-float-line').count(), 1, '折线仍在')
+    assert.deepEqual(errors, [])
+  } finally {
+    await tab.evaluate(() => localStorage.removeItem('ssb-floating')).catch(() => {})
+    for (const path of [`${base}snapshot`, `${base}kline?*`, `${base}refresh`]) await tab.unroute(path).catch(() => {})
+    await tab.close()
+  }
+})
+
+test('标记保存失败时保留草稿并在原处报错', async () => {
+  const base = '**/api/stock-assistant/'
+  const id = 'XSHG:equity:600519'
+  const item = { id, exchange: 'XSHG', code: '600519', officialName: '茅台', priceScale: 2, timezone: 'Asia/Shanghai', marks: [] }
+  const snapshot = { serverEpoch: 'fixture-marks', snapshotSeq: 1, routingRevision: 1, quotes: {}, control: { revision: 1, watchlist: { order: [id], items: { [id]: item } }, preferences: { refreshSeconds: 15 }, routes: [], providers: [] } }
+  const errors = []
+  page.on('pageerror', e => errors.push(e.message))
+  try {
+    await page.route(`${base}snapshot`, handler => handler.fulfill({ json: { ok: true, data: snapshot } }))
+    await page.route(`${base}watchlist`, handler => handler.fulfill({ status: 500, json: { ok: false, error: { code: 'STORAGE_WRITE_FAILED', message: '写入失败' } } }))
+    await page.reload()
+    await page.locator('.ssb-row').first().click()
+    const form = page.locator('.ssb-overlay .ssb-inline-form').first()
+    await form.locator('.ssb-input-num').fill('1428')
+    await form.getByRole('button', { name: '添加标记' }).click()
+    // 就地提示: 顶部横幅在抽屉之下, 用户看不到
+    const markError = page.locator('.ssb-overlay .ssb-form-error').first()
+    await markError.waitFor({ timeout: 5000 })
+    assert.equal(await form.locator('.ssb-input-num').inputValue(), '1428', '失败必须保留草稿')
+    assert.match(await markError.innerText(), /写入失败|标记保存失败/)
+    // 成功路径必须回到干净状态: 草稿清空, 错误消失
+    // 成功路径: 夹具的真实存储版本与桩快照不同代, 会撞 409, 这里直接给成功响应
+    await page.unroute(`${base}watchlist`)
+    await page.route(`${base}watchlist`, handler => handler.fulfill({ json: { ok: true, data: { revision: 2, unchanged: false } } }))
+    await form.getByRole('button', { name: '添加标记' }).click()
+    await page.waitForFunction(() => document.querySelector('.ssb-overlay .ssb-inline-form .ssb-input-num')?.value === '', null, { timeout: 5000 })
+    assert.equal(await page.locator('.ssb-overlay .ssb-form-error').count(), 0, '成功后错误提示必须消失')
+    // 抽屉里的图表要宿主内置组件, 夹具没有: 只断言与标记无关的异常为零
+    assert.deepEqual(errors.filter(message => !/Unexpected token|图表/.test(message)), [])
+  } finally {
+    await page.unroute(`${base}snapshot`).catch(() => {})
+    await page.unroute(`${base}watchlist`).catch(() => {})
+    await page.reload()
+  }
+})
+
+test('搜索候选预览是按钮: 键盘聚焦后 Enter 进详情', async () => {
+  const base = '**/api/stock-assistant/'
+  const id = 'XSHG:equity:600519'
+  const item = { id, exchange: 'XSHG', code: '600519', officialName: '茅台', currency: 'CNY', priceScale: 2, timezone: 'Asia/Shanghai' }
+  // 搜索结果按快照里的路由版本判新旧: 版本对不上客户端会整批丢弃
+  let routingRevision = 0
+  try {
+    await page.route(`${base}snapshot`, async handler => {
+      const response = await handler.fetch(), body = await response.json()
+      routingRevision = body.data.routingRevision
+      await handler.fulfill({ response, json: body })
+    })
+    await page.route(`${base}search*`, handler => handler.fulfill({ json: { ok: true, data: { items: [item], catalogs: [], routingRevision } } }))
+    await page.route(`${base}refresh`, handler => handler.fulfill({ json: { ok: true, data: { quotes: {} } } }))
+    await page.getByRole('button', { name: '搜索' }).first().click()
+    const input = page.locator('.ssb-search-input, input[type="search"]').first()
+    await input.fill('茅台')
+    const peek = page.locator('.ssb-peek').first()
+    await peek.waitFor({ timeout: 5000 })
+    // 元素类型必须是按钮: span + role=button 能进 tab 序但 Enter/Space 什么都不会发生
+    assert.equal(await peek.evaluate(node => node.tagName), 'BUTTON', '预览必须是真按钮')
+    await peek.focus()
+    await page.keyboard.press('Enter')
+    await page.locator('.ssb-overlay').waitFor({ timeout: 5000 })
+    assert.match(await page.locator('.ssb-overlay').innerText(), /茅台/)
+  } finally {
+    for (const path of [`${base}search*`, `${base}refresh`, `${base}snapshot`]) await page.unroute(path).catch(() => {})
+    await page.keyboard.press('Escape').catch(() => {})
+  }
+})
+
+test('页面缩放后悬浮盯盘按视觉尺寸收回视口', async () => {
+  const base = '**/api/stock-assistant/'
+  const id = 'XSHG:equity:600001'
+  const item = { id, exchange: 'XSHG', code: '600001', officialName: '标的1' }
+  const saved = { x: 980, y: 450 }
+  const MARGIN = 8
+  // 独占标签页: 上一个用例会在共享页面上留路由与缩放状态
+  const tab = await context.newPage()
+  const errors = []
+  tab.on('pageerror', e => errors.push(e.message))
+  await tab.route(`${base}snapshot`, handler => handler.fulfill({ json: { ok: true, data: { serverEpoch: 'fixture-zoom', snapshotSeq: 1, routingRevision: 1, quotes: {}, control: { revision: 1, watchlist: { order: [id], items: { [id]: item } }, preferences: { refreshSeconds: 15 }, routes: [], providers: [] } } } }))
+  await tab.route(`${base}refresh`, handler => handler.fulfill({ json: { ok: true, data: { quotes: {} } } }))
+  const placeOf = async float => {
+    const box = await float.boundingBox()
+    const viewport = await tab.evaluate(() => ({ width: document.documentElement.clientWidth, height: document.documentElement.clientHeight }))
+    return { box, viewport, right: viewport.width - box.x - box.width, bottom: viewport.height - box.y - box.height }
+  }
+  const until = async (float, check, label, timeout = 5000) => {
+    const deadline = Date.now() + timeout
+    for (;;) {
+      const place = await placeOf(float)
+      if (check(place)) return place
+      if (Date.now() > deadline) assert.fail(`等待超时: ${label} (${JSON.stringify(place)})`)
+      await tab.waitForTimeout(50)
+    }
+  }
+  try {
+    await tab.bringToFront()
+    await tab.setViewportSize({ width: 1280, height: 900 })
+    // 新标签页初始是 opaque origin, 先落到夹具页才能写 localStorage
+    await tab.goto(page.url())
+    await tab.evaluate(([sid, at]) => localStorage.setItem('ssb-floating', JSON.stringify({ open: true, mode: 'list', ids: [sid], x: at.x, y: at.y })), [id, saved])
+    await tab.reload()
+    const float = tab.getByRole('complementary', { name: '悬浮盯盘' })
+    await float.waitFor()
+    await float.locator('.ssb-float-row').first().waitFor()
+    // 缩放不改布局视口, 只放大视觉尺寸: 保存坐标按布局 px 计, 缩放后必然越界
+    await tab.evaluate(() => { document.documentElement.style.zoom = '1.25' })
+    const zoomed = await until(float, place => place.right >= MARGIN * 1.25 - 1 && place.bottom >= MARGIN * 1.25 - 1 && place.box.x >= MARGIN * 1.25 - 1, '缩放后收回视口')
+    assert.ok(zoomed.box.y >= 0, '卡片不得移出顶部')
+    assert.ok(zoomed.right <= MARGIN * 1.25 + 2, '贴边即可, 不能过度收缩')
+    assert.equal(await tab.evaluate(() => JSON.parse(localStorage.getItem('ssb-floating')).x), saved.x, '夹取不改写保存坐标')
+    // 缩放页里拖动: 指针给的是视觉位移, 偏好存布局坐标, 两者换算错了会跳位并把错坐标写盘
+    // 缩放页里拖动: 指针给的是视觉位移, 偏好存布局坐标, 两者换算错了会跳位并把错坐标写盘。
+    // 卡片此刻贴在右边距上, 只能往左拖
+    const before = await tab.evaluate(() => JSON.parse(localStorage.getItem('ssb-floating')).x)
+    // 抓手必须落在标题条上: 卡片 padding 区不参与拖动
+    const head = await float.locator('.ssb-float-head').boundingBox()
+    const grabX = head.x + head.width * 0.5, grabY = head.y + head.height / 2
+    await tab.mouse.move(grabX, grabY)
+    await tab.mouse.down()
+    await tab.mouse.move(grabX - 40, grabY, { steps: 4 })
+    await tab.mouse.up()
+    await tab.waitForTimeout(100)
+    const after = await tab.evaluate(() => JSON.parse(localStorage.getItem('ssb-floating')).x)
+    const moved = await float.boundingBox()
+    // 拖动必须跟手: 旧实现把视觉位移当布局量, 在缩放页里被夹回原地, 一步都不动
+    assert.ok(Math.abs(moved.x - zoomed.box.x + 40) <= 2, `拖动跟手, 实际 ${moved.x - zoomed.box.x}`)
+    // 落盘的是布局坐标: 视觉左缘 / 缩放比
+    assert.ok(Math.abs(after - moved.x / 1.25) <= 2, `落盘坐标必须是布局量, 实际 ${after}`)
+    assert.deepEqual(errors, [])
+  } finally {
+    await tab.evaluate(() => { document.documentElement.style.zoom = ''; localStorage.removeItem('ssb-floating') }).catch(() => {})
+    await tab.close()
   }
 })

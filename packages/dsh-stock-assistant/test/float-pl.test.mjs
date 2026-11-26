@@ -83,6 +83,6 @@ test('自选列表的持仓盈亏列跟着同一口径走', async () => {
   const item = { ...held, exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', listingStatus: 'listed' }
   const entry = { quote: { last: '1444.99', previousClose: '1453', change: '-8.01', changePct: '-0.55', providerInstanceId: 'p', delayKind: 'realtime', quoteAt: null, receivedAt: 1, sessionState: 'trading' }, health: 'ok', lastError: null }
   const state = { view: { view: 'list', sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [item.id], items: { [item.id]: item } }, preferences: {} }, quotes: { [item.id]: entry }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
-  const html = renderToStaticMarkup(React.createElement(api.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView() {} }, layout: {} }))
+  const html = renderToStaticMarkup(React.createElement(api.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0, updateView() {} }, layout: {} }))
   assert.match(html, /ssb-cell-pl ssb-up">\+3\.2%</, '盈利按涨跌色着色的 1 位小数')
 })

@@ -45,17 +45,26 @@ export function createCatalog({ state, getControl = state.get, router, executor,
     }
     return result
   }
-  function all() {
-    const map = new Map()
-    for (const cache of records('catalog')) for (const s of cache.payload.items) if (securitySchema.safeParse(s).success) map.set(s.id, s)
-    return [...map.values()]
+  // 整表展平与校验按"路由版本 + 缓存版本"记忆化: 一次搜索的 82% 成本是重复 zod 校验与建表,
+  // 目录本身只在 sync 写缓存时变, 缓存版本就是最直接的失效信号
+  let index = null
+  const indexOf = () => {
+    // 版本号是缓存的私有扩展: 传裸 Map 的调用方(基准/夹具)会静默失去失效能力, 宁可早炸
+    if (typeof state.cache.version !== 'number') fail('CACHE_CONTRACT', '目录缓存缺版本号', 500)
+    const version = `${getControl().routingRevision}:${state.cache.version}`
+    if (index?.version === version) return index.value
+    const byId = new Map()
+    // 同 id 后写者胜: 与缓存写入顺序一致, 换主源后新缓存必须盖掉旧的
+    for (const cache of records('catalog')) for (const s of cache.payload.items) byId.set(s.id, s)
+    index = { version, value: { items: [...byId.values()], byId } }
+    return index.value
   }
   function search(q, limit = 20) {
     const query = q.trim().toLowerCase()
     if (!query) return []
     // 代码大小写不敏感: 美股代码全大写, 逐字比较会让本地目录搜不到 aapl/apple
     const score = s => { const code = s.code.toLowerCase(), name = s.officialName.toLowerCase(); return code === query ? 0 : name === query ? 1 : code.startsWith(query) ? 2 : name.includes(query) ? 3 : s.cnspell?.toLowerCase().startsWith(query) ? 4 : 99 }
-    return all().map(s => ({ s, rank: score(s) })).filter(r => r.rank < 99).sort((a, b) => a.rank - b.rank || a.s.id.localeCompare(b.s.id)).slice(0, limit).map(r => r.s)
+    return indexOf().items.map(s => ({ s, rank: score(s) })).filter(r => r.rank < 99).sort((a, b) => a.rank - b.rank || a.s.id.localeCompare(b.s.id)).slice(0, limit).map(r => r.s)
   }
   // 目录同步走闭包: 挂在返回对象上时 this.sync 一旦被解构或换绑就丢 this
   const sync = async (market, capabilities = ['catalog', 'calendar']) => {
@@ -106,12 +115,12 @@ export function createCatalog({ state, getControl = state.get, router, executor,
       // 已有目录但过期: 先展示旧数据, 同时后台刷新, 下一次浏览/轮询就能拿到新目录
       const newest = Math.max(...cached.map(c => c.fetchedAt))
       if (now() - newest > CATALOG_TTL) sync(market, ['catalog']).catch(() => {})
-      const securities = all().filter(s => s.exchange === market).sort((a, b) => a.code.localeCompare(b.code))
+      const securities = indexOf().items.filter(s => s.exchange === market).sort((a, b) => a.code.localeCompare(b.code))
       const start = Math.max(0, Math.trunc(Number(offset) || 0)), size = Math.min(200, Math.max(1, Math.trunc(Number(limit) || 50)))
       return { total: securities.length, items: securities.slice(start, start + size) }
     },
     resolve(id) {
-      const cached = all().find(s => s.id === id)
+      const cached = indexOf().byId.get(id)
       if (cached) return cached
       const candidate = candidates.get(id)
       return candidate && candidate.until > now() && candidate.revision === getControl().routingRevision ? candidate.security : null

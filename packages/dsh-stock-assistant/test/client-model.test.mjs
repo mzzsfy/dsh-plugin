@@ -14,7 +14,7 @@ export async function loadClient(extra = {}) {
 test('暂停期间显式刷新应用新价，普通快照仍保持暂停行情', async () => {
   const { plugin } = await loadClient()
   const snapshot = (seq, last) => ({ serverEpoch: 'one', snapshotSeq: seq, routingRevision: 0, routeSelections: {}, control: { revision: 0 }, quotes: { a: { quote: { last } } } })
-  const runtime = plugin.__testing.createPageRuntime({ layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {} } }, bus: { subscribe: () => () => {}, publish() {} }, tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) }, document: { addEventListener() {}, removeEventListener() {} }, fetch: async () => ({ ok: true, json: async () => ({ ok: true, data: snapshot(3, '12.00') }) }) })
+  const runtime = plugin.__testing.createPageRuntime({ layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0 } }, bus: { subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0, publish() {} }, tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) }, document: { addEventListener() {}, removeEventListener() {} }, fetch: async () => ({ ok: true, json: async () => ({ ok: true, data: snapshot(3, '12.00') }) }) })
   runtime.applySnapshot(snapshot(1, '10.00')); runtime.setPaused(true); runtime.applySnapshot(snapshot(2, '11.00'))
   assert.equal(runtime.getSnapshot().data.quotes.a.quote.last, '10.00')
   await runtime.refresh()
@@ -25,23 +25,23 @@ test('U04 键盘导航期间冻结行序并继续更新数字', async () => {
   const { plugin } = await loadClient({ modules: { react: React } })
   const data = { control: { watchlist: { order: ['a','b'], items: { a: { id: 'a', officialName: '甲证券', code: '600001', exchange: 'XSHG' }, b: { id: 'b', officialName: '乙证券', code: '600002', exchange: 'XSHG' } } }, preferences: {} }, quotes: { a: { quote: { changePct: '-1.00', last: '9.00' } }, b: { quote: { changePct: '2.00', last: '12.00' } } } }
   // 冻结只由键盘导航触发(行菜单的 menuId 是死状态, 已删): 排序为降序时仍按冻结顺序渲染
-  const runtime = { getSnapshot: () => ({ data, busy: {}, view: { sort: 'desc', keyboardNavigating: true, frozenOrder: ['a','b'], view: 'list' } }), subscribe: () => () => {} }
+  const runtime = { getSnapshot: () => ({ data, busy: {}, view: { sort: 'desc', keyboardNavigating: true, frozenOrder: ['a','b'], view: 'list' } }), subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0 }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime, layout: {} }))
   assert.ok(html.indexOf('甲证券') < html.indexOf('乙证券')); assert.match(html, /12\.00/)
 })
 test('UI01 自选列表呈现同源价格、涨跌符号与未知延迟', async () => {
   const { plugin } = await loadClient({ modules: { react: React } })
-  const runtime = { getSnapshot: () => ({ view: { view: 'list', sort: 'manual' }, busy: {}, data: { control: { revision: 1, watchlist: { order: ['XSHG:equity:600519'], items: { 'XSHG:equity:600519': { id: 'XSHG:equity:600519', officialName: '贵州茅台', code: '600519', exchange: 'XSHG' } } }, preferences: { colorMode: 'red-up' } }, quotes: { 'XSHG:equity:600519': { health: 'ok', quote: { last: '10.00', changePct: '25.00', providerInstanceId: 'a', delayKind: 'unknown' } } } } }), subscribe: () => () => {} }
+  const runtime = { getSnapshot: () => ({ view: { view: 'list', sort: 'manual' }, busy: {}, data: { control: { revision: 1, watchlist: { order: ['XSHG:equity:600519'], items: { 'XSHG:equity:600519': { id: 'XSHG:equity:600519', officialName: '贵州茅台', code: '600519', exchange: 'XSHG' } } }, preferences: { colorMode: 'red-up' } }, quotes: { 'XSHG:equity:600519': { health: 'ok', quote: { last: '10.00', changePct: '25.00', providerInstanceId: 'a', delayKind: 'unknown' } } } } }), subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0 }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime, layout: {} }))
   assert.match(html, /贵州茅台/); assert.match(html, /10\.00/); assert.match(html, /\+25\.00%/); assert.match(html, /延迟未知/)
   assert.match(html, /data-plugin="@mzzsfy\/dsh-stock-assistant"/)
 })
 test('H03/H04 main和导航入口配对且注册清理成对', async () => {
-  const modules = { react: { createElement: (...args) => args }, '@mzzsfy/dsh-common-tools/client': { setupCommonTools: () => ({ publish() {}, subscribe: () => () => {} }), createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) } }
+  const modules = { react: { createElement: (...args) => args }, '@mzzsfy/dsh-common-tools/client': { setupCommonTools: () => ({ publish() {}, subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0 }), createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) } }
   const document = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} }
   const { plugin } = await loadClient({ modules, document })
   const cleanups = [], registrations = [], removed = []
-  const ctx = { effect: fn => cleanups.push(fn()), layout: { panelInfo: { getSnapshot: () => ({ activePanelId: null }), subscribe: () => () => {} } }, slots: { inject: (name, fn) => { fn(); return () => removed.push(name) }, register: options => registrations.push(options) } }
+  const ctx = { effect: fn => cleanups.push(fn()), layout: { panelInfo: { getSnapshot: () => ({ activePanelId: null }), subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0 } }, slots: { inject: (name, fn) => { fn(); return () => removed.push(name) }, register: options => registrations.push(options) } }
   plugin.apply(ctx)
   assert.equal(registrations.find(r => r.name === 'main')?.key, 'stock-assistant')
   assert.equal(registrations.find(r => r.name === 'sidebar.panellist')?.id, 'stock-assistant')
@@ -52,14 +52,17 @@ test('H05/H07/H08 页面级运行时保留跨会话与隐藏后的草稿，不�
   const { plugin } = await loadClient()
   let panel = 'stock-assistant', listener
   const layout = { panelInfo: { getSnapshot: () => ({ activePanelId: panel }), subscribe: fn => { listener = fn; return () => { listener = null } } } }
-  const runtime = plugin.__testing.createPageRuntime({ layout, bus: { subscribe: () => () => {}, publish() {} }, tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) }, document: { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} }, fetch: async () => ({ ok: true, json: async () => ({ ok: true, data: { serverEpoch: 'one', snapshotSeq: 1, control: { revision: 0, watchlist: { order: [] }, preferences: {} } } }) }) })
-  runtime.updateView({ view: 'settings', query: '茅台', settingsDraft: { preserved: true }, scrollTop: 120 })
+  const runtime = plugin.__testing.createPageRuntime({ layout, bus: { subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0, publish() {} }, tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) }, document: { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} }, fetch: async () => ({ ok: true, json: async () => ({ ok: true, data: { serverEpoch: 'one', snapshotSeq: 1, control: { revision: 0, watchlist: { order: [] }, preferences: {} } } }) }) })
+  runtime.updateView({ view: 'settings', query: '茅台', settingsDraft: { preserved: true } })
+  runtime.setScrollTop(120)
   panel = null; listener()
   panel = 'stock-assistant'; listener()
   const value = runtime.getSnapshot()
   assert.equal(value.view.query, '茅台')
   assert.equal(value.view.settingsDraft.preserved, true)
-  assert.equal(value.view.scrollTop, 120)
+  // 滚动位置不进响应式 state(每帧写会把整面板重渲染), 由运行时单独保管
+  assert.equal(value.view.scrollTop, undefined, '滚动位置不得留在 view 里')
+  assert.equal(runtime.getScrollTop(), 120, '重挂载要能恢复到原位置')
   runtime.dispose()
   assert.equal(listener, null)
 })

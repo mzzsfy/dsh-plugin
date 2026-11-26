@@ -157,7 +157,9 @@ window.__ModuleLoader__.load({
     function createPageRuntime({ layout, bus, tools, document: doc = document, fetch: request = fetch }) {
       let disposed = false, generation = 0, demandGeneration = 0, pageId = crypto.randomUUID(), timer, heartbeat, undoTimer, browseTimer, queryGeneration = 0, querying, composing = false
       const subscribers = new Set(), retiredEpochs = new Set(), requests = new Set()
-      let state = { view: { view: 'list', query: '', selectedId: null, detailId: null, sort: 'manual', focusId: null, keyboardNavigating: false, frozenOrder: null, settingsDraft: null, scrollTop: 0, alias: '', browseMarket: 'XSHG', browseRows: null, browseTotal: 0, browseOffset: 0, notice: '', browsePeek: {} }, data: null, paused: false, error: '', errorCode: '', errorKey: '', dataError: '', busy: {}, candidates: [], composing: false, undo: null, peekQuotes: {} }
+      // 表格滚动位置只用于重挂载后恢复, 不进响应式 state: 滚动每帧写 state 会把整面板重渲染一遍
+      let scrollTop = 0
+      let state = { view: { view: 'list', query: '', selectedId: null, detailId: null, sort: 'manual', focusId: null, keyboardNavigating: false, frozenOrder: null, settingsDraft: null, alias: '', browseMarket: 'XSHG', browseRows: null, browseTotal: 0, browseOffset: 0, notice: '', browsePeek: {} }, data: null, paused: false, error: '', errorCode: '', errorKey: '', dataError: '', busy: {}, candidates: [], composing: false, undo: null, peekQuotes: {} }
       function emit() { for (const fn of subscribers) fn() }
       function patch(next) { if (!disposed) { state = { ...state, ...next }; emit() } }
       // 操作错误按产生它的动作记账: 只有同名动作重试或用户关闭才清; 数据面快照刷新不清
@@ -322,6 +324,11 @@ window.__ModuleLoader__.load({
         const delayTimer = setTimeout(() => { klineRetryTimers.delete(delayTimer); resolve() }, ms)
         klineRetryTimers.set(delayTimer, resolve)
       })
+      // 趋势数据活在闭包里, 不在 state 里: 借 patch({}) 伪造"state 变了"会把整个面板重渲染一遍,
+      // 而真正需要更新的是浮窗折线与详情分时, 所以给它一条独立订阅通道
+      const trendListeners = new Set()
+      let trendRevision = 0
+      const bumpTrend = () => { if (disposed) return; trendRevision += 1; for (const fn of [...trendListeners]) fn() }
       const trends = new Map()
       function trendRouteEpoch(securityId) {
         const [market, instrument] = (securityId || '').split(':')
@@ -349,7 +356,7 @@ window.__ModuleLoader__.load({
         if (!addTrendPoint(entry, at, close)) return
         entry.lastQuoteAt = at
         entry.view = { ...entry.view, candles: displayTrendCandles(entry) }
-        patch({})
+        bumpTrend()
       }
       function addTrendPoint(entry, at, close) {
         const minute = trendMinute(at)
@@ -453,9 +460,9 @@ window.__ModuleLoader__.load({
               entry.nextAt = Math.max(entry.nextAt || 0, Date.now() + MINUTE_MS)
             }
             if (entry.pendingToken === token && gen !== generation && entry.view?.loading) entry.view = entry.real ? { ...entry.view, loading: false } : null
-            if (!disposed) patch({})
+            bumpTrend()
           }).then(() => getTrend(securityId))
-        patch({})
+        bumpTrend()
         return entry.pending
       }
       // 错误态的重试是用户明确要求再来一次: 清掉显示错误并立刻取数, 不受本地上一次窗口拦截;
@@ -465,13 +472,20 @@ window.__ModuleLoader__.load({
         if (entry) {
           entry.nextAt = 0
           if (entry.view?.error) entry.view = { ...entry.view, error: '', errorCode: '' }
-          patch({})
+          bumpTrend()
         }
         return loadTrend(securityId)
       }
       return {
         getSnapshot: () => state,
+        getScrollTop: () => scrollTop,
+        setScrollTop(value) { scrollTop = value },
         subscribe(fn) { subscribers.add(fn); return () => subscribers.delete(fn) },
+        // 纯数字快照: 引用恒定, 订阅者只在真的落点或换窗时重渲染
+        subscribeTrend(fn) { trendListeners.add(fn); return () => trendListeners.delete(fn) },
+        trendRevision: () => trendRevision,
+        // 趋势落点的唯一通知入口: 落点由 loadTrend/updateTrendQuote 等内部动作触发
+        bumpTrend,
         loadTrend, getTrend, trendDelay, trendContext, updateTrendQuote, retryTrend,
         updateView, api, action, applySnapshot,
         // 横幅只能由产生它的动作重试或用户关闭清除, 数据面刷新不得代用户做这个决定
@@ -588,6 +602,8 @@ window.__ModuleLoader__.load({
           await action('configuration', async () => {
             let current = routes
             let progress = ''
+            // 同一目标多轮重查会重复出现: 按目标记, 后来验通了就不再算未测
+            const untested = new Set()
             // 推荐配置与一键补全自带体检: 探针不可用的目标先剔除, 保证装上的是立刻能出数的组合。
             // 这只是推荐配置的质量保证, 手动保存路由不走这条路, 也不看探针结果。
             // 体检不探分时: 分时是单源能力, 探针失败也不会被剪掉(剪了没有别的源可回退), 探了只是让一次保存多等十几个探针;
@@ -600,7 +616,13 @@ window.__ModuleLoader__.load({
                 progress = usedCaps.map(c => CAP_LABEL[c]).join('/') + (round ? `（重查第${round + 1}轮）` : '') + '：检查中…'
                 patch({ checkProgress: progress })
                 const check = await api('/provider-check', 'POST', { providers, routes: current, capabilities: usedCaps })
-                denied.push(...check.checks.filter(c => c.status !== 'ready').map(c => c.providerInstanceId + ':' + c.capability + ':' + c.market))
+                // 未执行(skipped)只说明预算用完, 不是目标不可用: 当成 denied 会把好路由剪掉
+                denied.push(...check.checks.filter(c => c.status !== 'ready' && c.status !== 'skipped').map(c => c.providerInstanceId + ':' + c.capability + ':' + c.market))
+                for (const c of check.checks) {
+                  const key = `${c.providerInstanceId}:${c.capability}:${c.market}`
+                  if (c.status === 'skipped') untested.add(key)
+                  else untested.delete(key)
+                }
               }
               if (!denied.length) break
               current = pruneDeniedTargets(current, new Set(denied))
@@ -610,7 +632,8 @@ window.__ModuleLoader__.load({
             const result = await api('/configuration', 'POST', { operationId: crypto.randomUUID(), expectedRevision: state.view.settingsDraft?.expectedRevision ?? state.data.control.revision, providers, routes: current })
             // 推荐配置/一键补全直连 api, 同样要按响应前推本地版本, 否则紧接着的保存会拿旧基线撞 409
             if (state.data?.control && Number.isInteger(result?.revision) && result.revision > state.data.control.revision) patch({ data: { ...state.data, control: { ...state.data.control, revision: result.revision } } })
-            updateView({ view: 'list', settingsDraft: null, notice })
+            // 预算用完的目标没验过: 提示里要交代"装了但没测", 不能只说"已应用"
+            updateView({ view: 'list', settingsDraft: null, notice: untested.size ? `${notice}（${untested.size} 项目标超预算未测）` : notice })
           }).finally(() => patch({ checkProgress: null }))
         },
         // 一键启用: 按当前草稿里已启用的实例补全缺失的市场能力路由
@@ -671,7 +694,7 @@ window.__ModuleLoader__.load({
           if (disposed) return
           try { bus.publish({ type: 'watch-demand', pageId, generation: ++demandGeneration, active: false }) } catch {}
           disposed = true; generation++; queryGeneration++; klineSeq++; clearTimeout(timer); clearTimeout(undoTimer); clearTimeout(browseTimer); for (const [delayTimer, resolve] of klineRetryTimers) { clearTimeout(delayTimer); resolve() } klineRetryTimers.clear(); clearInterval(heartbeat); querying?.abort(); for (const c of requests) c.abort(); requests.clear()
-          stopLayout(); stopBus(); doc.removeEventListener('visibilitychange', visible); refresher.dispose(); subscribers.clear()
+          stopLayout(); stopBus(); doc.removeEventListener('visibilitychange', visible); refresher.dispose(); subscribers.clear(); trendListeners.clear()
         },
       }
     }
@@ -1134,7 +1157,7 @@ window.__ModuleLoader__.load({
         listBar,
         renameForm,
         !w.order.length ? h('div', { className: 'ssb-empty' }, h('p', null, '添加第一只自选，集中查看价格和来源。'), h(Button, { primary: true, onClick: () => runtime.updateView({ view: 'search' }) }, '添加自选')) :
-          h('div', { className: 'ssb-table-scroll', role: 'tabpanel', id: WATCHLIST_PANEL_ID, 'aria-label': active.label, onScroll: e => runtime.updateView({ scrollTop: e.currentTarget.scrollTop }), ref: node => { if (node && Math.abs(node.scrollTop - (view.scrollTop || 0)) > 1) node.scrollTop = view.scrollTop || 0 } },
+          h('div', { className: 'ssb-table-scroll', role: 'tabpanel', id: WATCHLIST_PANEL_ID, 'aria-label': active.label, onScroll: e => runtime.setScrollTop(e.currentTarget.scrollTop), ref: node => { const saved = runtime.getScrollTop(); if (node && Math.abs(node.scrollTop - saved) > 1) node.scrollTop = saved } },
             // 表头: 让每列含义自解释; 窄容器整体隐藏(降级为行内键值对)
             h('div', { className: 'ssb-row-head', 'aria-hidden': true },
               h('span', { className: 'ssb-grip' }, ''),
@@ -1349,6 +1372,8 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'ssb-banner ssb-error', role: 'alert' }, message, guide ? h(Button, { onClick: guide.onClick, disabled: busyOneClick }, busyOneClick ? '处理中…' : guide.label) : null, onRetry ? h(Button, { onClick: onRetry }, '重试') : null)
     }
     function KlineView({ runtime, state, item }) {
+      // 分时数据不在 state 里(见 runtime.subscribeTrend): 订阅它才会在落点与换窗时重渲染
+      React.useSyncExternalStore(runtime.subscribeTrend, runtime.trendRevision, runtime.trendRevision)
       const period = state.klinePeriod || '1d'
       // 切标的/周期的当帧 state.kline 还是上一轮的, 只有 key 对上才算这一轮的数据;
       // 否则图例会拼出上一只的涨跌并带上残缺的"最近 ()"
@@ -1787,7 +1812,6 @@ window.__ModuleLoader__.load({
       const costBase = costBaseOf(marks)
       const lastN = Number(q?.last)
       const costPl = costPlOf(marks, q?.last)
-      const applyMarks = next => quiet(() => runtime.mutate('marks', { securityId: item.id, marks: next }))
       // 增删都是整组替换: 协议面只有一个操作, 也不会出现半更新的中间态
       // 标记类型是成组分类切换, 用分段控件而不是两个按钮: 选中态不再靠"黑底按钮"承担
       const markKind = view.markDraft?.kind === 'target' ? 'target' : 'cost'
@@ -1799,8 +1823,9 @@ window.__ModuleLoader__.load({
         if (marks.length >= 12) { runtime.updateView({ markError: '最多 12 个标记' }); return }
         const kind = view.markDraft?.kind === 'target' ? 'target' : 'cost'
         if (marks.some(mark => mark.kind === kind && mark.price === price)) { runtime.updateView({ markError: '同类型不能有重复价格' }); return }
-        applyMarks([...marks, { id: crypto.randomUUID().slice(0, 8), price, kind }])()
-        runtime.updateView({ markDraft: null, markError: '' })
+        runtime.mutate('marks', { securityId: item.id, marks: [...marks, { id: crypto.randomUUID().slice(0, 8), price, kind }] })
+          .then(() => runtime.updateView({ markDraft: null, markError: '' }))
+          .catch(e => runtime.updateView({ markError: e?.message || '标记保存失败' }))
       } },
         h('div', { className: 'ssb-seg', role: 'group', 'aria-label': '标记类型' },
           h('button', { type: 'button', className: `ssb-seg-opt${markKind === 'cost' ? ' ssb-seg-on' : ''}`, 'aria-pressed': markKind === 'cost', onClick: () => runtime.updateView({ markDraft: { kind: 'cost', price: view.markDraft?.price ?? '' } }) }, '成本'),
@@ -1816,7 +1841,7 @@ window.__ModuleLoader__.load({
           h('span', { className: 'ssb-mark-kind' }, mark.kind === 'cost' ? '成本' : '卖价'),
           h('span', { className: 'ssb-number' }, priceTextOf(mark.price, item.priceScale)),
           h('span', { className: `ssb-mark-pct${toneClass(pct)}` }, pct == null ? '—' : `${signed(pct.toFixed(2))}%`),
-          h(Button, { danger: true, disabled: state.busy.write, onClick: applyMarks(marks.filter(other => other.id !== mark.id)) }, '删除'))
+          h(Button, { danger: true, disabled: state.busy.write, onClick: () => runtime.mutate('marks', { securityId: item.id, marks: marks.filter(other => other.id !== mark.id) }).catch(e => runtime.updateView({ markError: e?.message || '标记删除失败' })) }, '删除'))
       })) : null
       // 分组标签: 一只票可同时属于多个分组, 整组替换提交; 已有标签 pill 一键加入, 新标签走输入框
       const tags = item.tags || []
@@ -1965,6 +1990,13 @@ window.__ModuleLoader__.load({
     // 视口夹取: 悬浮窗位置存的是绝对坐标, 浏览器窗口缩小或页面缩放后必须按当前视口收回来,
     // 否则整张卡留在可视区外, 除了清站点数据再没法点开
     const FLOAT_MARGIN = 8, FLOAT_WIDTH = 288, FLOAT_HEIGHT = 210
+    // 浏览器按设备像素取整, 换算出来的缩放比会有千分位误差
+    const SCALE_EPSILON = 0.01
+    // 页面缩放(CSS zoom / transform)不改布局视口, 只放大视觉尺寸: 两者之比就是缩放比
+    const visualScaleOf = element => {
+      const layout = element?.offsetWidth, visual = element?.getBoundingClientRect?.().width
+      return layout > 0 && visual > 0 ? visual / layout : 1
+    }
     // 视口取布局视口: innerWidth 含经典滚动条, 而 position:fixed 的 left/top 以布局视口为准,
     // 混用会把卡片右缘压到滚动条底下。没有布局引擎的环境(SSR/静态渲染)读不到视口, 调用方据此跳过夹取
     const viewportOf = () => {
@@ -1973,38 +2005,45 @@ window.__ModuleLoader__.load({
       const height = root?.clientHeight || (typeof window === 'undefined' ? 0 : window.innerHeight)
       return width > 0 && height > 0 ? { width, height } : null
     }
-    function clampFloatPlacement({ x, y, width, height, viewport }) {
-      const clamp = (value, span) => Math.min(Math.max(FLOAT_MARGIN, value), Math.max(FLOAT_MARGIN, span))
-      return { x: clamp(x, viewport.width - width - FLOAT_MARGIN), y: clamp(y, viewport.height - height - FLOAT_MARGIN) }
+    // scale 是视觉缩放比(页面 zoom / transform): 视口与 left/top 是布局 px, 卡片实际占位是视觉 px,
+    // 两者混算时缩放越大越会放行越界, 所以统一换算到视觉空间夹完再换回布局坐标
+    function clampFloatPlacement({ x, y, width, height, viewport, scale = 1 }) {
+      // 退化缩放比(0/NaN)会让坐标变成 Infinity/NaN 而把卡片整个弄丢
+      const s = Number.isFinite(scale) && scale > 0 ? scale : 1
+      const clamp = (value, span) => Math.min(Math.max(FLOAT_MARGIN * s, value), Math.max(FLOAT_MARGIN * s, span))
+      const visualWidth = width * s, visualHeight = height * s
+      return { x: clamp(x * s, viewport.width - visualWidth - FLOAT_MARGIN * s) / s, y: clamp(y * s, viewport.height - visualHeight - FLOAT_MARGIN * s) / s }
     }
     // 卡片尺寸与视口都要跟: 换模式/开选择器改变高度, 浏览器缩放改变视口。
     // 尺寸进 state, 视口不进——渲染时现读, state 只在 resize 后触发重渲染, 避免漏一次事件就整段用旧视口
     function useFloatBox(ref, enabled) {
-      const [size, setSize] = React.useState(() => ({ width: FLOAT_WIDTH, height: FLOAT_HEIGHT }))
+      const [box, setBox] = React.useState(() => ({ width: FLOAT_WIDTH, height: FLOAT_HEIGHT, scale: 1 }))
       const [, setViewportTick] = React.useState(0)
       React.useEffect(() => {
         if (!enabled) return
         const element = ref.current
         if (!element) return
-        const measure = () => setSize(current => {
-          const width = element.offsetWidth || FLOAT_WIDTH, height = element.offsetHeight || FLOAT_HEIGHT
-          return current.width === width && current.height === height ? current : { width, height }
+        const measure = () => setBox(current => {
+          const width = element.offsetWidth || FLOAT_WIDTH, height = element.offsetHeight || FLOAT_HEIGHT, scale = visualScaleOf(element)
+          return current.width === width && current.height === height && Math.abs(current.scale - scale) < SCALE_EPSILON ? current : { width, height, scale }
         })
         const onViewport = () => { measure(); setViewportTick(tick => tick + 1) }
         measure()
         const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null
         observer?.observe(element)
+        // 页面缩放不触发 resize, 只改元素视觉尺寸: 观察根元素才能在缩放后重新夹取
+        observer?.observe(document.documentElement)
         window.addEventListener('resize', onViewport)
         return () => { observer?.disconnect(); window.removeEventListener('resize', onViewport) }
       }, [enabled, ref])
-      return size
+      return box
     }
     // 拖动: 按住非控件区域移动, 松手时把落点写回偏好
     function useFloatingDrag(onDrop) {
       const dragRef = React.useRef(null)
       const clamp = (x, y, el) => {
         const viewport = viewportOf()
-        return viewport ? clampFloatPlacement({ x, y, width: el?.offsetWidth || FLOAT_WIDTH, height: el?.offsetHeight || FLOAT_HEIGHT, viewport }) : { x, y }
+        return viewport ? clampFloatPlacement({ x, y, width: el?.offsetWidth || FLOAT_WIDTH, height: el?.offsetHeight || FLOAT_HEIGHT, viewport, scale: visualScaleOf(el) }) : { x, y }
       }
       return {
         onPointerDown: e => {
@@ -2016,7 +2055,9 @@ window.__ModuleLoader__.load({
         },
         onPointerMove: e => {
           if (!dragRef.current) return
-          const { x, y } = clamp(e.clientX - dragRef.current.dx, e.clientY - dragRef.current.dy, e.currentTarget)
+          // 指针事件是视觉坐标, 夹取要布局坐标: 混着传会让缩放页里拖动跳位并把错坐标存下来
+          const scale = visualScaleOf(e.currentTarget)
+          const { x, y } = clamp((e.clientX - dragRef.current.dx) / scale, (e.clientY - dragRef.current.dy) / scale, e.currentTarget)
           e.currentTarget.style.left = `${x}px`
           e.currentTarget.style.top = `${y}px`
           e.currentTarget.style.right = 'auto'
@@ -2026,8 +2067,9 @@ window.__ModuleLoader__.load({
           if (!dragRef.current) return
           dragRef.current = null
           e.currentTarget.releasePointerCapture?.(e.pointerId)
-          const box = e.currentTarget.getBoundingClientRect()
-          onDrop({ x: Math.round(box.left), y: Math.round(box.top) })
+          // 落点是视觉坐标, 偏好里存布局坐标: 缩放状态下直接存会让重开后跳位
+          const box = e.currentTarget.getBoundingClientRect(), scale = visualScaleOf(e.currentTarget)
+          onDrop({ x: Math.round(box.left / scale), y: Math.round(box.top / scale) })
         },
       }
     }
@@ -2305,6 +2347,7 @@ window.__ModuleLoader__.load({
       const allQuiet = picked.every(id => QUIET_STATES.has(quoteOf(id)?.sessionState))
       useFloatingPolling({ runtime, open, picked, items, live: floating.live, paused: state.paused, floatSeconds: floatRefresh, allQuiet, epoch, revision, retryTick, setFetched, setError: setQuoteError })
       const trading = TRADING_STATES.includes(quoteOf(securityId)?.sessionState) || !quoteOf(securityId)?.sessionState
+      React.useSyncExternalStore(runtime.subscribeTrend, runtime.trendRevision, runtime.trendRevision)
       const showTrend = open && mode === 'kline' && !picker && floating.live !== false && !state.paused
       useTrendPolling({ enabled: showTrend, runtime, securityId, context: showTrend ? runtime.trendContext(securityId) : null, trading })
       const trendData = mode === 'kline' && securityId ? runtime.getTrend(securityId) : null
@@ -2357,7 +2400,7 @@ window.__ModuleLoader__.load({
       if (!open) return null
       // 坐标写坏(NaN/非数值)时退回默认右下角锚定: 拿 NaN 当 left 会让整张卡消失
       const viewport = viewportOf()
-      const placed = Number.isFinite(floating.x) && Number.isFinite(floating.y) && viewport ? clampFloatPlacement({ x: floating.x, y: floating.y, width: floatBox.width, height: floatBox.height, viewport }) : null
+      const placed = Number.isFinite(floating.x) && Number.isFinite(floating.y) && viewport ? clampFloatPlacement({ x: floating.x, y: floating.y, width: floatBox.width, height: floatBox.height, viewport, scale: floatBox.scale }) : null
       const position = placed ? { left: placed.x, top: placed.y, right: 'auto', bottom: 'auto' } : {}
       const step = delta => {
         const at = picked.indexOf(securityId)
@@ -2463,7 +2506,7 @@ window.__ModuleLoader__.load({
           if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); const index = e.key === 'ArrowDown' ? Math.min(visible.length - 1, at + 1) : Math.max(0, at - 1); if (visible[index]) choose(visible[index]) }
           if (e.key === 'Escape') runtime.updateView({ view: 'list' })
         } }))),
-        h('div', { role: 'listbox', 'aria-label': '证券搜索结果', className: 'ssb-results' }, ...visible.map(item => h('div', { role: 'option', 'aria-selected': view.selectedId === item.id, key: item.id, className: `ssb-candidate${view.selectedId === item.id ? ' ssb-selected' : ''}`, onClick: () => choose(item) }, h('span', { className: 'ssb-peek', role: 'button', tabIndex: 0, onClick: e => { e.stopPropagation(); runtime.updateView({ detailId: item.id, view: view.view, overlay: 'detail', browsePeek: { ...(view.browsePeek || {}), [item.id]: item } }); runtime.refresh([{ id: item.id, exchange: item.exchange, code: item.code, officialName: item.officialName }]).catch(() => {}) } }, h('strong', null, item.officialName), h('span', { className: 'ssb-muted' }, `${MARKET_LABEL[item.exchange] || item.exchange} ${item.code}${item.currency ? ` · ${item.currency}` : ''}`)), h(Button, { disabled: !!data?.control?.watchlist?.items?.[item.id] || state.busy.write, onClick: quiet(() => runtime.mutate('add', { securityId: item.id })) }, data?.control?.watchlist?.items?.[item.id] ? '已在自选' : '加自选')))),
+        h('div', { role: 'listbox', 'aria-label': '证券搜索结果', className: 'ssb-results' }, ...visible.map(item => h('div', { role: 'option', 'aria-selected': view.selectedId === item.id, key: item.id, className: `ssb-candidate${view.selectedId === item.id ? ' ssb-selected' : ''}`, onClick: () => choose(item) }, h('button', { type: 'button', className: 'ssb-peek', onClick: e => { e.stopPropagation(); runtime.updateView({ detailId: item.id, view: view.view, overlay: 'detail', browsePeek: { ...(view.browsePeek || {}), [item.id]: item } }); runtime.refresh([{ id: item.id, exchange: item.exchange, code: item.code, officialName: item.officialName }]).catch(() => {}) } }, h('strong', null, item.officialName), h('span', { className: 'ssb-muted' }, `${MARKET_LABEL[item.exchange] || item.exchange} ${item.code}${item.currency ? ` · ${item.currency}` : ''}`)), h(Button, { disabled: !!data?.control?.watchlist?.items?.[item.id] || state.busy.write, onClick: quiet(() => runtime.mutate('add', { securityId: item.id })) }, data?.control?.watchlist?.items?.[item.id] ? '已在自选' : '加自选')))),
         !visible.length ? h('p', { className: 'ssb-muted', style: { margin: 0 } }, view.query ? '暂无匹配。目录未同步时，请先到设置配置并同步目录。' : '输入关键词开始搜索，例如代码、名称或拼音首字母。') : null,
         state.errorCode === 'CATALOG_NOT_READY' ? h('div', { className: 'ssb-banner', style: { margin: 0 } }, '目录未就绪。可以直接浏览市场添加自选。', h(Button, { onClick: () => runtime.updateView({ view: 'browse' }) }, '前往浏览市场')) : null,
         h('div', { className: 'ssb-toolbar', style: { margin: 0 } }, h(Button, { primary: true, disabled: !view.selectedId || !!data?.control?.watchlist?.items?.[view.selectedId] || state.busy.write, onClick: quiet(async () => { await runtime.mutate('add', { securityId: view.selectedId }); runtime.updateView({ view: 'list', selectedId: null }) }) }, data?.control?.watchlist?.items?.[view.selectedId] ? '已在自选' : '确认添加'))))
@@ -2636,7 +2679,7 @@ window.__ModuleLoader__.load({
             probe ? h('span', {
               className: `ssb-probe-result ${probe.status === 'ready' ? 'ssb-probe-ok' : 'ssb-probe-bad'}`,
               title: probe.error ? `${probe.error.code || ''} ${probe.error.message || ''}`.trim() : `耗时 ${probe.ms}ms`,
-            }, probe.status === 'ready' ? `✓ ${probe.ms ?? '—'}ms` : '✗') : null)
+            }, probe.status === 'ready' ? `✓ ${probe.ms ?? '—'}ms` : probe.status === 'skipped' ? '未测' : '✗') : null)
         })
         // 备源与延迟只对报价/K线/分时有意义,收进行内折叠,避免八市场铺成三屏;
         // 分时目前只有一个源, 没有第二个声明者时这一行恒为空操作, 不渲染
@@ -2950,7 +2993,7 @@ window.__ModuleLoader__.load({
 .ssb-kline-tip { position:absolute; z-index:3; width:200px; padding:8px 10px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); background:var(--ssb-bg-sub); box-shadow:var(--dsw-shadow-lv3); font-size:12px; line-height:1.5; color:var(--ssb-text-sub); font-family:var(--ds-font-family-code); font-variant-numeric:tabular-nums; pointer-events:none; }
 .ssb-kline-tip-time { color:var(--ssb-text); }.ssb-kline-skeleton { height:340px; border:1px dashed var(--ssb-border); border-radius:var(--ssb-radius-sm); display:flex; align-items:center; justify-content:center; color:var(--ssb-text-sub); margin-bottom:8px; }
 .ssb-detail-grid { display:grid; grid-template-columns:minmax(0,1fr) 240px; gap:16px; align-items:start; }.ssb-detail-side { min-width:0; }.ssb-detail-side .ssb-facts { grid-template-columns:auto minmax(0,1fr); gap:6px 12px; }.ssb-detail-side .ssb-facts dt { white-space:nowrap; }
-.ssb-empty { padding:48px 16px; color:var(--ssb-text-sub); text-align:center; font-size:14px; }.ssb-banner { border:1px solid var(--ssb-border); border-left:3px solid var(--ssb-warn); border-radius:var(--ssb-radius-sm); padding:12px; margin:12px 0; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }.ssb-banner-ok { border-left-color:var(--ssb-ok); }.ssb-error { border-left-color:var(--ssb-danger); }.ssb-banner-floating { position:fixed; top:12px; left:50%; transform:translateX(-50%); z-index:80; width:min(720px,92vw); margin:0; background:var(--ssb-bg); box-shadow:var(--dsw-shadow-lv3); }.ssb-banner p { margin:0; }.ssb-search-view { max-width:760px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); background:var(--ssb-bg); padding-bottom:4px; }.ssb-panel-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px; border-bottom:.5px solid var(--ssb-border); flex-wrap:wrap; }.ssb-panel-head h2 { font-size:16px; margin:0; }.ssb-panel-body { padding:16px; display:flex; flex-direction:column; gap:12px; }.ssb-form-row { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; }.ssb-form-row > .ssb-field { flex:0 0 176px; }.ssb-search-label { display:grid; gap:8px; margin-top:20px; }.ssb-form-row > .ssb-search-label { flex:1 1 300px; margin-top:0; }.ssb-results { display:grid; gap:8px; margin:16px; }.ssb-candidate { padding:10px 12px; display:flex; justify-content:space-between; align-items:center; gap:12px; background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); color:var(--ssb-text); font:inherit; cursor:pointer; }.ssb-candidate:hover { border-color:var(--ssb-accent); }.ssb-candidate.ssb-selected { background:var(--ssb-accent-wash); border-color:var(--ssb-accent); }.ssb-peek { display:flex; flex:1; flex-direction:column; gap:2px; text-align:left; cursor:pointer; min-width:0; }.ssb-peek:hover strong { text-decoration:underline; }.ssb-provider { border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); padding:16px; margin:12px 0; min-width:0; }.ssb-provider legend { padding:0 6px; color:var(--ssb-text-sub); }.ssb-provider details { grid-column:1 / -1; }.ssb-provider summary { cursor:pointer; }.ssb-reqlog { margin:8px 0 0; padding:0 0 0 18px; color:var(--ssb-text-sub); }.ssb-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }.ssb-route-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(132px,1fr)); gap:12px; }.ssb-route-cell { display:grid; gap:6px; min-width:0; }.ssb-route-cell-label { color:var(--ssb-text-sub); font-size:11px; }.ssb-route-cell select { width:100%; min-width:0; }.ssb-route-advanced { margin-top:12px; }.ssb-route-advanced > summary { cursor:pointer; }.ssb-route-tune { display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap; padding:8px 0; border-top:1px solid var(--ssb-border); }.ssb-route-tune-label { min-width:32px; color:var(--ssb-text-sub); }.ssb-route-delay { flex:0 0 120px; }
+.ssb-empty { padding:48px 16px; color:var(--ssb-text-sub); text-align:center; font-size:14px; }.ssb-banner { border:1px solid var(--ssb-border); border-left:3px solid var(--ssb-warn); border-radius:var(--ssb-radius-sm); padding:12px; margin:12px 0; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }.ssb-banner-ok { border-left-color:var(--ssb-ok); }.ssb-error { border-left-color:var(--ssb-danger); }.ssb-banner-floating { position:fixed; top:12px; left:50%; transform:translateX(-50%); z-index:80; width:min(720px,92vw); margin:0; background:var(--ssb-bg); box-shadow:var(--dsw-shadow-lv3); }.ssb-banner p { margin:0; }.ssb-search-view { max-width:760px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); background:var(--ssb-bg); padding-bottom:4px; }.ssb-panel-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px; border-bottom:.5px solid var(--ssb-border); flex-wrap:wrap; }.ssb-panel-head h2 { font-size:16px; margin:0; }.ssb-panel-body { padding:16px; display:flex; flex-direction:column; gap:12px; }.ssb-form-row { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; }.ssb-form-row > .ssb-field { flex:0 0 176px; }.ssb-search-label { display:grid; gap:8px; margin-top:20px; }.ssb-form-row > .ssb-search-label { flex:1 1 300px; margin-top:0; }.ssb-results { display:grid; gap:8px; margin:16px; }.ssb-candidate { padding:10px 12px; display:flex; justify-content:space-between; align-items:center; gap:12px; background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); color:var(--ssb-text); font:inherit; cursor:pointer; }.ssb-candidate:hover { border-color:var(--ssb-accent); }.ssb-candidate.ssb-selected { background:var(--ssb-accent-wash); border-color:var(--ssb-accent); }.ssb-peek { display:flex; flex:1; flex-direction:column; gap:2px; text-align:left; cursor:pointer; min-width:0; background:none; border:0; padding:0; font:inherit; color:inherit; }.ssb-peek:hover strong { text-decoration:underline; }.ssb-provider { border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); padding:16px; margin:12px 0; min-width:0; }.ssb-provider legend { padding:0 6px; color:var(--ssb-text-sub); }.ssb-provider details { grid-column:1 / -1; }.ssb-provider summary { cursor:pointer; }.ssb-reqlog { margin:8px 0 0; padding:0 0 0 18px; color:var(--ssb-text-sub); }.ssb-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }.ssb-route-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(132px,1fr)); gap:12px; }.ssb-route-cell { display:grid; gap:6px; min-width:0; }.ssb-route-cell-label { color:var(--ssb-text-sub); font-size:11px; }.ssb-route-cell select { width:100%; min-width:0; }.ssb-route-advanced { margin-top:12px; }.ssb-route-advanced > summary { cursor:pointer; }.ssb-route-tune { display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap; padding:8px 0; border-top:1px solid var(--ssb-border); }.ssb-route-tune-label { min-width:32px; color:var(--ssb-text-sub); }.ssb-route-delay { flex:0 0 120px; }
 .ssb-switch { display:inline-flex; align-items:center; gap:8px; cursor:pointer; position:relative; }.ssb-switch input[type="checkbox"] { position:absolute; opacity:0; width:1px; height:1px; }.ssb-switch__track { display:inline-flex; flex-shrink:0; align-items:center; width:34px; height:19px; padding:3px; border-radius:999px; background:var(--ssb-bg-muted); border:1px solid var(--ssb-border); transition:background .15s ease; }.ssb-switch__thumb { width:13px; height:13px; border-radius:50%; background:var(--ssb-text-sub); transition:transform .15s ease; }.ssb-switch input[type="checkbox"]:checked + .ssb-switch__track { background:var(--ssb-accent); }.ssb-switch input[type="checkbox"]:checked + .ssb-switch__track .ssb-switch__thumb { transform:translateX(13px); background:var(--ssb-bg); }.ssb-switch input[type="checkbox"]:focus-visible + .ssb-switch__track { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:2px; }.ssb-switch input[type="checkbox"]:disabled + .ssb-switch__track { opacity:.5; cursor:not-allowed; }.ssb-switch:hover .ssb-switch__track { border-color:var(--ssb-accent); }
 @media(max-width:720px) { .ssb-detail-grid { grid-template-columns:minmax(0,1fr); } }
 @media(max-width:959px) { .ssb-page { padding:16px; } }

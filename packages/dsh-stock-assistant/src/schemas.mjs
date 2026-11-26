@@ -121,7 +121,7 @@ export function parseConfiguration(value) {
 }
 // 分时路由的迁移版本: 存量库只补一次(补缺失路由 + 给单源分时登记备源), 用户随后删掉分时路由不该在下次启动被复活
 export const TREND_ROUTE_MIGRATION = 2
-export const controlSchema = z.object({ revision: z.number().int().nonnegative(), routingRevision: z.number().int().nonnegative(), routeMigration: z.number().int().nonnegative().default(0), watchlist: z.object({ order: z.array(z.string()).max(100), items: z.record(z.string(), securitySchema.safeExtend({ alias: z.string(), pinned: z.boolean(), marks: marksSchema, tags: z.array(tagName).max(MAX_TAGS).refine(list => new Set(list).size === list.length, '标签不能重复').default([]) })) }), preferences: preferencesSchema, providers: z.array(providerSchema), routes: z.array(routeSchema), operations: z.array(z.object({ id: z.uuid(), hash: z.string(), at: z.number(), result: z.object({ revision: z.number() }).passthrough(), action: z.string(), payload: z.unknown() })).max(256) }).superRefine((control, ctx) => {
+export const controlSchema = z.object({ revision: z.number().int().nonnegative(), routingRevision: z.number().int().nonnegative(), routeMigration: z.number().int().nonnegative().default(0), watchlist: z.object({ order: z.array(z.string()).max(100), items: z.record(z.string(), securitySchema.safeExtend({ alias: z.string(), pinned: z.boolean(), marks: marksSchema, tags: z.array(tagName).max(MAX_TAGS).refine(list => new Set(list).size === list.length, '标签不能重复').default([]) })) }), preferences: preferencesSchema, providers: z.array(providerSchema), routes: z.array(routeSchema), operations: z.array(z.object({ id: z.uuid(), hash: z.string(), at: z.number(), result: z.object({ revision: z.number() }).passthrough(), action: z.string() })).max(256) }).superRefine((control, ctx) => {
   const w = control.watchlist
   if (new Set(w.order).size !== w.order.length || w.order.length !== Object.keys(w.items).length || w.order.some(id => w.items[id]?.id !== id)) ctx.addIssue({ code: 'custom', message: '自选序列与证券不一致' })
   let unpinned = false
@@ -175,25 +175,16 @@ const normalizeCredentialField = root => {
   const providers = root.providers.map(p => { const next = normalizeProvider(p); if (next !== p) changed = true; return next })
   return changed ? { ...root, providers } : root
 }
-// 幂等操作台账里的 configuration 载荷是用户当时的完整配置副本: 它和 providers 一样会带代理/端点 URL,
-// 只清洗顶层 providers 会让明文继续留在文件里(快照不返回 operations, 但持久化仍是明文)。
+// 幂等台账曾经存过一份完整的配置副本(含代理/端点明文): 现在只留幂等键与结果,
+// 读入时把存量条目里的 payload 丢掉。丢弃必须发生在归一化里, 否则明文会留在盘上直到下一次无关写入。
 const normalizeOperations = root => {
   if (!Array.isArray(root?.operations)) return root
   let changed = false
   const operations = root.operations.map(operation => {
-    const payload = operation && typeof operation === 'object' ? operation.payload : null
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return operation
-    let next = payload
-    if (Array.isArray(payload.providers)) {
-      let providersChanged = false
-      const providers = payload.providers.map(p => { const candidate = normalizeProvider(p); if (candidate !== p) providersChanged = true; return candidate })
-      if (providersChanged) next = { ...next, providers }
-    }
-    const endpoints = normalizeEndpointMap(next.endpoints)
-    if (endpoints !== next.endpoints) next = { ...next, endpoints }
-    if (next === payload) return operation
+    if (!operation || typeof operation !== 'object' || !('payload' in operation)) return operation
     changed = true
-    return { ...operation, payload: next }
+    const { payload, ...rest } = operation
+    return rest
   })
   return changed ? { ...root, operations } : root
 }

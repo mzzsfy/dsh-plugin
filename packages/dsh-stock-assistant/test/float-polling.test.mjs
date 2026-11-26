@@ -71,7 +71,7 @@ function mount(mode, { trendFailure = false, quotes = snapshot.quotes, sessionDa
   const setInterval = (fn, delay) => { intervals.set(fn, delay); return fn }
   vm.runInNewContext(source, { window, document, localStorage, console, fetch, AbortController, URLSearchParams, Date: Clock, setTimeout, clearTimeout, setInterval, clearInterval: fn => intervals.delete(fn), crypto: globalThis.crypto })
   const runtime = plugin.__testing.createPageRuntime({
-    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {} } },
+    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0 } },
     bus: { subscribe: (_, { onReset }) => { reset = onReset; return () => {} }, publish() {} },
     tools: { createSnapshotRefresh: load => { loadSnapshot = load; return { refresh() {}, dispose() {} } } },
     document, fetch,

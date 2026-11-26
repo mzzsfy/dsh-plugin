@@ -59,8 +59,8 @@ test('klineKeyOf 对不同标的与周期给出不同键', async () => {
 test('换详情时自动回填该标的已保存的别名', async () => {
   const { createPageRuntime } = await load()
   const runtime = createPageRuntime({
-    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {} }, selectPanel() {} },
-    bus: { subscribe: () => () => {}, publish() {} },
+    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0 }, selectPanel() {} },
+    bus: { subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0, publish() {} },
     tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) },
     document: { addEventListener() {}, removeEventListener() {} },
     fetch: async () => ({ ok: true, json: async () => ({ ok: true, data: snapshotOf({}) }) }),
@@ -82,8 +82,8 @@ test('换详情时自动回填该标的已保存的别名', async () => {
 const snapshotOf = items => ({ serverEpoch: 'e', snapshotSeq: 1, routingRevision: 0, routeSelections: {}, control: { revision: 1, routingRevision: 0, watchlist: { order: Object.keys(items), items }, preferences: { refreshSeconds: 15, colorMode: 'red-up' } }, quotes: {} })
 const securityOf = (id, code) => ({ id, exchange: id.split(':')[0], code, officialName: code, alias: '', pinned: false, cost: null, tags: [], currency: 'CNY', priceScale: 2 })
 const runtimeOf = (plugin, extra = {}) => plugin.__testing.createPageRuntime({
-  layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {} }, selectPanel: extra.selectPanel || (() => {}) },
-  bus: { subscribe: () => () => {}, publish() {} },
+  layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0 }, selectPanel: extra.selectPanel || (() => {}) },
+  bus: { subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0, publish() {} },
   tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) },
   document: { addEventListener() {}, removeEventListener() {}, visibilityState: 'visible' },
   fetch: extra.fetch || (async () => ({ ok: true, json: async () => ({ ok: true, data: snapshotOf({}) }) })),
@@ -93,8 +93,8 @@ const runtimeOf = (plugin, extra = {}) => plugin.__testing.createPageRuntime({
 test('换详情时清空成本与分组草稿, 同一只重复打开不清', async () => {
   const { createPageRuntime } = await load()
   const runtime = createPageRuntime({
-    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {} }, selectPanel() {} },
-    bus: { subscribe: () => () => {}, publish() {} },
+    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0 }, selectPanel() {} },
+    bus: { subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0, publish() {} },
     tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) },
     document: { addEventListener() {}, removeEventListener() {} },
     fetch: async () => ({ ok: true, json: async () => ({ ok: true, data: snapshotOf({}) }) }),
@@ -120,8 +120,8 @@ test('openDetail 先切面板再进详情, 且不预载 K 线', async () => {
   const { createPageRuntime } = await load()
   const calls = []
   const runtime = createPageRuntime({
-    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {} }, selectPanel: id => calls.push(['selectPanel', id]) },
-    bus: { subscribe: () => () => {}, publish() {} },
+    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0 }, selectPanel: id => calls.push(['selectPanel', id]) },
+    bus: { subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0, publish() {} },
     tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) },
     document: { addEventListener() {}, removeEventListener() {} },
     fetch: async url => { calls.push(['fetch', url.split('?')[0]]); return { ok: true, json: async () => ({ ok: true, data: snapshotOf({}) }) } },
@@ -144,8 +144,8 @@ test('K线请求一次取足历史, 不把用户卡在一年窗口', async () =>
   const { createPageRuntime, KLINE_HISTORY_LIMIT } = await load()
   const urls = []
   const runtime = createPageRuntime({
-    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {} }, selectPanel() {} },
-    bus: { subscribe: () => () => {}, publish() {} },
+    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0 }, selectPanel() {} },
+    bus: { subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0, publish() {} },
     tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) },
     document: { addEventListener() {}, removeEventListener() {} },
     fetch: async url => { urls.push(String(url)); return { ok: true, json: async () => ({ ok: true, data: { candles: [] } }) } },
@@ -163,8 +163,8 @@ test('标的变化后到达的 K 线结果被丢弃', async () => {
   let release
   const pending = new Promise(resolve => { release = resolve })
   const runtime = createPageRuntime({
-    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {} }, selectPanel() {} },
-    bus: { subscribe: () => () => {}, publish() {} },
+    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0 }, selectPanel() {} },
+    bus: { subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0, publish() {} },
     tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) },
     document: { addEventListener() {}, removeEventListener() {} },
     fetch: () => pending,
@@ -187,8 +187,8 @@ test('标的变化后到达的 K 线失败不清空当前标的的数据', async
   const { createPageRuntime } = await load()
   let pending = 0, rejectA, resolveB
   const runtime = createPageRuntime({
-    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {} }, selectPanel() {} },
-    bus: { subscribe: () => () => {}, publish() {} },
+    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0 }, selectPanel() {} },
+    bus: { subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0, publish() {} },
     tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) },
     document: { addEventListener() {}, removeEventListener() {} },
     fetch: () => ++pending === 1 ? new Promise((_, reject) => { rejectA = reject }) : new Promise(resolve => { resolveB = resolve }),
@@ -217,8 +217,8 @@ test('同 key 并发只让最后一次请求的结果落地', async () => {
   let pending = 0
   const releases = []
   const runtime = createPageRuntime({
-    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {} }, selectPanel() {} },
-    bus: { subscribe: () => () => {}, publish() {} },
+    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0 }, selectPanel() {} },
+    bus: { subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0, publish() {} },
     tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) },
     document: { addEventListener() {}, removeEventListener() {} },
     fetch: () => { const index = ++pending; return new Promise(resolve => releases.push(() => resolve({ ok: true, json: async () => ({ ok: true, data: { candles: [{ time: '2026-11-06', open: index, high: index, low: index, close: index }] } }) }))) },
@@ -243,8 +243,8 @@ test('同 key 并发: 先发的请求失败时不覆盖后发的成功结果', a
   const { createPageRuntime } = await load()
   const releases = []
   const runtime = createPageRuntime({
-    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {} }, selectPanel() {} },
-    bus: { subscribe: () => () => {}, publish() {} },
+    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0 }, selectPanel() {} },
+    bus: { subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0, publish() {} },
     tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) },
     document: { addEventListener() {}, removeEventListener() {} },
     fetch: () => new Promise((resolve, reject) => releases.push({ resolve, reject })),
@@ -268,8 +268,8 @@ test('同 key 并发: 先发的请求失败时不覆盖后发的成功结果', a
 test('服务不可用: 非 JSON 响应翻成可读错误', async () => {
   const { createPageRuntime } = await load()
   const runtime = createPageRuntime({
-    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {} }, selectPanel() {} },
-    bus: { subscribe: () => () => {}, publish() {} },
+    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0 }, selectPanel() {} },
+    bus: { subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0, publish() {} },
     tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) },
     document: { addEventListener() {}, removeEventListener() {} },
     fetch: async () => ({ ok: false, status: 404, json: async () => { throw new SyntaxError('Unexpected token \'o\', "not found" is not valid JSON') } }),
@@ -287,8 +287,8 @@ test('中止错误折算为中文取消, 不伪装成服务故障', async () => 
   const { createPageRuntime } = await load()
   const abortError = Object.assign(new Error('This operation was aborted'), { name: 'AbortError', code: 'ABORT_ERR' })
   const runtime = createPageRuntime({
-    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {} }, selectPanel() {} },
-    bus: { subscribe: () => () => {}, publish() {} },
+    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0 }, selectPanel() {} },
+    bus: { subscribe: () => () => {}, subscribeTrend: () => () => {}, trendRevision: () => 0, publish() {} },
     tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) },
     document: { addEventListener() {}, removeEventListener() {} },
     fetch: async () => ({ ok: false, status: 200, json: async () => { throw abortError } }),

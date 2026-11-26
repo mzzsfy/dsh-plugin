@@ -13,7 +13,8 @@ import { openState, digest } from './state.mjs'
 import { parseConfiguration, preferencesSchema, defaultConfig, klineQuerySchema, refreshSecuritiesSchema, CAPABILITIES, TREND_ROUTE_MIGRATION, tickPeriodMs } from './schemas.mjs'
 import { createWatchlistService } from './service.mjs'
 import { createBudget } from './budget.mjs'
-import { createExecutor, routeTimeoutMs, requestBudgetMs } from './executor.mjs'
+import { createUsSymbols } from './us-symbols.mjs'
+import { createExecutor, routeTimeoutMs, requestBudgetMs, groupGapMs, UPSTREAM_TIMEOUT_MS, EXECUTOR_CONCURRENCY } from './executor.mjs'
 import { createCollector, deriveDelay } from './collector.mjs'
 import { createCatalog } from './catalog.mjs'
 import { createDemand } from './demand.mjs'
@@ -22,12 +23,18 @@ import { createTrendCache, trendSessionDate } from './trend-cache.mjs'
 import { createTickStore } from './ticks.mjs'
 import { fail, parseSecurityId, MARKET_META, clockInZone } from './market-model.mjs'
 const WINDOW = 5 * 60 * 1000
+// 探针诊断的节流窗口内最多发起多少次检查: 检查会真的打上游, 不能由页面无限触发
+const PROBE_CHECK_LIMIT = 64
+// 探针总预算上限: 目标多到推导值超过它时不再加长请求, 改为交出已完成的部分诊断
+const PROBE_TIMEOUT_CEILING_MS = 2 * 60 * 1000
+// 响应收尾(序列化 + 写日志)留在路由计时之内的裕度
+const PROBE_RESPONSE_MARGIN_MS = 2 * 1000
 // 分时来源(东财/腾讯)的时间戳统一按北京时间给出, 拍点线的横轴必须与之一致, 否则切到离线时整体偏移
 const TREND_SOURCE_TIME_ZONE = 'Asia/Shanghai'
-const US_SYMBOL_TTL = 24 * 60 * 60 * 1000
-const US_SYMBOL_LIMIT = 500
 export async function createApplication({ storageDomain, providers = [tushare, tencent, sina, eastmoney, xueqiu, finnhub], publish = () => {}, env = process.env, credentials = null, fetch = globalThis.fetch, now = Date.now, timers = globalThis, vendorAvailable = true }) {
-  const serverEpoch = randomUUID(), checks = new Map()
+  const serverEpoch = randomUUID()
+  // 检查节流按最近一次窗口内的时间戳计: 固定窗口会在边界放行双倍突发, 探针是真的打上游
+  const probeTimes = []
   // 凭据解析: 宿主提供 credentials 服务时交给它(插件存储层优先, 再逐层回退到进程环境与 .env 文件),
   // 否则退回进程环境变量。引用只表示"哪个密钥", 值始终由宿主保管。
   // 接口按能力逐个核对: 宿主给的对象缺哪个方法, 就只退回哪条路径, 而不是在取数时炸掉。
@@ -43,7 +50,7 @@ export async function createApplication({ storageDomain, providers = [tushare, t
   }
   let snapshotSeq = 0, stopped = false, collector, catalog, demand, watchlist, recoveryLoop
   let ensuring = null, lastEnsure = -Infinity, ensureError = null, hadDemand = false, ensureCaches = () => {}
-  const usSymbols = new Map()
+  const usSymbols = createUsSymbols({ now })
   const touched = () => snapshotSeq++
   const changed = () => { touched(); publish({ type: 'invalidate', serverEpoch, snapshotSeq, scopes: ['snapshot'] }) }
   // 凭据存在性只给设置页看, 而解析是异步的、快照是同步的: 保存配置与启动时各算一次, 快照读这份结果。
@@ -78,7 +85,9 @@ export async function createApplication({ storageDomain, providers = [tushare, t
     trendCache = createTrendCache({ table: state.trendCache, now })
     ticks = createTickStore({ now })
     // 回探跟着面板活跃走: 有人看时每 RECOVERY_PROBE_MS 把已降级路由的上级全探一遍, 没人看就停
-    recoveryLoop = createRecoveryLoop({ probe: createRecovery({ getControl, router, executor }), timers, interval: RECOVERY_PROBE_MS, canRun: () => executor.idle() })
+    // 回探要的是当前生效的 provider/route 表: 传控制记录读取器(整条记录)会让 getConfig() 直接抛错,
+    // 而循环把异常吞掉 —— 降级路由的自动回切会静默地一次都不跑
+    recoveryLoop = createRecoveryLoop({ probe: createRecovery({ getConfig: () => state.get(), router, executor }), timers, interval: RECOVERY_PROBE_MS, canRun: () => executor.idle() })
     catalog = createCatalog({ state, getControl, router, executor, registry, now, changed })
     demand = createDemand(() => {
       const wanted = demand.active(), opening = wanted && !hadDemand; hadDemand = wanted
@@ -113,38 +122,94 @@ export async function createApplication({ storageDomain, providers = [tushare, t
     throw e
   }
   const snapshot = () => {
-    const control = state.get(); delete control.operations
+    // 台账不随快照下发; 读侧共享同一份冻结快照, 不能原地删字段
+    const { operations, ...control } = state.get()
     return { serverEpoch, snapshotSeq, routingRevision: control.routingRevision, control, quotes: collector.watchEntries(), timeouts: { route: routeTimeoutMs(control.preferences) }, routeSelections: router.selections(), catalogs: catalog.status(), adapters: registry.descriptors(), suggested: defaultConfig(), ensureError, vendorAvailable, providerStatus: control.providers.map(p => ({ id: p.id, credentialPresent: p.credentialRef === null || credentialPresence.get(`${p.id}:credential`) === true, credentialRef: p.credentialRef, proxy: !!p.proxy, proxyCredentialRef: p.proxyCredentialRef ?? null, proxyCredentialPresent: p.proxyCredentialRef ? credentialPresence.get(`${p.id}:proxy`) === true : null, endpointsCovered: Object.keys(p.endpoints || {}).length, recentRequests: executor.recentRequests(p.id) })), klineReady: Object.fromEntries(control.routes.filter(r => r.capability === 'kline').map(r => [r.market, true])), markets: Object.fromEntries(Object.entries(MARKET_META).map(([market, meta]) => [market, { currency: meta.currency, verified: meta.verifiedByDefault }])) }
   }
   function assertLive() { if (stopped) fail('STOPPED', '股票工具已停止', 503) }
-  async function providerCheck(input, signal) {
-    assertLive()
-    const config = parseConfiguration({ providers: input.providers, routes: input.routes })
-    const caps = z.array(z.enum(CAPABILITIES)).min(1).max(CAPABILITIES.length).parse(input.capabilities)
-    const at = now()
-    for (const [id, check] of checks) if (check.until <= at) checks.delete(id)
-    if (checks.size >= 64) fail('CHECK_LIMIT', '检查请求过多，请稍后重试', 429)
-    const results = []
+  // 待测目标表: 一条路由的每个实例各算一个探针, 同 (实例, 能力, 市场) 只测一次。
+  // 组内串行由执行器的额度组间隔保证, 所以并行度按额度组切分, 而不是按目标数。
+  const probePlan = (config, caps) => {
+    const plan = [], seen = new Set(), groups = new Map()
     for (const route of config.routes.filter(r => caps.includes(r.capability))) for (const target of [route.primaryInstanceId, ...route.fallbackInstanceIds]) {
       const instance = config.providers.find(p => p.id === target)
       registry.validate(instance, route)
       const key = `${instance.id}:${route.capability}:${route.market}`
-      if (results.some(r => r.key === key)) continue
-      // 探针耗时就是这一条路由端到端拿数据的真实延迟, 用于把「能不能用」和「快不快」一起回给用户
-      const startedAt = now()
-      try {
-        const result = await executor.run(instance, route.capability, { market: route.market, instrument: route.instrument }, { probe: true, signal })
-        // 探针必须由同名能力的端点产出: 适配器拿别的能力冒充(漏实现分支)时不能当就绪, 且要说清是谁被验了
-        const ready = result?.status === 'ready' && result.capability === route.capability
-        results.push({ key, providerInstanceId: instance.id, capability: route.capability, market: route.market, status: ready ? 'ready' : 'unavailable', ms: now() - startedAt, ...(ready ? {} : { error: { code: 'PROBE_MISMATCH', message: `探针校验的是${result?.capability ?? '未知'}能力` } }) })
-      } catch (e) { results.push({ key, providerInstanceId: instance.id, capability: route.capability, market: route.market, status: 'denied', ms: now() - startedAt, error: { code: e.code, message: e.message } }) }
+      if (seen.has(key)) continue
+      seen.add(key)
+      const probe = { key, instance, route, capability: route.capability, market: route.market }
+      plan.push(probe)
+      const gap = groupGapMs(instance)
+      const group = groups.get(instance.quotaGroup)
+      groups.set(instance.quotaGroup, { count: (group?.count || 0) + 1, gap: Math.max(group?.gap || 0, gap) })
     }
-    const checkId = randomUUID()
-    checks.set(checkId, { hash: digest(config), until: now() + WINDOW, results })
+    return { plan, groups }
+  }
+  // 预算跟着工作量走: 48 个探针按 1 秒间隔排开已接近一分钟, 再套固定 60 秒必然在中途被掐断。
+  // 组内串行、跨组并行, 但探针和行情共用执行器的并发槽: 最长的一组先占一个槽, 其余工作量按槽位数摊
+  const probeBudgetMs = groups => {
+    let work = 0, worst = 0
+    for (const group of groups.values()) {
+      const cost = group.count * (group.gap + UPSTREAM_TIMEOUT_MS)
+      work += cost
+      worst = Math.max(worst, cost)
+    }
+    // makespan 的上界: 最长一组独占一个槽, 剩余工作量由剩下的槽位分摊
+    return Math.min(worst + (work - worst) / EXECUTOR_CONCURRENCY + PROBE_RESPONSE_MARGIN_MS, PROBE_TIMEOUT_CEILING_MS)
+  }
+  const probeInput = input => {
+    const config = parseConfiguration({ providers: input.providers, routes: input.routes })
+    const caps = z.array(z.enum(CAPABILITIES)).min(1).max(CAPABILITIES.length).parse(input.capabilities)
+    return { config, caps, ...probePlan(config, caps) }
+  }
+  async function providerCheck(input, signal) {
+    assertLive()
+    const { config, plan, groups } = probeInput(input)
+    const at = now()
+    while (probeTimes.length && at - probeTimes[0] >= WINDOW) probeTimes.shift()
+    if (probeTimes.length >= PROBE_CHECK_LIMIT) fail('CHECK_LIMIT', '检查请求过多，请稍后重试', 429)
+    probeTimes.push(at)
+    // 自查截止时刻比路由预算早一个裕度: 预算用完时交出已完成的部分诊断, 而不是整条 504
+    const deadline = at + probeBudgetMs(groups) - PROBE_RESPONSE_MARGIN_MS
+    const results = new Array(plan.length)
+    const skipped = (probe, code, message) => ({ key: probe.key, providerInstanceId: probe.instance.id, capability: probe.capability, market: probe.market, status: 'skipped', ms: 0, error: { code, message } })
+    const byGroup = new Map()
+    for (const [index, probe] of plan.entries()) byGroup.set(probe.instance.quotaGroup, [...(byGroup.get(probe.instance.quotaGroup) || []), { index, probe }])
+    await Promise.all([...byGroup.values()].map(async group => {
+      for (const { index, probe } of group) {
+        if (signal?.aborted) { results[index] = skipped(probe, 'CANCELLED', '检查已取消'); continue }
+        if (now() >= deadline) { results[index] = skipped(probe, 'CHECK_DEADLINE', '检查预算用完，此项未执行'); continue }
+        // 截止时刻也要打断在途探针: 排队等并发槽的探针既不受现在剩余预算的约束,
+        // 也让整条请求越过路由计时器被 504 掉 —— 那样一条诊断都交不出来
+        const limiter = new AbortController()
+        const expire = () => limiter.abort()
+        const abortByOuter = () => limiter.abort()
+        const timer = timers.setTimeout(expire, Math.max(0, deadline - now()))
+        signal?.addEventListener('abort', abortByOuter, { once: true })
+        // 探针耗时就是这一条路由端到端拿数据的真实延迟, 用于把「能不能用」和「快不快」一起回给用户
+        const startedAt = now()
+        try {
+          const result = await executor.run(probe.instance, probe.capability, { market: probe.market, instrument: probe.route.instrument }, { probe: true, signal: limiter.signal })
+          // 探针必须由同名能力的端点产出: 适配器拿别的能力冒充(漏实现分支)时不能当就绪, 且要说清是谁被验了
+          const ready = result?.status === 'ready' && result.capability === probe.capability
+          results[index] = { key: probe.key, providerInstanceId: probe.instance.id, capability: probe.capability, market: probe.market, status: ready ? 'ready' : 'unavailable', ms: now() - startedAt, ...(ready ? {} : { error: { code: 'PROBE_MISMATCH', message: `探针校验的是${result?.capability ?? '未知'}能力` } }) }
+        } catch (e) {
+          // 到点被打断不是"目标不可用": 报 denied 会让客户端把这批好路由剪掉
+          results[index] = limiter.signal.aborted && !signal?.aborted
+            ? skipped(probe, 'CHECK_DEADLINE', '检查预算用完，此项未执行')
+            : { key: probe.key, providerInstanceId: probe.instance.id, capability: probe.capability, market: probe.market, status: 'denied', ms: now() - startedAt, error: { code: e.code, message: e.message } }
+        } finally {
+          timers.clearTimeout(timer)
+          signal?.removeEventListener('abort', abortByOuter)
+        }
+      }
+    }))
+    const completed = results.filter(Boolean)
     // 解除采集暂停只认行情: 分时/目录/K 线的探针失败不该左右行情采集状态机
-    const quoteResults = results.filter(r => r.capability === 'quotes')
-    if (digest(config) === digest({ providers: getControl().providers, routes: getControl().routes }) && quoteResults.length && quoteResults.every(r => r.status === 'ready')) collector.resume()
-    return { checkId, checks: results }
+    const quoteResults = completed.filter(r => r.capability === 'quotes')
+    if (quoteResults.length && quoteResults.every(r => r.status === 'ready') && digest(config) === digest({ providers: getControl().providers, routes: getControl().routes })) collector.resume()
+    const partial = completed.some(r => r.status === 'skipped')
+    return { checkId: randomUUID(), checks: completed, partial }
   }
   async function configuration(operation) {
     assertLive()
@@ -269,6 +334,8 @@ export async function createApplication({ storageDomain, providers = [tushare, t
   return {
     // 路由层超时随刷新档位走: 节拍越慢, 落在拍后半段的请求要等越久, 超时必须盖住这段等待
     routeTimeoutMs: () => routeTimeoutMs(state.get().preferences),
+    // 探针预算必须由路由层按同一口径取: 先解析输入算出待测目标数, 再定这条请求的时限
+    providerCheckTimeoutMs: input => probeBudgetMs(probeInput(input).groups),
     snapshot, providerCheck, configuration,
     demand(message) { assertLive(); demand.update(message) },
     async search(q, phase = 'local', signal) {
@@ -276,18 +343,8 @@ export async function createApplication({ storageDomain, providers = [tushare, t
       if (typeof q !== 'string' || [...q].length > 100) fail('INVALID_QUERY', '搜索词过长')
       const items = phase === 'remote' ? await catalog.remote(q, signal) : catalog.search(q)
       decorateWithMarketMeta(items)
-      const routingRevision = state.get().routingRevision
-      if (phase === 'remote') {
-        for (const item of items) {
-          const row = item.raw && typeof item.raw === 'object' ? item.raw : null
-          if (row?.MktNum && /^10[567]$/.test(row.MktNum)) {
-            usSymbols.set(`US:${row.Code}`, { mktNum: row.MktNum, jys: row.JYS || null, at: now() })
-            while (usSymbols.size > US_SYMBOL_LIMIT) usSymbols.delete(usSymbols.keys().next().value)
-          }
-        }
-      }
-      for (const [key, value] of usSymbols) if (now() - value.at > US_SYMBOL_TTL) usSymbols.delete(key)
-      return { items, catalogs: catalog.status(), routingRevision }
+      // 美股映射由适配器写入, 上限与过期在容器里保证, 这里不再扫全表
+      return { items, catalogs: catalog.status(), routingRevision: state.get().routingRevision }
     },
     async kline(input, signal) {
       assertLive()
