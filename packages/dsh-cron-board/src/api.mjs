@@ -6,7 +6,7 @@
 import { assertValidSchedule, normalizeSchedule, nextRunAtOf, nextRunAtOfSchedules, nextRunsOf, nextRunsOfSchedules, splitSchedules, summarizeCron, summarizeSchedules } from './cron.mjs'
 import { DEFAULT_LOG_TAIL_LINES, DEFAULT_MAX_EXPANSION, DEFAULT_TIMEOUT_MS, SESSION_UNAVAILABLE_REASON } from './config.mjs'
 import { maskValue } from './env-text.mjs'
-import { AGENT_PRESET_PATTERN, JOB_MESSAGES, JOB_WRITABLE_FIELDS, normalizeJob } from './job-fields.mjs'
+import { JOB_MESSAGES, JOB_WRITABLE_FIELDS, normalizeJob } from './job-fields.mjs'
 
 const ROUTE_PREFIX = '/api/cron-board'
 // 编辑表单预览的触发点条数(单条表达式与合并计划同口径)
@@ -286,12 +286,16 @@ function storageWarning(store) {
   }
 }
 
-export function createApi({ store, logger, executor, scheduler, periodic, reportSessionMissing, readSidebarTab, readShowAutomationTasks, updateUiSettings, getAgentPresets, getSessionController, logSystem, notifyChange }) {
-  // 界面偏好统一读取面:两项均为客户端展示开关,缺失服务时按缺省关闭
+export function createApi({ store, logger, executor, scheduler, periodic, reportSessionMissing, readSidebarTab, readShowAutomationTasks, readToolsAppend, readToolsOverlay, readToolStatus, readToolDiagnostics, updateUiSettings, getAgentPresets, getSessionController, logSystem, notifyChange }) {
   const uiPreferences = () => ({
-    sidebarTab: readSidebarTab ? readSidebarTab() === true : false,
-    showAutomationTasks: readShowAutomationTasks ? readShowAutomationTasks() === true : false,
+    sidebarTab: readSidebarTab?.() === true,
+    showAutomationTasks: readShowAutomationTasks?.() === true,
+    toolsAppend: readToolsAppend?.() === true,
+    toolsOverlay: readToolsOverlay?.() === true,
   })
+
+  const toolStatus = () => readToolStatus?.() ?? { appendActive: false, overlayActive: false }
+  const toolDiagnostics = () => readToolDiagnostics?.() ?? { overlay: null }
 
   // 会话通道就绪按请求时刻判定:服务由宿主异步挂载,晚到即恢复,不做一次性定格
   const sessionAvailable = () => Boolean(typeof getSessionController === 'function' && getSessionController())
@@ -409,22 +413,25 @@ export function createApi({ store, logger, executor, scheduler, periodic, report
           // 宿主进程时区偏移小时数:无后缀任务的展示时区(调度与展示同源,与浏览器无关)
           serverTzOffset: -new Date().getTimezoneOffset() / 60,
           ui: uiPreferences(),
+          toolStatus: toolStatus(),
+          toolDiagnostics: toolDiagnostics(),
         })
       },
     },
     {
-      // 界面偏好写入(sidebarTab / showAutomationTasks):settings.update 服务端持久化,即时生效
+      // 界面偏好与模型工具开关由宿主设置服务持久化
       method: 'POST',
       segments: ['ui-settings'],
       handler: async ({ req, res }) => {
         const body = await readJsonBody(req)
         const patch = {}
-        if (typeof body.sidebarTab === 'boolean') patch.sidebarTab = body.sidebarTab
-        if (typeof body.showAutomationTasks === 'boolean') patch.showAutomationTasks = body.showAutomationTasks
+        for (const key of Object.keys(uiPreferences())) {
+          if (typeof body[key] === 'boolean') patch[key] = body[key]
+        }
         if (!Object.keys(patch).length) return sendJson(res, 400, { error: '无有效字段' })
         if (typeof updateUiSettings !== 'function') return sendJson(res, 200, { ok: false, error: '设置服务不可用' })
         const persisted = await updateUiSettings(patch)
-        sendJson(res, 200, { ok: persisted, ui: uiPreferences() })
+        sendJson(res, 200, { ok: persisted, ui: uiPreferences(), toolStatus: toolStatus() })
       },
     },
     {
@@ -452,8 +459,9 @@ export function createApi({ store, logger, executor, scheduler, periodic, report
       method: 'GET',
       segments: ['agent-presets'],
       handler: async ({ res }) => {
-        // 目录来自宿主 agentPresets 服务(dsh-im 同构);服务缺失或异常回空目录,前端仅展示「跟随宿主默认」
-        const catalog = { defaultId: '', items: [] }
+        // 目录来自宿主 agentPresets 服务(dsh-im 同构);服务缺失或异常回空目录,前端仅展示「跟随宿主默认」。
+        // 只回 id/label:宿主默认 id 前端不消费,多回一个字段等于给出无人遵守的契约
+        const catalog = { items: [] }
         try {
           const service = getAgentPresets ? getAgentPresets() : undefined
           if (service && typeof service.list === 'function') {
@@ -462,13 +470,12 @@ export function createApi({ store, logger, executor, scheduler, periodic, report
             for (const entry of Array.isArray(listed) ? listed : []) {
               const row = typeof entry === 'string' ? { id: entry } : entry
               const id = row && typeof row.id === 'string' ? row.id.trim() : ''
-              if (id === '' || !AGENT_PRESET_PATTERN.test(id) || seen.has(id) || row.broken !== undefined) continue
+              // 预设 id 由宿主定义(只要求非空):目录照实展示,与任务写入口径一致,
+              // 否则形态特殊的预设任务看板下拉里选不回来
+              if (id === '' || seen.has(id) || row.broken !== undefined) continue
               seen.add(id)
               const label = typeof row.name === 'string' && row.name.trim() ? row.name.trim().slice(0, 128) : id
               catalog.items.push({ id, label })
-            }
-            if (typeof service.defaultId === 'string' && AGENT_PRESET_PATTERN.test(service.defaultId.trim())) {
-              catalog.defaultId = service.defaultId.trim()
             }
           }
         } catch { /* 目录降级为空,不阻断任务表单 */ }
@@ -544,8 +551,13 @@ export function createApi({ store, logger, executor, scheduler, periodic, report
         const existing = store.jobs.get(params.id)
         if (!existing) throw new Error(MESSAGES.jobNotFound)
         // 全量归一用于校验(未提交字段取服务端当前值),但只把显式提交的配置字段写入:
-        // 旧快照不得回滚运行期已推进的 nextRunAt / 会话绑定等字段
-        const fields = normalizeJob({ ...existing, ...body }, { requireFutureTrigger: body.schedule !== undefined })
+        // 旧快照不得回滚运行期已推进的 nextRunAt / 会话绑定等字段。
+        // 会话子对象按字段合并:未提交的子字段(固定会话、模型)沿用当前值,
+        // 否则整对象替换会把执行链刚自愈写入的绑定回滚成失效会话
+        const merged = body.session !== undefined && body.session !== null && typeof body.session === 'object'
+          ? { ...existing, ...body, session: { ...(existing.session ?? {}), ...body.session } }
+          : { ...existing, ...body }
+        const fields = normalizeJob(merged, { requireFutureTrigger: body.schedule !== undefined, checkName: body.name !== undefined })
         // 只拦「脚本任务改成会话任务」这一引入动作:停用/改名/改期等既有会话任务维护
         // 在服务缺失期照旧可用(否则会把停用开关一起打断)
         if (fields.kind === 'session' && existing.kind !== 'session' && !sessionAvailable()) return rejectSessionUnavailable(res)
@@ -554,6 +566,20 @@ export function createApi({ store, logger, executor, scheduler, periodic, report
           if (body[key] !== undefined) patch[key] = fields[key]
         }
         if (body.session !== undefined || body.kind !== undefined) patch.session = fields.session
+        // 用户重新配置投递范围后，创建会话不再拥有模型写权限。
+        // 只认投递范围的实际变化:改任务模型/推理强度不影响投递目标,不收回;
+        // 缺省字段按空串比,避免「未写过的绑定」被当成变化
+        const text = (value) => (typeof value === 'string' ? value : '')
+        const session = fields.session
+        const before = existing.session ?? {}
+        const scopeChanged = existing.createdBySessionId
+          && (fields.kind !== existing.kind
+            || (body.workdir !== undefined && fields.workdir !== existing.workdir)
+            || (body.session !== undefined
+              && (session.mode !== (before.mode ?? 'fresh')
+                || text(session.pinnedSessionId) !== text(before.pinnedSessionId)
+                || text(session.agentPreset) !== text(before.agentPreset))))
+        if (scopeChanged) patch.createdBySessionId = undefined
         // 改期才重算触发点;未携带 schedule 的局部更新(改名/开关/并发)不得推进 nextRunAt,
         // 否则临近的待触发运行被推到下一周期
         if (body.nextRunAt !== undefined) patch.nextRunAt = fields.nextRunAt
@@ -573,21 +599,27 @@ export function createApi({ store, logger, executor, scheduler, periodic, report
       handler: async ({ res, params }) => {
         // 删除先清执行面:该任务的排队记录 cancelled、在途运行杀树/终态;
         // 未能在 deadline 内终止时取消删除并显式回报,不能让任务消失后仍有运行投递/写日志
-        const stopped = await executor.stopJob(params.id)
+        let stopped
+        try {
+          stopped = await executor.stopJob(params.id)
+        } catch (error) {
+          // 清场中途抛错(如运行记录集合损坏)同样要解除拒绝态,否则该任务永久「删除中」
+          executor.releaseJob(params.id)
+          throw error
+        }
         if (!stopped.settled) {
           executor.releaseJob(params.id)
           throw businessError(409, MESSAGES.jobNotTerminated)
         }
-        // 持久化删除失败必须解除「删除中」拒绝态:任务仍在(或仍在内存),闩着不放会让
-        // 该任务永久拒绝运行,每次调度 tick 再补一条 fail 记录,除重启无解。
-        // 删除一旦成功(任务行已落盘移除)日志目录清理就只是收尾:失败留痕但不翻案成败
+        // 删除窗口结束即释放拒绝态:失败时任务恢复调度,成功后 id 也不再残留于该集合。
+        // 日志目录清理只是收尾:失败留痕但不翻案成败
+        let removed = false
         try {
-          const removed = await store.jobs.remove(params.id)
-          if (!removed) throw new Error(MESSAGES.jobNotFound)
-        } catch (error) {
+          removed = await store.jobs.remove(params.id)
+        } finally {
           executor.releaseJob(params.id)
-          throw error
         }
+        if (!removed) throw new Error(MESSAGES.jobNotFound)
         try {
           await logger.removeJob(params.id)
         } catch (error) {

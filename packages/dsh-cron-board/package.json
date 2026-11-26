@@ -59,6 +59,7 @@
     "test",
     "cordis.patch.yml",
     "多cron支持-BDD.md",
+    "模型工具支持-BDD.md",
     "README.md",
     "兼容性测试.md"
   ]

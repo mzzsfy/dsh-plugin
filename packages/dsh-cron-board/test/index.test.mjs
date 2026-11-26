@@ -142,7 +142,7 @@ test('index:写路由接线 withRouteGate——无 JSON content-type 的 POST �
 })
 
 // 装配桩:webServer + settings + timer + 会话服务,记录注册与 interval 形态
-function makeFullCtx({ timerAvailable = true } = {}) {
+function makeFullCtx({ timerAvailable = true, overlay = null } = {}) {
   const routes = new Map()
   const registered = []
   resetBusStub()
@@ -175,12 +175,15 @@ function makeFullCtx({ timerAvailable = true } = {}) {
   }
   const intervals = []
   const toolDefs = []
+  // 覆盖模式的 apply 级接线:官方定义表 + 受影响 agent + 事件回调登记
+  const overlayAgents = overlay ? [{}] : []
+  const toolEvents = new Map()
   const ctx = {
     effect(fn) { fn() },
     get(name) {
       if (name === 'settings') return settingsService
       if (name === 'sessionController') return sessionController
-      if (name === 'agents') return { get: (id) => sessions.get(id) }
+      if (name === 'agents') return { get: (id) => sessions.get(id), list: () => overlayAgents }
       if (name === 'workspaceRegistry') return { archivedSessionIds: [] }
       if (name === 'agentPresets') return { defaultId: '', list: async () => [] }
       if (name === 'sessionQuery') {
@@ -207,16 +210,23 @@ function makeFullCtx({ timerAvailable = true } = {}) {
       if (deps[0] === 'settings') {
         fn({ settings: settingsService })
       }
-      if (deps[0] === 'tools') {
+      if (deps.length === 1 && deps[0] === 'tools') {
+        const tools = {
+          register(definition) {
+            toolDefs.push(definition)
+            return () => {
+              const index = toolDefs.indexOf(definition)
+              if (index >= 0) toolDefs.splice(index, 1)
+            }
+          },
+          ...overlay === null ? {} : { get: (name) => overlay.get(name) },
+        }
         fn({
-          tools: {
-            register(definition) {
-              toolDefs.push(definition)
-              return () => {
-                const index = toolDefs.indexOf(definition)
-                if (index >= 0) toolDefs.splice(index, 1)
-              }
-            },
+          tools,
+          get: (name) => (name === 'tools' ? tools : undefined),
+          on(event, handler) {
+            toolEvents.set(event, handler)
+            return () => toolEvents.delete(event)
           },
         })
       }
@@ -228,7 +238,7 @@ function makeFullCtx({ timerAvailable = true } = {}) {
       },
     },
   }
-  return { ctx, routes, registered, intervals, settingsService, sessions, published, toolDefs }
+  return { ctx, routes, registered, intervals, settingsService, sessions, published, toolDefs, toolEvents, overlayAgents }
 }
 
 test('index:inject 声明 webServer(sessionController 不进 inject,旧宿主不 pending)', async () => {
@@ -347,6 +357,50 @@ test('index:tickSeconds 设置变更经 watch 重建 interval', async () => {
   watchFn()
   // Then interval 重建
   assert.equal(intervals.length, 2)
+})
+
+test('index:toolsOverlay 开关在真实装配下包装并恢复官方定义', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cron-board-idx-overlay-'))
+  t.after(async () => {
+    process.env.DSH_CRON_BOARD_DATA_DIR = isolatedDataDir
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  })
+  process.env.DSH_CRON_BOARD_DATA_DIR = dir
+  const titles = {
+    schedule_create: 'Create a scheduled task',
+    schedule_list: 'List scheduled tasks',
+    schedule_view: 'View one scheduled task',
+    schedule_edit: 'Update, pause, resume, or delete one scheduled task',
+  }
+  const overlay = new Map()
+  for (const [name, title] of Object.entries(titles)) {
+    overlay.set(name, {
+      name,
+      description: title + '.',
+      parameters: { type: 'object', properties: {} },
+      output: { schema: { type: 'object', additionalProperties: true, properties: {} }, render: () => [] },
+      presentCall: () => ({}),
+      execute: async () => ({ id: 'official' }),
+    })
+  }
+  let watchFn = null
+  const base = makeFullCtx({ overlay })
+  base.settingsService.register = () => ({ get: () => ({ toolsOverlay: base.settingsService.get().toolsOverlay === true }), watch(fn) { watchFn = fn } })
+  base.settingsService.get = () => ({ toolsOverlay: false })
+  apply(base.ctx)
+  const original = new Map([...overlay].map(([name, definition]) => [name, definition.execute]))
+  assert.deepEqual([...overlay.values()].map((definition) => definition.execute === original.get(definition.name)), [true, true, true, true])
+  // When 打开开关并触发设置变更
+  base.settingsService.get = () => ({ toolsOverlay: true })
+  watchFn()
+  // Then 官方定义的执行入口被包装但仍可调用
+  for (const definition of overlay.values()) assert.notEqual(definition.execute, original.get(definition.name))
+  assert.deepEqual(await overlay.get('schedule_create').execute({}, { agent: base.overlayAgents[0] }), { id: 'official' })
+  // When 关闭开关
+  base.settingsService.get = () => ({ toolsOverlay: false })
+  watchFn()
+  // Then 全部恢复原执行入口
+  for (const definition of overlay.values()) assert.equal(definition.execute, original.get(definition.name))
 })
 
 test('index:toolsAppend 开关控制看板工具注册与撤销', async () => {

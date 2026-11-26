@@ -61,7 +61,19 @@ export function createExecutor({ store, logger, runner, sessionRunner, maxExpans
         i++
         continue
       }
+      // 排队后被删除的任务绝不能再起跑:删除成功即释放拒绝态,队列项可能比任务活得久。
+      // 判定放在出队之前:读失败也只丢这一项,不留「已出队但从未起跑」的悬挂记录
+      let claimable = false
+      try {
+        claimable = !refusing.has(item.job.id) && store.jobs.get(item.job.id) !== undefined
+      } catch {
+        claimable = false
+      }
       queue.splice(i, 1)
+      if (!claimable) {
+        Promise.resolve(discardRecords([item.record])).catch(() => {})
+        continue
+      }
       activeTotal++
       activeByJob.set(item.job.id, activeOf(item.job.id) + 1)
       // 终态写失败不悬挂:状态留在内存,下次任意写落盘自愈
@@ -119,10 +131,11 @@ export function createExecutor({ store, logger, runner, sessionRunner, maxExpans
           },
         },
         updateRecord: (patch) => store.runs.update(record.runId, patch),
-        updateBinding: (sessionId) => store.jobs.updateRuntime(job.id, {
-          session: { ...(store.jobs.get(job.id)?.session ?? job.session), pinnedSessionId: sessionId },
+        // 读改写放进 store 的同一临界区:并发配置编辑不会被这份旧快照覆盖回旧值
+        updateBinding: (sessionId) => store.jobs.updateRuntime(job.id, (row) => ({
+          session: { ...(row.session ?? {}), pinnedSessionId: sessionId },
           pinnedSessionId: undefined,
-        }),
+        })),
       })
       // 统一形态:{ promise, cancel };async 兼容形态(既有 runner/测试桩)转 { promise, cancel: 无 }
       const promise = typeof execution?.then === 'function' ? execution : execution.promise
@@ -185,12 +198,17 @@ export function createExecutor({ store, logger, runner, sessionRunner, maxExpans
     }
   }
 
-  // 排队记录收敛:移出内存队列并按 cancelled 补写终态(补写失败不打断停止链)
-  async function markCancelled(records, message) {
+  // 只摘内存队列项,不写记录:调用方随后自行决定记录是删除还是取消
+  function dropQueued(records) {
     const pending = new Set(records.map((record) => record.runId))
     for (let i = queue.length - 1; i >= 0; i--) {
       if (pending.has(queue[i].record.runId)) queue.splice(i, 1)
     }
+  }
+
+  // 排队记录收敛:移出内存队列并按 cancelled 补写终态(补写失败不打断停止链)
+  async function markCancelled(records, message) {
+    dropQueued(records)
     for (const record of records) {
       const current = store.runs.get(record.runId)
       if (current === undefined || current.status !== 'queued') continue
@@ -213,6 +231,9 @@ export function createExecutor({ store, logger, runner, sessionRunner, maxExpans
   // 行删除失败(集合损坏等)退回取消终态,至少不悬挂在 queued
   async function discardRecords(records) {
     for (const record of records) {
+      const current = store.runs.get(record.runId)
+      // 只处理仍排队的行:已在途或已终态的行删掉会留下「跑着却没有历史」的现场
+      if (current !== undefined && current.status !== 'queued') continue
       const removed = await store.runs.remove(record.runId).catch(() => false)
       if (!removed) await markCancelled([record], CANCELLED_PREEMPT_MESSAGE)
     }
@@ -259,8 +280,12 @@ export function createExecutor({ store, logger, runner, sessionRunner, maxExpans
       } catch (error) {
         // 预占中途失败:已落库的 queued 记录收敛为 cancelled,不留永远排队的孤儿;
         // 删除窗口类拒绝则连行一起清掉(任务已不可见,取消终态也仍是孤儿)
-        if (Number.isInteger(error && error.status)) await discardRecords(records)
-        else await markCancelled(records, CANCELLED_PREEMPT_MESSAGE)
+        if (Number.isInteger(error && error.status)) {
+          dropQueued(records)
+          await discardRecords(records)
+        } else {
+          await markCancelled(records, CANCELLED_PREEMPT_MESSAGE)
+        }
         throw error
       }
       // 卸载/HMR 落在预占 await 之间:预占记录收敛为 cancelled,且跳过 runOnce 自动禁用
@@ -271,6 +296,7 @@ export function createExecutor({ store, logger, runner, sessionRunner, maxExpans
       }
       // 删除窗口落在最后一次预占之后:任务已不可见,记录不得留库,显式 409 拒绝
       if (refusing.has(job.id) || !store.jobs.get(job.id)) {
+        dropQueued(records)
         await discardRecords(records)
         throw conflictError(JOB_DELETING_REASON)
       }
@@ -309,10 +335,11 @@ export function createExecutor({ store, logger, runner, sessionRunner, maxExpans
         cancelled.unshift(queue.splice(i, 1)[0].record)
       }
       await markCancelled(cancelled, CANCELLED_JOB_MESSAGE)
-      for (const [runId, entry] of [...cancelByRunId]) {
+      for (const entry of [...cancelByRunId.values()]) {
         if (entry.jobId !== jobId) continue
+        // 只发取消不摘句柄:句柄由 runUnit 的收尾统一摘除,提前摘会让进度推进中的
+        // 单元失去取消身份(再次 stop 静默无效)
         entry.cancel(CANCELLED_JOB_MESSAGE)
-        cancelByRunId.delete(runId)
       }
       // 与卸载收敛同一 deadline:会话运行无取消句柄,无上限等待会让删除路由永久挂起
       await settleActive(() => activeOf(jobId) > 0)

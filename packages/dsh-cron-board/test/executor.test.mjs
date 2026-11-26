@@ -400,6 +400,76 @@ test('E2: 删除落在首次预占的 await 之间,dispatch 409 且不留孤儿 
   store.runs.create = rawCreate
 })
 
+test('E2: 删除成功后释放拒绝态,队列残留项也不得再起跑', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cron-board-e2c-'))
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
+  const store = await createStore({ dir: join(dir, 'data') })
+  const logger = createLogger({ rootDir: join(dir, 'logs') })
+  const ran = []
+  const executor = createExecutor({ store, logger, runner: { run: async () => { ran.push('run'); return { status: 'success', exitCode: 0 } } }, readMaxConcurrent: () => 1 })
+  await store.jobs.create({ ...JOB_BASE, id: 'j-e2-release' })
+  const rawCreate = store.runs.create.bind(store.runs)
+  let release
+  let markEntered
+  const entered = new Promise((resolve) => { markEntered = resolve })
+  const gate = new Promise((resolve) => { release = resolve })
+  store.runs.create = async (data) => {
+    markEntered()
+    await gate
+    return rawCreate(data)
+  }
+  // Given 预占挂起,删除在窗口内完成并立即释放拒绝态(成功删除后的新语义)
+  const dispatching = executor.dispatch({ ...JOB_BASE, id: 'j-e2-release' }, 'manual')
+  await entered
+  await executor.stopJob('j-e2-release')
+  await store.jobs.remove('j-e2-release')
+  executor.releaseJob('j-e2-release')
+  release()
+  // When 预占结束
+  await assert.rejects(dispatching, (error) => error.status === 409)
+  store.runs.create = rawCreate
+  // Then 不留队列项、不落运行记录、更不起跑
+  assert.equal(executor.status().queued, 0)
+  assert.deepEqual(store.runs.list('j-e2-release'), [])
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  assert.deepEqual(ran, [])
+})
+
+test('E2: 排队项所属任务被直删后不得起跑(pump 兜底)', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cron-board-e2d-'))
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
+  const store = await createStore({ dir: join(dir, 'data') })
+  const logger = createLogger({ rootDir: join(dir, 'logs') })
+  const ran = []
+  let releaseA
+  const gateA = new Promise((resolve) => { releaseA = resolve })
+  const executor = createExecutor({
+    store,
+    logger,
+    runner: {
+      run: async ({ job }) => {
+        ran.push(job.id)
+        if (job.id === 'j-a') await gateA
+        return { status: 'success', exitCode: 0 }
+      },
+    },
+    readMaxConcurrent: () => 1,
+  })
+  await store.jobs.create({ ...JOB_BASE, id: 'j-a' })
+  await store.jobs.create({ ...JOB_BASE, id: 'j-b' })
+  // Given 并发闸门只允许一个,j-b 的记录停在内存在队列里
+  await executor.dispatch({ ...JOB_BASE, id: 'j-a' }, 'manual')
+  await executor.dispatch({ ...JOB_BASE, id: 'j-b' }, 'manual')
+  assert.deepEqual(executor.status(), { active: 1, queued: 1 })
+  // When 任务行被持久层直删(不经 stopJob:集合损坏恢复等路径),随后一次 pump 才轮到该排队项
+  await store.jobs.remove('j-b')
+  releaseA()
+  await waitFor(() => executor.status().active === 0 && executor.status().queued === 0)
+  // Then 被删任务的 runner 从未启动,也不留孤儿运行记录
+  assert.deepEqual(ran, ['j-a'])
+  assert.deepEqual(store.runs.list('j-b'), [])
+})
+
 test('E2: 多组合预占中途删除,已落库记录整行清除', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'cron-board-e2b-'))
   t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
@@ -691,4 +761,35 @@ test('S1: 停止窗口内不启动 shell,stop 无需等满 settle deadline', asy
   assert.ok(Date.now() - startedAt < 3000, 'stop 不应等满 settle deadline')
   assert.equal(store.runs.get(runId).status, 'cancelled')
   assert.deepEqual(executor.status(), { active: 0, queued: 0 })
+})
+
+test('F03: stopJob 之后取消句柄仍归执行链持有,进程级 stop 仍能取消', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cron-board-f03b-'))
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
+  const store = await createStore({ dir: join(dir, 'data') })
+  const logger = createLogger({ rootDir: join(dir, 'logs') })
+  let started
+  const gate = new Promise((resolve) => { started = resolve })
+  let cancelled = 0
+  const runner = {
+    // 首单元给出取消句柄且挂起:stopJob 只发取消不摘句柄,句柄由收尾摘除
+    run: () => {
+      started()
+      const promise = new Promise(() => {})
+      return { promise, cancel: () => { cancelled += 1 } }
+    },
+  }
+  const executor = createExecutor({ store, logger, runner, readMaxConcurrent: () => 1, settleTimeoutMs: 50 })
+  await store.jobs.create({ ...JOB_BASE, id: 'j-keep' })
+  await executor.dispatch({ ...JOB_BASE, id: 'j-keep' }, 'manual')
+  await gate
+  await waitFor(() => executor.status().active === 1)
+  await executor.stopJob('j-keep')
+  // Then 句柄仍在:再次停止仍会下发取消(旧实现在 stopJob 里提前摘除,后续取消静默失效)
+  assert.equal(cancelled, 1)
+  await executor.stopJob('j-keep')
+  assert.equal(cancelled, 2)
+  // And 进程级 stop 也能取消同一个在途单元
+  await executor.stop()
+  assert.equal(cancelled, 3)
 })

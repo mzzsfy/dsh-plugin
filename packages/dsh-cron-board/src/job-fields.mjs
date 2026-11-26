@@ -8,6 +8,9 @@ import {
 } from './cron.mjs'
 import { DEFAULT_TIMEOUT_MS, SESSION_UNAVAILABLE_REASON } from './config.mjs'
 
+// 名称随任务清单回给每个 agent,需要上限;提示词长度由请求体上限约束,不在此另设
+export const JOB_NAME_MAX = 120
+
 // 任务级错误文案:路由层 MESSAGES 展开引用,工具层按 code 映射
 export const JOB_MESSAGES = {
   jobNotFound: '任务不存在',
@@ -18,13 +21,12 @@ export const JOB_MESSAGES = {
   commandRequired: '任务命令不能为空',
   badKind: '任务类型不合法',
   badSessionMode: '会话模式仅支持 fresh 或 pinned',
-  badAgentPreset: '执行预设 ID 仅限小写字母、数字与连字符',
   badSessionModel: '模型指定不合法:provider 与 model 必须为非空文本,reasoningEffort 可省略',
   noFutureTrigger: 'cron 表达式没有可执行的未来触发点,请调整表达式',
+  jobNameTooLong: '任务名称最多 ' + JOB_NAME_MAX + ' 个字符',
 }
 
-// 执行预设 ID 形态:小写字母/数字/连字符,首段字母数字
-export const AGENT_PRESET_PATTERN = /^[a-z0-9][a-z0-9-]*$/
+// 预设 id 由宿主定义(只要求非空),本包不约束形态
 
 // PATCH 可写字段白名单:未列出的字段(运行态/持久化元数据)不得经更新路径写入
 export const JOB_WRITABLE_FIELDS = ['name', 'kind', 'command', 'prompt', 'workdir', 'schedule', 'enabled', 'timeoutMs', 'runOnce', 'concurrency']
@@ -47,7 +49,8 @@ export function normalizeSession(body) {
   const raw = body.session && typeof body.session === 'object' ? body.session : {}
   if (raw.mode !== undefined && raw.mode !== 'fresh' && raw.mode !== 'pinned') throw new Error(JOB_MESSAGES.badSessionMode)
   const agentPreset = typeof raw.agentPreset === 'string' ? raw.agentPreset.trim() : ''
-  if (agentPreset !== '' && !AGENT_PRESET_PATTERN.test(agentPreset)) throw new Error(JOB_MESSAGES.badAgentPreset)
+  // 预设 id 由宿主定义(只要求非空字符串),这里不校验形态:校验会拒掉宿主声明合法的 id,
+  // 也会让存量任务改不动;目录展示侧的形态过滤是 UI 关注点,不参与任务写入
   const session = {
     mode: raw.mode === 'pinned' ? 'pinned' : 'fresh',
     pinnedSessionId: typeof raw.pinnedSessionId === 'string' ? raw.pinnedSessionId.trim() : '',
@@ -59,9 +62,12 @@ export function normalizeSession(body) {
   return session
 }
 
-export function normalizeJob(body, { requireFutureTrigger = true } = {}) {
+export function normalizeJob(body, { requireFutureTrigger = true, checkName = true } = {}) {
   const name = typeof body.name === 'string' ? body.name.trim() : ''
   if (name === '') throw new Error(JOB_MESSAGES.jobNameRequired)
+  // 只在本次提交名称时校验长度:存量超长名称仍需能停用/改期
+  if (checkName && name.length > JOB_NAME_MAX) throw new Error(JOB_MESSAGES.jobNameTooLong)
+  const prompt = typeof body.prompt === 'string' ? body.prompt : ''
   const kind = body.kind === 'session' ? 'session' : 'shell'
   if (body.kind !== 'shell' && body.kind !== 'session') throw new Error(JOB_MESSAGES.badKind)
   const command = typeof body.command === 'string' ? body.command.trim() : ''
@@ -78,7 +84,7 @@ export function normalizeJob(body, { requireFutureTrigger = true } = {}) {
     name,
     kind,
     command,
-    prompt: typeof body.prompt === 'string' ? body.prompt : '',
+    prompt,
     workdir: typeof body.workdir === 'string' ? body.workdir.trim() : '',
     schedule,
     enabled: body.enabled !== false,

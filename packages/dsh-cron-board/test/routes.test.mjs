@@ -505,7 +505,10 @@ test('status 路由:报告调度器与 timer 可用性', async (t) => {
   assert.equal(res.payload.timerRunning, true)
   assert.deepEqual(res.payload.scheduler, { active: 1, queued: 2 })
   assert.equal(res.payload.nextAt, 1750000000000)
-  assert.deepEqual(res.payload.ui, { sidebarTab: false, showAutomationTasks: false })
+  assert.deepEqual(res.payload.ui, { sidebarTab: false, showAutomationTasks: false, toolsAppend: false, toolsOverlay: false })
+  assert.deepEqual(res.payload.toolStatus, { appendActive: false, overlayActive: false })
+  // 覆盖未生效时的对账现场:缺省 readToolDiagnostics 也要有稳定形态
+  assert.deepEqual(res.payload.toolDiagnostics, { overlay: null })
 })
 
 test('status 路由:ui.sidebarTab 透出用户侧边栏移入偏好', async (t) => {
@@ -564,6 +567,23 @@ test('ui-settings 路由:showAutomationTasks 布尔补丁独立持久化,不回�
   assert.equal(storedAutomation, true)
 })
 
+test('ui-settings 读写模型工具开关时保留另一开关', async (t) => {
+  const settings = { toolsAppend: false, toolsOverlay: true }
+  const { api } = await makeApi(t, {
+    readToolsAppend: () => settings.toolsAppend,
+    readToolsOverlay: () => settings.toolsOverlay,
+    updateUiSettings: async (patch) => { Object.assign(settings, patch); return true },
+  })
+  const enabled = await call(api, 'POST', '/api/cron-board/ui-settings', { toolsAppend: true })
+  assert.equal(enabled.status, 200)
+  assert.equal(enabled.payload.ui.toolsAppend, true)
+  assert.equal(enabled.payload.ui.toolsOverlay, true)
+  const disabled = await call(api, 'POST', '/api/cron-board/ui-settings', { toolsOverlay: false })
+  assert.equal(disabled.status, 200)
+  assert.equal(disabled.payload.ui.toolsAppend, true)
+  assert.equal(disabled.payload.ui.toolsOverlay, false)
+})
+
 test('status 路由:ui.showAutomationTasks 透出自动化任务只读聚合偏好', async (t) => {
   // Given readShowAutomationTasks 桩返回开
   const { api } = await makeApi(t, { readShowAutomationTasks: () => true })
@@ -589,6 +609,26 @@ test('status 路由:timer 缺失降级时 timerRunning=false 且带原因', asyn
   const res = await call(api, 'GET', '/api/cron-board/status')
   assert.equal(res.payload.timerRunning, false)
   assert.equal(res.payload.timerReason, '宿主定时服务不可用')
+})
+
+test('jobs 路由:名称长度只在提交名称时校验,存量超长名仍可停用', async (t) => {
+  const { store, api } = await makeApi(t)
+  // Given 一个存量超长名称的任务
+  const job = await store.jobs.create({ name: 'x'.repeat(121), kind: 'shell', command: 'x', schedule: '* * * * *', enabled: true, timeoutMs: 1000 })
+  // When 不提交名称只改成停用
+  const disabled = await call(api, 'PATCH', '/api/cron-board/jobs/' + job.id, { enabled: false, updatedAt: job.updatedAt })
+  // Then 受理(否则这类任务再也改不动)
+  assert.equal(disabled.status, 200)
+  assert.equal(disabled.payload.enabled, false)
+  // When 提交超长名称
+  const tooLong = await call(api, 'PATCH', '/api/cron-board/jobs/' + job.id, { name: 'y'.repeat(121), updatedAt: disabled.payload.updatedAt })
+  // Then 400 且原值不变
+  assert.equal(tooLong.status, 400)
+  assert.match(tooLong.payload.error, /名称最多/)
+  assert.equal(store.jobs.get(job.id).name, 'x'.repeat(121))
+  // When 新建时提交超长名称
+  const created = await call(api, 'POST', '/api/cron-board/jobs', { name: 'z'.repeat(121), kind: 'shell', command: 'x', schedule: '* * * * *' })
+  assert.equal(created.status, 400)
 })
 
 test('jobs 路由:会话任务字段校验与默认值', async (t) => {
@@ -625,13 +665,14 @@ test('jobs 路由:会话任务字段校验与默认值', async (t) => {
   })
   // Then 400
   assert.equal(badMode.status, 400)
-  // When 非法执行预设 id(大写/下划线均不合目录 id 形态)
-  const badPreset = await call(api, 'POST', '/api/cron-board/jobs', {
+  // When 宿主声明的预设 id 不在目录形态白名单内(大写/下划线)
+  const oddPreset = await call(api, 'POST', '/api/cron-board/jobs', {
     name: 's3', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true,
     session: { agentPreset: 'Coder_X' },
   })
-  // Then 400
-  assert.equal(badPreset.status, 400)
+  // Then 照原样受理:预设 id 由宿主定义,任务写入不校验其形态
+  assert.equal(oddPreset.status, 200)
+  assert.equal(oddPreset.payload.session.agentPreset, 'Coder_X')
 })
 
 test('jobs 路由:会话任务 model 字段归一与校验(跟随默认=缺省)', async (t) => {
@@ -693,13 +734,14 @@ test('agent-presets 路由:目录来自宿主服务,缺失降级空目录', asyn
   const { api } = await makeApi(t, { getAgentPresets: () => service })
   // When 拉取目录
   const listed = await call(api, 'GET', '/api/cron-board/agent-presets')
-  // Then 非法形态/重复/损坏项剔除,字符串条目按 {id,label:id} 接受(dsh-im catalogItem 同构)
+  // Then 空 id/重复/损坏项剔除,字符串条目按 {id,label:id} 接受(dsh-im catalogItem 同构),
+  // 形态特殊的宿主 id 照实展示(与任务写入口径一致)
   assert.equal(listed.status, 200)
-  assert.equal(listed.payload.defaultId, 'deepseek')
   assert.deepEqual(listed.payload.items, [
     { id: 'deepseek', label: 'DeepSeek 默认' },
     { id: 'coder', label: 'coder' },
     { id: 'broken-str', label: 'broken-str' },
+    { id: 'Bad_Id', label: 'Bad_Id' },
     { id: 'dup', label: 'dup' },
   ])
   // When 服务缺失
@@ -707,13 +749,13 @@ test('agent-presets 路由:目录来自宿主服务,缺失降级空目录', asyn
   const empty = await call(bare.api, 'GET', '/api/cron-board/agent-presets')
   // Then 空目录 200(前端仅「跟随宿主默认」)
   assert.equal(empty.status, 200)
-  assert.deepEqual(empty.payload, { defaultId: '', items: [] })
+  assert.deepEqual(empty.payload, { items: [] })
   // When 服务异常
   const throwing = await makeApi(t, { getAgentPresets: () => ({ list: async () => { throw new Error('boom') } }) })
   const failed = await call(throwing.api, 'GET', '/api/cron-board/agent-presets')
   // Then 仍空目录 200
   assert.equal(failed.status, 200)
-  assert.deepEqual(failed.payload, { defaultId: '', items: [] })
+  assert.deepEqual(failed.payload, { items: [] })
 })
 
 test('model-catalog 路由:宿主目录归一,缺失与异常降级空目录', async (t) => {
@@ -884,6 +926,38 @@ test('runs 路由:无参数查全量,带 jobId 查单任务', async (t) => {  //
   assert.deepEqual(mine.payload.items[0].schedules, ['0 9 * * *T+8', '30 8 * * 1-5T+0'])
   assert.equal(mine.payload.items[0].scheduleSummary, '每天 09:00(UTC+8) · 工作日 08:30(UTC+0)')
   assert.equal(all.payload.items[0].scheduleSummary, null)
+})
+
+test('S1: 看板更改会话执行预设时收回模型写权限', async (t) => {
+  const { api, store } = await makeApi(t)
+  const original = await store.jobs.create({
+    name: '会话夹具', kind: 'session', schedule: '0 9 * * *', enabled: false,
+    session: { mode: 'fresh', agentPreset: 'standard' }, createdBySessionId: 'session-fixture',
+  })
+  const path = '/api/cron-board/jobs/' + original.id
+  const renamed = await call(api, 'PATCH', path, { name: '改名' })
+  assert.equal(renamed.payload.createdBySessionId, 'session-fixture')
+  const changed = await call(api, 'PATCH', path, { session: { mode: 'fresh', agentPreset: 'minimal' } })
+  assert.equal(changed.status, 200)
+  assert.equal(changed.payload.session.agentPreset, 'minimal')
+  assert.equal(store.jobs.get(original.id).createdBySessionId, undefined)
+})
+
+test('S1: 只看板改任务模型不收回模型写权(投递范围未变)', async (t) => {
+  const { api, store } = await makeApi(t)
+  const original = await store.jobs.create({
+    name: '会话夹具', kind: 'session', schedule: '0 9 * * *', enabled: false,
+    session: { mode: 'fresh', agentPreset: 'standard' }, createdBySessionId: 'session-fixture',
+  })
+  const path = '/api/cron-board/jobs/' + original.id
+  const moved = await call(api, 'PATCH', path, { session: { mode: 'fresh', agentPreset: 'standard', model: { provider: 'p', model: 'm' } } })
+  assert.equal(moved.status, 200)
+  // 模型选择不影响投递目标,来源会话保留
+  assert.equal(store.jobs.get(original.id).createdBySessionId, 'session-fixture')
+  // 改目录仍收回
+  const escaped = await call(api, 'PATCH', path, { workdir: '/other' })
+  assert.equal(escaped.status, 200)
+  assert.equal(store.jobs.get(original.id).createdBySessionId, undefined)
 })
 
 test('jobs 路由:PATCH 只认显式字段,他处变更不被旧快照回滚', async (t) => {

@@ -144,13 +144,14 @@ function createCollection({ file, link, idKey }) {
       })
       return updated
     },
-    // 运行时回填:不推进配置版本(updatedAt),只记 runtimeUpdatedAt
+    // 运行时回填:不推进配置版本(updatedAt),只记 runtimeUpdatedAt。
+    // patch 可以是函数:读改写发生在同一临界区内,避免「先读后写」把并发改动的字段覆盖回旧值
     async updateRuntime(id, patch) {
       let updated
       await this.mutate((list) => {
         const row = list.find((item) => item[idKey] === id)
         if (row === undefined) return false
-        applyPatch(row, patch)
+        applyPatch(row, typeof patch === 'function' ? patch(row) ?? {} : patch)
         row.runtimeUpdatedAt = Date.now()
         updated = { ...row }
       })
@@ -181,11 +182,12 @@ function createCollection({ file, link, idKey }) {
       })
       return outcome
     },
-    async remove(id) {
+    async remove(id, expectedUpdatedAt) {
       let removed = false
       await this.mutate((list) => {
         const index = list.findIndex((item) => item[idKey] === id)
         if (index < 0) return false
+        if (expectedUpdatedAt !== undefined && list[index].updatedAt !== expectedUpdatedAt) return false
         list.splice(index, 1)
         removed = true
       })
@@ -202,6 +204,9 @@ export async function createStore({ dir }) {
   const jobsBase = createCollection({ file: makeFile('jobs.json'), link, idKey: 'id' })
   const runs = createCollection({ file: makeFile('runs.json'), link, idKey: 'runId' })
   await Promise.all([envsBase.load(), jobsBase.load(), runs.load()])
+  // 孤儿运行记录回收:任务删除与运行清理跨两个集合文件,进程在中间退出会留下
+  // jobId 指向不存在任务的 run;加载时统一收敛,避免看板出现无主历史
+  const prunedOrphans = await pruneOrphanRuns()
 
   // 文本导入:清空与批量追加在同一次 mutate 内完成(单次落盘,半导入不可回滚的场景不存在)
   const envs = {
@@ -256,8 +261,8 @@ export async function createStore({ dir }) {
     update: (id, patch) => jobsBase.update(id, patch),
     updateRuntime: (id, patch) => jobsBase.updateRuntime(id, patch),
     updateIf: (id, expectedUpdatedAt, patch) => jobsBase.updateIf(id, expectedUpdatedAt, patch),
-    async remove(id) {
-      const removed = await jobsBase.remove(id)
+    async remove(id, expectedUpdatedAt) {
+      const removed = await jobsBase.remove(id, expectedUpdatedAt)
       if (!removed) return false
       await runs.mutate((list) => {
         const keep = list.filter((row) => row.jobId !== id)
@@ -283,11 +288,41 @@ export async function createStore({ dir }) {
     return row
   }
 
+  // 无主运行记录:任务已不存在则整行丢弃(集合损坏时不动,避免误删唯一现场)。
+  // 卫生工作:任何失败都只留痕,不让整个装配失败;任务集合为空而运行记录非空视为可疑
+  // (典型是 jobs.json 缺失),此时跳过,防止一次误判清空全部历史
+  async function pruneOrphanRuns() {
+    if (jobsBase.broken || runs.broken) return 0
+    if (jobsBase.rows.length === 0 && runs.rows.length > 0) {
+      process.stderr.write('[cron-board] 任务集合为空但存在运行记录,跳过孤儿回收(疑似任务文件缺失)\n')
+      return 0
+    }
+    try {
+      const alive = new Set(jobsBase.rows.map((row) => row.id))
+      const orphans = runs.rows.filter((row) => !alive.has(row.jobId))
+      if (orphans.length === 0) return 0
+      const ids = new Set(orphans.map((row) => row.runId))
+      await runs.mutate((list) => {
+        const keep = list.filter((row) => !ids.has(row.runId))
+        list.length = 0
+        list.push(...keep)
+      })
+      return orphans.length
+    } catch (error) {
+      process.stderr.write('[cron-board] 孤儿运行记录回收失败: ' + String(error && error.message ? error.message : error) + '\n')
+      return 0
+    }
+  }
+
   return {
     envs,
     jobs,
-    // 写链排空:等待已提交 mutate 全部结束(不报告写失败);测试清理数据目录前调用以缩小与删除的竞态面
+    // 写链排空:等待已提交 mutate 全部结束(不报告写失败);卸载与测试清理前调用,缩小与删除的竞态面
     flush: () => link.chain.catch(() => {}),
+    // 启动期回收结果:供插件在装配后留痕(孤儿运行记录数)
+    get orphanRunsPruned() {
+      return prunedOrphans
+    },
     runs: {
       get rows() {
         return runs.rows

@@ -46,8 +46,9 @@ const SETTINGS_SCHEMA = schemastery.object({
   maskEnvInPrompt: schemastery.boolean().default(false).description('会话任务投递文本中环境变量打码'),
   sidebarTab: schemastery.boolean().default(false).description('看板移入 better-sidebar 侧边栏(需已安装;关闭时始终使用主界面)'),
   showAutomationTasks: schemastery.boolean().default(false).description('看板显示宿主自动化任务(只读聚合)并隐藏侧栏重复入口;需宿主提供自动化任务服务'),
-  toolsAppend: schemastery.boolean().default(false).description('追加看板工具(cron_board_list/view/create/edit):让模型读取并创建/修改/删除看板任务;默认关闭'),
-  toolsOverlay: schemastery.boolean().default(false).description('覆盖官方自动化任务工具(schedule_list/view/create/edit 同名遮蔽):模型操作宿主自动化任务;默认关闭'),
+  toolsAppend: schemastery.boolean().default(false).description('追加看板工具：读取看板任务和管理会话任务，脚本任务只读'),
+  appendMaxJobs: schemastery.number().min(0).step(1).default(0).description('追加模式下单个会话可通过工具创建的任务上限(0 = 不限制)'),
+  toolsOverlay: schemastery.boolean().default(false).description('替换当前预设提供的官方自动化任务工具执行入口'),
 })
 
 // 0.1.7 宿主以静态 Config 导出生成设置节表单(maintain 同构);legacy 宿主经
@@ -117,7 +118,12 @@ export function apply(ctx, config) {
   // 装配惰性单例:首个请求 / timer 激活触发初始化,各组件只建一次
   // 生命周期解绑引用:惰性装配完成前给安全空实现,装配后指向真实 scheduler
   const schedulerRef = { current: { dispose() {} } }
+  // 卸载闸门:装配是异步的,卸载可能落在装配中间;此时必须回收刚建好的执行链,不留无主 tick
+  let disposed = false
+  let runtimeRef = null
   const buildRuntime = async () => {
+    // 卸载后不应再有新的装配启动:否则会建出无人持有的 tick 与写链
+    if (disposed) throw new Error('cron-board 已卸载,放弃本次装配')
     const store = await createStore({ dir: dataDir })
     const logger = createLogger({ rootDir: join(dataDir, 'logs') })
     const sessionDriver = createSessionDriver({
@@ -150,6 +156,9 @@ export function apply(ctx, config) {
     })
     try {
       schedulerRef.current = scheduler
+      // 卸载闸门:装配等待期间插件可能已卸载,此时已建的 tick 与执行链必须就地回收,
+      // 否则卸载后仍有无人持有的定时器继续调度。回收统一交给装配失败的 catch
+      if (disposed) throw new Error('cron-board 已卸载,放弃本次装配')
       await scheduler.recover()
       const api = createApi({
         store,
@@ -160,6 +169,10 @@ export function apply(ctx, config) {
         reportSessionMissing,
         readSidebarTab: () => readBoolean('sidebarTab', false),
         readShowAutomationTasks: () => readBoolean('showAutomationTasks', false),
+        readToolsAppend: () => readBoolean('toolsAppend', false),
+        readToolsOverlay: () => readBoolean('toolsOverlay', false),
+        readToolStatus,
+        readToolDiagnostics,
         updateUiSettings,
         getAgentPresets: () => ctx.get('agentPresets'),
         getSessionController,
@@ -174,10 +187,23 @@ export function apply(ctx, config) {
       throw error
     }
   }
-  const runtimeCache = createRuntimeCache(buildRuntime)
+  const runtimeCache = createRuntimeCache(async () => {
+    const runtime = await buildRuntime()
+    runtimeRef = runtime
+    return runtime
+  })
   const getRuntime = () => runtimeCache.get()
 
   const periodic = { running: false, reason: null }
+  const toolReconcilers = new Set()
+  const reconcileTools = () => {
+    for (const reconcile of toolReconcilers) reconcile()
+  }
+  let appendActive = false
+  let overlay = null
+  const readToolStatus = () => ({ appendActive, overlayActive: overlay?.active === true })
+  // 覆盖开关打开却未生效的现场:按预设可见性对账后仍然没有可包装的定义时,给出可判读的原因
+  const readToolDiagnostics = () => ({ overlay: overlay?.debug ?? null })
   let armTick = null
   let disposeTick = null
 
@@ -308,10 +334,6 @@ export function apply(ctx, config) {
 
   // 看板工具(追加模式):设置开关 toolsAppend 打开才注册,关闭即撤销;
   // 注册半失败整体回滚,不留半套工具;tools 服务缺失时静默不挂(旧宿主无工具面)
-  const toolReconcilers = []
-  const reconcileTools = () => {
-    for (const reconcile of toolReconcilers) reconcile()
-  }
   ctx.inject(['tools'], (tctx) => {
     const disposers = []
     const unmount = () => {
@@ -326,7 +348,12 @@ export function apply(ctx, config) {
     const mount = () => {
       let definitions
       try {
-        definitions = createJobTools({ getRuntime, getSessionController })
+        definitions = createJobTools({
+          getRuntime,
+          getSessionController,
+          notifyChange,
+          readMaxJobs: () => readNumber('appendMaxJobs', 0),
+        })
       } catch (error) {
         ctx.logger?.warn?.('[cron-board] 工具定义构建失败: ' + String(error && error.message ? error.message : error))
         return
@@ -338,34 +365,46 @@ export function apply(ctx, config) {
         ctx.logger?.warn?.('[cron-board] 工具注册失败: ' + String(error && error.message ? error.message : error))
       }
     }
-    let mounted = false
     const reconcileAppend = () => {
       const wanted = readBoolean('toolsAppend', false)
-      if (wanted === mounted) return
-      if (wanted) mount()
-      else unmount()
-      mounted = wanted
+      if (wanted && disposers.length === 0) mount()
+      if (!wanted) unmount()
+      appendActive = disposers.length > 0
     }
-    toolReconcilers.push(reconcileAppend)
+    toolReconcilers.add(reconcileAppend)
     reconcileAppend()
     return () => {
-      const index = toolReconcilers.indexOf(reconcileAppend)
-      if (index >= 0) toolReconcilers.splice(index, 1)
+      toolReconcilers.delete(reconcileAppend)
       unmount()
+      appendActive = false
     }
   })
 
-  // 覆盖模式:agent 作用域注册同名 schedule_* 工具,开关关闭即撤销
-  const overlay = createOverlayManager(ctx, {
-    readEnabled: () => readBoolean('toolsOverlay', false),
-    getSchedule: () => ctx.get('schedule'),
-    logger: ctx.logger,
+  ctx.inject(['tools'], (overlayCtx) => {
+    if (typeof overlayCtx.get?.('tools')?.get !== 'function' || typeof overlayCtx.on !== 'function') return
+    const manager = createOverlayManager(overlayCtx, {
+      readEnabled: () => readBoolean('toolsOverlay', false),
+      listAgents: () => ctx.get('agents')?.list?.() ?? [],
+      notifyChange,
+      logger: ctx.logger,
+    })
+    overlay = manager
+    toolReconcilers.add(manager.reconcile)
+    manager.reconcile()
+    return () => {
+      toolReconcilers.delete(manager.reconcile)
+      manager.dispose()
+      if (overlay === manager) overlay = null
+    }
   })
-  toolReconcilers.push(overlay.reconcile)
-  overlay.reconcile()
-  ctx.effect(() => () => overlay.dispose(), 'cron-board overlay tools lifecycle')
 
   // defer 挂起定时器随插件生命周期回收,不遗留生命周期外触发
-  // 生命周期钩子:scheduler dispose 停 tick 并收敛执行链(清队/杀在途/等归零)
-  ctx.effect(() => () => schedulerRef.current.dispose?.(), 'cron-board scheduler lifecycle')
+  // 生命周期钩子:scheduler dispose 停 tick 并收敛执行链(清队/杀在途/等归零);
+  // 收尾再排空写链,避免卸载瞬间仍在飞的持久化写入落到新建实例上
+  ctx.effect(() => () => {
+    disposed = true
+    // scheduler.dispose 是异步的:必须等它把队列与在途运行的终态写排进写链,
+    // 再排空写链,否则旧实例可能在卸载返回后继续落盘,覆盖新实例的 recover 结果
+    return Promise.resolve(schedulerRef.current.dispose?.()).then(() => runtimeRef?.store?.flush?.())
+  }, 'cron-board scheduler lifecycle')
 }

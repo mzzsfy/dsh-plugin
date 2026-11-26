@@ -137,3 +137,70 @@ test('store:updateIf 在临界区内比较并写入,并发同基线仅一个成�
   assert.equal([first, second].find((item) => item.ok).row.name, store.jobs.get(created.id).name)
   assert.equal([first, second].find((item) => !item.ok).reason, 'conflict')
 })
+
+test('D08: 启动时回收 jobId 指向已删任务的孤儿运行记录', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cron-board-orphan-'))
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
+  const first = await createStore({ dir })
+  const job = await first.jobs.create({ name: 't', kind: 'shell', command: 'x', schedule: '* * * * *', enabled: true, timeoutMs: 1000 })
+  await first.runs.create({ jobId: job.id, trigger: 'manual', status: 'success', logFile: 'a' })
+  await first.runs.create({ jobId: 'ghost-job', trigger: 'manual', status: 'success', logFile: 'b' })
+  await first.flush()
+  // When 重启(重新加载两个集合文件)
+  const second = await createStore({ dir })
+  // Then 无主记录被丢弃,活任务的历史保留
+  assert.equal(second.orphanRunsPruned, 1)
+  assert.deepEqual(second.runs.list('ghost-job'), [])
+  assert.equal(second.runs.list(job.id).length, 1)
+})
+
+test('D08: updateRuntime 支持函数补丁,读改写同临界区', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cron-board-runtime-'))
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
+  const store = await createStore({ dir })
+  const job = await store.jobs.create({
+    name: 't', kind: 'session', schedule: '0 9 * * *', prompt: 'x', enabled: false,
+    session: { mode: 'fresh', pinnedSessionId: '', agentPreset: 'standard' },
+  })
+  // When 并发「配置改名」与「绑定回填」同时发生
+  const [renamed] = await Promise.all([
+    store.jobs.update(job.id, { name: '改名' }),
+    store.jobs.updateRuntime(job.id, (row) => ({ session: { ...row.session, pinnedSessionId: 's-1' } })),
+  ])
+  // Then 两个字段都保留(旧实现用外部快照写回会覆盖其中一处)
+  const row = store.jobs.get(job.id)
+  assert.equal(renamed.name, '改名')
+  assert.equal(row.session.pinnedSessionId, 's-1')
+})
+
+test('D08: 函数补丁不会覆盖并发配置写(会话子字段各自保留)', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cron-board-runtime2-'))
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
+  const store = await createStore({ dir })
+  const job = await store.jobs.create({
+    name: 't', kind: 'session', schedule: '0 9 * * *', prompt: 'x', enabled: false,
+    session: { mode: 'pinned', pinnedSessionId: '', agentPreset: 'standard' },
+  })
+  // When 配置侧改预设与执行侧回填绑定同时发生
+  await Promise.all([
+    store.jobs.update(job.id, { session: { mode: 'pinned', pinnedSessionId: '', agentPreset: 'reviewer' } }),
+    store.jobs.updateRuntime(job.id, (row) => ({ session: { ...row.session, pinnedSessionId: 's-9' } })),
+  ])
+  // Then 两处改动都在:旧实现用外部快照写回会丢掉其中一个
+  const row = store.jobs.get(job.id)
+  assert.equal(row.session.agentPreset, 'reviewer')
+  assert.equal(row.session.pinnedSessionId, 's-9')
+})
+
+test('D08: 任务集合为空而运行记录非空时跳过孤儿回收(防误清历史)', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cron-board-orphan2-'))
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
+  const first = await createStore({ dir })
+  await first.runs.create({ jobId: 'ghost', trigger: 'manual', status: 'success', logFile: 'a' })
+  await first.flush()
+  // When 任务文件缺失后重启(集合为空,运行记录仍在)
+  const second = await createStore({ dir })
+  // Then 不清空历史
+  assert.equal(second.orphanRunsPruned, 0)
+  assert.equal(second.runs.list('ghost').length, 1)
+})

@@ -979,7 +979,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const previewSeq = useRef(0)
       const [error, setError] = useState(null)
       const [saving, setSaving] = useState(false)
-      const [presetCatalog, setPresetCatalog] = useState({ defaultId: '', items: [] })
+      const [presetCatalog, setPresetCatalog] = useState({ items: [] })
       const [modelCatalog, setModelCatalog] = useState({ default: null, items: [], failures: [] })
       const set = (patch) => setForm((prev) => ({ ...prev, ...patch }))
       const setSession = (patch) => setForm((prev) => ({ ...prev, session: { ...prev.session, ...patch } }))
@@ -1777,20 +1777,26 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     function CronBoardPluginCard({ ctx, bus, automation }) {
       const [enabled, setEnabled] = useState(null)
       const [showAutomation, setShowAutomation] = useState(null)
+      const [toolSettings, setToolSettings] = useState(null)
+      const toolModes = toolSettings?.ui
       const [automationReady, setAutomationReady] = useState(() => automation.available())
       const [busy, setBusy] = useState(false)
       const [error, setError] = useState('')
       const [open, setOpen] = useState(false)
+      // 写请求在途时总线刷新读到的是旧快照,回写会覆盖刚提交的勾选
+      const saving = useRef(false)
       // 渲染时重探服务在场:better-sidebar 晚于设置页装载时,重渲染自动纠正禁用态
       const sidebarReady = ctx.get('betterSidebar') !== undefined
       useEffect(() => {
         let alive = true
         const read = async () => {
-          const outcome = await request('GET', 'status')
-          if (!alive) return
+          const outcome = await statusReaders.get(bus)()
+          if (!alive || saving.current) return
           setEnabled(readSidebarTabPref(outcome))
           const nextAutomation = readShowAutomationPref(outcome)
           setShowAutomation(nextAutomation)
+          setToolSettings(outcome.ok && outcome.data?.ui ? outcome.data : null)
+          setError(outcome.ok ? '' : (outcome.error || '读取设置状态失败'))
           syncHostAutomationNav(nextAutomation)
         }
         read()
@@ -1807,7 +1813,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         setBusy(true)
         setError('')
         const outcome = await request('POST', 'ui-settings', { sidebarTab: !enabled })
-        if (outcome.ok && outcome.data && outcome.data.ui) setEnabled(outcome.data.ui.sidebarTab === true)
+        if (outcome.ok && outcome.data?.ok !== false && outcome.data && outcome.data.ui) setEnabled(outcome.data.ui.sidebarTab === true)
         else setError(outcome.error || (outcome.data && outcome.data.error) || '切换失败')
         setBusy(false)
       }
@@ -1816,13 +1822,38 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         setBusy(true)
         setError('')
         const outcome = await request('POST', 'ui-settings', { showAutomationTasks: !showAutomation })
-        if (outcome.ok && outcome.data && outcome.data.ui) {
+        if (outcome.ok && outcome.data?.ok !== false && outcome.data && outcome.data.ui) {
           const actual = outcome.data.ui.showAutomationTasks === true
           setShowAutomation(actual)
           syncHostAutomationNav(actual)
         } else setError(outcome.error || (outcome.data && outcome.data.error) || '切换失败')
         setBusy(false)
       }
+      const toggleToolMode = async (key) => {
+        if (busy || !toolModes) return
+        setBusy(true)
+        saving.current = true
+        setError('')
+        try {
+          const outcome = await request('POST', 'ui-settings', { [key]: toolModes[key] !== true })
+          if (outcome.ok && outcome.data?.ok === true && outcome.data.ui) setToolSettings(outcome.data)
+          else setError(outcome.error || outcome.data?.error || '切换失败')
+        } finally {
+          saving.current = false
+          setBusy(false)
+        }
+      }
+      const toolModeRow = (key, active, label, help) => h(React.Fragment, { key },
+        h('div', { className: 'cb-pc__rowLine' },
+          h('span', { className: 'cb-pc__rowLabel' }, label),
+          switchToggle({
+            checked: toolModes?.[key] === true,
+            disabled: busy || !toolModes,
+            onChange: () => toggleToolMode(key),
+            ariaLabel: label,
+          })),
+        h('p', { className: 'cb-pc__hint' }, help,
+          toolModes?.[key] === true && toolSettings.toolStatus?.[active] !== true ? ' 已开启，当前没有生效。' : ''))
       return h('li', { className: 'cb-pc' + (open ? ' cb-pc--open' : '') },
         h('button', { type: 'button', className: 'cb-pc__head', 'aria-expanded': open,
           'aria-label': (open ? '折叠' : '展开') + ': ' + CARD_TITLE, onClick: () => setOpen(!open) },
@@ -1854,6 +1885,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             h('p', { className: 'cb-pc__hint' }, automationReady
               ? '开启后在看板下方以只读分组显示宿主「自动化任务」,并隐藏其在侧栏的重复入口;点击任务打开宿主页面管理。'
               : '宿主未提供自动化任务服务,该开关不可用。'),
+            toolModeRow('toolsAppend', 'appendActive', '追加定时任务工具', '模型可读取看板任务，并管理本会话通过工具创建的会话任务。'),
+            toolModeRow('toolsOverlay', 'overlayActive', '替换官方自动化任务工具', '包装当前预设可用的官方 schedule_* 执行入口:参数、权限、结果不变,模型成功写入官方任务后看板刷新。官方自动化任务页面本身不变,关闭即撤销包装。'),
             error ? h('p', { className: 'cb-error', role: 'alert' }, error) : null)) : null)
     }
 

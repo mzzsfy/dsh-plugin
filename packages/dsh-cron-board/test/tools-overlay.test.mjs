@@ -1,146 +1,218 @@
-// 覆盖模式 BDD:真实宿主 scope 语义下验证同名工具遮蔽与撤销恢复,以及转调 schedule 服务。
-// 用真实 Context/ToolRuntime/SystemPrompt(与 boss-simulator 隔离用例同构),不 mock 作用域。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
-import { createScope } from '@deepseek-ai/dsh-scope'
+import { bindScopeParent, createScope } from '@deepseek-ai/dsh-scope'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 
-import { registerOverlayTools, createOverlayManager, OVERLAY_TOOL_NAMES } from '../src/tools-overlay.mjs'
+import { createOverlayManager } from '../src/tools-overlay.mjs'
 
-function makeHost() {
+function fixture(t) {
   const root = new Context()
   new SystemPrompt(root, {})
   new ToolRuntime(root, {})
-  if (typeof root.tools.setExecutor === 'function') {
-    root.tools.setExecutor({
-      sections: [],
-      describe: (definitions) => ({
-        schemas: definitions.map((definition) => ({
-          name: definition.name,
-          description: definition.description,
-          parameters: definition.parameters,
-        })),
-      }),
-    })
-  }
-  return root
-}
-
-function makeSchedule() {
+  t.after(() => root.fiber.dispose())
+  const presetKey = {}
+  const preset = createScope(root, presetKey)
+  const original = {}
   const calls = []
-  return {
-    calls,
-    async create(input, actor) { calls.push({ op: 'create', input, actor }); return { id: 't1', kind: 'rrule', ...input } },
-    async list(query) { calls.push({ op: 'list', query }); return { items: [], shown: 0, total: 0, limit: 50, offset: 0 } },
-    async view({ id }) { calls.push({ op: 'view', id }); return { id, kind: 'rrule' } },
-    async edit(input, actor) { calls.push({ op: 'edit', input, actor }); return { id: input.id, kind: 'rrule' } },
+  const register = (operation, title, value) => {
+    const name = 'schedule_' + operation
+    const execute = async (args, exec) => {
+      calls.push({ operation, args, exec })
+      return value
+    }
+    const definition = {
+      name,
+      description: title + '.',
+      parameters: { type: 'object', properties: {} },
+      output: { schema: { type: 'object', additionalProperties: true, properties: {} }, render: () => [] },
+      presentCall: () => ({ card: 'generic', title }),
+      execute,
+    }
+    original[operation] = { definition, execute }
+    return preset.ctx.tools.register(definition)
   }
-}
-
-function makeAgent(root, { depth = 0 } = {}) {
-  // 作用域键就是 agent 对象(宿主 createScope(loopCtx, agent) 的键语义)
-  const agent = { delegationDepth: depth, session: { id: 's1', header: { cwd: 'C:/work' } } }
-  agent.ctx = createScope(root, agent).ctx
-  return { agent, key: agent }
-}
-
-async function visibleNames(root, scopeKey) {
-  return (await root.systemPrompt.assemble({ scope: scopeKey })).tools.map((tool) => tool.name).sort()
-}
-
-test('overlay:agent 作用域同名工具遮蔽官方定义,撤销后官方恢复', async (t) => {
-  const root = makeHost()
-  t.after(() => root.fiber.dispose())
-  // Given 官方工具在全局层(模拟 preset/官方行注册)
-  const globalDispose = root.tools.register({
-    name: 'schedule_create', description: 'official', parameters: {},
-    output: { schema: { type: 'object', additionalProperties: true, properties: {} }, render: () => [] },
+  const nextTask = { id: 't1', kind: 'rrule', scheduledAtLocal: '2099-01-01T08:00:00+08:00' }
+  register('create', 'Create a scheduled task', nextTask)
+  register('list', 'List scheduled tasks', { items: [nextTask] })
+  register('view', 'View one scheduled task', nextTask)
+  register('edit', 'Update, pause, resume, or delete one scheduled task', { code: 'schedule_conflict' })
+  const agents = []
+  const makeAgent = (withSchedule = true) => {
+    const agent = {}
+    agent.ctx = createScope(root, agent).ctx
+    if (withSchedule) agent.presetBinding = bindScopeParent(agent, presetKey)
+    agents.push(agent)
+    return agent
+  }
+  let enabled = false
+  let changes = 0
+  const manager = createOverlayManager(root, {
+    readEnabled: () => enabled, listAgents: () => agents,
+    notifyChange: () => { changes++ },
   })
-  const { agent, key } = makeAgent(root)
-  assert.deepEqual(await visibleNames(root, key), ['schedule_create'])
-  // When 覆盖注册
-  const dispose = registerOverlayTools(agent, makeSchedule())
-  assert.ok(dispose)
-  // Then agent 层看到四个覆盖工具
-  const covered = await visibleNames(root, key)
-  assert.deepEqual(covered, [...OVERLAY_TOOL_NAMES].sort())
-  // When 撤销
-  dispose()
-  // Then 官方工具恢复
-  assert.deepEqual(await visibleNames(root, key), ['schedule_create'])
-  globalDispose()
-})
-
-test('overlay:create 转调 schedule.create,this_session 投递本会话', async (t) => {
-  const root = makeHost()
-  t.after(() => root.fiber.dispose())
-  const schedule = makeSchedule()
-  const { agent, key } = makeAgent(root)
-  const dispose = registerOverlayTools(agent, schedule)
-  t.after(() => dispose())
-  const definition = root.tools.get('schedule_create', key)
-  assert.ok(definition)
-  const result = await definition.execute({
-    title: 'x', prompt: 'p', rrule: 'DTSTART:20260101T000000Z\nRRULE:FREQ=DAILY;COUNT=1', target: 'this_session',
-  }, { agent })
-  assert.equal(result.id, 't1')
-  assert.deepEqual(schedule.calls[0].input.target, { kind: 'session', sessionId: 's1' })
-  assert.equal(schedule.calls[0].actor, 's1')
-})
-
-test('overlay:子代理被拒绝,delete 携带额外字段与空更新返回 invalid_selector', async (t) => {
-  const root = makeHost()
-  t.after(() => root.fiber.dispose())
-  const { agent, key } = makeAgent(root, { depth: 2 })
-  const schedule = makeSchedule()
-  t.after(registerOverlayTools(agent, schedule))
-  const create = root.tools.get('schedule_create', key)
-  const refused = await create.execute({ title: 'x', prompt: 'p', rrule: 'r', target: 'new' }, { agent })
-  assert.equal(refused.code, 'subagent_session')
-  // Given 正常调用者
-  const normal = makeAgent(root)
-  t.after(registerOverlayTools(normal.agent, schedule))
-  const edit = root.tools.get('schedule_edit', normal.key)
-  const bad = await edit.execute({ id: 't1', action: 'delete', title: 'x' }, { agent: normal.agent })
-  assert.equal(bad.code, 'invalid_selector')
-  const empty = await edit.execute({ id: 't1', action: 'update' }, { agent: normal.agent })
-  assert.equal(empty.code, 'invalid_selector')
-})
-
-test('overlay:manager 按开关挂载/撤销已有 agent,关闭后不留注册', async (t) => {
-  const root = makeHost()
-  t.after(() => root.fiber.dispose())
-  const { agent, key } = makeAgent(root)
-  const schedule = makeSchedule()
-  const listeners = []
-  const ctx = {
-    get(name) { return name === 'agents' ? { list: () => [agent] } : undefined },
-    on(event, fn) {
-      listeners.push({ event, fn })
-      return () => {
-        const index = listeners.findIndex((listener) => listener.fn === fn)
-        if (index >= 0) listeners.splice(index, 1)
-      }
-    },
+  t.after(manager.dispose)
+  return {
+    root, original, calls, makeAgent, manager, presetKey,
+    get changes() { return changes },
+    setEnabled(value) { enabled = value; manager.reconcile() },
   }
-  let enabled = true
-  const manager = createOverlayManager(ctx, { readEnabled: () => enabled, getSchedule: () => schedule })
-  t.after(() => manager.dispose())
+}
+
+test('S2: 覆盖保留官方工具输入输出及展示契约，关闭时撤销执行包装', async (t) => {
+  const f = fixture(t)
+  const agent = f.makeAgent()
+  const { definition, execute } = f.original.create
+  const args = { title: '测试任务' }
+  const exec = { agent, signal: new AbortController().signal }
+  assert.equal(f.root.tools.get('schedule_create', agent).execute, execute)
+  f.setEnabled(true)
+  const wrapped = f.root.tools.get('schedule_create', agent)
+  assert.equal(wrapped, definition)
+  assert.notEqual(wrapped.execute, execute)
+  assert.deepEqual(await wrapped.execute(args, exec), {
+    id: 't1', kind: 'rrule', scheduledAtLocal: '2099-01-01T08:00:00+08:00',
+  })
+  assert.deepEqual(f.calls, [{ operation: 'create', args, exec }])
+  assert.equal(f.changes, 1)
+  await f.root.tools.get('schedule_list', agent).execute({}, exec)
+  await f.root.tools.get('schedule_edit', agent).execute({}, exec)
+  assert.equal(f.changes, 1, '查询和未落库的编辑不发布变更')
+  f.setEnabled(false)
+  assert.equal(f.root.tools.get('schedule_create', agent).execute, execute)
+})
+
+test('S2: 无官方工具的预设与被限制的 agent 不获得额外工具', (t) => {
+  const f = fixture(t)
+  const normal = f.makeAgent()
+  const restricted = f.makeAgent()
+  const minimal = f.makeAgent(false)
+  f.setEnabled(true)
+  restricted.ctx.tools.restrict({ deny: ['schedule_create'] })
+  assert.equal(f.root.tools.get('schedule_create', minimal), undefined)
+  assert.equal(f.root.tools.get('schedule_create', restricted), undefined)
+  assert.notEqual(f.root.tools.get('schedule_create', normal).execute, f.original.create.execute)
+  f.manager.dispose()
+  assert.equal(f.root.tools.get('schedule_create', normal).execute, f.original.create.execute)
+})
+
+test('S2: 仅同名的第三方工具保持原执行函数', (t) => {
+  const f = fixture(t)
+  const agent = f.makeAgent(false)
+  const execute = async () => ({ items: [] })
+  agent.ctx.tools.register({
+    name: 'schedule_list', description: 'List external tasks.', parameters: {},
+    output: { schema: { type: 'object', additionalProperties: true, properties: {} }, render: () => [] },
+    execute,
+  })
+  f.setEnabled(true)
+  assert.equal(f.root.tools.get('schedule_list', agent).execute, execute)
+})
+
+test('S2: 其他插件替换执行入口后，后续对账不重新包装', (t) => {
+  const f = fixture(t)
+  f.makeAgent()
+  f.setEnabled(true)
+  const { definition } = f.original.create
+  const replacement = async () => ({ id: 'replacement' })
+  definition.execute = replacement
+  f.manager.reconcile()
+  f.manager.reconcile()
+  assert.equal(definition.execute, replacement)
+  f.setEnabled(false)
+  assert.equal(definition.execute, replacement)
+})
+
+test('S2: 其他插件恢复原执行入口后重新接管', (t) => {
+  const f = fixture(t)
+  f.makeAgent()
+  f.setEnabled(true)
+  const { definition, execute } = f.original.create
+  const wrapped = definition.execute
+  definition.execute = async () => ({ id: 'replacement' })
+  f.manager.reconcile()
+  definition.execute = execute
+  f.manager.reconcile()
+  assert.notEqual(definition.execute, execute)
+  assert.notEqual(definition.execute, wrapped)
+})
+
+test('S2: 对账抛错不外泄到宿主事件', (t) => {
+  const warnings = []
+  const root = new Context()
+  new SystemPrompt(root, {})
+  new ToolRuntime(root, {})
+  t.after(() => root.fiber.dispose())
+  let explode = false
+  const manager = createOverlayManager(root, {
+    readEnabled: () => true,
+    listAgents: () => { if (explode) throw new Error('agents 不可用'); return [] },
+    notifyChange: () => {},
+    logger: { warn: (message) => warnings.push(message) },
+  })
+  t.after(manager.dispose)
+  explode = true
+  assert.doesNotThrow(() => root.emit('tools/change'))
+  assert.doesNotThrow(() => root.emit('agent/created', { agent: {} }))
+  assert.equal(warnings.length, 2)
+  assert.match(warnings[0], /自动化工具对账失败/)
+})
+
+test('S2: 切换预设后仅包装仍可见的官方定义', (t) => {
+  const f = fixture(t)
+  const agent = f.makeAgent()
+  const { definition, execute } = f.original.create
+  f.setEnabled(true)
+  assert.notEqual(definition.execute, execute)
+  agent.presetBinding.rebind({})
+  f.root.emit('tools/change')
+  assert.equal(f.root.tools.get('schedule_create', agent), undefined)
+  assert.equal(definition.execute, execute)
+  agent.presetBinding.rebind(f.presetKey)
+  f.root.emit('tools/change')
+  assert.notEqual(definition.execute, execute)
+})
+
+test('S2: 开启后发现新 agent，销毁后撤销无人使用的包装', (t) => {
+  const f = fixture(t)
+  f.setEnabled(true)
+  const { definition, execute } = f.original.list
+  const agent = f.makeAgent()
+  f.root.emit('agent/created', { agent })
+  assert.notEqual(definition.execute, execute)
+  f.root.emit('agent/disposed', { agent })
+  assert.equal(definition.execute, execute)
+})
+
+test('S2: 诊断现场记录开关、agent 数与命中数,失效态只告警一次', (t) => {
+  const warnings = []
+  const root = new Context()
+  new SystemPrompt(root, {})
+  new ToolRuntime(root, {})
+  t.after(() => root.fiber.dispose())
+  let enabled = false
+  const agents = []
+  const manager = createOverlayManager(root, {
+    readEnabled: () => enabled,
+    listAgents: () => agents,
+    notifyChange: () => {},
+    logger: { warn: (message) => warnings.push(message) },
+  })
+  t.after(manager.dispose)
+  // 关闭态与「开启但无 agent」必须可区分,否则卡片无法定位原因
   manager.reconcile()
-  assert.equal(manager.mounted.size, 1)
-  assert.deepEqual(await visibleNames(root, key), [...OVERLAY_TOOL_NAMES].sort())
-  // When 关闭
-  enabled = false
-  manager.reconcile()
-  assert.equal(manager.mounted.size, 0)
-  assert.deepEqual(await visibleNames(root, key), [])
-  // When 打开后新 agent 经事件挂载
+  assert.deepEqual(manager.debug, { enabled: false, agents: 0, wanted: 0, error: null })
   enabled = true
   manager.reconcile()
-  const created = makeAgent(root)
-  listeners.find((listener) => listener.event === 'agent/created').fn({ agent: created.agent })
-  assert.equal(manager.mounted.size, 2)
-  assert.deepEqual(await visibleNames(root, created.key), [...OVERLAY_TOOL_NAMES].sort())
+  assert.deepEqual(manager.debug, { enabled: true, agents: 0, wanted: 0, error: null })
+  assert.deepEqual(warnings, [])
+  // 有 agent 但宿主工具表里没有官方定义:告警一次,重复对账不再刷
+  agents.push({ ctx: createScope(root, {}).ctx })
+  manager.reconcile()
+  assert.deepEqual(manager.debug, { enabled: true, agents: 1, wanted: 0, error: null })
+  assert.equal(warnings.length, 1)
+  manager.reconcile()
+  manager.reconcile()
+  assert.equal(warnings.length, 1)
 })

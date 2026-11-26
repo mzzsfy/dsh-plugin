@@ -1,59 +1,85 @@
 # 模型工具支持(追加 / 覆盖)BDD
 
-本文件约束 `dsh-cron-board` 的模型工具面:两种互不干扰的模式,默认全部关闭,由设置开关显式开启。
+## 背景
 
-- **追加模式**:注册 `cron_board_*` 四工具,读写看板自有任务;与官方 `schedule_*` 并存。
-- **覆盖模式**:注册与官方同名的 `schedule_*` 四工具,在 agent 作用域遮蔽官方定义,转调宿主 `ctx.schedule`;模型看到的是 cron-board 的实现,数据仍是宿主自动化任务。
+`dsh-cron-board` 自身持有看板任务(脚本/会话两类),宿主另有一套官方自动化任务(`schedule_*`)。桌面模型要能读看板、按用户明确要求建会话任务,又要在不改写宿主契约的前提下让官方任务写入后看板能刷新。两种诉求互不重叠,因此拆成两个独立开关,默认全部关闭。
 
-两种模式都遵守同一原则:开关关闭 = 工具不存在(不是"注册后拒绝调用");开关打开/关闭即时生效,不需要重启宿主;任何挂载失败整体回滚,不留半套工具。
+## 场景
 
-## S1 追加模式:看板任务读写
+### S1 追加模式:看板任务读写
 
 - 设置项 `toolsAppend`(布尔,默认 `false`)。
 - 打开时注册 `cron_board_list` / `cron_board_view` / `cron_board_create` / `cron_board_edit`;关闭时撤销全部。
 - 注册在插件根作用域(全局可见),不与任何官方工具同名。
 - 工具执行时才装配运行时(惰性单例),首个调用可能等待数据目录初始化。
 
-### 工具契约
+#### 工具契约
 
 | 工具 | 作用 | 关键参数 |
 |------|------|----------|
-| `cron_board_list` | 列出任务,启用的在前、按下次触发升序 | `active?` / `kind?` / `limit`(≤500,默认 100) / `offset` |
+| `cron_board_list` | 分页列出任务,启用的在前、按下次触发升序;返回 `items`、`shown`、`total`、`limit`、`offset` | `active?` / `kind?` / `limit`(1–500,默认 100) / `offset`(默认 0) |
 | `cron_board_view` | 单任务全貌 + 最近 5 条运行 | `id` |
-| `cron_board_create` | 新建脚本/会话任务 | `name` / `schedule`(多行) / `kind?` / `command?` / `prompt?` / `sessionMode?` / `agentPreset?` / `enabled?` / `timeoutMs?` / `concurrency?` |
-| `cron_board_edit` | 更新 / 启停 / 立即运行 / 删除 | `id` / `action`(`update`\|`delete`\|`run`) + 显式字段 + `expectedUpdatedAt?` |
+| `cron_board_create` | 新建会话任务 | `name` / `schedule`(多行) / `prompt` / `kind?`(仅 `session`,可省略) / `sessionMode?` / `enabled?` / `runOnce?` / `concurrency?` |
+| `cron_board_edit` | 更新或删除当前会话通过工具创建的任务 | `id` / `action`(`update`\|`delete`) / `expectedUpdatedAt`(必填) + 可更新 `name`、`schedule`、`prompt`、`enabled`、`runOnce`、`concurrency` |
 
 规则:
 
-- 归一与校验复用 HTTP 路由的同一套实现(`job-fields.mjs`),两条入口对同一输入给出同一结果。
-- `schedule` 支持多行(多 cron 表达式),每条可带 `T+N` 时区后缀;新建与改期逐条要求有未来触发点。
-- 列表与创建结果不含命令/提示正文;正文只在 `cron_board_view` 返回(控制工具结果体积)。
-- 更新只写显式提交的字段;带 `schedule` 才重算 `nextRunAt`;`expectedUpdatedAt` 不匹配返回 `job_conflict`。
-- 删除先停执行面(`stopJob`),未能终止返回 `job_not_terminated` 且任务保留;日志目录清理失败不翻案删除结果。
-- 会话任务在会话服务缺失时返回 `session_unavailable`。
-- 错误码:`invalid_name` / `invalid_kind` / `invalid_command` / `invalid_schedule` / `not_future` / `invalid_selector` / `job_not_found` / `job_conflict` / `job_not_terminated` / `session_unavailable` / `internal_error`。
+- `schedule` 复用看板的 cron 校验。支持多行表达式及 `T±N` 时区后缀,新建与改期逐条要求有未来触发点。
+- 列表翻页以集合与顺序不变为前提:按 `offset += shown` 直到 `offset >= total` 即可读完整集合;翻页期间任务触发会改变排序键 `nextRunAt`,增删会改变 `total`,此时回到 `offset = 0` 以新的 `total` 重读。
+- `name` 上限 120 字符(随列表回给每个 agent);`prompt` 长度由请求体上限约束,不另设阈值。
+- 命令和提示正文仅在 `cron_board_view` 中返回。脚本任务对模型只读。
+- 写操作只作用于当前顶层会话:任务必须由该会话通过工具创建(`createdBySessionId`),且目录与调用会话当前目录一致;子会话、其他会话创建的任务、脚本任务一律拒写。
+- 创建时目录与预设由调用会话决定,模型提交的 `workdir` / `agentPreset` 不生效;目录取调用会话的宿主有效目录(会话内 `cd` 后以新目录为准),宿主与服务都给不出目录时拒绝创建。
+- `sessionMode` 为 `pinned` 时固定会话就是调用方,模型不提交固定会话 id;只要固定会话仍是调用方就保持可写(会话丢失后宿主重绑新会话,原会话恢复后即失去写权,方向为安全侧)。
+- `update` / `delete` 必须提交模型读到的 `expectedUpdatedAt`(来自 `list`/`view`/`create` 的 `updatedAt`):与当前版本不一致返回 `job_conflict` 且不改数据。`update` 只写显式提交的字段,带 `schedule` 才重算 `nextRunAt`。
+- 归属只认创建会话:看板改变投递范围(任务目录、任务类型、会话绑定,含会话模型选择)后清除来源会话,该任务收回模型写权限;`pinned` 指向的会话不是调用方时同样收回。调用方中途 `cd` 或换组合预设不改变归属。
+- 四个工具逐条注册,任一条注册失败即整体撤销已注册部分,不留半套。
+- 删除先停执行面(`stopJob`):未能终止返回 `job_not_terminated` 并保留任务;日志目录清理失败不翻案删除结果。
+- 成功创建、编辑、删除后通知看板刷新。
 
-## S2 覆盖模式:同名遮蔽官方工具
+#### 错误码
 
-- 设置项 `toolsOverlay`(布尔,默认 `false`)。
-- 打开时对每个 agent 在 **agent 作用域**注册 `schedule_create` / `schedule_list` / `schedule_view` / `schedule_edit`;更近作用域同名定义遮蔽 preset 的官方工具。
-- 参数、描述、输出 schema、错误码与官方 `@deepseek-ai/dsh-tool-schedule` 对齐;执行转调宿主 `ctx.schedule`(创建/查看/编辑/删除自动化任务)。
-- 官方工具语义完整保留:`this_session` / `new_once` / `new` 三种投递目标、rrule、暂停/恢复、`expectedUpdatedAt` 冲突。
-- 子代理会话按官方规则拒绝(`subagent_session`);`ctx.schedule` 缺失时工具不注册(旧宿主无自动化任务服务)。
-- 开关关闭:撤销 agent 作用域注册,官方工具在下一步工具表刷新后恢复;无需重启。
-- 回退:关掉 `toolsOverlay` 即回到官方工具面;cron-board 不改官方数据、不改官方 preset 行。
+| code | 触发条件 |
+|------|----------|
+| `agent_required` | 调用方没有顶层会话,或取不到组合预设 |
+| `subagent_session` | 子会话(含委派深度)发起写操作 |
+| `cwd_required` | 调用会话没有工作目录 |
+| `shell_read_only` | 对脚本任务发起写操作 |
+| `job_context_mismatch` | 任务来源会话或目录与调用会话不一致,或固定会话指向的不是调用方 |
+| `job_not_found` | 任务不存在 |
+| `job_conflict` | `expectedUpdatedAt` 与当前版本不一致 |
+| `job_not_terminated` | 删除时仍有在途运行未能终止 |
+| `session_unavailable` | 会话服务缺失,无法创建会话任务 |
+| `quota_exceeded` | 该会话通过工具创建的任务数已达 `appendMaxJobs` 上限(0 为不限制) |
+| `invalid_name` | 名称为空或超过 120 字符 |
+| `invalid_schedule` / `not_future` | cron 表达式非法,或没有未来触发点 |
+| `invalid_selector` | 提交了写操作不允许的字段(白名单之外的键静默忽略)或动作 |
+| `internal_error` | 未归类的运行期失败 |
 
-### 替换官方自动化任务的边界(本阶段)
+### S2 覆盖模式
 
-- 本阶段只替换**工具面**;官方 `dsh-client-ui-schedule` 页面与 turn card 仍由官方插件渲染。
+- `toolsOverlay` 默认关闭。开启后对当前会话可见且符合官方契约的整套 `schedule_*` 定义原位包装执行入口,保留宿主注册身份、权限、参数、结果和展示。
+- Given 预设未提供官方工具或工具受限,When 开启覆盖,Then 宿主工具清单和准入结果均不变。
+- Given 会话已启用覆盖,When 创建或编辑官方任务成功,Then 返回官方结果并通知看板刷新。查询和业务失败保留原结果。看板自身的自动化任务分组另经宿主的 `schedule/changed` 事件刷新,覆盖的通知是在此之上的补充。
+- Given 开关关闭、预设切换后定义不可见,或插件卸载,Then 释放相应包装并恢复原执行入口;`tools` 服务释放由注入清理承担。
+- Given 开关开着且存在会话,Then 每次对账后把开关态、agent 数、命中数、最后一次对账错误写入 `/api/cron-board/status` 的 `toolDiagnostics.overlay`;命中数为 0 时按失效态记一条告警(重复对账不重复记)。
+- Given 其他插件替换了某官方定义的执行入口,Then 让位不夺回;该入口恢复成原实现后,下一次对账重新接管。
+- Given 对账过程抛错,Then 记录告警并保持宿主事件链继续,不影响会话创建与其他插件注册。
+- 官方工具继续使用宿主的 RRULE、投递目标、暂停和恢复、乐观锁与子代理准入规则。
+
+#### 替换官方自动化任务的边界(本阶段)
+
+- 本阶段只替换**工具面**;官方 `dsh-client-ui-schedule` 页面、历史与编辑页仍由官方插件渲染。
 - 看板面板接管官方任务管理(列表/编辑/运行/历史)与官方页隐藏属后续阶段,单独设计;在此之前不得声称"已替换官方自动化任务"。
 - 覆盖模式不改写宿主自动化任务数据,模型通过覆盖工具创建的任务与官方页创建的任务等价。
 
-## S3 开关一致性
+### S3 开关一致性
 
 - 两个开关独立:可只开追加、只开覆盖、或都开(覆盖只影响 `schedule_*`,追加只提供 `cron_board_*`,不冲突)。
-- 开关变化经设置变更通道即时对账;注册失败记录告警并保持未注册状态(不回退到半套)。
-- 插件卸载时撤销两种模式的全部注册。
+- Given 设置卡首次打开,Then 两个开关默认关闭。修改一个开关时保留另一个开关的值。
+- Given 配置已保存,Then 卡片区分配置值与实际挂载状态;写入失败时保留已保存值并显示错误。
+- Given 覆盖开关已打开,Then 提示只描述「对提供官方 `schedule_*` 的预设生效」,不暗示接管官方页面。
+- 插件卸载时撤销追加注册与覆盖包装。
 
 ## 不做
 
@@ -61,3 +87,13 @@
 - 不在覆盖模式下改写官方任务数据结构或做数据迁移。
 - 不为工具实现独立的认证/权限层;沿用宿主工具面。
 - 不在追加模式提供跨插件任务的通用管理(只看板自有任务)。
+- 不提供模型侧立即运行(`run`)与脚本任务创建:两者都绕过用户在看板的显式操作。
+
+## 已知边界
+
+- 追加四工具是宿主新名字,按名字收紧的预设 permit-list 天然安全,deny-list 部署需显式 deny 这四个名字;本包不自建按预设的准入层。
+- 追加模式的条数上限由 `appendMaxJobs` 控制(默认 0 = 不限制),创建频率与宿主审批不受本包约束,可信度低的会话不宜开启。
+- 写入与取消之间存在窗口:任务已落库而宿主把结果改写成 aborted。本包按删除路径补偿(停执行面、删任务与日志目录),update 另用 CAS 回滚原字段;补偿会推进配置版本,模型重试前需重新读取。补偿本身失败时只留痕(任务保留),不会静默丢失。
+- 删除类取消只保证终态幂等(重试得 `job_not_found`);`dispatch` 的 409 回滚与进程级停止重叠时,可能残留指向已删任务的 cancelled 运行行,由下次启动的孤儿回收清理。
+- 预设 id 形态不校验:宿主只要求非空,看板目录照实展示;目录里没有的 id(预设已删除等)在表单上回落为「跟随宿主默认」。
+- 官方定义识别依赖描述前缀与 `presentCall` 契约;官方文案改写会静默失效,卡片以「已开启,当前没有生效」提示兜底,`/api/cron-board/status` 的 `toolDiagnostics.overlay` 给出对账现场的 agent 数与命中数。

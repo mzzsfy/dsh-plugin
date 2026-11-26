@@ -231,9 +231,11 @@ const EDGE_TASKS = [
 const TZ_TASKS = [
   { id: 'automation-tz', kind: 'rrule', title: 'UTC 任务', prompt: '', status: 'active', scheduledAt: '2099-01-02T01:00:00.000Z', rrule: 'DTSTART;TZID=UTC:20990102T010000\nRRULE:FREQ=DAILY;INTERVAL=1;BYHOUR=1;BYMINUTE=0', target: { kind: 'new', create: {} }, involvedSessionIds: [] },
 ]
-function createHarness({ showAutomation = false, tasks = TASKS, remote = true, layoutAvailable = true } = {}) {
+function createHarness({ showAutomation = false, tasks = TASKS, remote = true, layoutAvailable = true, slot = 'main', rejectToolSettings = false } = {}) {
   const calls = []
   let pref = showAutomation
+  const toolSettings = { toolsAppend: false, toolsOverlay: false }
+  const ui = () => ({ sidebarTab: false, showAutomationTasks: pref, ...toolSettings })
   const catalogCalls = []
   const layoutCalls = []
   const bus = {
@@ -266,10 +268,15 @@ function createHarness({ showAutomation = false, tasks = TASKS, remote = true, l
     const respond = (payload) => ({ ok: true, status: 200, json: async () => payload })
     if (method === 'GET' && target === API + 'jobs') return respond({ items: [] })
     if (method === 'GET' && target === API + 'envs') return respond({ items: [] })
-    if (method === 'GET' && target === API + 'status') return respond({ scheduler: { active: 0, queued: 0 }, serverTzOffset: 8, ui: { sidebarTab: false, showAutomationTasks: pref } })
+    if (method === 'GET' && target === API + 'status') return respond({ scheduler: { active: 0, queued: 0 }, serverTzOffset: 8, ui: ui() })
     if (method === 'POST' && target === API + 'ui-settings') {
       if (typeof body.showAutomationTasks === 'boolean') pref = body.showAutomationTasks
-      return respond({ ok: true, ui: { sidebarTab: false, showAutomationTasks: pref } })
+      const toolPatch = Object.fromEntries(Object.keys(toolSettings).filter(key => typeof body[key] === 'boolean').map(key => [key, body[key]]))
+      if (rejectToolSettings && Object.keys(toolPatch).length > 0) {
+        return respond({ ok: false, error: '设置写入失败', ui: { ...ui(), ...toolPatch } })
+      }
+      Object.assign(toolSettings, toolPatch)
+      return respond({ ok: true, ui: ui(), toolStatus: { appendActive: toolSettings.toolsAppend, overlayActive: false } })
     }
     return respond({})
   }
@@ -304,13 +311,20 @@ function createHarness({ showAutomation = false, tasks = TASKS, remote = true, l
       return () => {}
     },
     slots: {
-      inject: (name, factory) => factory(),
+      inject: (name, factory) => {
+        const result = factory()
+        if (!result?.next) return result
+        const disposers = [...result]
+        return () => disposers.forEach((dispose) => dispose?.())
+      },
       register: (meta, component) => { registered.push({ meta, component }); return () => {} },
     },
   })
-  const entry = registered.find((item) => item.meta.name === 'main')
-  assert.ok(entry, '未注册主面板')
-  const runtime = createRuntime(entry.component, { visible: true })
+  const entry = registered.find((item) => item.meta.name === slot)
+  assert.ok(entry, `未注册 ${slot}`)
+  const runtime = slot === 'main'
+    ? createRuntime(entry.component, { visible: true })
+    : createRuntime(() => ({ children: [entry.component()] }), {})
   return { runtime, calls, catalogCalls, layoutCalls, documentElement: documentStub.documentElement }
 }
 
@@ -396,6 +410,46 @@ test('Given showAutomationTasks=false When 打开工具栏开关 Then 写入偏�
   assert.equal(catalogCalls.length, 1, '开启后应读取宿主目录')
   const current = runtime.find((item) => item.props.jobs !== undefined)
   assert.equal(hasGroup(current.element), true, '开启后应出现自动化任务分组')
+})
+
+test('S3: 配置卡默认关闭，追加和覆盖可独立切换', async (t) => {
+  const { runtime, calls } = createHarness({ slot: 'plugins.bundle.config' })
+  t.after(() => runtime.unmount())
+  const card = () => runtime.find(item => item.type.name === 'CronBoardPluginCard').element
+  const input = label => nodesOf(card()).find(node => node.type === 'input' && node.props['aria-label'] === label)
+  runtime.render()
+  await runtime.flush()
+  nodesOf(card()).find(node => node.props['aria-expanded'] === false).props.onClick()
+  await runtime.flush()
+  const append = '追加定时任务工具'
+  const overlay = '替换官方自动化任务工具'
+  assert.equal(input(append).props.checked, false)
+  assert.equal(input(overlay).props.checked, false)
+  input(append).props.onChange({ target: { checked: true } })
+  await runtime.flush()
+  assert.equal(input(append).props.checked, true)
+  assert.equal(input(overlay).props.checked, false)
+  input(overlay).props.onChange({ target: { checked: true } })
+  await runtime.flush()
+  assert.equal(input(append).props.checked, true)
+  assert.equal(input(overlay).props.checked, true)
+  assert.match(textOf(card()), /当前没有生效/)
+  assert.deepEqual(calls.filter(call => call.method === 'POST').map(call => call.body), [{ toolsAppend: true }, { toolsOverlay: true }])
+})
+
+test('S3: 设置服务拒绝写入时保留已保存的开关值并提示错误', async (t) => {
+  const { runtime } = createHarness({ slot: 'plugins.bundle.config', rejectToolSettings: true })
+  t.after(() => runtime.unmount())
+  const card = () => runtime.find(item => item.type.name === 'CronBoardPluginCard').element
+  const input = () => nodesOf(card()).find(node => node.type === 'input' && node.props['aria-label'] === '追加定时任务工具')
+  runtime.render()
+  await runtime.flush()
+  nodesOf(card()).find(node => node.props['aria-expanded'] === false).props.onClick()
+  await runtime.flush()
+  input().props.onChange({ target: { checked: true } })
+  await runtime.flush()
+  assert.equal(input().props.checked, false)
+  assert.match(textOf(card()), /设置写入失败/)
 })
 
 test('Given 复杂 RRULE When 打开看板 Then 仅官方可表达子集翻译,其余回退自定义规则', async () => {
