@@ -1016,7 +1016,13 @@ const MESSAGES_ZH = {
   'pricing.invalidResponse': '保存失败，定价响应无效。',
   'pricing.validationSummary': '请检查标出的定价字段。',
   'pricing.providerPattern': '平台模式',
+  'pricing.providerPlaceholder': 'gpt-*',
   'pricing.modelPattern': '型号模式',
+  'pricing.modelPatternPlaceholder': 'gpt-*-sol（最多一个 *）',
+  'pricing.pricePlaceholder': '0',
+  'pricing.monthDayFromPlaceholder': '1',
+  'pricing.monthDayToPlaceholder': '31',
+  'pricing.datePlaceholder': 'YYYY-MM-DD',
   'pricing.helpLabel': '匹配规则说明',
   'pricing.help': '先比较平台，再比较型号。每段精确优先，其次是带 * 的模式（更长优先；同长度按前缀、后缀、中缀），最后才是单独的 *。条件必须全部成立，同档条件多者优先，仍并列时按规则编号选择第一条。每段最多一个 *，可匹配零个或多个字符。',
   'pricing.copyRule': '复制规则',
@@ -1360,7 +1366,13 @@ const MESSAGES_EN = {
   'pricing.invalidResponse': 'Save failed because the pricing response was invalid.',
   'pricing.validationSummary': 'Review the highlighted pricing fields.',
   'pricing.providerPattern': 'Provider pattern',
+  'pricing.providerPlaceholder': 'gpt-*',
   'pricing.modelPattern': 'Model pattern',
+  'pricing.modelPatternPlaceholder': 'gpt-*-sol (max one *)',
+  'pricing.pricePlaceholder': '0',
+  'pricing.monthDayFromPlaceholder': '1',
+  'pricing.monthDayToPlaceholder': '31',
+  'pricing.datePlaceholder': 'YYYY-MM-DD',
   'pricing.helpLabel': 'Matching syntax and priority',
   'pricing.help': 'Compare the provider first, then the model. In each segment, exact comes first, then patterns with * (longer first; for equal lengths, prefix, suffix, then infix), then a lone *. All conditions must match. More conditions take priority on a tie. Remaining ties go to the first rule by number. Each segment accepts at most one *, which matches zero or more characters.',
   'pricing.copyRule': 'Copy rule',
@@ -6158,6 +6170,7 @@ ${HUD_CSS}
         h('span', { className: 'ud-guard-amount' },
           h('input', {
             type: 'number', className: 'ud-input', min: 0, step: 'any', inputMode: 'decimal',
+            placeholder: t('pricing.pricePlaceholder'),
             value: rule.price?.[key] ?? '',
             onChange: (event) => onPricePatch({ price: { ...rule.price, [key]: event.target.value } }),
           }),
@@ -6186,6 +6199,7 @@ ${HUD_CSS}
           h('span', { className: 'ud-field-label' }, t(labelKey)),
           h('input', {
             type, className: 'ud-input', value: condition[field] ?? '',
+            placeholder: type === 'date' ? t('pricing.datePlaceholder') : undefined,
             onChange: (event) => patchCondition({ [field]: event.target.value }),
           }),
           errorTextOf(`${condPath}.${field}`))
@@ -6206,6 +6220,7 @@ ${HUD_CSS}
           h('input', {
             type: 'number', className: 'ud-input', min: MONTH_DAY_MIN,
             max: MONTH_DAY_MAX, step: 1,
+            placeholder: t(field === 'from' ? 'pricing.monthDayFromPlaceholder' : 'pricing.monthDayToPlaceholder'),
             value: condition[field] ?? '',
             onChange: (event) => patchCondition({ [field]: event.target.value === '' ? '' : Number(event.target.value) }),
           }),
@@ -6405,6 +6420,7 @@ ${HUD_CSS}
         h('div', { className: 'ud-pricing-pattern' },
           h(PricingSuggestInput, {
             label: t('pricing.providerPattern'), value: providerValue, options: suggestions?.providers ?? [],
+            placeholder: t('pricing.providerPlaceholder'),
             readOnly: locked, invalid: Boolean(patternError), describedBy: patternError ? errorId : undefined,
             onChange: (value) => {
               if (value.includes(SEGMENT_SEPARATOR)) actions.rename(slot, rule.model, value)
@@ -6413,6 +6429,7 @@ ${HUD_CSS}
           }),
           h(PricingSuggestInput, {
             label: t('pricing.modelPattern'), value: model, options: modelOptions,
+            placeholder: t('pricing.modelPatternPlaceholder'),
             readOnly: locked, invalid: Boolean(modelError), describedBy: modelError ? errorId : undefined,
             onChange: (value) => actions.rename(slot, `${provider}/${value}`),
           }),

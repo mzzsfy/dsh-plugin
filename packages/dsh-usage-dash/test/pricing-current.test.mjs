@@ -173,7 +173,7 @@ const inputByLabel = (owner, label) => {
     return { props: {
       value: field.props.value,
       onChange: (event) => field.props.onChange(typeof event === 'string' ? event : event.target.value),
-      readOnly: field.props.readOnly,
+      readOnly: field.props.readOnly, placeholder: field.props.placeholder,
       'aria-invalid': Boolean(field.props.invalid),
     } }
   }
@@ -578,12 +578,23 @@ test('Given 月中号段 When 修改数字字段并保存 Then 请求仍使用�
   const monthly = { ...rule(3), model: 'p/m', conditions: [{ kind: 'monthDays', from: 1, to: 31 }] }
   f.resolve(f.gets[0], { revision: 1, rules: [rule(), monthly] }); await f.settle()
   f.openEdit(editor, 'p/m'); await f.settle()
+  assert.equal(inputByLabel(conditionFields(editor), '从').props.placeholder, '1')
+  assert.equal(inputByLabel(conditionFields(editor), '至').props.placeholder, '31')
   changeInput(inputByLabel(conditionFields(editor), '从'), '26')
   await f.settle()
   const pending = f.save(editor)
   const posted = f.saves[0].body.rules
   assert.deepEqual(posted.find(item => item.model === 'p/m').conditions, [{ kind: 'monthDays', from: 26, to: 31 }])
   f.resolve(f.saves[0], { revision: 2, rules: posted }); await pending
+}))
+
+test('Given 日期段条件 When 渲染 Then 日期输入显示日期格式占位', t => withFixture(t, async f => {
+  const editor = f.editor()
+  const dated = { ...rule(3), model: 'p/m', conditions: [{ kind: 'dateRange', from: '2026-01-01', to: '2026-01-31' }] }
+  f.resolve(f.gets[0], { revision: 1, rules: [rule(), dated] }); await f.settle()
+  f.openEdit(editor, 'p/m'); await f.settle()
+  assert.equal(inputByLabel(conditionFields(editor), '从').props.placeholder, 'YYYY-MM-DD')
+  assert.equal(inputByLabel(conditionFields(editor), '至').props.placeholder, 'YYYY-MM-DD')
 }))
 
 test('Given 存量规则缺省条件字段 When 保存 Then 继续视为无条件规则', t => withFixture(t, async f => {
@@ -600,6 +611,7 @@ test('Given 空安装 When 显式填写四个零价 Then 保存真实零价而�
   const editor = f.editor()
   f.resolve(f.gets[0], { revision: 1, rules: [] }); await f.settle()
   f.openEdit(editor, '*/*'); await f.settle()
+  assert.equal(priceInput(editor, '输入').props.placeholder, '0')
   for (const label of ['输入', '输出', '缓存读', '缓存写']) {
     changeInput(priceInput(editor, label), '0'); await f.settle()
   }
@@ -684,6 +696,14 @@ test('P14 Given 空表合成 */* 规则未填价 When 保存 Then 发送空表�
   assert.deepEqual(f.saves[0].body.rules, [])
   f.resolve(f.saves[0], { revision: 2, rules: [] }); await pending; await f.settle()
   assert.match(text(mountView(f, byComponent(editor, 'PricingRules')).tree), /全局默认价/, '保存后合成规则应继续可见')
+}))
+
+test('Given 定价表单 When 渲染 Then 平台与型号输入显示带 * 的示例', t => withFixture(t, async f => {
+  const editor = f.editor()
+  f.resolve(f.gets[0], { revision: 1, rules: [rule(), { ...rule(2), model: 'p/m' }] }); await f.settle()
+  f.openEdit(editor, 'p/m'); await f.settle()
+  assert.equal(providerPattern(editor).props.placeholder, 'gpt-*')
+  assert.equal(modelPattern(editor).props.placeholder, 'gpt-*-sol（最多一个 *）')
 }))
 
 test('Given 已观察多个平台 When 聚焦平台输入 Then 显示平台建议且可选择', t => withFixture(t, async f => {
