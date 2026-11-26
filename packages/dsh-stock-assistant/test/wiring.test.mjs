@@ -51,8 +51,8 @@ test('灌图的五处决策都落在调用点上', () => {
   must(/candles\.reduce\(\(sum, candle\) => sum \+ \(finiteOr\(candle\.volume\) \|\| 0\), 0\)/, '分时量必须累计整段')
   // 缺 avg 的分钟线要回退收盘价, 否则均价线断线
   must(/value: c\.avg \?\? c\.close/, '缺 avg 必须回退收盘价')
-  // 没有 at 的市场要靠「区间起点 + 分钟偏移」推横轴, 忽略它会整体偏时区
-  must(/const axisTime = \(c, i\) => c\.at \?\? base \+ i \* 60/, '横轴必须优先用行情自带时间')
+  must(/const axisTime = trendAxis\(result\.candles\)/, '横轴必须优先用行情自带时间')
+  must(/return \(candle, index\) => candle\.at \?\? base \+ index \* 60/, '缺 at 时退回「当天零点 + 分钟偏移」')
 })
 
 test('事件处理器不许把 React 事件当业务参数透传', () => {
@@ -71,6 +71,16 @@ test('hook 的解构参数与调用处传的键必须一致', () => {
   assert.deepEqual(keysOf(invocation), keysOf(definition), '传参键集必须与解构键集完全一致')
   // 参数表里出现的每个键都要在函数体里真的被用到, 反之函数体里读的键必须来自参数或本函数内声明
 
+})
+
+test('量副图两种形态都建, 量均线挂在量副图那一栏', () => {
+  // 分时的分钟量原先只存在于十字线读数里, 图上没有柱; 只给蜡烛建量副图等于分时永远没有量
+  must(/volRef\.current = chart\.addSeries\(LWC\.HistogramSeries[^\n]*\}, 1\)\n\s*if \(wantTrend\)/, '量副图必须建在形态分支之前, 两种形态共用')
+  must(/mavol: MAVOL_WINDOWS\.map\(\(n, i\) => chart\.addSeries\(LWC\.LineSeries, \{[^}]*\}, 1\)\)/, '量均线必须挂 pane 1, 与量柱同轴')
+  // 量柱数据只能有一个产出点: 首灌与重涂各写一套会在换主题后量柱与量均线错位
+  must(/volRef\.current\?\.setData\(volumeBarPoints\(/, '量柱必须走统一产出函数')
+  must(/if \(indicatorValues && guides\.mavol\) MAVOL_WINDOWS\.forEach/, '量均线开关必须接到图例')
+  must(/if \(info\.guides\?\.mavol\) MAVOL_WINDOWS\.forEach/, '量均线开关必须接到十字线读数')
 })
 
 test('悬浮窗拖动只从标题条发起', () => {

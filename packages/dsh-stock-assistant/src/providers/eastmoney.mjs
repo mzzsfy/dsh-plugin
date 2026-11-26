@@ -34,6 +34,8 @@ const TREND_FIELDS = 'f51,f52,f53,f54,f55,f56,f57,f58'
 // 分时时间戳的来源时区: 东财统一用北京时间, 与证券所属市场无关
 const SOURCE_ZONE = 'Asia/Shanghai'
 const num = value => value == null || typeof value === 'number' && !Number.isFinite(value) ? null : value === '-' ? null : String(value)
+// 换手率/量比是纯数值语义(不参与定点价格格式化), 统一收敛成 number; 缺失仍是 null
+const rate = value => { const text = num(value); const n = Number(text); return text === null || !Number.isFinite(n) ? null : n }
 // 风控页是 HTML: 不嗅探就会被当成「响应不是JSON」, 用户看不到「去浏览器过滑块」这条唯一出路
 const CHALLENGE_HINT = /验证码|人机验证|安全验证|滑块|拖动|geetest|tcaptcha|captcha/i
 const challenged = async response => {
@@ -82,7 +84,7 @@ export const eastmoney = {
     return { status: 'ready', capability: 'quotes', market: request.market, instrument: 'equity' }
   },
   async quotes(request, ctx) {
-    const fields = 'f2,f3,f4,f5,f6,f12,f13,f14,f15,f16,f17,f18,f124'
+    const fields = 'f2,f3,f4,f5,f6,f8,f10,f12,f13,f14,f15,f16,f17,f18,f124'
     const seen = new Set(), items = []
     // 一次请求取一批 secid;data:null 表示整批 secid 均无效(如整批退市),降级为逐证券缺失。
     const ingest = async symbols => {
@@ -95,12 +97,14 @@ export const eastmoney = {
         if (seen.has(security.id)) throw new StockError('BAD_PAYLOAD', '报价身份冲突', 502)
         seen.add(security.id)
         // fltt=2时价格为已缩放数值, "-"表示停牌等无值;f124为来源Unix秒;成交额币种按市场派生(单一事实源 MARKET_META.currency)。
+        // f8 换手率(百分数原值)、f10 量比在沪深港美同义(实测 116.00700 与 105.AAPL 均可读)
         const quoteAt = Number.isFinite(row.f124) ? new Date(row.f124 * 1000).toISOString() : null
         const currency = MARKET_META[security.exchange]?.currency || 'CNY'
         items.push(normalizeQuote({
           securityId: security.id, providerInstanceId: request.providerInstanceId, adapterId: 'eastmoney', providerSymbol: `${row.f13}.${row.f12}`,
           last: num(row.f2), previousClose: num(row.f18), open: num(row.f17), high: num(row.f15), low: num(row.f16),
           volume: sharesFromLots(num(row.f5), security.exchange), volumeUnit: 'share', amount: num(row.f6), amountUnit: currency,
+          turnoverRate: rate(row.f8), volumeRatio: rate(row.f10),
           quoteAt, timestampKind: 'trade',
           receivedAt: ctx.now(), delayKind: 'unknown', delaySeconds: null, securityState: 'unknown',
         }))

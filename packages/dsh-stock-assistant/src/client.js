@@ -111,6 +111,9 @@ window.__ModuleLoader__.load({
       if (Math.abs(amount) >= 1e4) return `${(amount / 1e4).toFixed(0)}万`
       return amount.toFixed(0)
     }
+    // 量比是纯倍率(来源已给 0.86 这种值), 换手率是百分数原值(0.12 表示 0.12%)
+    const ratioText = value => value == null || value === '' || !Number.isFinite(Number(value)) ? null : Number(value).toFixed(2)
+    const percentText = value => ratioText(value) == null ? null : `${ratioText(value)}%`
     // 一键全能力自举: 启用实例的适配器能力声明(capabilities×markets)是唯一事实源, 缺什么补什么
     const CAP_ORDER = ['quotes', 'kline', 'trend', 'catalog', 'search', 'calendar']
     const bootstrapRoutes = ({ adapters, providers, routes }) => {
@@ -1220,15 +1223,17 @@ window.__ModuleLoader__.load({
     // ---- KlineView: lightweight-charts 图表视图(设计"client 详情重构"节十步数据流) ----
     const PERIODS = [{ key: 'trend', label: '分时' }, { key: '1d', label: '日K' }, { key: '1w', label: '周K' }, { key: '1M', label: '月K' }]
     const GUIDE_KEY = 'ssb-guides'
-    const GUIDE_DEFAULT = { preClose: true, marks: true, highLow: false, ma: true, ema: false, boll: false, bbi: false }
+    const GUIDE_DEFAULT = { preClose: true, marks: true, highLow: false, ma: true, ema: false, boll: false, bbi: false, mavol: true }
     // horizontal 是横贯全图的参考位(priceLine), indicator 是跟随每根K线的序列(LineSeries)
     const GUIDE_GROUPS = [
       { title: '参考位', items: [['preClose', '昨收'], ['marks', '价格标记'], ['highLow', '区间最高/最低']] },
-      { title: '指标线', items: [['ma', 'MA 均线'], ['ema', 'EMA 指数均线'], ['boll', 'BOLL 布林带'], ['bbi', 'BBI 多空']] },
+      { title: '指标线', items: [['ma', 'MA 均线'], ['ema', 'EMA 指数均线'], ['boll', 'BOLL 布林带'], ['bbi', 'BBI 多空'], ['mavol', '量均线 MAVOL']] },
     ]
     const EMA_WINDOW = 12, BOLL_WINDOW = 20, BOLL_K = 2
     const VENDOR_URL = '/plugins-vendor/dsh-stock-assistant/lightweight-charts.standalone.production.js'
     const MA_WINDOWS = [5, 10, 20, 60]
+    // 量副图上的均量线: 只给短窗, 长窗在千根量柱上几乎一条直线
+    const MAVOL_WINDOWS = [5, 10]
     const LWC_LOAD_TIMEOUT_MS = 10 * 1000
     // ensureLwc: 模块级 promise 单例; 超时/加载后校验失败都要移除脚本并清空单例, 下一次详情才能重建。
     // onload 本身不代表全局可用: vendor 被替换或是别的脚本时, 不能把 undefined 当成功永久缓存。
@@ -1276,7 +1281,7 @@ window.__ModuleLoader__.load({
       const red = varOf('--ssb-danger'), green = varOf('--ssb-ok')
       const [up, down] = colorMode === 'green-up' ? [green, red] : [red, green]
       // 背景取面板底色而不是 transparent: 容器自身没有背景, 交给 canvas 留白的话暗色主题下会露出一块白
-      return { background: varOf('--ssb-bg') || 'transparent', textColor: varOf('--ssb-text-sub'), gridLine: varOf('--ssb-border'), crosshair: varOf('--ssb-text-dim'), up, down, volumeUp: up + '73', volumeDown: down + '73', MA: [varOf('--ssb-chart-ma-fast'), varOf('--ssb-chart-ma-mid'), varOf('--ssb-chart-ma-slow'), varOf('--ssb-chart-ma-long')], EMA: varOf('--ssb-chart-ema'), BOLL: [varOf('--ssb-chart-boll-mid'), varOf('--ssb-chart-boll-rail')], BBI: varOf('--ssb-chart-bbi'), cost: varOf('--ssb-chart-cost'), target: varOf('--ssb-chart-target') }
+      return { background: varOf('--ssb-bg') || 'transparent', textColor: varOf('--ssb-text-sub'), gridLine: varOf('--ssb-border'), crosshair: varOf('--ssb-text-dim'), up, down, volumeUp: up + '73', volumeDown: down + '73', MA: [varOf('--ssb-chart-ma-fast'), varOf('--ssb-chart-ma-mid'), varOf('--ssb-chart-ma-slow'), varOf('--ssb-chart-ma-long')], EMA: varOf('--ssb-chart-ema'), BOLL: [varOf('--ssb-chart-boll-mid'), varOf('--ssb-chart-boll-rail')], BBI: varOf('--ssb-chart-bbi'), MAVOL: [varOf('--ssb-chart-mavol-fast'), varOf('--ssb-chart-mavol-slow')], cost: varOf('--ssb-chart-cost'), target: varOf('--ssb-chart-target') }
     }
     // 以下指标都返回等长数组(前导 null), 因为 BOLL/BBI 要按索引把多条均线对齐
     function seriesMA(candles, n) {
@@ -1307,6 +1312,30 @@ window.__ModuleLoader__.load({
         low[i] = mid[i] - k * Math.sqrt(variance)
       }
       return [mid, up, low]
+    }
+    // 量柱的唯一数据出处: 分时要按 axisTime 对齐横轴, 日K 用业务日期; 缺量的补点记 0 高柱而不是跳过,
+    // 否则本地补点会在量副图上留一段缺口, 看起来像数据丢了
+    function volumeBarPoints(candles, theme, axisTime) {
+      return candles.map((candle, index) => ({
+        time: axisTime ? axisTime(candle, index) : candle.time,
+        value: finiteOr(candle.volume) || 0,
+        color: finiteOr(candle.close) >= finiteOr(candle.open) ? theme.volumeUp : theme.volumeDown,
+      }))
+    }
+    // 分时横轴: 优先来源时刻(at), 缺 at 时退回当天 UTC 零点起算。
+    // base 是当天 UTC 零点, 推到非 UTC 市场会整体偏时区(美股约 11 小时), 所以这只是最后一道兜底
+    function trendAxis(candles) {
+      const base = Math.floor(new Date(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`).getTime() / 1000)
+      return (candle, index) => candle.at ?? base + index * 60
+    }
+    // 均量线: 窗口内任一根量缺失就整位留 null, 拿 0 凑均值会把停牌/补点处的量线压出一个假坑
+    function seriesMAVOL(candles, n) {
+      const volumes = candles.map(candle => finiteOr(candle.volume))
+      return candles.map((_, i) => {
+        if (i < n - 1) return null
+        const window = volumes.slice(i - n + 1, i + 1)
+        return window.every(Number.isFinite) ? window.reduce((sum, value) => sum + value, 0) / n : null
+      })
     }
     function seriesBBI(candles) {
       const m3 = seriesMA(candles, 3), m6 = seriesMA(candles, 6), m12 = seriesMA(candles, 12), m24 = seriesMA(candles, 24)
@@ -1385,20 +1414,18 @@ window.__ModuleLoader__.load({
       function fillCandleData(result) {
         const theme = themeOf(), candles = result.candles
         mainRef.current.setData(candles.map(c => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close })))
-        volRef.current.setData(candles.map(c => ({ time: c.time, value: c.volume ?? 0, color: c.close >= c.open ? theme.volumeUp : theme.volumeDown })))
+        volRef.current?.setData(volumeBarPoints(candles, theme))
         applyIndicators(candles)
       }
-      // 分时: Area 收盘线+均价线+昨收虚线
+      // 分时: Area 收盘线+均价线+昨收虚线+分钟量柱
       function fillTrendData(result) {
+        const theme = themeOf()
         // 横轴优先用来源时刻(at):按索引自造会让时间轴整体平移;缺 at 时退回当天 UTC 零点起算
-        const base = Math.floor(new Date(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`).getTime() / 1000)
-        // 行情自带时间戳优先: 没有它才按「区间起点 + 分钟偏移」推。
-        // 注意 base 是当天 UTC 零点, 推到非 UTC 市场会整体偏时区(美股约 11 小时),
-        // 所以这只是最后一道兜底——东财分时恒给 at, 该路径当前不可达
-        const axisTime = (c, i) => c.at ?? base + i * 60
+        const axisTime = trendAxis(result.candles)
         const points = result.candles.map((c, i) => ({ time: axisTime(c, i), value: c.close }))
         mainRef.current.setData(points)
         avgRef.current.setData(result.candles.flatMap((c, i) => c.quotePoint ? [] : [{ time: axisTime(c, i), value: c.avg ?? c.close }]))
+        volRef.current?.setData(volumeBarPoints(result.candles, theme, axisTime))
       }
       // 分时用 Area、K线用 Candlestick, 同一 chart 上换形态就是删旧 series 建新 series;
       // 时间轴允许 Unix 秒与业务日期混用, 所以不必重建整个实例。
@@ -1409,7 +1436,7 @@ window.__ModuleLoader__.load({
       const indicatorValues = React.useMemo(() => {
         const candles = kline?.candles
         if (!candles?.length || wantTrend) return null
-        return { ma: MA_WINDOWS.map(n => seriesMA(candles, n)), ema: [seriesEMA(candles, EMA_WINDOW)], boll: seriesBoll(candles, BOLL_WINDOW, BOLL_K), bbi: [seriesBBI(candles)] }
+        return { ma: MA_WINDOWS.map(n => seriesMA(candles, n)), ema: [seriesEMA(candles, EMA_WINDOW)], boll: seriesBoll(candles, BOLL_WINDOW, BOLL_K), bbi: [seriesBBI(candles)], mavol: MAVOL_WINDOWS.map(n => seriesMAVOL(candles, n)) }
       }, [kline?.candles, wantTrend])
       // 建图与重涂都在空依赖的回调里跑, 用这份最新值替代首帧闭包
       liveRef.current = { candles: kline?.candles, colorMode: state.data?.control?.preferences?.colorMode, indicators: indicatorValues, period, priceScale: item.priceScale, timezone: item.timezone, preClose: kline?.preClose, guides }
@@ -1436,6 +1463,7 @@ window.__ModuleLoader__.load({
         if (indicatorValues && guides.ema) series.push([`EMA${EMA_WINDOW}`, indicatorValues.ema[0].at(-1), ' ssb-ema'])
         if (indicatorValues && guides.boll) ['BOLL', 'BOLL上', 'BOLL下'].forEach((name, index) => series.push([name, indicatorValues.boll[index].at(-1), ` ssb-boll-${index}`]))
         if (indicatorValues && guides.bbi) series.push(['BBI', indicatorValues.bbi[0].at(-1), ' ssb-bbi'])
+        if (indicatorValues && guides.mavol) MAVOL_WINDOWS.forEach((window, index) => series.push([`MAVOL${window}`, indicatorValues.mavol[index].at(-1), ` ssb-mavol-${index}`]))
         return {
           quote: [...quote, ['涨跌', pct == null ? null : `${signed(pct.toFixed(2))}%`, tone], ['量', formatAmount(volume, { zeroIsMissing: false })]],
           series: series.filter(([, value]) => value != null && Number.isFinite(Number(value))),
@@ -1465,9 +1493,9 @@ window.__ModuleLoader__.load({
         mainRef.current?.applyOptions(seriesPaintPlan(t, !!avgRef.current))
         // 成交量序列不认系列级配色, 只认每根柱子自带的 color, 所以必须按当前蜡烛重灌一次
         const candles = liveRef.current.candles
-        if (candles?.length) volRef.current?.setData(candles.map(c => ({ time: c.time, value: c.volume ?? 0, color: c.close >= c.open ? t.volumeUp : t.volumeDown })))
+        if (candles?.length) volRef.current?.setData(volumeBarPoints(candles, t, liveRef.current.period === 'trend' ? trendAxis(candles) : null))
         avgRef.current?.applyOptions({ color: t.MA[0] })
-        const palette = { ma: t.MA, ema: t.EMA, boll: t.BOLL, bbi: t.BBI }
+        const palette = { ma: t.MA, ema: t.EMA, boll: t.BOLL, bbi: t.BBI, mavol: t.MAVOL }
         for (const [key, list] of Object.entries(indicatorRef.current)) list.forEach((series, index) => series.applyOptions({ color: Array.isArray(palette[key]) ? palette[key][index] : palette[key] }))
         // 参考线建好后就固定了, 只换颜色; 没有对应的线时 applyOptions 是 no-op
         preCloseLineRef.current?.applyOptions({ color: t.crosshair })
@@ -1490,6 +1518,8 @@ window.__ModuleLoader__.load({
         preCloseLineRef.current = highLineRef.current = lowLineRef.current = null
         markLinesRef.current = []
         const theme = themeOf()
+        // 量副图两种形态都要: 分时的分钟量原先只存在于十字线读数里, 图上没有柱
+        volRef.current = chart.addSeries(LWC.HistogramSeries, { priceFormat: { type: 'volume' }, priceLineVisible: false, lastValueVisible: false }, 1)
         if (wantTrend) {
           mainRef.current = chart.addSeries(LWC.AreaSeries, { topColor: theme.up + '4d', bottomColor: theme.up + '07', lineColor: theme.up, lineWidth: 1 }, 0)
           avgRef.current = chart.addSeries(LWC.LineSeries, { color: theme.MA[0], lineWidth: 1, priceLineVisible: false, lastValueVisible: false }, 0)
@@ -1501,8 +1531,9 @@ window.__ModuleLoader__.load({
             ema: [line(theme.EMA)],
             boll: [line(theme.BOLL[0]), line(theme.BOLL[1]), line(theme.BOLL[1])],
             bbi: [line(theme.BBI)],
+            // 量均线挂在量副图那一栏, 与量柱同轴
+            mavol: MAVOL_WINDOWS.map((n, i) => chart.addSeries(LWC.LineSeries, { color: theme.MAVOL[i], lineWidth: 1, priceLineVisible: false, lastValueVisible: false }, 1)),
           }
-          volRef.current = chart.addSeries(LWC.HistogramSeries, { priceFormat: { type: 'volume' }, priceLineVisible: false, lastValueVisible: false }, 1)
         }
       }
       // 数据就绪后灌入; 图表实例由 effect A 创建, series 按形态在此处切换
@@ -1570,7 +1601,7 @@ window.__ModuleLoader__.load({
             const candles = info.candles || []
             const at = candles.findIndex(candle => timeKeyOf(candle.time) === timeKeyOf(param.time))
             const base = trend || at <= 0 ? info.preClose : candles[at - 1]?.close
-            // 分时没有独立的成交量序列, 量从匹配到的那根上取; 日K取柱状序列
+            // 量柱序列两种形态都有, 统一从它取当前柱的值; 序列还没建好才退回匹配到那根的量
             const volume = volRef.current ? param.seriesData.get(volRef.current)?.value : (at >= 0 ? candles[at]?.volume : null)
             // 辅助线读数与图上线条同源: 直接用 series 在该时间点的值, 关掉的线没有数据自然不列
             const readings = []
@@ -1581,6 +1612,7 @@ window.__ModuleLoader__.load({
               if (info.guides?.ema) pick(`EMA${EMA_WINDOW}`, refs.ema?.[0])
               if (info.guides?.boll) ['BOLL', 'BOLL上', 'BOLL下'].forEach((label, index) => pick(label, refs.boll?.[index]))
               if (info.guides?.bbi) pick('BBI', refs.bbi?.[0])
+              if (info.guides?.mavol) MAVOL_WINDOWS.forEach((window, index) => pick(`MAVOL${window}`, refs.mavol?.[index]))
             }
             setCrosshair({
               time: crosshairTimeText(param.time, trend, info.timezone),
@@ -1745,7 +1777,7 @@ window.__ModuleLoader__.load({
       const marketLabel = MARKET_LABEL[item.exchange] || item.exchange
       // 币种唯一来源是自选条目 currency(watchlist 写入时由 MARKET_META 保证), client 不设回退表
       const currency = item.currency || ''
-      const fields = [['今开', priceTextOf(q?.open, item.priceScale)], ['最高', priceTextOf(q?.high, item.priceScale)], ['最低', priceTextOf(q?.low, item.priceScale)], ['昨收', priceTextOf(q?.previousClose, item.priceScale)], ['涨跌额', q?.change == null ? null : signed(q.change)], ['成交量', q?.volume == null ? null : `${formatAmount(q.volume, { zeroIsMissing: false })}股`], ['成交额', formatAmount(q?.amount)], ['交易时段', ({ trading: '交易中', closed: '休市', break: '午间休市', auction: '集合竞价', preopen: '开市前', unknown: '未知' })[q?.sessionState] || '未知'], ['报价时间', timeText(q?.quoteAt)], ['获取时间', timeText(q?.receivedAt)], ['来源', q?.providerInstanceId], ['延迟', delayText(q)]]
+      const fields = [['今开', priceTextOf(q?.open, item.priceScale)], ['最高', priceTextOf(q?.high, item.priceScale)], ['最低', priceTextOf(q?.low, item.priceScale)], ['昨收', priceTextOf(q?.previousClose, item.priceScale)], ['涨跌额', q?.change == null ? null : signed(q.change)], ['成交量', q?.volume == null ? null : `${formatAmount(q.volume, { zeroIsMissing: false })}股`], ['成交额', formatAmount(q?.amount)], ['量比', ratioText(q?.volumeRatio)], ['换手率', percentText(q?.turnoverRate)], ['交易时段', ({ trading: '交易中', closed: '休市', break: '午间休市', auction: '集合竞价', preopen: '开市前', unknown: '未知' })[q?.sessionState] || '未知'], ['报价时间', timeText(q?.quoteAt)], ['获取时间', timeText(q?.receivedAt)], ['来源', q?.providerInstanceId], ['延迟', delayText(q)]]
       // 非自选详情: 加自选为主操作, 不显示别名/删除等自选管理
       const peekActions = inWatchlist ? null : h('div', { className: 'ssb-toolbar' }, h(Button, { primary: true, disabled: state.busy.write, onClick: quiet(() => runtime.mutate('add', { securityId: item.id })) }, '加自选'))
       // 价格标记: 每条带语义(成本/卖价), 各自算盈亏, 图上一条线
@@ -1927,12 +1959,49 @@ window.__ModuleLoader__.load({
         return () => { stopped = true; clearTimeout(timer); document.removeEventListener('visibilitychange', pull) }
       }, [enabled, runtime, securityId, context, trading])
     }
+    // 视口夹取: 悬浮窗位置存的是绝对坐标, 浏览器窗口缩小或页面缩放后必须按当前视口收回来,
+    // 否则整张卡留在可视区外, 除了清站点数据再没法点开
+    const FLOAT_MARGIN = 8, FLOAT_WIDTH = 288, FLOAT_HEIGHT = 210
+    // 视口取布局视口: innerWidth 含经典滚动条, 而 position:fixed 的 left/top 以布局视口为准,
+    // 混用会把卡片右缘压到滚动条底下。没有布局引擎的环境(SSR/静态渲染)读不到视口, 调用方据此跳过夹取
+    const viewportOf = () => {
+      const root = typeof document === 'undefined' ? null : document.documentElement
+      const width = root?.clientWidth || (typeof window === 'undefined' ? 0 : window.innerWidth)
+      const height = root?.clientHeight || (typeof window === 'undefined' ? 0 : window.innerHeight)
+      return width > 0 && height > 0 ? { width, height } : null
+    }
+    function clampFloatPlacement({ x, y, width, height, viewport }) {
+      const clamp = (value, span) => Math.min(Math.max(FLOAT_MARGIN, value), Math.max(FLOAT_MARGIN, span))
+      return { x: clamp(x, viewport.width - width - FLOAT_MARGIN), y: clamp(y, viewport.height - height - FLOAT_MARGIN) }
+    }
+    // 卡片尺寸与视口都要跟: 换模式/开选择器改变高度, 浏览器缩放改变视口。
+    // 尺寸进 state, 视口不进——渲染时现读, state 只在 resize 后触发重渲染, 避免漏一次事件就整段用旧视口
+    function useFloatBox(ref, enabled) {
+      const [size, setSize] = React.useState(() => ({ width: FLOAT_WIDTH, height: FLOAT_HEIGHT }))
+      const [, setViewportTick] = React.useState(0)
+      React.useEffect(() => {
+        if (!enabled) return
+        const element = ref.current
+        if (!element) return
+        const measure = () => setSize(current => {
+          const width = element.offsetWidth || FLOAT_WIDTH, height = element.offsetHeight || FLOAT_HEIGHT
+          return current.width === width && current.height === height ? current : { width, height }
+        })
+        const onViewport = () => { measure(); setViewportTick(tick => tick + 1) }
+        measure()
+        const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null
+        observer?.observe(element)
+        window.addEventListener('resize', onViewport)
+        return () => { observer?.disconnect(); window.removeEventListener('resize', onViewport) }
+      }, [enabled, ref])
+      return size
+    }
     // 拖动: 按住非控件区域移动, 松手时把落点写回偏好
     function useFloatingDrag(onDrop) {
       const dragRef = React.useRef(null)
       const clamp = (x, y, el) => {
-        const width = el?.offsetWidth || 288, height = el?.offsetHeight || 210, margin = 8
-        return { x: Math.min(Math.max(margin, x), Math.max(margin, window.innerWidth - width - margin)), y: Math.min(Math.max(margin, y), Math.max(margin, window.innerHeight - height - margin)) }
+        const viewport = viewportOf()
+        return viewport ? clampFloatPlacement({ x, y, width: el?.offsetWidth || FLOAT_WIDTH, height: el?.offsetHeight || FLOAT_HEIGHT, viewport }) : { x, y }
       }
       return {
         onPointerDown: e => {
@@ -1977,7 +2046,7 @@ window.__ModuleLoader__.load({
     // 宿主把主题 token 内联写在 body 的 style 上, 同色系两套主题切换时明暗标记并不变,
     // 只盯着那个标记会整次漏掉换肤。取实际色值当签名, 才算判断了「主题真的变了」。
     // background 也在签名里: 画布底色就铺的是它, canvas 不透明, 漏掉它等于背景永远不换
-    const themeSignature = t => [t.background, t.textColor, t.gridLine, t.crosshair, t.up, t.down, t.volumeUp, t.volumeDown, t.cost, t.target, t.EMA, t.BBI, ...t.MA, ...t.BOLL].join('|')
+    const themeSignature = t => [t.background, t.textColor, t.gridLine, t.crosshair, t.up, t.down, t.volumeUp, t.volumeDown, t.cost, t.target, t.EMA, t.BBI, ...t.MA, ...t.BOLL, ...t.MAVOL].join('|')
     // 午休与收盘都不产生新数据, 归同一个安静档
     const QUIET_STATES = new Set(['closed', 'break'])
     const FLOAT_KEY = 'ssb-floating'
@@ -2216,6 +2285,9 @@ window.__ModuleLoader__.load({
         setLastChartId(open && mode === 'kline' ? securityId : null)
       }, [open, mode, securityId])
       const drag = useFloatingDrag(update)
+      // 保存的坐标只在渲染时收敛, 不改写偏好: 窗口放大回原尺寸要回到用户拖到的位置
+      const floatRef = React.useRef(null)
+      const floatBox = useFloatBox(floatRef, open)
       // 悬浮窗节奏取自独立偏好, 列表间隔不再参与
       const floatRefresh = floatIntervalOf(state.data?.control?.preferences?.floatRefreshSeconds)
       // 本地报价只在产生它的宿主和路由代际内参与择优。
@@ -2280,7 +2352,10 @@ window.__ModuleLoader__.load({
       // 切模式/开关面板时行浮层必须收掉: 列表已经不在, 留着就是一块幽灵卡片
       React.useEffect(() => { setRowTip(null) }, [mode, picker, open])
       if (!open) return null
-      const position = floating.x == null || floating.y == null ? {} : { left: floating.x, top: floating.y, right: 'auto', bottom: 'auto' }
+      // 坐标写坏(NaN/非数值)时退回默认右下角锚定: 拿 NaN 当 left 会让整张卡消失
+      const viewport = viewportOf()
+      const placed = Number.isFinite(floating.x) && Number.isFinite(floating.y) && viewport ? clampFloatPlacement({ x: floating.x, y: floating.y, width: floatBox.width, height: floatBox.height, viewport }) : null
+      const position = placed ? { left: placed.x, top: placed.y, right: 'auto', bottom: 'auto' } : {}
       const step = delta => {
         const at = picked.indexOf(securityId)
         const next = picked[(at + delta + picked.length) % picked.length]
@@ -2311,7 +2386,7 @@ window.__ModuleLoader__.load({
       const greenUp = state.data?.control?.preferences?.colorMode === 'green-up' ? ' ssb-green-up' : ''
       // 勾选写入一律按自选顺序重排, 否则反复勾选会把 ids 变成点击次序, 列表顺序会跳
       const setPicked = ids => { const set = new Set(ids); update({ ids: order.filter(id => set.has(id)) }) }
-      return h('div', { className: `ssb-float${greenUp}${alerting ? ' ssb-float-alerting' : ''}`, role: 'complementary', 'aria-label': '悬浮盯盘', style: position, onPointerDown: drag.onPointerDown, onPointerMove: drag.onPointerMove, onPointerUp: drag.onPointerUp, onPointerCancel: drag.onPointerUp },
+      return h('div', { ref: floatRef, className: `ssb-float${greenUp}${alerting ? ' ssb-float-alerting' : ''}`, role: 'complementary', 'aria-label': '悬浮盯盘', style: position, onPointerDown: drag.onPointerDown, onPointerMove: drag.onPointerMove, onPointerUp: drag.onPointerUp, onPointerCancel: drag.onPointerUp },
         React.createElement('style', { 'data-plugin': '@mzzsfy/dsh-stock-assistant', dangerouslySetInnerHTML: { __html: CSS } }),
         prefError ? h('div', { className: 'ssb-banner ssb-error', role: 'alert', style: { margin: '0 12px' } }, prefError, h(Button, { onClick: clearPrefError }, '关闭')) : null,
         h(FloatHeader, { mode, picker, current, picked, onStep: step, onMode: next => update({ mode: next }), onPicker: setPicker, onClose: () => update({ open: false }) }),
@@ -2641,9 +2716,9 @@ window.__ModuleLoader__.load({
     const CSS = `
 .ssb-root,.ssb-float-root { --ssb-accent:var(--dsw-alias-brand-primary); --ssb-accent-deep:var(--dsw-alias-button-primary-hover); --ssb-on-accent:var(--dsw-alias-label-primary-inverted); --ssb-accent-wash:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent); --ssb-ok:var(--dsw-alias-state-success-primary); --ssb-warn:var(--dsw-alias-state-warn-primary); --ssb-danger:var(--dsw-alias-state-error-primary); --ssb-bg:var(--dsw-alias-bg-layer-1); --ssb-bg-sub:var(--dsw-alias-bg-layer-2); --ssb-bg-muted:var(--dsw-alias-bg-module-platform); --ssb-border:var(--dsw-alias-border-l2); --ssb-text:var(--dsw-alias-label-primary); --ssb-text-sub:var(--dsw-alias-label-secondary); --ssb-text-dim:var(--dsw-alias-label-tertiary); --ssb-hover:var(--dsw-alias-interactive-bg-hover); --ssb-radius-sm:var(--dsw-radius-sm); --ssb-radius-md:var(--dsw-radius-md); --ssb-radius-lg:var(--dsw-radius-lg); }
 /* 图表区分色: 亮色取中低明度保证白底上不糊, 取值由 test/chart-colors.test.mjs 卡对比度与线间色差 */
-.ssb-root,.ssb-float-root { --ssb-chart-ma-fast: hsl(45 96% 40%); --ssb-chart-ma-mid: hsl(280 88% 52%); --ssb-chart-ma-slow: hsl(189 94% 38%); --ssb-chart-ma-long: hsl(239 84% 56%); --ssb-chart-ema: hsl(330 81% 50%); --ssb-chart-boll-mid: hsl(217 91% 50%); --ssb-chart-boll-rail: hsl(213 90% 62%); --ssb-chart-bbi: hsl(160 84% 34%); --ssb-chart-cost: hsl(20 92% 45%); --ssb-chart-target: hsl(305 80% 45%); }
+.ssb-root,.ssb-float-root { --ssb-chart-ma-fast: hsl(45 96% 40%); --ssb-chart-ma-mid: hsl(280 88% 52%); --ssb-chart-ma-slow: hsl(189 94% 38%); --ssb-chart-ma-long: hsl(239 84% 56%); --ssb-chart-ema: hsl(330 81% 50%); --ssb-chart-boll-mid: hsl(217 91% 50%); --ssb-chart-boll-rail: hsl(213 90% 62%); --ssb-chart-bbi: hsl(160 84% 34%); --ssb-chart-mavol-fast: hsl(120 90% 38%); --ssb-chart-mavol-slow: hsl(74 80% 26%); --ssb-chart-cost: hsl(20 92% 45%); --ssb-chart-target: hsl(305 80% 45%); }
 /* 暗色整体提亮一档, 否则深色线条直接溶进背景; 明暗标记由宿主写在 body 上 */
-[data-ds-dark-theme] .ssb-root,[data-ds-dark-theme] .ssb-float-root { --ssb-chart-ma-fast: hsl(45 96% 58%); --ssb-chart-ma-mid: hsl(280 90% 72%); --ssb-chart-ma-slow: hsl(189 90% 58%); --ssb-chart-ma-long: hsl(239 88% 76%); --ssb-chart-ema: hsl(330 85% 68%); --ssb-chart-boll-mid: hsl(217 92% 68%); --ssb-chart-boll-rail: hsl(213 94% 80%); --ssb-chart-bbi: hsl(160 80% 56%); --ssb-chart-cost: hsl(20 95% 58%); --ssb-chart-target: hsl(305 85% 70%); }
+[data-ds-dark-theme] .ssb-root,[data-ds-dark-theme] .ssb-float-root { --ssb-chart-ma-fast: hsl(45 96% 58%); --ssb-chart-ma-mid: hsl(280 90% 72%); --ssb-chart-ma-slow: hsl(189 90% 58%); --ssb-chart-ma-long: hsl(239 88% 76%); --ssb-chart-ema: hsl(330 85% 68%); --ssb-chart-boll-mid: hsl(217 92% 68%); --ssb-chart-boll-rail: hsl(213 94% 80%); --ssb-chart-bbi: hsl(160 80% 56%); --ssb-chart-mavol-fast: hsl(120 90% 60%); --ssb-chart-mavol-slow: hsl(74 80% 48%); --ssb-chart-cost: hsl(20 95% 58%); --ssb-chart-target: hsl(305 85% 70%); }
 /* 悬浮盯盘挂在 body 上, 与面板同源取色但不需要面板的整屏布局 */
 .ssb-root { height:100%; min-width:0; overflow:auto; color:var(--ssb-text); background:var(--ssb-bg); font:inherit; font-size:13px; line-height:20px; }
 .ssb-float-root { color:var(--ssb-text); font:inherit; font-size:13px; line-height:20px; }
@@ -2863,6 +2938,7 @@ window.__ModuleLoader__.load({
 /* 图例指标色与图表 series 色板一一对应(图表侧只能吃具体色值, 无法引用主题变量) */
 .ssb-ma-0 { color:var(--ssb-chart-ma-fast); }.ssb-ma-1 { color:var(--ssb-chart-ma-mid); }.ssb-ma-2 { color:var(--ssb-chart-ma-slow); }.ssb-ma-3 { color:var(--ssb-chart-ma-long); }
 .ssb-ema { color:var(--ssb-chart-ema); }
+.ssb-mavol-0 { color:var(--ssb-chart-mavol-fast); }.ssb-mavol-1 { color:var(--ssb-chart-mavol-slow); }
 .ssb-boll-0 { color:var(--ssb-chart-boll-mid); }.ssb-boll-1 { color:var(--ssb-chart-boll-rail); }.ssb-boll-2 { color:var(--ssb-chart-boll-rail); }
 .ssb-bbi { color:var(--ssb-chart-bbi); }
 .ssb-menu-title { padding:8px 8px 2px; font-size:11px; color:var(--ssb-text-dim); }.ssb-kline-holder { height:340px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); }
@@ -2948,7 +3024,7 @@ window.__ModuleLoader__.load({
           return () => { for (const stop of disposers.reverse()) stop() }
         }, 'stock-assistant main panel')
       },
-      __testing: { createPageRuntime, StockPage, FloatingTicker, FloatHeader, FloatPicker, FloatList, FloatChart, FloatFoot, KlineView, Sparkline, Select, dropdownPlacement, dragOrder, quiet, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, subscribePref, LWC_LOAD_TIMEOUT_MS, klineKeyOf, klineShipPlan, klineViewportOf, applyKlineViewport, chartOptions, KLINE_HISTORY_LIMIT, KLINE_INITIAL_BARS, finiteOr, formatAmount, toneClass, priceTextOf, tagTabs, resolveTab, costBaseOf, costPlOf, markPct, QUIET_STATES, floatPollDelay, floatIntervalOf, FLOAT_INTERVALS, FLOAT_FALLBACK_SECONDS, timestampOf, floatFreshness, priceTimeOf, clockText, staleAfter, markAlertOf, markAlertText, deliverMarkAlert, sparkIndexAt, candleTimeText, quoteTipLines, crosshairTipLines, crosshairTimeText, timeKeyOf, crosshairTipStyle, rowTipPositionOf, sparkRangeOf, sparkTicksOf, sparkWindowOf, sparkZoomOf, sparkPanOf, sparkNormalizeOf, sparkFollowOf, seriesPaintPlan, sanitizeCandles, themeSignature, ensureLwc, routesForProviders, routesForAdapter, routesForAdapters, providerChangeDraft, settingsSavePayload, pruneDeniedTargets, selectEntries, offlineText, offlinePrefix, floatReadout },
+      __testing: { createPageRuntime, StockPage, FloatingTicker, FloatHeader, FloatPicker, FloatList, FloatChart, FloatFoot, KlineView, Sparkline, Select, dropdownPlacement, dragOrder, quiet, seriesMA, seriesEMA, seriesBoll, seriesBBI, seriesMAVOL, volumeBarPoints, trendAxis, ratioText, percentText, MAVOL_WINDOWS, readPref, writePref, subscribePref, LWC_LOAD_TIMEOUT_MS, klineKeyOf, klineShipPlan, klineViewportOf, applyKlineViewport, chartOptions, KLINE_HISTORY_LIMIT, KLINE_INITIAL_BARS, finiteOr, formatAmount, toneClass, priceTextOf, tagTabs, resolveTab, costBaseOf, costPlOf, markPct, QUIET_STATES, floatPollDelay, floatIntervalOf, FLOAT_INTERVALS, FLOAT_FALLBACK_SECONDS, timestampOf, floatFreshness, priceTimeOf, clockText, staleAfter, markAlertOf, markAlertText, deliverMarkAlert, sparkIndexAt, candleTimeText, quoteTipLines, crosshairTipLines, crosshairTimeText, timeKeyOf, crosshairTipStyle, rowTipPositionOf, sparkRangeOf, sparkTicksOf, sparkWindowOf, sparkZoomOf, sparkPanOf, sparkNormalizeOf, sparkFollowOf, seriesPaintPlan, sanitizeCandles, themeSignature, ensureLwc, clampFloatPlacement, FLOAT_MARGIN, FLOAT_WIDTH, FLOAT_HEIGHT, routesForProviders, routesForAdapter, routesForAdapters, providerChangeDraft, settingsSavePayload, pruneDeniedTargets, selectEntries, offlineText, offlinePrefix, floatReadout },
     }
   },
 })

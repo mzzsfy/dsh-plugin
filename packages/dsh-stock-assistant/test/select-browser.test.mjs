@@ -576,7 +576,74 @@ test('悬浮图 3 秒档继续消费报价，首分钟内不重拉分时', async
     assert.equal(network.filter(({ path, method }) => path.endsWith('/kline') && method === 'GET').length, 2)
     assert.deepEqual(errors, [])
   } finally {
+    // 假时钟作用在整个浏览器上下文: 只关标签页不复原, 后续用例页面的定时器会一起冻住;
+    // resume 只恢复定时器, 停在虚拟时间上, 还要把系统时间拨回墙钟
+    await tab.clock.setSystemTime(new Date()).catch(() => {})
+    await tab.clock.resume().catch(() => {})
     await tab.evaluate(() => localStorage.removeItem('ssb-floating')).catch(() => {})
     await tab.close()
+  }
+})
+
+test('窗口缩小后悬浮盯盘收回视口, 放大回保存位置', async () => {
+  const base = '**/api/stock-assistant/'
+  const id = 'XSHG:equity:600001'
+  // 十只标的让选择器足以长到改变卡片高度, 覆盖尺寸变化路径
+  const order = Array.from({ length: 10 }, (_, index) => `XSHG:equity:${600001 + index}`)
+  const items = Object.fromEntries(order.map((sid, index) => [sid, { id: sid, exchange: 'XSHG', code: sid.split(':').at(-1), officialName: `标的${index + 1}` }]))
+  // 落点在 1280×900 下合法(右/下各留 8px), 且离右边够近: 缩到 700×520 后原坐标必然越界。
+  // y 取 450 而不是更靠下, 让「放大回来」的断言不受卡片高度变化影响
+  const saved = { x: 980, y: 450 }
+  await page.route(`${base}snapshot`, async handler => {
+    const response = await handler.fetch()
+    const body = await response.json()
+    body.data.serverEpoch = 'fixture-resize'
+    body.data.routingRevision = 1
+    body.data.control.watchlist = { order, items }
+    body.data.quotes = { [id]: { health: 'ok', quote: { securityId: id, last: '10.00', previousClose: '9.90', receivedAt: Date.now(), sessionState: 'trading' } } }
+    await handler.fulfill({ response, json: body })
+  })
+  await page.route(`${base}refresh`, handler => handler.fulfill({ json: { ok: true, data: { quotes: {} } } }))
+  const placeOf = async float => {
+    const box = await float.boundingBox(), viewport = page.viewportSize()
+    // 与 client.js 的 FLOAT_MARGIN 同一个口径: 这里是用户可见的 8px 边距, 不是实现细节
+    const margin = 8
+    return { box, viewport, inside: box.x >= margin - 0.5 && box.y >= margin - 0.5 && box.x + box.width <= viewport.width - margin + 0.5 && box.y + box.height <= viewport.height - margin + 0.5 }
+  }
+  // 视口变化要等 React 提交落地再断言: 后台标签页不跑 rAF, 用固定等待而不是帧同步
+  const settle = () => page.waitForTimeout(200)
+  try {
+    await page.bringToFront()
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await page.evaluate(([sid, at]) => localStorage.setItem('ssb-floating', JSON.stringify({ open: true, mode: 'list', ids: [sid], x: at.x, y: at.y })), [id, saved])
+    await page.reload()
+    const float = page.getByRole('complementary', { name: '悬浮盯盘' })
+    await float.waitFor()
+    // 快照到达前浮窗只有空态: 先等已勾选的行渲染出来, 否则序列器还没把自选交给浮窗
+    await float.locator('.ssb-float-row').first().waitFor()
+    await settle()
+    const placed = await placeOf(float)
+    assert.deepEqual([Math.round(placed.box.x), Math.round(placed.box.y)], [saved.x, saved.y], '大视口按保存坐标放置')
+    await page.setViewportSize({ width: 700, height: 520 })
+    await settle()
+    const shrunk = await placeOf(float)
+    assert.ok(shrunk.inside, `缩小后整张卡仍在视口内: ${JSON.stringify(shrunk)}`)
+    await float.getByRole('button', { name: '选择观测目标' }).click()
+    await float.getByText('跟随自选页手动排序', { exact: true }).waitFor()
+    await settle()
+    const grown = await placeOf(float)
+    assert.ok(grown.inside, `卡片长高后仍收在视口内: ${JSON.stringify(grown)}`)
+    await float.getByRole('button', { name: '完成选择' }).click()
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await settle()
+    const restored = await placeOf(float)
+    assert.deepEqual([Math.round(restored.box.x), Math.round(restored.box.y)], [saved.x, saved.y], '放大后回到保存位置, 尺寸变化不改写偏好')
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('ssb-floating')).x), saved.x, '保存的坐标不被渲染侧夹取覆盖')
+    assert.deepEqual(errors, [], 'resize/RO 期间不得有页面异常')
+  } finally {
+    await page.evaluate(() => localStorage.removeItem('ssb-floating')).catch(() => {})
+    await page.unroute(`${base}snapshot`)
+    await page.unroute(`${base}refresh`)
+    await page.setViewportSize({ width: 1280, height: 900 })
   }
 })

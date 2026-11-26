@@ -83,11 +83,14 @@ export const tencent = {
       const f = match[2].split('~')
       if (f.length < 38) throw new StockError('BAD_PAYLOAD', '来源字段数量异常', 502)
       const volume = num(f[36]), amount = num(f[37])
+      // 换手率/量比只在沪深口径成立: 实测港股 f[38] 恒 0、f[49] 是周高, 美股同列位是别的字段
+      const cn = security.exchange === 'XSHG' || security.exchange === 'XSHE'
       items.push(normalizeQuote({
         securityId: security.id, providerInstanceId: request.providerInstanceId, adapterId: 'tencent', providerSymbol,
         last: f[3], previousClose: f[4], open: f[5], high: f[33], low: f[34],
         volume: volume === null ? null : String(sharesFromLots(volume, security.exchange)), volumeUnit: 'share',
         amount: amount === null ? null : String(amountFromWan(amount, security.exchange)), amountUnit: MARKET_META[security.exchange]?.currency || 'CNY',
+        ...(cn ? { turnoverRate: num(f[38]), volumeRatio: num(f[49]) } : {}),
         quoteAt: parseQuoteTime(quoteStamp(f[30])), timestampKind: 'trade',
         receivedAt: ctx.now(), delayKind: 'unknown', delaySeconds: null, securityState: 'unknown',
       }))
