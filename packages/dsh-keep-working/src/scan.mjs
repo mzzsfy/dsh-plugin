@@ -5,7 +5,7 @@
  * 判定尾部状态、再按需 resume。
  */
 
-import { closureVerdict, hasVisibleOutput, lastAssistantText, matchMarker, turnSlice } from './closure.mjs'
+import { closureVerdict, lastAssistantText, matchMarker, tailAssistantText, turnSlice } from './closure.mjs'
 import { fillTemplate } from './config.mjs'
 import { isTransientFailure, parseFailureFacts } from './failure.mjs'
 import { rearmGoal } from './goal.mjs'
@@ -98,7 +98,7 @@ function tailVerdict(events, nowTime, config, inbox = pendingInbox(events)) {
 
   switch (reason.kind) {
     case 'completed': {
-      if (hasVisibleOutput(turnSlice(events, lastEnd.data.turn))) return 'skip:有可见回答'
+      if (tailAssistantText(events, lastEnd.data.turn).trim() !== '') return 'skip:有可见回答'
       if (closureVerdict(events, lastEnd.data.turn, { enforce: config.enforceClosure }).reason === 'file-write-requires-present') {
         return 'resume:closure'
       }

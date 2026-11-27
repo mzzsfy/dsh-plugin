@@ -33,6 +33,13 @@ const assistant = (seq, turn, text) =>
     message: { role: 'assistant', content: [{ type: 'text', text }] },
     stream: [],
   })
+const reasoningOnly = (seq, turn) =>
+  event(seq, 'assistant/message', {
+    turn,
+    step: 1,
+    message: { role: 'assistant', content: [{ type: 'reasoning', text: '还在想' }] },
+    stream: [],
+  })
 const userMessage = (seq, kind = 'user') =>
   event(seq, 'user/message', { id: `m-${seq}`, source: { kind }, content: [{ type: 'text', text: 'go' }] })
 const queuedMessage = (seq, text = '排队消息') => ({
@@ -711,6 +718,53 @@ test('写入但有可见回答的会话重启不恢复', async () => {
   })
   assert.equal(result.resumed, 0)
   assert.equal(h.sent.length, 0)
+})
+
+test('末步只剩思考的会话重启仍恢复:写入过要 present', async () => {
+  const tail = [
+    turnStart(1, TURN),
+    userMessage(2),
+    event(3, 'tool/call', {
+      turn: TURN,
+      step: 1,
+      callId: 'c-3',
+      name: 'write',
+      arguments: JSON.stringify({ file_path: 'C:/tmp/restart-watchdog.ps1' }),
+    }),
+    assistant(4, TURN, '先说明在改什么'),
+    reasoningOnly(5, TURN),
+    turnEnd(6, TURN, { kind: 'completed' }),
+  ]
+  const h = createHarness({ records: [record('s1', tail)] })
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.equal(result.resumed, 1)
+  assert.match(textOf(h.sent[0]), /present|TASK_DONE/)
+})
+
+test('末步只剩思考的会话重启仍恢复:没写文件按空回合', async () => {
+  const tail = [
+    turnStart(1, TURN),
+    userMessage(2),
+    assistant(3, TURN, '先说明在查什么'),
+    reasoningOnly(4, TURN),
+    turnEnd(5, TURN, { kind: 'completed' }),
+  ]
+  const h = createHarness({ records: [record('s1', tail)] })
+  const result = await scanStoredSessions({
+    ctx: h.ctx,
+    config: resolveConfig(),
+    createUserMessage: (options) => ({ id: 'auto-1', ...options }),
+    now: () => NOW,
+    scanDirectory: () => undefined,
+  })
+  assert.equal(result.resumed, 1)
+  assert.match(textOf(h.sent[0]), /没有可见输出/)
 })
 
 test('有可见回答的正常结束会话不恢复', async () => {

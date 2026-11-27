@@ -7,13 +7,12 @@ import {
   FILE_WRITE_TOOLS,
   assistantText,
   closureVerdict,
-  hasVisibleOutput,
   humanInitiatedTurn,
   lastAssistantText,
   matchMarker,
+  tailAssistantText,
   turnInitiator,
   turnSlice,
-  userTookOver,
 } from '../src/closure.mjs'
 
 const TURN = 7
@@ -42,6 +41,14 @@ const assistantToolOnly = (seq, turn) =>
       role: 'assistant',
       content: [{ type: 'tool-call', callId: 'c1', name: 'read', arguments: '{}' }],
     },
+    stream: [],
+  })
+
+const assistantReasoning = (seq, turn) =>
+  event(seq, 'assistant/message', {
+    turn,
+    step: 1,
+    message: { role: 'assistant', content: [{ type: 'reasoning', text: '还在想' }] },
     stream: [],
   })
 
@@ -204,10 +211,12 @@ test('S10 turn/end 之后的事件不参与判定', () => {
   assert.equal(verdict.reason, 'no-signal')
 })
 
-test('hasVisibleOutput 只认文本内容', () => {
-  assert.equal(hasVisibleOutput([assistantToolOnly(1, TURN)]), false)
-  assert.equal(hasVisibleOutput([assistant(1, TURN, '有话说')]), true)
-  assert.equal(hasVisibleOutput([]), false)
+test('tailAssistantText 只看末条 assistant 消息', () => {
+  assert.equal(tailAssistantText([assistantToolOnly(1, TURN)], TURN), '')
+  assert.equal(tailAssistantText([assistant(1, TURN, '有话说')], TURN), '有话说')
+  // 前面交代过、末步只剩思考:仍算没交代
+  assert.equal(tailAssistantText([assistant(1, TURN, '先说明'), assistantReasoning(2, TURN)], TURN), '')
+  assert.equal(tailAssistantText([], TURN), '')
 })
 
 test('turnInitiator 跳过非真人来源取真人消息', () => {
@@ -247,27 +256,6 @@ test('注入上下文前置时仍识别真人发起', () => {
   ]
   assert.equal(turnInitiator(events, 1), 'user')
   assert.equal(humanInitiatedTurn(events, 1, new Set()), true)
-})
-
-test('注入上下文之后的真人消息不算用户接管', () => {
-  const events = [
-    { seq: 1, time: 1_000, type: 'turn/start', data: { turn: 1 } },
-    injected(2),
-    userMessage(3),
-    assistant(4, 1, '做完了'),
-  ]
-  assert.equal(userTookOver(events, 1, new Set()), false)
-})
-
-test('注入上下文加真人插话仍判接管', () => {
-  const events = [
-    { seq: 1, time: 1_000, type: 'turn/start', data: { turn: 1 } },
-    injected(2),
-    userMessage(3),
-    userMessage(4),
-    assistant(5, 1, '做完了'),
-  ]
-  assert.equal(userTookOver(events, 1, new Set()), true)
 })
 
 test('只有注入上下文没有真人消息时不判真人发起', () => {

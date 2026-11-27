@@ -7,11 +7,9 @@
 
 import {
   closureVerdict,
-  hasVisibleOutput,
   humanInitiatedTurn,
+  tailAssistantText,
   turnInitiator,
-  turnSlice,
-  userTookOver,
 } from './closure.mjs'
 import { cooldownFor, fillTemplate } from './config.mjs'
 import { isTransientFailure, parseFailureFacts } from './failure.mjs'
@@ -129,20 +127,18 @@ export function createEngine({
 
     switch (reason.kind) {
       case 'completed': {
-        // 关闭结案强制:present/标记仍算结案,其余正常结束视为完成,只保留空回合恢复
+        // 末条 assistant 没有可见文本:回合是在没交代的情况下收尾的,按空回合处理
+        const answered = tailAssistantText(events, turn).trim() !== ''
+        // 关闭结案强制:present/标记仍算结案,交代过就算完成,只保留空回合恢复
         if (!config.enforceClosure) {
           if (closureVerdict(events, turn, { enforce: false }).closed) return { closed: true }
-          if (userTookOver(events, turn, state.sentIds)) return undefined
-          if (hasVisibleOutput(turnSlice(events, turn))) return { closed: true }
+          if (answered) return { closed: true }
           return config.resumeSilentTurns ? { reason: 'silent', text: config.continueTextSilent } : undefined
         }
         const verdict = closureVerdict(events, turn)
         if (verdict.closed) return { closed: true }
-        // 人已插话就让路,静的回合也不抢方向
-        if (userTookOver(events, turn, state.sentIds)) return undefined
         // 有有效文件写入时结案规则优先:没 present 就必须提醒,不能被空回合开关跳过
-        const silent = !hasVisibleOutput(turnSlice(events, turn))
-        if (silent && verdict.reason !== 'file-write-requires-present') {
+        if (!answered && verdict.reason !== 'file-write-requires-present') {
           return config.resumeSilentTurns ? { reason: 'silent', text: config.continueTextSilent } : undefined
         }
         if (turnInitiator(events, turn) !== 'user') return undefined
@@ -178,7 +174,6 @@ export function createEngine({
       // 拒绝落在两个 step 之间,等价于中断;归档与子会话由 handBackToGoal 排除
       case 'blocked': {
         if (closureVerdict(events, turn, { enforce: config.enforceClosure }).closed) return { closed: true }
-        if (userTookOver(events, turn, state.sentIds)) return undefined
         return { reason: 'interrupted', text: config.continueTextInterrupted, goalDriven: true }
       }
       default:

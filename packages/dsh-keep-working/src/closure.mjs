@@ -72,18 +72,16 @@ export function lastAssistantText(events, turn) {
   return ''
 }
 
-/** 本回合是否产生过可见输出。 */
-export function hasVisibleOutput(events) {
-  return events.some(
-    (event) => event?.type === 'assistant/message' && assistantText(event.data?.message).trim() !== '',
-  )
+/** 本回合最后一条 assistant 消息的可见文本;末步只有思考或工具调用时为空。 */
+export function tailAssistantText(events, turn) {
+  const slice = turnSlice(events, turn)
+  for (let index = slice.length - 1; index >= 0; index -= 1) {
+    const event = slice[index]
+    if (event?.type !== 'assistant/message') continue
+    return assistantText(event.data?.message)
+  }
+  return ''
 }
-
-/** 真人消息:来源是 user,且不是本插件补发的。 */
-const isHumanMessage = (event, excludeIds) =>
-  event?.type === 'user/message' &&
-  event.data?.source?.kind === 'user' &&
-  excludeIds?.has?.(event.data?.id) !== true
 
 /**
  * 回合前导段里的真人发起消息。
@@ -125,14 +123,6 @@ export function turnInitiator(events, turn) {
 /** 回合由真人发起:第一条非注入消息是真人且不是本插件自投递。 */
 export function humanInitiatedTurn(events, turn, excludeIds) {
   return leadingHumanMessage(events, turn, excludeIds) !== undefined
-}
-
-/** 用户在本回合中途插话:结案提醒让路,避免与人的意图抢方向。 */
-export function userTookOver(events, turn, excludeIds) {
-  const humans = turnSlice(events, turn).filter((event) => isHumanMessage(event, excludeIds))
-  if (humans.length === 0) return false
-  // 发起者不是真人(插件补发的回合)时,第一条真人消息就是插话
-  return leadingHumanMessage(events, turn, excludeIds) === undefined || humans.length > 1
 }
 
 const isFileWrite = (event) => event?.type === 'tool/call' && FILE_WRITE_TOOLS.has(event.data?.name)

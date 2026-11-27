@@ -22,6 +22,14 @@ const assistant = (seq, turn, text) =>
     stream: [],
   })
 
+const reasoningOnly = (seq, turn) =>
+  event(seq, 'assistant/message', {
+    turn,
+    step: 1,
+    message: { role: 'assistant', content: [{ type: 'reasoning', text: '还在想' }] },
+    stream: [],
+  })
+
 const toolCall = (seq, turn, name, args = '{}') =>
   event(seq, 'tool/call', { turn, step: 1, callId: `c-${seq}`, name, arguments: args })
 
@@ -212,6 +220,18 @@ test('S2e enforceClosure 关闭:写文件后没有 present 也不提醒', async 
   assert.equal(h.sent.length, 0)
 })
 
+test('S2e enforceClosure 关闭:末条只剩思考仍按空回合恢复', async () => {
+  const h = createHarness({ config: { enforceClosure: false } })
+  h.emit(turnStart(0, TURN))
+  h.emit(userMessage(1))
+  h.emit(assistant(2, TURN, '先说明在查什么'))
+  h.emit(reasoningOnly(3, TURN))
+  await h.emit(turnEnd(4, TURN, { kind: 'completed' }))
+  h.timers.flush()
+  assert.equal(h.sent.length, 1, '末步没交代就不算完成')
+  assert.match(textOf(h.sent[0]), /没有可见输出/)
+})
+
 test('S2f enforceClosure 关闭:空回合仍由空回合开关决定', async () => {
   const on = createHarness({ config: { enforceClosure: false } })
   on.emit(turnStart(0, TURN))
@@ -319,7 +339,7 @@ test('S4d 自投递回合未真正开始:用户回合仍恢复额度', async () 
   assert.equal(h.sent.length, 2)
 })
 
-test('S5 用户中途插话:让路,不发送', async () => {
+test('S5 用户中途插话:回合仍未结案,照常补提醒', async () => {
   const h = createHarness()
   h.emit(turnStart(0, TURN))
   h.emit(userMessage(1))
@@ -327,17 +347,60 @@ test('S5 用户中途插话:让路,不发送', async () => {
   h.emit(userMessage(3, 'user'))
   h.emit(assistant(4, TURN, '好的'))
   await h.emit(turnEnd(5, TURN, { kind: 'completed' }))
-  assert.equal(h.timers.count(), 0)
+  h.timers.flush()
+  assert.equal(h.sent.length, 1, '人的插话不改变回合未结案这一事实')
+  assert.match(textOf(h.sent[0]), /TASK_DONE/)
 })
 
-test('S5b 用户插话且回合无可见输出:让路,不发静默补发', async () => {
+test('S5a 插话后末条只剩思考:写入过就要 present', async () => {
+  const h = createHarness()
+  h.emit(turnStart(0, TURN))
+  h.emit(userMessage(1))
+  h.emit(toolCall(2, TURN, 'edit'))
+  h.emit(userMessage(3, 'user'))
+  h.emit(assistant(4, TURN, '按你说的改'))
+  h.emit(reasoningOnly(5, TURN))
+  await h.emit(turnEnd(6, TURN, { kind: 'completed' }))
+  h.timers.flush()
+  assert.equal(h.sent.length, 1)
+  assert.match(textOf(h.sent[0]), /TASK_DONE/)
+})
+
+test('S5b 插话且回合无可见输出:按空回合补发', async () => {
   const h = createHarness()
   h.emit(turnStart(0, TURN))
   h.emit(userMessage(1))
   h.emit(toolCall(2, TURN, 'read'))
   h.emit(userMessage(3, 'user'))
   await h.emit(turnEnd(4, TURN, { kind: 'completed' }))
-  assert.equal(h.timers.count(), 0)
+  h.timers.flush()
+  assert.equal(h.sent.length, 1)
+  assert.match(textOf(h.sent[0]), /没有可见输出/)
+})
+
+test('S5c 末条只剩思考:前面交代过也不算回答,写入后仍要 present', async () => {
+  const h = createHarness()
+  h.emit(turnStart(0, TURN))
+  h.emit(userMessage(1))
+  h.emit(toolCall(2, TURN, 'write'))
+  h.emit(assistant(3, TURN, '先说明在改什么'))
+  h.emit(reasoningOnly(4, TURN))
+  await h.emit(turnEnd(5, TURN, { kind: 'completed' }))
+  h.timers.flush()
+  assert.equal(h.sent.length, 1)
+  assert.match(textOf(h.sent[0]), /TASK_DONE/)
+})
+
+test('S5d 末条只剩思考且没写文件:按空回合补发', async () => {
+  const h = createHarness()
+  h.emit(turnStart(0, TURN))
+  h.emit(userMessage(1))
+  h.emit(assistant(2, TURN, '先说明在查什么'))
+  h.emit(reasoningOnly(3, TURN))
+  await h.emit(turnEnd(4, TURN, { kind: 'completed' }))
+  h.timers.flush()
+  assert.equal(h.sent.length, 1)
+  assert.match(textOf(h.sent[0]), /没有可见输出/)
 })
 
 test('S6 可重试错误:发送继续文案', async () => {
@@ -876,7 +939,7 @@ test('P2-40 离线探测在途时开启新回合:探测完成后不补发', asyn
   assert.equal(h.timers.count(), 0)
 })
 
-test('S18 插件补发的回合里用户插话一条:让路', async () => {
+test('S18 插件补发的回合里用户插话:未结案仍补提醒', async () => {
   const h = createHarness({ config: { maxConsecutive: 5 } })
   await h.runTurn(0, 1, '没结案', { human: true })
   assert.equal(h.sent.length, 1)
@@ -889,7 +952,7 @@ test('S18 插件补发的回合里用户插话一条:让路', async () => {
   h.emit(assistant(13, 2, '没结案'))
   await h.emit(turnEnd(14, 2, { kind: 'completed' }))
   h.timers.flush()
-  assert.equal(h.sent.length, 1, '插件回合内的真人插话必须让路')
+  assert.equal(h.sent.length, 2, '插话不是结案凭据,提醒照发')
 })
 
 test('S19 空回合开关关闭但有有效写入:仍要求 present', async () => {
