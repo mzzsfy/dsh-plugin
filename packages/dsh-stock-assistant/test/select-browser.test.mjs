@@ -255,18 +255,27 @@ const assertBannerAboveOverlay = async () => {
 // S2: 设置浮层 z-index 60 不能盖住保存错误横幅(409 真实由服务端返回)
 test('S2 保存配置 409 时错误横幅位于浮层之上', async () => {
   await openSettings()
+  // 推送闸门构造恒定冲突: 挂起 invalidate 后 bump 到 R+1, 页面 revision 恒持 R(推送被闸,
+  // 不存在「SSE 推送 vs 页面保存请求」的到达竞速), 保存提交 R 对服务器 R+1 —— 409 由构造决定。
+  // finally 必须放行积压推送并等页面补对账, 不给后续用例留下失联页面
   const revision = await page.evaluate(async () => (await (await fetch('/api/stock-assistant/snapshot')).json()).data.control.revision)
-  const bumped = await page.evaluate(async expectedRevision => {
-    const response = await fetch('/api/stock-assistant/preferences', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operationId: crypto.randomUUID(), expectedRevision, patch: { refreshSeconds: 60 } }) })
-    return response.status
-  }, revision)
-  assert.equal(bumped, 200)
-  const pending = page.waitForResponse(response => response.url().includes('/api/stock-assistant/configuration') && response.request().method() === 'POST')
-  await page.getByRole('button', { name: '保存数据源' }).click()
-  assert.equal((await pending).status(), 409)
-  assert.match(await page.locator('.ssb-banner.ssb-error').innerText(), /数据已被其他页面修改/)
-  await assertBannerAboveOverlay()
-  assert.equal(errors.length, 0)
+  await page.evaluate(async () => { await fetch('/fixture/hold', { method: 'POST', body: '{"on":true}' }) })
+  try {
+    const bumped = await page.evaluate(async expected => {
+      const response = await fetch('/api/stock-assistant/preferences', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operationId: crypto.randomUUID(), expectedRevision: expected, patch: { refreshSeconds: 60 } }) })
+      return response.status
+    }, revision)
+    assert.equal(bumped, 200)
+    const pending = page.waitForResponse(response => response.url().includes('/api/stock-assistant/configuration') && response.request().method() === 'POST')
+    await page.getByRole('button', { name: '保存数据源' }).click()
+    assert.equal((await pending).status(), 409)
+    assert.match(await page.locator('.ssb-banner.ssb-error').innerText(), /数据已被其他页面修改/)
+    await assertBannerAboveOverlay()
+    assert.equal(errors.length, 0)
+  } finally {
+    await page.evaluate(async () => { await fetch('/fixture/hold', { method: 'POST', body: '{"on":false}' }) })
+    await page.waitForFunction(async expected => (await (await fetch('/api/stock-assistant/snapshot')).json()).data.control.revision >= expected, revision + 1, { timeout: 5000 }).catch(() => {})
+  }
 })
 
 test('S2 保存配置 500 时错误横幅可见', async () => {

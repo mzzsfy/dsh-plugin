@@ -14,7 +14,14 @@ const fake = {
   async quotes(req, ctx) { return { items: req.securities.map(s => normalizeQuote({ securityId: s.id, providerInstanceId: req.providerInstanceId, adapterId: 'tushare', providerSymbol: s.code, last: s.code === '600519' ? '1428.00' : '12.16', previousClose: s.code === '600519' ? '1400.00' : '12.40', open: '12.40', high: '12.56', low: '12.10', volume: '135600', amount: '1648896.00', quoteAt: new Date().toISOString(), receivedAt: ctx.now(), delayKind: 'unknown', delaySeconds: null })) } },
 }
 const routes = new Map(), counts = {}, listeners = new Set()
-const app = await createApplication({ storageDomain: memoryStorage(), providers: [fake], env: { DSH_STOCK_TUSHARE_TOKEN: 'fixture-only' }, publish: payload => { for (const res of listeners) res.write(`data: ${JSON.stringify(payload)}\n\n`) } })
+// 推送闸门: 挂起 invalidate 推送, 供测试构造「页面 revision 落后于服务器」的恒定冲突,
+// 消除「bump 的 SSE 推送 vs 页面保存请求」的到达竞速; 放行时按序补投
+let heldEvents = null
+const publish = payload => {
+  if (heldEvents) { heldEvents.push(payload); return }
+  for (const res of listeners) res.write(`data: ${JSON.stringify(payload)}\n\n`)
+}
+const app = await createApplication({ storageDomain: memoryStorage(), providers: [fake], env: { DSH_STOCK_TUSHARE_TOKEN: 'fixture-only' }, publish })
 registerRoutes({ register: r => { routes.set(r.path, r.handler); return () => routes.delete(r.path) } }, app)
 const clientUrl = new URL('../src/client.js', import.meta.url)
 const commonClient = await readFile(new URL('../../dsh-common-tools/src/client.js', import.meta.url), 'utf8')
@@ -51,6 +58,13 @@ const server = http.createServer(async (req, res) => {
   if (path === '/fixture/demand') { let text = ''; for await (const chunk of req) text += chunk; app.demand(JSON.parse(text)); return res.end('{}') }
   if (path === '/fixture/counts') { res.setHeader('Content-Type', 'application/json'); return res.end(JSON.stringify(counts)) }
   if (path === '/fixture/burst') { for(let i = 0; i < 50; i++) for (const s of listeners) s.write('data: {"type":"invalidate"}\n\n'); return res.end('{}') }
+  if (path === '/fixture/hold') {
+    let text = ''; for await (const chunk of req) text += chunk
+    const on = JSON.parse(text).on === true
+    if (on && !heldEvents) heldEvents = []
+    if (!on && heldEvents) { const backlog = heldEvents; heldEvents = null; for (const payload of backlog) for (const res of listeners) res.write(`data: ${JSON.stringify(payload)}\n\n`) }
+    return res.end('{}')
+  }
   res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.end(html)
 })
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
