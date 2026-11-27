@@ -95,21 +95,32 @@ test('保存配置时引用过期的检查标识也不拦人', async () => {
 
 test('到点会打断在途探针, 记未执行而不是不可用', { timeout: 10000 }, async () => {
   // 探针卡在上游时预算必须能截断它: 到点的探针是"没验过", 报不可用会让客户端把好路由剪掉。
-  // 这里只把预算的截止定时器提前, 上游超时仍走真实延时, 保证先到的是检查截止
+  // 顺序必须由构造决定而不是由两个真实定时器赛跑: 截止定时器截成 0ms 立即触发,
+  // 上游响应定时器走同一注入面且永不自动触发(探针挂起在"上游未响应"形态),
+  // abort 经 executor 的 untilAbort 立即打断挂起的探针 —— "到点打断"是唯一可能的结果
   const patched = []
+  const upstreamTimers = new Set()
   const timers = {
-    setTimeout: (fn, ms) => { const shorten = ms === 9000; if (shorten) patched.push(ms); const handle = setTimeout(fn, shorten ? 0 : ms); return handle },
-    clearTimeout: handle => clearTimeout(handle),
+    setTimeout: (fn, ms) => {
+      if (ms === 9000) { patched.push(ms); return setTimeout(fn, 0) }
+      const handle = setTimeout(fn, ms); upstreamTimers.add(handle); return handle
+    },
+    clearTimeout: handle => { upstreamTimers.delete(handle); clearTimeout(handle) },
   }
-  const adapter = probeAdapter('fake', { probe: () => new Promise(resolve => setTimeout(() => resolve({ status: 'ready', capability: 'quotes' }), 100)) })
+  let probeArrived
+  const probeEntered = new Promise(resolve => { probeArrived = resolve })
+  const adapter = probeAdapter('fake', { probe: () => { probeArrived(); return new Promise(() => {}) } })
   const app = await createApplication({ storageDomain: memoryStorage(), providers: [adapter], timers })
   const input = { providers: [instance('a', 'fake')], routes: [routeOf('r', 'a')], capabilities: ['quotes'] }
   // 预算 11 秒, 自查截止早 2 秒
   assert.equal(app.providerCheckTimeoutMs(input) - 2 * 1000, 9000)
-  const checked = await app.providerCheck(input)
+  const pending = app.providerCheck(input)
+  await probeEntered
+  const checked = await pending
   assert.deepEqual(checked.checks.map(c => c.status), ['skipped'], '到点的探针记未执行')
   assert.equal(checked.checks[0].error.code, 'CHECK_DEADLINE')
   assert.equal(checked.partial, true)
   assert.deepEqual(patched, [9000], '确实命中截止定时器')
+  assert.equal(upstreamTimers.size, 0, '探针挂起不遗留上游定时器')
   await app.close()
 })
