@@ -95,17 +95,20 @@ test('保存配置时引用过期的检查标识也不拦人', async () => {
 
 test('到点会打断在途探针, 记未执行而不是不可用', { timeout: 10000 }, async () => {
   // 探针卡在上游时预算必须能截断它: 到点的探针是"没验过", 报不可用会让客户端把好路由剪掉。
-  // 顺序必须由构造决定而不是由两个真实定时器赛跑: 截止定时器截成 0ms 立即触发,
-  // 上游响应定时器走同一注入面且永不自动触发(探针挂起在"上游未响应"形态),
-  // abort 经 executor 的 untilAbort 立即打断挂起的探针 —— "到点打断"是唯一可能的结果
+  // 顺序完全由测试构造: 截止定时器不自动触发(事件循环饥饿时 0ms 定时器可能迟到,
+  // armTimeout 的 8s 上游超时会反过来先赢), 测试确认探针在途后手动触发它 —— 触发即
+  // limiter.abort, 经 executor 的 untilAbort 立即打断挂起的探针, skipped 是唯一结果;
+  // 上游超时定时器同样挂在注入面且永不自动触发, 不与任何真实时钟赛跑
   const patched = []
-  const upstreamTimers = new Set()
+  let fireDeadline = null
   const timers = {
     setTimeout: (fn, ms) => {
-      if (ms === 9000) { patched.push(ms); return setTimeout(fn, 0) }
-      const handle = setTimeout(fn, ms); upstreamTimers.add(handle); return handle
+      if (ms === 9000) { patched.push(ms); fireDeadline = fn; return { ref: () => {}, unref: () => {} } }
+      // 上游超时等其余定时器一律不自动触发: 本用例不测上游超时, 挂起即可, 免得
+      // 用例结束后仍有 ref 定时器拖住事件循环
+      return { ref: () => {}, unref: () => {} }
     },
-    clearTimeout: handle => { upstreamTimers.delete(handle); clearTimeout(handle) },
+    clearTimeout: () => {},
   }
   let probeArrived
   const probeEntered = new Promise(resolve => { probeArrived = resolve })
@@ -116,11 +119,11 @@ test('到点会打断在途探针, 记未执行而不是不可用', { timeout: 1
   assert.equal(app.providerCheckTimeoutMs(input) - 2 * 1000, 9000)
   const pending = app.providerCheck(input)
   await probeEntered
+  assert.deepEqual(patched, [9000], '确实命中截止定时器')
+  fireDeadline()
   const checked = await pending
   assert.deepEqual(checked.checks.map(c => c.status), ['skipped'], '到点的探针记未执行')
   assert.equal(checked.checks[0].error.code, 'CHECK_DEADLINE')
   assert.equal(checked.partial, true)
-  assert.deepEqual(patched, [9000], '确实命中截止定时器')
-  assert.equal(upstreamTimers.size, 0, '探针挂起不遗留上游定时器')
   await app.close()
 })
