@@ -92,7 +92,12 @@ async function validateModelSelection(sessionController, raw) {
   return { selection: checked.selection }
 }
 
-export function createSessionDriver({ getSessionController, getWorkspaceRegistry, getAgents, getSessionQuery, reportSessionMissing }) {
+export function createSessionDriver({ getSessionController, getWorkspaceRegistry, getAgents, getSessionQuery, reportSessionMissing, logSystem }) {
+  // 归档相关降级必须可见:旧宿主 logger 常无输出通道,直写 stderr 后才留痕
+  const log = (line) => {
+    process.stderr.write('[cron-board] ' + line + '\n')
+    if (typeof logSystem === 'function') logSystem(line)
+  }
   // 会话注册表在使用点实时解析:服务晚到/重载后即恢复,不做 apply 期一次性捕获;
   // 服务或其方法缺失时等价「查不到」,不得抛错打断 pinned 自愈路径
   function agentEntry(sessionId) {
@@ -121,13 +126,34 @@ export function createSessionDriver({ getSessionController, getWorkspaceRegistry
   }
 
   // pinned 可用性:已删除(不在持久层)、已归档(从所有分组视图隐藏)或子 agent 会话
-  // 均视为丢失,触发重建
-  async function pinnedUsable(sessionId) {
+  // 均视为丢失,触发重建。任务自身开了 autoUnarchive 时,已归档会话先尝试取消归档再判定:
+  // 归档只是可见性,取消归档后原会话可继续投递,不必重建导致上下文断裂
+  async function pinnedUsable(sessionId, autoUnarchive) {
     const registry = getWorkspaceRegistry ? getWorkspaceRegistry() : undefined
     const archivedIds = registry?.archivedSessionIds
-    if (Array.isArray(archivedIds) && archivedIds.includes(sessionId)) return false
+    if (Array.isArray(archivedIds) && archivedIds.includes(sessionId)) {
+      if (!(await unarchiveForDelivery(registry, sessionId, autoUnarchive))) return false
+    }
     const record = await pinnedRecord(sessionId)
     return record !== undefined && !isDerivedHeader(record.header)
+  }
+
+  // 取消归档成功才继续投递:宿主可能没有该方法(旧版本)或写入失败,
+  // 两种情况都退回「按丢失重建」,不让任务因归档状态而彻底停摆
+  async function unarchiveForDelivery(registry, sessionId, autoUnarchive) {
+    if (autoUnarchive !== true) return false
+    if (typeof registry?.unarchiveSession !== 'function') {
+      log('宿主未提供取消归档接口,已归档会话按丢失处理')
+      return false
+    }
+    try {
+      await registry.unarchiveSession(sessionId)
+    } catch (error) {
+      log('取消归档失败(' + sessionId + '): ' + String(error && error.message ? error.message : error))
+      return false
+    }
+    const after = registry.archivedSessionIds
+    return !(Array.isArray(after) && after.includes(sessionId))
   }
 
   // 建会话请求:分组按 workdir 挂载(dsh-im 同构);执行预设非空才带字段,
@@ -176,7 +202,7 @@ export function createSessionDriver({ getSessionController, getWorkspaceRegistry
       // 丢失/子会话判定先行,避免不可投递的会话被 running 态永久 skipped
       if (!sessionId) {
         recreated = 'unbound'
-      } else if (!(await pinnedUsable(sessionId))) {
+      } else if (!(await pinnedUsable(sessionId, session.autoUnarchive))) {
         recreated = 'lost'
       } else {
         const entry = agentEntry(sessionId)

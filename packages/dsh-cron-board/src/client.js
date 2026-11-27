@@ -412,7 +412,7 @@ function parseModelKey(key) {
 // 任务表单提交面:编辑只提交相对「打开编辑器时快照」有变化的字段(dirty),并带回该快照的
 // updatedAt 基线交给服务端乐观锁;全量重提旧快照会把他处变更(自动禁用/开关/会话绑定)静默回滚。
 const JOB_FORM_FIELDS = ['name', 'kind', 'command', 'prompt', 'workdir', 'schedule', 'timeoutMs', 'runOnce', 'enabled']
-const JOB_SESSION_FIELDS = ['mode', 'pinnedSessionId', 'agentPreset', 'modelKey']
+const JOB_SESSION_FIELDS = ['mode', 'pinnedSessionId', 'agentPreset', 'modelKey', 'autoUnarchive']
 // 并发上限:空串 = 清空该键(提交 null,服务端删键表达「不限并发」),否则提交数值
 function jobConcurrencyValue(raw) {
   return raw === '' ? null : Number(raw)
@@ -518,8 +518,9 @@ body{
 .cb-button:disabled{cursor:not-allowed;opacity:.5}
 .cb-button--primary{background:var(--cb-accent);border-color:var(--cb-accent);color:var(--dsw-alias-bg-base)}
 .cb-button--primary:hover:not(:disabled){background:var(--cb-accent-deep);border-color:var(--cb-accent-deep)}
-.cb-button--danger{color:var(--cb-danger);border-color:transparent}
-.cb-button--danger:hover:not(:disabled){border-color:transparent;background:var(--cb-hover-danger);color:var(--cb-danger)}
+.cb-button--ghost{border-color:transparent;color:var(--cb-text-sub)}
+.cb-button--ghost:hover:not(:disabled){background:var(--cb-hover);color:var(--cb-text)}
+.cb-button--danger{color:var(--cb-danger);border-color:transparent}.cb-button--danger:hover:not(:disabled){border-color:transparent;background:var(--cb-hover-danger);color:var(--cb-danger)}
 /* 确认类弹窗的主操作:危险实底 + 反白,悬停不回退成浅底 */
 .cb-button--danger-solid{background:var(--cb-danger);border-color:var(--cb-danger);color:var(--dsw-alias-bg-base)}
 .cb-button--danger-solid:hover:not(:disabled){background:color-mix(in srgb, var(--cb-danger) 88%, var(--dsw-alias-label-primary));border-color:var(--cb-danger);color:var(--dsw-alias-bg-base)}
@@ -603,26 +604,30 @@ html[data-cb-hide-host-automation-nav] nav > div:has(> button > span > div[data-
 .cb-code{font-family:ui-monospace,SFMono-Regular,monospace;font-size:var(--cb-font-sm);line-height:18px;color:var(--cb-text-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .cb-mask{color:var(--cb-text-sub)}
 .cb-modal-mask{position:fixed;inset:0;background:var(--cb-mask);display:flex;align-items:center;justify-content:center;z-index:60;animation:cb-fade-in .16s ease-out}
-.cb-modal{background:var(--cb-bg);color:var(--cb-text);border-radius:var(--cb-radius-lg);padding:var(--cb-space-6);max-width:640px;width:min(640px,94vw);max-height:90vh;overflow:hidden;display:flex;flex-direction:column;gap:14px;box-shadow:var(--dsw-shadow-lv3);animation:cb-pop-in .2s ease-out}
+.cb-modal{background:var(--cb-bg);color:var(--cb-text);border-radius:var(--cb-radius-lg);padding:var(--cb-space-6);max-width:640px;width:min(640px,94vw);max-height:90vh;overflow:hidden;display:flex;flex-direction:column;gap:var(--cb-space-5);box-shadow:var(--dsw-shadow-lv3);animation:cb-pop-in .2s ease-out}
 @keyframes cb-fade-in{from{opacity:0}to{opacity:1}}
 @keyframes cb-pop-in{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}
 @media (prefers-reduced-motion: reduce){.cb-modal-mask,.cb-modal{animation:none}.cb-dot--pulse{animation:none}.cb-card,.cb-row,.cb-button,.cb-pill,.cb-icon,.cb-switch__track,.cb-pc,.cb-pc__chevron{transition:none}}
-.cb-modal-head{display:flex;align-items:center;justify-content:space-between;gap:var(--cb-space-3);padding-bottom:var(--cb-space-4);border-bottom:.5px solid var(--cb-border)}
+.cb-modal-head{display:flex;align-items:flex-start;justify-content:space-between;gap:var(--cb-space-4);padding-bottom:var(--cb-space-4);border-bottom:.5px solid var(--cb-border)}
+.cb-modal-heading{display:flex;flex-direction:column;gap:2px;min-width:0}
 .cb-modal-title{font-size:16px;line-height:24px;font-weight:600}
+.cb-modal-sub{font-size:var(--cb-font-sm);line-height:16px;color:var(--cb-text-dim)}
 /* 弹窗底部与头部分隔线对齐;sticky 仍由 .cb-modal .cb-toolbar 承担 */
-.cb-modal-footer{border-top:.5px solid var(--cb-border);padding-top:var(--cb-space-4)}
-.cb-modal-body{display:flex;flex-direction:column;gap:var(--cb-space-4);flex:1 1 auto;min-height:0;overflow:auto}
+.cb-modal-footer{display:flex;align-items:center;gap:var(--cb-space-2);border-top:.5px solid var(--cb-border);padding-top:var(--cb-space-4)}
+.cb-modal-body{display:flex;flex-direction:column;gap:var(--cb-space-5);flex:1 1 auto;min-height:0;overflow:auto}
 .cb-modal .cb-toolbar{position:sticky;bottom:calc(-1 * var(--cb-space-6));z-index:1;background:var(--cb-bg);padding-top:var(--cb-space-3);border-bottom:0}
-.cb-section{display:flex;flex-direction:column;gap:var(--cb-space-2)}
-.cb-section-title{font-size:var(--cb-font-sm);font-weight:600;color:var(--cb-text);display:flex;align-items:center;gap:var(--cb-space-2)}
-.cb-section-title::before{content:'';width:3px;height:12px;border-radius:999px;background:var(--cb-accent)}
+/* 节:说明行 + 卡片;卡片用嵌套层底色分层,不再叠描边(规范:嵌套分层用 bg-sub 不加边框) */
+.cb-section{display:flex;flex-direction:column;gap:var(--cb-space-3);background:var(--cb-card);border:.5px solid var(--cb-border);border-radius:var(--cb-radius-md);padding:var(--cb-space-5)}
+.cb-section-head{display:flex;flex-direction:column;gap:2px}
+.cb-section-title{font-size:var(--cb-font-md);line-height:20px;font-weight:600;color:var(--cb-text)}
+.cb-section-desc{font-size:var(--cb-font-sm);line-height:16px;color:var(--cb-text-dim)}
 .cb-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--cb-space-3) var(--cb-space-4)}
-.cb-field{display:flex;flex-direction:column;gap:4px;font-size:var(--cb-font-sm);min-width:0;color:var(--cb-text-sub)}
+.cb-field{display:flex;flex-direction:column;gap:6px;font-size:var(--cb-font-md);line-height:20px;min-width:0;color:var(--cb-text-sub)}
 .cb-field--wide{grid-column:1 / -1}
-.cb-field input[type="text"],.cb-field input[type="number"],.cb-field textarea,.cb-field select{min-height:30px;border:1px solid var(--cb-border-strong);border-radius:var(--cb-radius-md);padding:4px 10px;font:inherit;font-size:var(--cb-font-md);background:var(--cb-bg);color:var(--cb-text);min-width:0;transition:border-color .15s,box-shadow .15s}
-.cb-field input:focus,.cb-field textarea:focus,.cb-field select:focus{outline:none;border-color:var(--cb-accent);box-shadow:0 0 0 3px var(--cb-accent-wash)}
-.cb-field textarea{min-height:64px;resize:vertical;font-family:inherit}
-.cb-hint{font-size:var(--cb-font-xs);color:var(--cb-text-dim)}
+.cb-field input[type="text"],.cb-field input[type="number"],.cb-field textarea,.cb-field select{min-height:var(--cb-control-h);border:1px solid var(--cb-border-strong);border-radius:var(--cb-radius-sm);padding:0 10px;font:inherit;font-size:var(--cb-font-md);background:var(--cb-bg);color:var(--cb-text);min-width:0;transition:border-color .15s}
+.cb-field input:focus,.cb-field textarea:focus,.cb-field select:focus{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-1px;border-color:transparent}
+.cb-field textarea{min-height:64px;padding:8px 10px;resize:vertical;font-family:inherit;line-height:20px}
+.cb-hint{font-size:var(--cb-font-sm);line-height:16px;color:var(--cb-text-dim)}
 .cb-preview{font-size:var(--cb-font-sm);border:1px dashed var(--cb-border-strong);border-radius:var(--cb-radius-md);padding:var(--cb-space-2) var(--cb-space-3);color:var(--cb-text-sub);background:var(--cb-accent-wash);border-color:color-mix(in srgb, var(--cb-accent) 35%, transparent);color:var(--cb-text)}
 /* —— 表单 v2:统一分段组件 + 调度构建器(设计稿 .superdesign/shots/7、8 锁定形态)—— */
 /* seg:类型/会话模式/调度频率共用同一形态,禁止另起多套选择样式 */
@@ -633,10 +638,10 @@ html[data-cb-hide-host-automation-nav] nav > div:has(> button > span > div[data-
 .cb-seg__opt--on:hover{color:var(--dsw-alias-bg-base)}
 .cb-seg__opt:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
 /* 调度构建器:极浅洗底面板,收纳频率/上下文/表达式/预览 */
-.cb-builder{background:var(--cb-bg-sub);border:.5px solid var(--cb-border);border-radius:var(--cb-radius-md);padding:var(--cb-space-5);display:flex;flex-direction:column;gap:12px}
+.cb-builder{background:var(--cb-bg-muted);border-radius:var(--cb-radius-sm);padding:var(--cb-space-4);display:flex;flex-direction:column;gap:var(--cb-space-3)}
 /* 计划行列表:一条表达式一行,选中行在下方构建器编辑 */
 .cb-sched-list{display:flex;flex-direction:column;gap:6px;margin-bottom:8px}
-.cb-sched-row{display:flex;align-items:center;gap:8px;min-width:0;background:var(--cb-bg-sub);border:.5px solid var(--cb-border);border-radius:var(--cb-radius-md);padding:6px 10px;cursor:pointer}
+.cb-sched-row{display:flex;align-items:center;gap:var(--cb-space-2);min-width:0;min-height:36px;background:var(--cb-bg);border:.5px solid var(--cb-border);border-radius:var(--cb-radius-sm);padding:0 10px;cursor:pointer;transition:border-color .15s,background .15s}
 .cb-sched-row:hover{border-color:var(--cb-border-strong)}
 .cb-sched-row--on{border-color:var(--cb-accent);background:var(--cb-accent-wash)}
 .cb-sched-row:focus-visible{outline:2px solid var(--cb-accent);outline-offset:1px}
@@ -656,17 +661,15 @@ html[data-cb-hide-host-automation-nav] nav > div:has(> button > span > div[data-
 .cb-run::before{content:'';width:5px;height:5px;border-radius:50%;background:var(--cb-accent);flex:none}
 .cb-run + .cb-run::before{background:var(--cb-text-dim)}
 /* 紧凑行组:名称+类型 / 策略单行 */
-.cb-formrow{display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap}
+.cb-formrow{display:flex;gap:var(--cb-space-4);align-items:flex-start;flex-wrap:wrap}
 .cb-formrow > .cb-field{flex:1;min-width:180px}
 .cb-formrow > .cb-field--fit{flex:0 0 auto;min-width:0;width:min(300px, 42%)}
 /* 运行策略单行:标题+开关+内联数字段同一行 */
-.cb-inline{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
-.cb-inlinesection{font-size:var(--cb-font-sm);font-weight:600;color:var(--cb-text);display:inline-flex;align-items:center;gap:6px}
-.cb-inlinesection::before{content:'';width:3px;height:11px;border-radius:999px;background:var(--cb-accent)}
+.cb-inline{display:flex;align-items:center;gap:var(--cb-space-4);flex-wrap:wrap;min-height:var(--cb-control-h)}
 .cb-if{display:inline-flex;align-items:center;gap:6px}
 .cb-if > .cb-field{flex-direction:row;align-items:center;gap:6px}
 .cb-if input[type="number"]{width:104px}
-.cb-log{font-family:ui-monospace,SFMono-Regular,monospace;font-size:var(--cb-font-sm);white-space:pre-wrap;word-break:break-all;background:var(--cb-bg-sub);border-radius:var(--cb-radius-md);padding:var(--cb-space-3);max-height:320px;overflow:auto}
+.cb-log{font-family:var(--ds-font-family-code);font-size:var(--cb-font-sm);white-space:pre-wrap;word-break:break-all;background:var(--cb-bg-sub);border-radius:var(--cb-radius-md);padding:var(--cb-space-3);max-height:320px;overflow:auto}
 .cb-empty{font-size:14px;line-height:22px;color:var(--cb-text-sub);padding:var(--cb-space-6) 0;text-align:center;display:flex;flex-direction:column;align-items:center;gap:var(--cb-space-4)}
 .cb-select{min-height:var(--cb-control-h);border:1px solid var(--cb-border-strong);border-radius:var(--cb-radius-sm);padding:4px 8px;font:inherit;font-size:var(--cb-font-md);background:var(--cb-bg);color:var(--cb-text)}
 .cb-confirm-text{font-size:var(--cb-font-md);color:var(--cb-text);line-height:1.5}
@@ -807,7 +810,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         hint ? h('span', { className: 'cb-hint' }, hint) : null)
     }
 
-    function Modal({ title, onClose, children, width }) {
+    function Modal({ title, subtitle, onClose, children, width }) {
       const bodyRef = useRef(null)
       useEffect(() => {
         const onKey = (event) => { if (event.key === 'Escape') onClose() }
@@ -819,15 +822,19 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       return h('div', { className: 'cb-modal-mask', onClick: (event) => { if (event.target === event.currentTarget) onClose() } },
         h('div', { className: 'cb-modal', style: width ? { width: 'min(' + width + 'px, 92vw)' } : null },
           h('div', { className: 'cb-modal-head' },
-            h('span', { className: 'cb-modal-title' }, title),
+            h('div', { className: 'cb-modal-heading' },
+              h('span', { className: 'cb-modal-title' }, title),
+              subtitle ? h('span', { className: 'cb-modal-sub' }, subtitle) : null),
             h('button', { className: 'cb-icon', 'aria-label': '关闭', onClick: onClose }, '✕')),
           h('div', { className: 'cb-modal-body', ref: bodyRef }, children)))
     }
 
-    // 节标题:表单分区渐进披露(基础/执行/调度)
-    function Section({ title, children }) {
-      return h('div', { className: 'cb-section' },
-        h('div', { className: 'cb-section-title' }, title),
+    // 节:表单分组的统一容器(说明行 + 卡片),Modal 内只经由它分组
+    function Section({ title, desc, children }) {
+      return h('section', { className: 'cb-section' },
+        h('div', { className: 'cb-section-head' },
+          h('span', { className: 'cb-section-title' }, title),
+          desc ? h('span', { className: 'cb-section-desc' }, desc) : null),
         children)
     }
 
@@ -966,6 +973,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           mode: job && job.session ? job.session.mode : 'fresh',
           pinnedSessionId: job && job.session ? job.session.pinnedSessionId : '',
           agentPreset: job && job.session ? job.session.agentPreset : '',
+          // 固定会话专用:投递前先取消目标会话的归档
+          autoUnarchive: job && job.session ? job.session.autoUnarchive === true : false,
           // 表单态为序列化 key(分隔符见 MODELKEY 段 / '' = 跟随宿主默认),提交时还原对象
           modelKey: serializeModelKey(job && job.session ? job.session.model : undefined),
         },
@@ -1073,16 +1082,22 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         else setError(outcome.error)
       }
 
-      return h(Modal, { title: editing ? '编辑任务' : '新建任务', onClose: onDone, width: 640 },
-        h('div', { className: 'cb-formrow' },
-          h(Field, { label: '名称' }, h('input', { type: 'text', value: form.name, onChange: (e) => set({ name: e.target.value }) })),
-          h(Field, { label: '类型', fit: true }, h(Segmented, {
-            options: [{ value: 'shell', label: KIND_LABELS.shell }, { value: 'session', label: KIND_LABELS.session }],
-            value: form.kind,
-            onChange: (kind) => set({ kind }),
-            ariaLabel: '类型',
-          }))),
-        h(Section, { title: '调度计划' },
+      return h(Modal, {
+        title: editing ? '编辑任务' : '新建任务',
+        subtitle: (KIND_LABELS[form.kind] || form.kind) + ' · 计划 ' + scheduleStates.length + ' 条' + (form.enabled ? '' : ' · 已停用'),
+        onClose: onDone,
+        width: 640,
+      },
+        h(Section, { title: '基础', desc: '名称用于列表识别,类型决定执行体' },
+          h('div', { className: 'cb-formrow' },
+            h(Field, { label: '名称' }, h('input', { type: 'text', value: form.name, onChange: (e) => set({ name: e.target.value }) })),
+            h(Field, { label: '类型', fit: true }, h(Segmented, {
+              options: [{ value: 'shell', label: KIND_LABELS.shell }, { value: 'session', label: KIND_LABELS.session }],
+              value: form.kind,
+              onChange: (kind) => set({ kind }),
+              ariaLabel: '类型',
+            })))),
+        h(Section, { title: '调度计划', desc: '一条任务可挂多条表达式,按书写顺序取最早触发点' },
           // 计划行:每条表达式一行,选中行在下方构建器编辑;单条时不可删除
           h('div', { className: 'cb-sched-list' },
             scheduleStates.map((state, index) => {
@@ -1111,12 +1126,12 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             h('button', { className: 'cb-linkbtn cb-sched-add', onClick: addSchedule }, '+ 添加时间')),
           h(ScheduleBuilder, { scheduleState: activeState, onStateChange: applyScheduleState, preview: activePreview, previewError, serverTzOffset })),
         form.kind === 'shell'
-          ? h(Section, { title: '运行配置(shell)' },
+          ? h(Section, { title: '执行配置', desc: '命令经宿主 shell 执行;工作目录留空即宿主当前目录' },
               h(Field, { label: '命令', hint: '经由宿主 shell 执行,支持环境变量插值 $NAME' },
                 h('input', { type: 'text', value: form.command, onChange: (e) => set({ command: e.target.value }) })),
               h('div', { className: 'cb-formrow' },
                 h(Field, { label: '工作目录(可空)' }, h('input', { type: 'text', value: form.workdir, onChange: (e) => set({ workdir: e.target.value }) }))))
-          : h(Section, { title: '运行配置(会话)' },
+          : h(Section, { title: '执行配置', desc: '会话任务投递即完成;首次投递会自动创建或绑定会话' },
               h('div', { className: 'cb-formrow' },
                 h(Field, {
                   label: '工作区(会话 cwd,可空)',
@@ -1150,6 +1165,17 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
                           onChange: (e) => setSession({ pinnedSessionId: e.target.value }),
                         })
                       : null))),
+              form.session.mode === 'pinned'
+                ? h(Field, { label: '自动取消归档', hint: '投递前先取消固定会话的归档;宿主不支持或取消失败时仍按丢失重建' },
+                    h('div', { className: 'cb-inline' },
+                      switchToggle({
+                        checked: form.session.autoUnarchive === true,
+                        onChange: (e) => setSession({ autoUnarchive: e.target.checked }),
+                        ariaLabel: '自动取消归档',
+                        title: '投递前先取消固定会话的归档;取消失败或宿主不支持时仍按丢失重建',
+                      }),
+                      h('span', { className: 'cb-meta' }, form.session.autoUnarchive === true ? '开启' : '关闭')))
+                : null,
               h(Field, { label: '执行预设', hint: '会话使用的 Agent Preset;跟随宿主默认时由宿主解析当前默认' },
                 h('select', {
                   className: 'cb-select',
@@ -1188,26 +1214,25 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
                 : null,
               h(Field, { label: '任务文本', hint: '投递给会话的任务内容,环境变量会折叠在文本前部' },
                 h('textarea', { value: form.prompt, onChange: (e) => set({ prompt: e.target.value }) }))),
-        h('div', { className: 'cb-inline' },
-          h('span', { className: 'cb-inlinesection' }, '运行策略'),
-          switchToggle({ checked: form.runOnce, onChange: (e) => set({ runOnce: e.target.checked }), label: '单次运行' }),
-          form.kind === 'shell'
-            ? h('span', { className: 'cb-if' },
-                h('span', { className: 'cb-blabel' }, '超时'),
-                h('input', { type: 'number', value: form.timeoutMs, title: '毫秒,超时即中断并标记失败', onChange: (e) => set({ timeoutMs: Number(e.target.value) }) }),
-                h('span', { className: 'cb-hint' }, 'ms'))
-            : null,
-          form.kind === 'shell'
-            ? h('span', { className: 'cb-if' },
-                h('span', { className: 'cb-blabel' }, '并发上限'),
-                h('input', { type: 'number', value: form.concurrency, style: { width: 72 }, title: '限制该任务同时进行的执行数,可空', onChange: (e) => set({ concurrency: e.target.value }) }))
-            : null,
-          form.kind === 'session' ? h('span', { className: 'cb-hint' }, '会话任务投递即完成,无超时与并发语义') : null),
+        h(Section, { title: '运行策略', desc: form.kind === 'session' ? '会话任务投递即完成,无超时与并发语义' : '策略只作用于本任务,不改动全局闸门' },
+          h('div', { className: 'cb-inline' },
+            switchToggle({ checked: form.enabled, onChange: (e) => set({ enabled: e.target.checked }), label: '启用' }),
+            switchToggle({ checked: form.runOnce, onChange: (e) => set({ runOnce: e.target.checked }), label: '单次运行' }),
+            form.kind === 'shell'
+              ? h('span', { className: 'cb-if' },
+                  h('span', { className: 'cb-blabel' }, '超时'),
+                  h('input', { type: 'number', value: form.timeoutMs, title: '毫秒,超时即中断并标记失败', onChange: (e) => set({ timeoutMs: Number(e.target.value) }) }),
+                  h('span', { className: 'cb-hint' }, 'ms'))
+              : null,
+            form.kind === 'shell'
+              ? h('span', { className: 'cb-if' },
+                  h('span', { className: 'cb-blabel' }, '并发上限'),
+                  h('input', { type: 'number', value: form.concurrency, style: { width: 72 }, title: '限制该任务同时进行的执行数,可空', onChange: (e) => set({ concurrency: e.target.value }) }))
+              : null)),
         error ? h('div', { className: 'cb-error' }, error) : null,
-        h('div', { className: 'cb-toolbar cb-modal-footer' },
-          h('button', { className: 'cb-button', onClick: onDone }, '取消'),
+        h('div', { className: 'cb-modal-footer' },
           h('div', { className: 'cb-spacer' }),
-          switchToggle({ checked: form.enabled, onChange: (e) => set({ enabled: e.target.checked }), label: '启用' }),
+          h('button', { className: 'cb-button cb-button--ghost', onClick: onDone }, '取消'),
           h('button', { className: 'cb-button cb-button--primary', disabled: saving, onClick: submit }, saving ? '保存中…' : '保存')))
     }
 

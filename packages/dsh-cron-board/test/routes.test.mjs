@@ -1375,3 +1375,29 @@ test('多计划:cron preview 返回逐条摘要与合并触发点', async (t) =>
   assert.equal(single.payload.items.length, 1)
   assert.equal(single.payload.items[0].schedule, '0 9 * * *T+0')
 })
+
+test('jobs 路由:自动取消归档是任务级会话字段,可开关且随会话子对象落库', async (t) => {
+  const { store, api } = await makeApi(t)
+  // When 建 pinned 任务时开启
+  const created = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: '归档自愈', kind: 'session', prompt: 'x', schedule: '0 9 * * *', enabled: true,
+    session: { mode: 'pinned', pinnedSessionId: 's-1', autoUnarchive: true },
+  })
+  assert.equal(created.status, 200)
+  assert.equal(created.payload.session.autoUnarchive, true)
+  // When 只改任务名(会话子对象未提交):开关必须保留
+  const renamed = await call(api, 'PATCH', '/api/cron-board/jobs/' + created.payload.id, { name: '改名' })
+  assert.equal(renamed.payload.session.autoUnarchive, true)
+  // When 关闭开关
+  const off = await call(api, 'PATCH', '/api/cron-board/jobs/' + created.payload.id, {
+    session: { mode: 'pinned', pinnedSessionId: 's-1', autoUnarchive: false }, expectedUpdatedAt: renamed.payload.updatedAt,
+  })
+  assert.equal(off.status, 200)
+  assert.equal(off.payload.session.autoUnarchive, undefined)
+  assert.equal(store.jobs.get(created.payload.id).session.autoUnarchive, undefined)
+  // And fresh 任务不会因此多出开关
+  const fresh = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: '新建', kind: 'session', prompt: 'x', schedule: '0 9 * * *', enabled: true, session: { mode: 'fresh', autoUnarchive: true },
+  })
+  assert.equal(fresh.payload.session.autoUnarchive, true)
+})

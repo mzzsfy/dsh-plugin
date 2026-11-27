@@ -59,6 +59,8 @@ export function normalizeSession(body) {
   }
   const model = normalizeSessionModel(raw.model)
   if (model) session.model = model
+  // 投递前自动取消归档:任务级开关,只有固定会话会用到(新建会话与归档无关)
+  if (raw.autoUnarchive === true) session.autoUnarchive = true
   return session
 }
 

@@ -136,6 +136,7 @@ export function apply(ctx, config) {
       // 不在装配期一次性捕获(否则 pinned 判定与忙判定永久降级到捕获时的形态)
       getAgents: () => ctx.get('agents'),
       getSessionQuery: () => ctx.get('sessionQuery'),
+      logSystem: (line) => (ctx.logger && ctx.logger.warn ? ctx.logger.warn(line) : undefined),
     })
     const executor = createExecutor({
       store,

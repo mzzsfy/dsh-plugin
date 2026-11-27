@@ -93,17 +93,19 @@ function makeRegistry({ paths = {}, archived = [] } = {}) {
   }
 }
 
-function makeDriver(stubs) {
+function makeDriver(stubs, extra = {}) {
   return createSessionDriver({
     getSessionController: () => stubs.sessionController,
     getWorkspaceRegistry: stubs.getWorkspaceRegistry,
     getAgents: () => stubs.agents,
     getSessionQuery: () => stubs.sessionQuery,
+    ...extra,
   })
 }
 
 const BASE_JOB = { id: 'j1', kind: 'session', prompt: '跑日报', session: { mode: 'fresh' } }
 const PINNED_S1 = { ...BASE_JOB, session: { mode: 'pinned', pinnedSessionId: 's-1' } }
+const AUTO = { ...PINNED_S1, session: { ...PINNED_S1.session, autoUnarchive: true } }
 const PINNED_GONE = { ...BASE_JOB, session: { mode: 'pinned', pinnedSessionId: 'gone' } }
 
 for (const bound of [false, true]) {
@@ -606,4 +608,66 @@ test('session-driver:pinned 指向普通 fork(parentSession + depth 0)仍复用'
   assert.equal(outcome.status, 'success')
   assert.equal(outcome.sessionId, 'fork-1')
   assert.equal(stubs.created.length, 0)
+})
+
+test('session-driver:自动取消归档开启时,已归档 pinned 会话原样继续投递', async () => {
+  const stubs = makeStubs()
+  stubs.sessions.set('s-1', { id: 's-1', status: 'idle' })
+  const archived = ['s-1']
+  const unarchived = []
+  stubs.getWorkspaceRegistry = () => ({
+    get archivedSessionIds() { return archived },
+    async unarchiveSession(sessionId) {
+      unarchived.push(sessionId)
+      archived.splice(archived.indexOf(sessionId), 1)
+    },
+  })
+  const driver = makeDriver(stubs)
+  // When 任务开了自动取消归档,投递到已归档会话
+  const outcome = await driver.run({ job: AUTO, env: {} })
+  // Then 先取消归档,再向原会话投递(无重建、无回写)
+  assert.deepEqual(unarchived, ['s-1'])
+  assert.equal(outcome.sessionId, 's-1')
+  assert.equal(outcome.message, '已投递会话')
+  assert.equal(outcome.pinnedNewId, undefined)
+  assert.equal(stubs.created.length, 0)
+})
+
+test('session-driver:任务未开自动取消归档时保持丢失重建', async () => {
+  const stubs = makeStubs()
+  stubs.sessions.set('s-1', { id: 's-1', status: 'idle' })
+  const unarchived = []
+  stubs.getWorkspaceRegistry = () => ({ archivedSessionIds: ['s-1'], async unarchiveSession(id) { unarchived.push(id) } })
+  const driver = makeDriver(stubs)
+  const outcome = await driver.run({ job: PINNED_S1, env: {} })
+  assert.deepEqual(unarchived, [])
+  assert.notEqual(outcome.sessionId, 's-1')
+  assert.equal(outcome.message, '原会话丢失已重建')
+})
+
+test('session-driver:取消归档失败或宿主无接口时退回重建', async () => {
+  const failing = makeStubs()
+  failing.sessions.set('s-1', { id: 's-1', status: 'idle' })
+  failing.getWorkspaceRegistry = () => ({
+    archivedSessionIds: ['s-1'],
+    async unarchiveSession() { throw new Error('写入失败') },
+  })
+  const lost = await makeDriver(failing).run({ job: AUTO, env: {} })
+  assert.equal(lost.message, '原会话丢失已重建')
+  assert.equal(failing.created.length, 1)
+  // 宿主版本没有该接口:同样不阻断投递
+  const legacy = makeStubs()
+  legacy.sessions.set('s-1', { id: 's-1', status: 'idle' })
+  legacy.getWorkspaceRegistry = () => ({ archivedSessionIds: ['s-1'] })
+  const rebuilt = await makeDriver(legacy).run({ job: AUTO, env: {} })
+  assert.equal(rebuilt.message, '原会话丢失已重建')
+  assert.equal(legacy.created.length, 1)
+})
+
+test('session-driver:取消归档未真正生效(集合仍含该 id)时按丢失处理', async () => {
+  const stubs = makeStubs()
+  stubs.sessions.set('s-1', { id: 's-1', status: 'idle' })
+  stubs.getWorkspaceRegistry = () => ({ archivedSessionIds: ['s-1'], async unarchiveSession() {} })
+  const outcome = await makeDriver(stubs).run({ job: AUTO, env: {} })
+  assert.equal(outcome.message, '原会话丢失已重建')
 })
