@@ -896,6 +896,10 @@ const MESSAGES_ZH = {
   workspaceUnknown: '未知工作区',
   workspaceUsageEmpty: '当前范围内暂无工作区用量。',
   workspaceUsageEmptyModel: '该模型在当前范围内暂无工作区用量。',
+  workspaceUsageNoMatch: '没有匹配的工作区。',
+  workspaceUsageSearch: '搜索工作区名称',
+  workspaceUsageShowAll: '显示全部 {n} 项',
+  workspaceUsageShowLess: '收起',
   workspaceUsageTotal: '合计',
   displayGroup: '显示补全',
   displayGroupDesc: '官方用量与费用显示',
@@ -1246,6 +1250,10 @@ const MESSAGES_EN = {
   workspaceUnknown: 'Unknown workspace',
   workspaceUsageEmpty: 'No workspace usage in this range.',
   workspaceUsageEmptyModel: 'No workspace usage for this model in this range.',
+  workspaceUsageNoMatch: 'No workspace matches the search.',
+  workspaceUsageSearch: 'Search workspace name',
+  workspaceUsageShowAll: 'Show all {n}',
+  workspaceUsageShowLess: 'Show less',
   workspaceUsageTotal: 'Total',
   displayGroup: 'Display additions',
   displayGroupDesc: 'Official usage and cost display',
@@ -1637,6 +1645,21 @@ function workspaceUsageRows(byWorkspace, workspaces, model, unknownLabel, delete
     }
   }).filter((row) => row.tokens > 0 || row.requests > 0 || row.turns > 0)
     .sort((a, b) => b.tokens - a.tokens || b.requests - a.requests || a.name.localeCompare(b.name))
+}
+
+// 工作区用量默认只列前 N 项,更长列表靠搜索与展开,避免整块撑满摘要
+const WORKSPACE_USAGE_TOP = 10
+
+// 工作区用量搜索:按展示名匹配,忽略大小写与首尾空格
+function workspaceUsageFiltered(rows, keyword) {
+  const query = String(keyword ?? '').trim().toLowerCase()
+  if (!query) return rows
+  return rows.filter((row) => String(row.name ?? '').toLowerCase().includes(query))
+}
+
+// 工作区用量视图键:范围、模型或刷新任一变化即重建组件,搜索词与展开态随之复位
+function workspaceUsageViewKey(request, model, tick) {
+  return [request?.from ?? '', request?.to ?? '', model ?? '', tick ?? ''].join('|')
 }
 
 // 趋势图视口常量
@@ -4191,6 +4214,10 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-workspace-usage-track{height:6px;border-radius:999px;background:var(--dsw-alias-bg-module-platform);overflow:hidden}
 .ud-workspace-usage-fill{display:block;height:100%;border-radius:inherit;background:var(--dsw-alias-state-business-primary)}
 .ud-workspace-usage-meta{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
+.ud-workspace-usage-search{position:relative;display:flex;align-items:center;min-width:0}
+.ud-workspace-usage-search>svg{position:absolute;inset-inline-start:10px;color:var(--dsw-alias-label-secondary);pointer-events:none}
+.ud-workspace-usage-search .ud-input{height:28px;min-height:28px;padding-block:0;padding-inline-start:32px;font-size:13px;line-height:18px;appearance:none}
+.ud-workspace-usage-more{align-self:flex-start;height:28px;padding:0;font-size:12px;line-height:18px}
 .ud-model-row{display:flex;align-items:center;gap:8px;min-height:46px;padding:1px 4px;border-bottom:1px solid var(--dsw-alias-border-l1)}
 .ud-model-row--expand{cursor:pointer}
 .ud-model-row--expand:hover{background:var(--dsw-alias-interactive-bg-hover)}
@@ -5136,22 +5163,47 @@ ${HUD_CSS}
     // 工作区用量对比:统计卡之外的独立视图,按 token 量排序;
     // 选中模型时用模型拆分重算,避免把总量误当成模型用量
     function WorkspaceUsage({ byWorkspace = [], workspaces = [], model = '', t = defaultT }) {
+      const [query, setQuery] = useState('')
+      const [expanded, setExpanded] = useState(false)
       const rows = workspaceUsageRows(byWorkspace, workspaces, model, t('workspaceUnknown'), t('workspaceDeleted'))
+      // 搜索框只在长列表出现;过滤与搜索框同源,避免搜索词在无控件时仍生效
+      const searchable = rows.length > WORKSPACE_USAGE_TOP
+      const matches = searchable ? workspaceUsageFiltered(rows, query) : rows
+      // 折叠只限制可见行;占比与进度条始终按全量口径
+      const overflow = matches.length > WORKSPACE_USAGE_TOP
+      const visible = overflow && !expanded ? matches.slice(0, WORKSPACE_USAGE_TOP) : matches
       const total = rows.reduce((sum, row) => sum + row.tokens, 0)
       const max = rows.reduce((value, row) => Math.max(value, row.tokens), 0)
       return h('div', { className: 'ud-section ud-workspace-usage' },
         h('div', { className: 'ud-section-head' },
           h('span', { className: 'ud-section-title' }, t('workspaceUsage')),
           h('span', { className: 'ud-workspace-usage-hint' }, model ? `${t('workspaceUsageHint')} · ${model}` : t('workspaceUsageHint'))),
+        searchable
+          ? h('div', { className: 'ud-workspace-usage-search' },
+              h(Icon, { paths: ICONS.search }),
+              h('input', {
+                type: 'search',
+                className: 'ud-input',
+                value: query,
+                placeholder: t('workspaceUsageSearch'),
+                'aria-label': t('workspaceUsageSearch'),
+                onChange: (event) => {
+                  setQuery(event.target.value)
+                  setExpanded(false)
+                },
+              }))
+          : null,
         rows.length > 0
           ? h('div', { className: 'ud-workspace-usage-total' },
               h('span', null, t('workspaceUsageTotal')),
               h('strong', null, `${formatTokensCompact(total)} tok`))
           : null,
-        rows.length === 0
-          ? h('div', { className: 'ud-empty' }, t(model ? 'workspaceUsageEmptyModel' : 'workspaceUsageEmpty'))
+        matches.length === 0
+          ? h('div', { className: 'ud-empty' }, rows.length === 0
+              ? t(model ? 'workspaceUsageEmptyModel' : 'workspaceUsageEmpty')
+              : t('workspaceUsageNoMatch'))
           : h('div', { className: 'ud-workspace-usage-list' },
-              rows.map((row) => {
+              visible.map((row) => {
                 const percent = total > 0 ? (row.tokens / total) * PERCENT_SCALE : 0
                 const width = max > 0 ? (row.tokens / max) * PERCENT_SCALE : 0
                 return h('div', { className: 'ud-workspace-usage-row', key: row.id },
@@ -5165,7 +5217,15 @@ ${HUD_CSS}
                     h('span', { className: 'ud-workspace-usage-fill', style: { width: `${width}%` } })),
                   h('div', { className: 'ud-workspace-usage-meta' },
                     `${t('requests')} ${formatTokens(row.requests)} · ${t('activeDays')} ${row.activeDays}`))
-              })))
+              })),
+        overflow
+          ? h('button', {
+              type: 'button',
+              className: 'ud-btn ud-btn--text ud-workspace-usage-more',
+              'aria-expanded': expanded,
+              onClick: () => setExpanded((value) => !value),
+            }, expanded ? t('workspaceUsageShowLess') : t('workspaceUsageShowAll', { n: matches.length }))
+          : null)
     }
 
     // 工作区用量块:嵌入「用量摘要」,只按日范围比较工作区,不混入统计视图与工作区筛选
@@ -5281,6 +5341,8 @@ ${HUD_CSS}
         loading && !stats ? h('div', { className: 'ud-loading', role: 'status', 'aria-busy': 'true', 'aria-label': t('loading') }) : null,
         !emptyVisible && stats
           ? h(WorkspaceUsage, {
+              // 范围、模型或刷新任一变即重建组件,搜索词与展开态随数据复位
+              key: workspaceUsageViewKey(request, activeModel, refreshTick),
               byWorkspace: Array.isArray(stats.byWorkspace) ? stats.byWorkspace : [],
               workspaces,
               model: activeModel,
