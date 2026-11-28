@@ -9,8 +9,11 @@ const {
   MODEL_USAGE_PROJECTION,
   buildSessionCostItem,
   ensureGlobalDefault,
+  isDefaultLayer,
+  ensureModelDefaults,
   normalizePricingRules,
   partitionGroupOf,
+  pricingLayerRule,
 } = core
 
 const t = (key, params = {}) => key === 'stats.cost' ? `费用 ≈ ${params.cost}` : key
@@ -147,4 +150,38 @@ test('Given 无条件副本与不同范围交错 When 加载编辑器草稿 Then
     ['a/b', 1],
     ['a/b', 3],
   ])
+})
+
+test('Given 默认层已填价 When 添加时段价 Then 四桶价格照抄默认层且条件是全天时段', () => {
+  const layer = pricingLayerRule('¥', rule('a/b', price(7, 8, 9, 10)))
+  assert.deepEqual(layer.price, { input: 7, output: 8, cacheRead: 9, cacheWrite: 10 })
+  assert.deepEqual(layer.conditions, [{ kind: 'dailyWindow', from: '00:00', to: '23:59' }])
+  assert.equal(layer.model, '')
+})
+
+test('Given 默认层价格留空 When 添加时段价 Then 价格留空待填且仍带全天条件', () => {
+  const layer = pricingLayerRule('¥', rule('a/b', price('', '', '', '')))
+  assert.deepEqual(layer.price, { input: '', output: '', cacheRead: '', cacheWrite: '' })
+  assert.deepEqual(layer.conditions, [{ kind: 'dailyWindow', from: '00:00', to: '23:59' }])
+})
+
+test('Given 有条件的规则与无条件规则 When 判断默认层 Then 只有无条件的是默认层', () => {
+  assert.equal(isDefaultLayer(rule('a/b', price(1), [])), true)
+  assert.equal(isDefaultLayer({ ...rule('a/b', price(1)), conditions: null }), true)
+  assert.equal(isDefaultLayer(rule('a/b', price(1), [{ kind: 'weekdays', days: [1] }])), false)
+})
+
+test('Given 模型只有时段层 When 补齐默认价 Then 按首层价格补一条无条件层', () => {
+  const base = { input: 5, output: 6, cacheRead: 0.5, cacheWrite: 0 }
+  const rules = [rule('*/*', price(1)), rule('a/b', base, [{ kind: 'dailyWindow', from: '09:00', to: '18:00' }])]
+  const filled = ensureModelDefaults(rules)
+  const layers = filled.filter((item) => item.model === 'a/b')
+  assert.equal(layers.length, 2)
+  assert.deepEqual(layers.find(isDefaultLayer).price, base)
+  assert.deepEqual(layers.find(isDefaultLayer).conditions, [])
+})
+
+test('Given 模型已有默认层 When 补齐默认价 Then 原样返回不重复补', () => {
+  const rules = [rule('*/*', price(1)), rule('a/b', price(2))]
+  assert.deepEqual(ensureModelDefaults(rules).map((item) => item.model), ['*/*', 'a/b'])
 })

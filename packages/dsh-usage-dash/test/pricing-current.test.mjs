@@ -163,8 +163,33 @@ const mountView = (fixture, component) => {
 }
 const formTree = editor => expand(byComponent(editor, 'PricingRuleForm'))
 const ruleFields = editor => ({ tree: expand(byComponent({ tree: formTree(editor) }, 'PricingRuleFields')) })
-const conditionFields = editor => ({ tree: expand(byComponent(ruleFields(editor), 'PricingConditions')) })
-const priceGrid = editor => ({ tree: expand(byComponent(ruleFields(editor), 'PricingPriceGrid')) })
+// 单规则表单内价格分多层:默认层无条件恒生效,时段层按条件覆盖;层片是组件元素,需展开才能取到四桶与条件
+const layerNodes = editor => nodes(ruleFields(editor).tree).filter(node => node.type?.name === 'PricingLayerBlock')
+const layerRule = node => node.props.rule
+const isDefaultLayerRule = rule => !(rule.conditions ?? []).length
+const defaultLayerNode = editor => layerNodes(editor).find(node => isDefaultLayerRule(layerRule(node))) ?? null
+const timedLayerNodes = editor => layerNodes(editor).filter(node => !isDefaultLayerRule(layerRule(node)))
+const editingLayer = (editor, index) => {
+  const layer = layerNodes(editor)[index]
+  assert.ok(layer, `应有价格层: ${index}; got ${layerNodes(editor).length}`)
+  return layer
+}
+const conditionFields = (editor, index = 0) => {
+  const layer = timedLayerNodes(editor)[index]
+  assert.ok(layer, `应有时段层: ${index}; got ${timedLayerNodes(editor).length}`)
+  return { tree: expand(byComponent({ tree: expand(layer) }, 'PricingConditions')) }
+}
+const priceGrid = (editor, layer) => {
+  const node = layer ?? defaultLayerNode(editor) ?? layerNodes(editor)[0]
+  assert.ok(node, '应有可编辑的价格层')
+  return { tree: expand(byComponent({ tree: expand(node) }, 'PricingPriceGrid')) }
+}
+const removeLayerButton = (editor, index) => {
+  const layer = editingLayer(editor, index)
+  const button = nodes(expand(layer)).find(node => node.type === 'button' && node.props['aria-label'] === '删除这一层')
+  assert.ok(button, `价格层应提供删除入口: ${index}`)
+  return button
+}
 const inputByLabel = (owner, label) => {
   const field = nodes(owner.tree).find(node => node.type?.name === 'PricingSuggestInput'
     ? node.props.label === label
@@ -525,51 +550,73 @@ test('Given 普通规则 When 将平台填成含斜杠的内容 Then 输入保�
   f.resolve(f.saves[0], { revision: 2, rules: posted }); await pending
 }))
 
-test('Given 同型号有两条规则 When 修改一条的型号并保存 Then 另一条保持原型号', t => withFixture(t, async f => {
+// 新语义:平台/型号属于整组(一个模型 = 一条规则),改名作用于该模型的所有价格层,
+// 不再存在「只改同型号其中一条规则」的入口。
+test('Given 同型号两层价格 When 修改型号并保存 Then 该组所有层同步改名且各层数据保持', t => withFixture(t, async f => {
   const editor = f.editor()
   const original = { ...rule(3), model: 'p/m' }
   const conditional = { ...rule(5), model: 'p/m', conditions: [{ kind: 'weekdays', days: [1] }] }
   f.resolve(f.gets[0], { revision: 1, rules: [rule(), original, conditional] }); await f.settle()
   f.openEdit(editor, 'p/m'); await f.settle()
+  assert.deepEqual(layerNodes(editor).map(node => node.props.rule.price.input), [3, 5], '编辑态收拢该模型的全部层')
   changeInput(modelPattern(editor), 'other'); await f.settle()
   const pending = f.save(editor)
   const posted = f.saves[0].body.rules
-  assert.deepEqual(posted.map(item => item.model), ['*/*', 'p/other', 'p/m'])
+  assert.deepEqual(posted.map(item => item.model), ['*/*', 'p/other', 'p/other'], '型号作用于整组,各层一起改名')
+  assert.deepEqual(posted.filter(item => item.model === 'p/other').map(item => [item.price.input, item.conditions.length]), [[3, 0], [5, 1]])
   f.resolve(f.saves[0], { revision: 2, rules: posted }); await pending
 }))
 
-test('Given 规则已有型号 When 新增规则中途输入相同范围与全局模式 Then 规则保持独立且可继续修正', t => withFixture(t, async f => {
+// 新语义:同范围的两层由「+ 添加时段价」在既有默认价上扩展,而非再建一条同型号规则
+// (新建同型号规则会得到第二条默认价,保存时按重复默认价拦截,见下一条用例)。
+test('Given 已有精确型号默认价 When 添加时段价 Then 默认层与时段层并存为两层', t => withFixture(t, async f => {
+  const editor = f.editor()
+  const exact = { ...rule(3), model: 'p/m' }
+  f.resolve(f.gets[0], { revision: 1, rules: [rule(), exact] }); await f.settle()
+  f.openEdit(editor, 'p/m'); await f.settle()
+  byText(ruleFields(editor), '+ 添加时段价').props.onClick(); await f.settle()
+  const pending = f.save(editor)
+  const posted = f.saves[0].body.rules
+  const layers = posted.filter(item => item.model === 'p/m')
+  assert.deepEqual(layers.map(item => item.conditions.length).sort(), [0, 1], '默认层与时段层并存为两层')
+  assert.equal(layers.find(item => item.conditions.length).price.input, 3, '新时段层价格照抄默认层')
+  f.resolve(f.saves[0], { revision: 2, rules: posted }); await pending
+}))
+
+// 新语义:把时段层的条件全部删掉后该层即成为默认价,与同型号已有默认价冲突,保存被拦截。
+test('Given 已有默认价 When 新增同型号并删掉时段层条件 Then 保存判重复', t => withFixture(t, async f => {
   const editor = f.editor()
   const exact = { ...rule(3), model: 'p/m' }
   f.resolve(f.gets[0], { revision: 1, rules: [rule(), exact] }); await f.settle()
   f.openCreate(editor); await f.settle()
   await enterPattern(f, editor, 'p', 'm')
+  const remove = nodes(conditionFields(editor).tree).find(node => node.type === 'button' && node.props['aria-label'] === '删除条件')
+  assert.ok(remove, '时段层需能删掉默认时段条件')
+  remove.props.onClick(); await f.settle()
   await f.save(editor); await f.settle()
-  assert.equal(f.saves.length, 0, '与已有默认价同范围应拦截')
-  await enterPattern(f, editor, '*', '*')
-  assert.deepEqual([providerPattern(editor).props.readOnly, modelPattern(editor).props.readOnly], [false, false])
-  await enterPattern(f, editor, 'p', 'mo')
-  const pending = f.save(editor)
-  assert.ok(f.saves[0].body.rules.some(item => item.model === 'p/mo'))
-  f.resolve(f.saves[0], { revision: 2, rules: f.saves[0].body.rules }); await pending
+  assert.equal(f.saves.length, 0, '删掉条件后该层成为默认价,与已有默认价重复应拦截')
 }))
 
-test('Given 同型号两条附加规则 When 移除第一条 Then 第二条保留自身数据', t => withFixture(t, async f => {
+// 新语义:删除单层走层头的「删除这一层」,「删除计费规则」删的是整个模型组。
+test('Given 同型号两条时段价 When 删除其中一层 Then 另一层保留自身数据', t => withFixture(t, async f => {
   const editor = f.editor()
   const earlier = { ...rule(2), model: 'p/m', conditions: [{ kind: 'weekdays', days: [1] }] }
   const later = { ...rule(3), model: 'p/m', conditions: [{ kind: 'weekdays', days: [2] }] }
   f.resolve(f.gets[0], { revision: 1, rules: [rule(), earlier, later] }); await f.settle()
   f.openEdit(editor, 'p/m'); await f.settle()
-  const remove = mountView(f, byComponent({ tree: formTree(editor) }, 'DeleteArmedButton'))
-  byText(remove, '删除计费规则').props.onClick(); await f.settle()
-  byText(remove, '确认删除').props.onClick(); await f.settle()
-  f.openEdit(editor, 'p/m'); await f.settle()
-  assert.equal(priceInput(editor).props.value, 3)
+  // 只有时段层的存量会补一条默认价层,默认层在首位且不可删
+  assert.deepEqual(layerNodes(editor).map(node => node.props.rule.price.input), [2, 2, 3])
+  removeLayerButton(editor, 1).props.onClick(); await f.settle()
+  assert.deepEqual(layerNodes(editor).map(node => node.props.rule.price.input), [2, 3], '只删掉被点的这一层')
+  assert.equal(priceInput(editor).props.value, 2)
   const activeDay = nodes(conditionFields(editor).tree).find(node => node.type === 'button' && node.props['aria-pressed'] === true)
   assert.equal(text(activeDay), '二')
   const pending = f.save(editor)
   const posted = f.saves[0].body.rules
-  assert.deepEqual(posted.filter(item => item.model === 'p/m').map(item => [item.price.input, item.conditions]), [[3, [{ kind: 'weekdays', days: [2] }]]])
+  const layers = posted.filter(item => item.model === 'p/m').map(item => [item.price.input, item.conditions])
+  assert.equal(layers.length, 2, '默认价层与剩余时段层各一条')
+  assert.ok(layers.some(([input, conditions]) => input === 2 && conditions.length === 0), '默认价保留')
+  assert.ok(layers.some(([input, conditions]) => input === 3 && conditions[0].days[0] === 2), '另一层数据不变')
   f.resolve(f.saves[0], { revision: 2, rules: posted }); await pending
 }))
 
@@ -682,7 +729,11 @@ test('P13 Given 无 */* 规则 When 编辑器加载 Then 列表末尾显示合�
   f.openEdit(editor, '*/*'); await f.settle()
   assert.deepEqual([providerPattern(editor), modelPattern(editor)].map(input => [input.props.value, input.props.readOnly]), [['*', true], ['*', true]])
   assert.deepEqual(['输入', '输出', '缓存读', '缓存写'].map(label => priceInput(editor, label).props.value), ['', '', '', ''])
-  assert.equal(byComponent(ruleFields(editor), 'PricingConditions'), undefined)
+  const layers = layerNodes(editor)
+  assert.equal(layers.length, 1, '合成全局默认价只有默认层')
+  assert.match(text(expand(layers[0])), /默认价/)
+  assert.equal(nodes(expand(layers[0])).some(node => node.type?.name === 'PricingConditions'), false)
+  assert.equal(nodes(expand(layers[0])).some(node => node.props?.['aria-label'] === '删除这一层'), false, '默认层不渲染层删除入口')
   const form = { tree: formTree(editor) }
   assert.ok(byText(form, '保存'), '应在实际编辑表单内检查删除入口')
   assert.equal(byComponent(form, 'DeleteArmedButton'), undefined, '全局默认价表单不应渲染删除控件')
@@ -751,12 +802,14 @@ test('Given 平台为 p When 聚焦型号输入 Then 只推荐该平台的型号
   assert.deepEqual(options, ['m'])
 }, { observed: observedPricingModels }))
 
-test('Given 规则带价格和条件 When 点复制 Then 型号置空且价格条件保留', t => withFixture(t, async f => {
+// 复制把源规则落成独立草稿行(型号只留平台段)。新实现的复制不直接打开表单,
+// 副本需从规则列表进入编辑;副本数据(价格+条件)与型号码清空语义不变。
+test('Given 规则带价格和条件 When 点复制模型 Then 表单直接打开副本且型号置空价格条件保留', t => withFixture(t, async f => {
   const editor = f.editor()
   const source = { ...rule(2), model: 'p/m', conditions: [{ kind: 'weekdays', days: [1] }] }
   f.resolve(f.gets[0], { revision: 1, rules: [rule(), source] }); await f.settle()
   const rows = mountView(f, byComponent(editor, 'PricingRules'))
-  const copy = nodes(rows.tree).find(node => node.type === 'button' && node.props['aria-label']?.startsWith('复制规则 #2'))
+  const copy = nodes(rows.tree).find(node => node.type === 'button' && node.props['aria-label'] === '复制模型 p/m')
   assert.ok(copy, '规则行应提供复制入口')
   copy.props.onClick(); await f.settle()
   assert.deepEqual([providerPattern(editor).props.value, modelPattern(editor).props.value], ['p', ''])
@@ -773,11 +826,13 @@ test('Given 规则带价格和条件 When 点复制 Then 型号置空且价格�
   f.resolve(f.saves[0], { revision: 2, rules: posted }); await pending
 }, { observed: observedPricingModels }))
 
-test('Given 新增规则填多个型号 When 保存 Then 按型号复制成多条同价规则', t => withFixture(t, async f => {
+// 新语义:额外型号共用默认层,复制出的是「同价无条件规则」(时段层只属于原型号)。
+test('Given 新增规则填多个型号 When 保存 Then 按型号复制成多条同价默认规则', t => withFixture(t, async f => {
   const editor = f.editor()
   f.resolve(f.gets[0], price(1)); await f.settle()
   f.openCreate(editor); await f.settle()
   await enterPattern(f, editor, 'p', 'm')
+  removeLayerButton(editor, 1).props.onClick(); await f.settle()
   byText(extraFields(editor), '+ 添加型号').props.onClick(); await f.settle()
   byText(extraFields(editor), '+ 添加型号').props.onClick(); await f.settle()
   changeInput(extraModelInput(editor, 0), 'q/other'); await f.settle()
@@ -807,21 +862,21 @@ test('Given 新增规则额外型号带通配符 When 保存 Then 提示精确�
   assert.match(text(formTree(editor)), /精确/)
 }, { observed: observedPricingModels }))
 
-test('Given 新增规则带条件且填额外型号 When 保存 Then 复制规则共享条件', t => withFixture(t, async f => {
+// 新语义:额外型号挂在默认层,只复制默认层;时段层仍只属于被编辑的型号。
+test('Given 新增规则带全天时段层且填额外型号 When 保存 Then 额外型号只复制默认价', t => withFixture(t, async f => {
   const editor = f.editor()
   f.resolve(f.gets[0], price(1)); await f.settle()
   f.openCreate(editor); await f.settle()
   await enterPattern(f, editor, 'p', 'm')
   byText(extraFields(editor), '+ 添加型号').props.onClick(); await f.settle()
   changeInput(extraModelInput(editor, 0), 'q/other'); await f.settle()
-  byText(conditionFields(editor), '+ 添加条件').props.onClick(); await f.settle()
   const pending = f.save(editor)
   const posted = f.saves[0].body.rules
-  const condition = [{ kind: 'dailyWindow', from: '00:00', to: '23:59' }]
   assert.deepEqual(posted.filter(item => ['p/m', 'q/other'].includes(item.model))
     .map(item => [item.model, item.conditions]), [
-    ['p/m', condition],
-    ['q/other', condition],
+    ['p/m', []],
+    ['q/other', []],
+    ['p/m', [{ kind: 'dailyWindow', from: '00:00', to: '23:59' }]],
   ])
   f.resolve(f.saves[0], { revision: 2, rules: posted }); await pending
 }, { observed: observedPricingModels }))
@@ -839,10 +894,12 @@ test('Given 多型号保存中输入新额外型号 When 服务端回包 Then �
   f.resolve(f.saves[0], { revision: 2, rules: saved }); await pending; await f.settle()
   const list = mountView(f, byComponent(editor, 'PricingRules')).tree
   const models = nodes(list).filter(node => node.props?.className === 'ud-pricing-rule-model').map(text)
+  // 列表按模型折叠:同模型的默认层与时段层只占一行,在飞输入的 q/other2 另起一行
   assert.deepEqual(models.sort(), ['*/*', 'p/m', 'q/other2'])
+  assert.equal(models.filter(model => model === 'q/other2').length, 1)
   const second = f.save(editor)
   const posted = f.saves[1].body.rules
-  assert.deepEqual(posted.map(item => item.model).sort(), ['*/*', 'p/m', 'q/other2'])
+  assert.deepEqual(posted.map(item => item.model).sort(), ['*/*', 'p/m', 'p/m', 'q/other2'])
   assert.ok(posted.every(item => item.extraModels === undefined))
   f.resolve(f.saves[1], { revision: 3, rules: posted }); await second
 }, { observed: observedPricingModels }))
@@ -855,15 +912,16 @@ test('Given 新增规则额外型号留空 When 保存 Then 忽略空行', t => 
   byText(extraFields(editor), '+ 添加型号').props.onClick(); await f.settle()
   const pending = f.save(editor)
   const posted = f.saves[0].body.rules
-  assert.deepEqual(posted.filter(item => item.model === 'p/m').length, 1)
+  assert.deepEqual(posted.map(item => item.model).sort(), ['*/*', 'p/m', 'p/m'], '空额外型号不落规则,原型号两层保留')
   f.resolve(f.saves[0], { revision: 2, rules: posted }); await pending
 }, { observed: observedPricingModels }))
 
-test('Given 复制全局兜底规则 When 打开新增表单 Then 平台和型号都置空', t => withFixture(t, async f => {
+// 与上一条复制用例同:副本先落成草稿行,再从列表进入编辑;新实现不会替用户自动打开表单。
+test('Given 复制全局兜底模型 When 表单打开 Then 平台和型号都置空', t => withFixture(t, async f => {
   const editor = f.editor()
   f.resolve(f.gets[0], price(1)); await f.settle()
   const rows = mountView(f, byComponent(editor, 'PricingRules'))
-  const copy = nodes(rows.tree).find(node => node.type === 'button' && node.props['aria-label']?.startsWith('复制规则 #1'))
+  const copy = nodes(rows.tree).find(node => node.type === 'button' && node.props['aria-label'] === '复制模型 */*')
   copy.props.onClick(); await f.settle()
   assert.deepEqual([providerPattern(editor).props.value, modelPattern(editor).props.value], ['', ''])
 }, { observed: observedPricingModels }))
@@ -889,46 +947,59 @@ test('Given 编辑已有规则 When 打开表单 Then 不显示新增页的多�
   assert.equal(byText(ruleFields(editor), '+ 添加型号'), undefined)
 }, { observed: observedPricingModels }))
 
-test('P15 Given 某型号只有条件规则 When 新增一条无条件规则 Then 该规则成为默认价', t => withFixture(t, async f => {
+// 新语义:新增规则自带默认层(无条件)与全天时段层;要让新规则成为该型号的默认价,
+// 删掉时段层即可,留下无条件默认层与存量条件层并存。
+test('P15 Given 某型号只有条件规则 When 载入编辑器 Then 自动补默认价层并可保存', t => withFixture(t, async f => {
   const editor = f.editor()
   f.resolve(f.gets[0], { revision: 1, rules: [rule(), EDITOR_RULE] }); await f.settle()
-  f.openCreate(editor); await f.settle()
-  await enterPattern(f, editor, 'a', 'b')
+  f.openEdit(editor, 'a/b'); await f.settle()
+  assert.equal(layerNodes(editor).length, 2, '只有时段层的模型自动补一条默认价层')
+  assert.ok(defaultLayerNode(editor), '默认层必须存在')
   const pending = f.save(editor)
-  assert.ok(f.saves.length, '应发起保存')
   const rules = f.saves[0].body.rules
   const sameModel = rules.filter(item => item.model === 'a/b')
   assert.equal(sameModel.length, 2)
-  assert.ok(sameModel.some(item => (item.conditions ?? []).length === 0), '新增的无条件规则即默认价')
+  assert.ok(sameModel.some(item => (item.conditions ?? []).length === 0), '默认价层无条件发布')
+  assert.ok(sameModel.some(item => (item.conditions ?? []).length > 0), '存量时段层保持条件')
   f.resolve(f.saves[0], { revision: 2, rules }); await pending
 }))
 
-test('Given 新增规则 When 添加条件并保存 Then 发布有条件的规则', t => withFixture(t, async f => {
+// 新语义:新增规则默认两槽(默认层空价 + 时段层继承价格、条件全天),两层一起保存。
+test('Given 新增规则 When 打开表单 Then 默认层与全天时段层两层一起保存', t => withFixture(t, async f => {
   const editor = f.editor()
   f.resolve(f.gets[0], price(1)); await f.settle()
   f.openCreate(editor); await f.settle()
   await enterPattern(f, editor, 'p', 'm')
-  const add = byText(conditionFields(editor), '+ 添加条件')
-  assert.ok(add, '新增规则需要提供添加条件入口')
-  add.props.onClick(); await f.settle()
+  const layers = layerNodes(editor)
+  assert.equal(layers.length, 2, '新增规则一次插入默认层与时段层')
+  assert.match(text(expand(layers[0])), /默认价/)
+  assert.match(text(expand(layers[1])), /时段价/)
+  assert.equal(layerRule(layers[0]).price.input, 0, '默认层未填写时是占位零价')
+  assert.deepEqual(layerRule(layers[0]).price, layerRule(layers[1]).price, '时段层继承默认层价格')
+  assert.deepEqual(layerRule(layers[1]).conditions, [{ kind: 'dailyWindow', from: '00:00', to: '23:59' }], '时段层条件默认全天')
+  assert.match(text(conditionFields(editor).tree), /每日时段/)
   const pending = f.save(editor)
   const posted = f.saves[0].body.rules
-  assert.deepEqual(posted.find(item => item.model === 'p/m').conditions, [{ kind: 'dailyWindow', from: '00:00', to: '23:59' }])
+  assert.deepEqual(posted.filter(item => item.model === 'p/m').map(item => item.conditions),
+    [[], [{ kind: 'dailyWindow', from: '00:00', to: '23:59' }]])
   f.resolve(f.saves[0], { revision: 2, rules: posted }); await pending
 }))
 
-test('Given 普通存量规则的条件为 null When 打开表单并追加条件 Then 能保存该条件', t => withFixture(t, async f => {
+// 新语义:存量缺省条件归一为默认层,追加条件走「+ 添加时段价」(默认层不再渲染条件编辑器)。
+test('Given 普通存量规则的条件为 null When 打开表单并添加时段价 Then 能保存该条件', t => withFixture(t, async f => {
   const editor = f.editor()
   f.resolve(f.gets[0], { revision: 1, rules: [rule(), { ...EDITOR_RULE, conditions: null }] }); await f.settle()
   f.openEdit(editor, 'a/b'); await f.settle()
-  byText(conditionFields(editor), '+ 添加条件').props.onClick(); await f.settle()
+  assert.equal(defaultLayerNode(editor) !== null, true, 'null 条件归一为默认层')
+  byText(ruleFields(editor), '+ 添加时段价').props.onClick(); await f.settle()
   const pending = f.save(editor)
   const posted = f.saves[0].body.rules
-  assert.deepEqual(posted.find(item => item.model === 'a/b').conditions, [{ kind: 'dailyWindow', from: '00:00', to: '23:59' }])
+  assert.deepEqual(posted.filter(item => item.model === 'a/b').map(item => item.conditions),
+    [[], [{ kind: 'dailyWindow', from: '00:00', to: '23:59' }]])
   f.resolve(f.saves[0], { revision: 2, rules: posted }); await pending
 }))
 
-test('Given 同型号已有无条件价 When 移除较前规则的条件 Then 正在编辑的表单显示冲突', t => withFixture(t, async f => {
+test('Given 同型号已有无条件价 When 删掉时段层条件 Then 正在编辑的表单显示冲突', t => withFixture(t, async f => {
   const editor = f.editor()
   f.resolve(f.gets[0], { revision: 1, rules: [rule(), EDITOR_RULE, { ...EDITOR_RULE, conditions: [] }] }); await f.settle()
   f.openEdit(editor, 'a/b'); await f.settle()
@@ -938,17 +1009,77 @@ test('Given 同型号已有无条件价 When 移除较前规则的条件 Then �
   assert.match(text(ruleFields(editor).tree), /同一范围只能有一条无条件规则/)
 }))
 
-test('Given 普通规则仅有一个条件 When 删除该条件并保存 Then 发布无条件的规则', t => withFixture(t, async f => {
+// 新语义:删掉时段层唯一条件后该层就是默认层(渲染为默认价、不再有条件编辑器)。
+test('Given 普通规则仅有一个条件 When 删除该条件 Then 该层成为第二个默认价并被拦下', t => withFixture(t, async f => {
   const editor = f.editor()
   f.resolve(f.gets[0], { revision: 1, rules: [rule(), EDITOR_RULE] }); await f.settle()
   f.openEdit(editor, 'a/b'); await f.settle()
+  assert.equal(layerNodes(editor).length, 2, '载入时已为只有时段层的模型补默认价')
   const remove = nodes(conditionFields(editor).tree).find(node => node.type === 'button' && node.props['aria-label'] === '删除条件')
   assert.ok(remove, '单个条件应可删除')
   remove.props.onClick(); await f.settle()
-  assert.match(text(conditionFields(editor).tree), /无条件/)
-  assert.ok(byText(conditionFields(editor), '+ 添加条件'))
+  assert.equal(layerNodes(editor).length, 2, '删掉条件后该层仍留在表单里')
+  assert.equal(timedLayerNodes(editor).length, 0, '无条件的层不再算时段层')
+  assert.match(text(ruleFields(editor).tree), /默认价/)
+  f.save(editor); await f.settle()
+  assert.equal(f.saves.length, 0, '两个无条件层同范围,保存被拦')
+  assert.match(text(ruleFields(editor).tree), /同一范围只能有一条无条件规则/)
+}))
+
+test('Given 默认层旁再添一层并删掉其条件 When 渲染 Then 该层仍可见且可单独删除', t => withFixture(t, async f => {
+  const editor = f.editor()
+  f.resolve(f.gets[0], { revision: 1, rules: [rule(), { ...rule(3), model: 'p/m' }] }); await f.settle()
+  f.openEdit(editor, 'p/m'); await f.settle()
+  byText(ruleFields(editor), '+ 添加时段价').props.onClick(); await f.settle()
+  assert.equal(layerNodes(editor).length, 2)
+  const removeCondition = nodes(conditionFields(editor, 0).tree)
+    .find(node => node.type === 'button' && node.props['aria-label'] === '删除条件')
+  assert.ok(removeCondition, '新增层应带可删除的默认条件')
+  removeCondition.props.onClick(); await f.settle()
+  assert.equal(layerNodes(editor).length, 2, '删掉条件后该层仍留在表单里')
+  assert.equal(timedLayerNodes(editor).length, 0, '该层已无条件下,但仍占第二层位,可补条件或删除')
+  removeLayerButton(editor, 1).props.onClick(); await f.settle()
+  assert.equal(layerNodes(editor).length, 1)
+}))
+
+test('Given 型号只有时段层 When 删除时段层 Then 保留自动补的默认价', t => withFixture(t, async f => {
+  const editor = f.editor()
+  const only = { ...rule(2), model: 'a/b', conditions: [{ kind: 'weekdays', days: [1] }] }
+  f.resolve(f.gets[0], { revision: 1, rules: [rule(), only] }); await f.settle()
+  f.openEdit(editor, 'a/b'); await f.settle()
+  assert.equal(layerNodes(editor).length, 2, '载入时已为 a/b 补默认价')
+  removeLayerButton(editor, 1).props.onClick(); await f.settle()
+  assert.equal(layerNodes(editor).length, 1, '删掉时段层后只剩默认价')
+  assert.ok(defaultLayerNode(editor), '默认价不可删')
   const pending = f.save(editor)
   const posted = f.saves[0].body.rules
-  assert.deepEqual(posted.find(item => item.model === 'a/b').conditions, [])
+  assert.deepEqual(posted.filter(item => item.model === 'a/b').map(item => item.conditions), [[]])
   f.resolve(f.saves[0], { revision: 2, rules: posted }); await pending
+}))
+
+test('Given 同型号有默认层与时段层 When 查看并展开规则行 Then 折叠价取该时点生效层且逐层列出', t => withFixture(t, async f => {
+  const editor = f.editor()
+  const base = { ...rule(3), model: 'p/m' }
+  const timed = { ...rule(5), model: 'p/m', conditions: [{ kind: 'dailyWindow', from: '09:00', to: '18:00' }] }
+  f.resolve(f.gets[0], { revision: 1, rules: [rule(), base, timed] }); await f.settle()
+  const owner = mountView(f, byComponent(editor, 'PricingRules'))
+  const modelNames = () => nodes(owner.tree).filter(node => node.props?.className === 'ud-pricing-rule-model').map(text)
+  assert.deepEqual(modelNames().sort(), ['*/*', 'p/m'], '同一模型的多层折叠成一行')
+  const row = () => nodes(owner.tree).find(node => node.type === 'article'
+    && nodes(node).some(child => child.props?.className === 'ud-pricing-rule-model' && text(child) === 'p/m'))
+  // 夹具时点 09:00 落在 09:00–18:00 内,折叠价应是时段层而不是默认层
+  assert.match(text(row()), /¥5 \/ ¥0/, '折叠态给出该时点生效的价格')
+  assert.match(text(row()), /2 个价格层/)
+  const toggle = nodes(row()).find(node => node.type === 'button' && node.props.className?.includes('ud-pricing-rule-head'))
+  toggle.props.onClick(); await f.settle()
+  const details = nodes(row()).find(node => node.type?.name === 'PricingRuleDetails')
+  assert.ok(details, '展开后应渲染各层明细')
+  assert.equal(details.props.activeRule?.price.input, 5, '生效层指向时段层')
+  assert.deepEqual(details.props.layers.map(layer => [layer.price.input, (layer.conditions ?? []).length]),
+    [[3, 0], [5, 1]], '展开后逐层列出默认价与时段价')
+  const detailText = text(expand(details))
+  assert.match(detailText, /默认价/)
+  assert.match(detailText, /时段价/)
+  assert.match(detailText, /此刻生效/)
+  assert.match(detailText, /每日时段 09:00–18:00/)
 }))
