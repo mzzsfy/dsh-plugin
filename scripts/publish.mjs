@@ -19,6 +19,8 @@
  *     有提交则拒绝并要求显式 --bump(防止代码已变而版本未动被误判为无需更新);
  *     tag 缺失拒绝自动补打(维护者核对 registry tarball 后手工恢复,不得绑定任意 HEAD)
  *   - npm view 非 E404 失败直接中止(防把网络故障当未发布造成重复发布)
+ *   - 版本枚举包(现为 dsh-shared-terminal)在洁净门后先过枚举闸门:关注宿主版本
+ *     有缺失则机械补齐并跑 L1,通过后单独提交枚举改动再继续;L1 失败中止且保留改动
  *   - 推送(main 与 tag)由维护者执行
  */
 
@@ -32,6 +34,10 @@ const REGISTRY = 'https://registry.npmjs.org'
 const BUMP_KINDS = ['patch', 'minor', 'major']
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const ENUM_CHECK_SCRIPT = join(repoRoot, 'scripts', 'compat', 'enum-check.mjs')
+// 夹具/裁剪检出可能只带 publish.mjs(见 tests/publish.test.mjs):整仓特征缺失才允许跳过;
+// 真实仓库缺枚举脚本属残缺检出,必须 fail-closed,不能静默放行
+const enumCheck = existsSync(ENUM_CHECK_SCRIPT) ? await import('./compat/enum-check.mjs') : null
 const npmCmd = () => (process.platform === 'win32' ? 'npm.cmd' : 'npm')
 
 /** 包清单以 packages/ 目录为准自动发现,与 dev-link.mjs 同构,不再手工维护名单 */
@@ -207,6 +213,69 @@ function tagSafe(value) {
   return value.replace(/[^A-Za-z0-9_-]/g, '_')
 }
 
+/** enum-check 的 JSON 输出;stdout 混入其他内容即视为不可信 */
+function parseEnumReport(stdout) {
+  try {
+    const report = JSON.parse(stdout)
+    return report && Array.isArray(report.missing) && Array.isArray(report.changedFiles) && Array.isArray(report.inserted)
+      ? report
+      : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 版本枚举闸门(仅登记了枚举的包):
+ * --check 有 missing 时先机械补齐并跑 L1,通过后把枚举改动单独提交,再继续版本判定。
+ * L1 失败保留改动但不发布;网络或锚点错误直接中止。--skip-test 不豁免本闸门。
+ */
+function enumGate(dirName, opts) {
+  if (enumCheck === null) {
+    if (existsSync(join(repoRoot, 'packages', 'dsh-maintain'))) {
+      fail('缺 scripts/compat/enum-check.mjs(与 packages/dsh-maintain 同在),拒绝在残缺检出上发布')
+    }
+    console.log('WARN  未找到枚举脚本与 dsh-maintain(夹具/裁剪检出),跳过版本枚举闸门')
+    return
+  }
+  if (!enumCheck.hasEnumeration(dirName)) return
+  console.log(`  $ node scripts/compat/enum-check.mjs ${dirName} --check`)
+  const check = spawnSync(process.execPath, [ENUM_CHECK_SCRIPT, dirName, '--check'], { cwd: repoRoot, encoding: 'utf8', windowsHide: true })
+  if (check.error) fail(`版本枚举检查启动失败: ${check.error.message}`)
+  if (check.status === 1) fail(`版本枚举检查失败,中止发布:\n${(check.stderr || '').trim()}`)
+  if (check.status !== 0 && check.status !== 2) fail(`版本枚举检查异常退出 ${check.status},中止发布:\n${(check.stderr || '').trim()}`)
+  const report = parseEnumReport(check.stdout)
+  if (report === null) fail(`版本枚举检查输出不是约定 JSON,中止发布:\n${(check.stdout || '').trim()}`)
+  if (check.status === 0) {
+    console.log('OK    版本枚举已覆盖当前关注版本')
+    return
+  }
+  const missing = report.missing
+  if (missing.length === 0) fail('版本枚举检查退出 2 但 missing 为空,中止发布')
+  console.log(`MISS  ${dirName} 未纳表的宿主版本: ${missing.join(', ')}`)
+  if (opts.dryRun) {
+    console.log('dry-run:将补齐上述版本并跑 L1,通过后提交枚举改动再继续版本判定(本次不改文件)')
+    return
+  }
+  console.log(`  $ node scripts/compat/enum-check.mjs ${dirName}`)
+  const fixed = spawnSync(process.execPath, [ENUM_CHECK_SCRIPT, dirName], { cwd: repoRoot, encoding: 'utf8', windowsHide: true })
+  if (fixed.error) fail(`版本枚举补齐启动失败: ${fixed.error.message}`)
+  if (fixed.status === 3) fail(`版本枚举补齐后 L1 未通过,中止发布(已改文件保留供核对):\n${(fixed.stderr || '').trim()}`)
+  if (fixed.status !== 0) fail(`版本枚举补齐失败(exit ${fixed.status}),中止发布:\n${(fixed.stderr || '').trim()}`)
+  const result = parseEnumReport(fixed.stdout)
+  if (result === null) fail(`版本枚举补齐输出不是约定 JSON,中止发布:\n${(fixed.stdout || '').trim()}`)
+  if (result.changedFiles.length === 0) fail('版本枚举报告 missing 但 changedFiles 为空,中止发布避免假阳')
+  for (const file of result.changedFiles) console.log(`  changed: ${file}`)
+  console.log(`OK    枚举补齐插入: ${result.inserted.join(', ')}(L1 通过)`)
+  // 枚举改动先落成独立提交:tag 必须指向可还原源码,发布前的洁净复检也要求范围内无未提交变更
+  const add = run('git', ['add', ...result.changedFiles], repoRoot)
+  if (add.status !== 0) fail(`枚举改动暂存失败:\n${add.stderr}`)
+  const message = `chore(${dirName}): 纳表宿主版本 ${result.inserted.join(', ')}`
+  const commit = run('git', ['commit', '-m', message, '--', ...result.changedFiles], repoRoot)
+  if (commit.status !== 0) fail(`枚举改动提交失败,中止发布(请手动提交后重跑):\n${commit.stderr}`)
+  console.log(`OK    版本枚举已提交: ${message}`)
+}
+
 /** dirName 是 packages/ 下的目录名;npm 包名以目录内 package.json 为准(可为 scoped) */
 function publishOne(dirName, opts) {
   console.log(`\n=== ${dirName} ===`)
@@ -225,6 +294,9 @@ function publishOne(dirName, opts) {
   if (dirty.stdout.trim() !== '') {
     fail(`${dirName} 发布范围存在未提交变更,拒绝发布(tag 须指向可还原的源码提交)。先提交或清理:\n${dirty.stdout.trim()}`)
   }
+
+  // 洁净门之后、版本判定之前:枚举补齐会新增提交,使"tag 后无提交"的 SKIP 判定不会吞掉纳表
+  enumGate(dirName, opts)
 
   const online = onlineVersion(name)
   if (online !== null) {

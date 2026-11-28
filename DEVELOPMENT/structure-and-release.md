@@ -28,3 +28,15 @@ node scripts/publish.mjs <包名|all> [--bump patch|minor|major] [--skip-test] [
 - 推送 main 与 tag 由维护者执行;发版后重跑 `node scripts/dev-link.mjs all`,让 profile 依赖行追上线上新版本
 - 公共依赖包(common-tools)只发库自己:九个消费方 `dependencies` 浮动在同一 minor(`^0.5.0`),库发 patch 时消费方无需重发;改帧集合/导出形状即破坏,须发行破坏版并与消费方范围抬升同批发布(装载行按包名解析,版本范围管不住它,规约见 [client-dependency.md](client-dependency.md))
 - 发布顺序由 `publish.mjs all` 的 `topoSortPackages` 按依赖拓扑保证(库先于消费方);新增包必须让依赖关系可被 manifest 解析,不得依赖目录名顺序。**先发库再发消费方**,否则新消费方安装时 `^0.5.0` 解析不到(ETARGET)
+
+### 版本枚举包的发版前自动纳表
+
+`dsh-shared-terminal` 用精确版本枚举约束功能面(`SUPPORTED_VERSIONS`、`package.json` 的 `dsh.compatibility.dshReleases`、`test/plugin.test.mjs` 逐版本夹具、`README.md` 两处白名单、`兼容性测试.md` 允许表与 D01 上限,共 7 处)。宿主发新版本而枚举未更新时,装载闸门会放行(peer 是 `>=` 范围),但包内 host 半区按未实测版本干净禁用,工具与 `/api/shared-terminal/*` 静默不注册。该缺口已多次出现(留档见 `.compat/version-watch/2026-11-29.md`),故发布流程强制机械补齐:
+
+- 触发点:`scripts/publish.mjs` 的发布范围洁净门之后、线上版本判定之前;仅对 `scripts/compat/enum-check.mjs` 登记了枚举的包执行,其他包跳过。
+- 检测:`enum-check <包> --check` 经 `packages/dsh-maintain/src/core.mjs` 的 `fetchDistTags` 取 alpha/next/latest 三渠道去重后的关注版本,与每个位置已枚举集合求差。退出码 `2` = 有 missing;`1` = 网络失败、锚点/格式漂移或包无枚举登记,直接中止发布,禁止猜测。
+- 补齐:有 missing 时运行 `enum-check <包>`,按固定锚点机械插入(排序、去重、JSON 逗号规范化),随后跑 L1:包目录 `node --test "test/*.test.mjs"` + 仓库根 `node scripts/smoke-load.mjs`。通过后以 `chore(<包>): 纳表宿主版本 <版本>` 只提交改动文件,再继续版本判定——枚举变更按 fix 走 patch,同版本发布仍需显式 `--bump`。
+- 失败语义:L1 失败 exit `3`,发布中止并保留已改文件供人工看 diff,不自动回滚;锚点缺失报错指出位置,更新脚本锚点前不得发布。
+- 观测:发布日志打印 missing、补齐插入的版本与改动文件清单。
+- 人工兜底:文档/夹具改版导致锚点漂移时,手工执行 `node scripts/compat/enum-check.mjs dsh-shared-terminal --check`(只报告、exit 2 表示待补)与去掉 `--check`(补齐 + L1)排查;`--dry-run` 只报告 missing,不改文件不提交;`--skip-test` 不豁免本闸门的 L1。`兼容性测试.md` 的实测记录段属历史证据,脚本不自动追加。
+- 边界:关注版本只取 dist-tags 三渠道的当前最新版,跳过的中间版本不会被补;机械纳表不等于实测证据,新版本功能面结论仍以 L1/L3 与宿主升级回归为准。`dshReleases` 已登记 `unknown` 的版本按未纳表升级为 `compatible`;登记 `incompatible` 时闸门报错交人工,不静默覆盖。补齐后脚本会复检 missing 为空才跑 L1 并提交。
