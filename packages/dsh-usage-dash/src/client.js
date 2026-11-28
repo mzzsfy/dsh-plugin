@@ -284,7 +284,7 @@ const WHATIF_MESSAGES_ZH = {
   'whatif.days.90': '90 天',
   'whatif.targetModel': '目标模型',
   'whatif.targetModelPlaceholder': 'provider/model',
-  'whatif.targetModelHint': '填 服务商/模型,如 deepseek/deepseek-chat',
+  'whatif.targetModelHint': '填 服务商/模型(如 deepseek/deepseek-chat),或从下拉选择已定价模型',
   'whatif.invalidModel': '需两段 provider/model,段可通配',
   'whatif.loading': '正在计算…',
   'whatif.rulesLoading': '正在加载定价规则…',
@@ -456,7 +456,7 @@ const WHATIF_MESSAGES_EN = {
   'whatif.days.90': '90 days',
   'whatif.targetModel': 'Target model',
   'whatif.targetModelPlaceholder': 'provider/model',
-  'whatif.targetModelHint': 'Use provider/model, e.g. deepseek/deepseek-chat',
+  'whatif.targetModelHint': 'Use provider/model (e.g. deepseek/deepseek-chat), or pick a priced model from the list',
   'whatif.invalidModel': 'Requires two segments provider/model; segments may be wildcards',
   'whatif.loading': 'Calculating…',
   'whatif.rulesLoading': 'Loading pricing rules…',
@@ -7263,6 +7263,11 @@ ${HUD_CSS}
       return rows
     }
 
+    // 沙盘目标模型候选:沿用规则里的具体型号,按名称排序便于下拉定位
+    function whatifModelCandidates(rules) {
+      return pricingRuleModels(rules).map((row) => row.model).sort((a, b) => a.localeCompare(b))
+    }
+
     // 模型视图要覆盖「已配置」和「已观察」两类来源:规则先配好、尚无用量时也要能看价
     function pricingModelRows(observed, rules) {
       const rows = Array.isArray(observed) ? [...observed] : []
@@ -8054,6 +8059,8 @@ ${HUD_CSS}
       const [targetModel, setTargetModel] = useState('')
       const [remote, setRemote] = useState({ status: 'idle', value: null, error: '' })
       const modelInputId = React.useId()
+      const modelListId = `${modelInputId}-models`
+      const modelCandidates = whatifModelCandidates(rules)
       const rulesReady = Array.isArray(rules)
       const hasRules = rulesReady && rules.length > 0
       const trimmedModel = targetModel.trim()
@@ -8118,10 +8125,13 @@ ${HUD_CSS}
             type: 'text',
             className: cx('ud-whatif-input', modelInvalid && 'ud-whatif-input--invalid'),
             value: targetModel,
+            list: modelListId,
             placeholder: t('whatif.targetModelPlaceholder'),
             'aria-invalid': modelInvalid,
             onChange: (event) => setTargetModel(event.target.value),
           }),
+          h('datalist', { id: modelListId },
+            modelCandidates.map((model) => h('option', { key: model, value: model }))),
           modelInvalid
             ? h('span', { className: 'ud-whatif-error-text' }, t('whatif.invalidModel'))
             : h('span', { className: 'ud-whatif-hint' }, t('whatif.targetModelHint'))))
