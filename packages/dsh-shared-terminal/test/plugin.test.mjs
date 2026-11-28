@@ -38,6 +38,7 @@ test('Given each tested Controller runtime, When installing, Then one terminal t
     ['0.2.2-rc.4', attachEra],
     ['0.2.2-rc.5', attachEra],
     ['0.2.3-alpha.2', attachEra],
+    ['0.2.3-alpha.3', attachEra],
   ]) {
     const fixture = context(controller)
     registerTerminalTool(fixture.ctx, { version, defineTool })
